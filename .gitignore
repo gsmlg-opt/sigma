@@ -41,7 +41,7 @@ erl_crash.dump
 
 # Javascript
 /node_modules/
-/apps/ex_pi_web/assets/node_modules/
+/apps/*/node_modules/
 bun.lock
 npm-debug.log*
 yarn-debug.log*
