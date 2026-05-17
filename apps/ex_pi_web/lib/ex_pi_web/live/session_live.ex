@@ -78,9 +78,9 @@ defmodule ExPiWeb.SessionLive do
             <span class="text-xs uppercase tracking-widest font-bold opacity-70">Workspace</span>
           </div>
           <h2 class="font-semibold truncate" title={@workdir}>{Path.basename(@workdir)}</h2>
-          <.dm_link navigate={~p"/workdir/#{@encoded_workdir}"} class="text-[10px] text-primary-container hover:underline mt-2 inline-block font-bold">
+          <.dm_btn navigate={~p"/workdir/#{@encoded_workdir}"} variant="link" class="p-0 h-auto text-[10px] text-secondary-content hover:underline mt-2 inline-block font-bold">
             Change Directory
-          </.dm_link>
+          </.dm_btn>
         </div>
 
         <.dm_left_menu id="sidebar-sessions" class="flex-1 overflow-y-auto px-2 pt-4">
@@ -253,20 +253,7 @@ defmodule ExPiWeb.SessionLive do
 
   defp get_sessions_dir(workdir) do
     encoded_cwd = Base.url_encode64(workdir, padding: false)
-
-    root =
-      case :code.priv_dir(:ex_pi_web) do
-        {:error, :bad_name} -> Path.expand("priv/sessions", File.cwd!())
-        path -> 
-          p = List.to_string(path)
-          if String.contains?(p, "_build") do
-             Path.expand("apps/ex_pi_web/priv/sessions", File.cwd!())
-          else
-             Path.join(p, "sessions")
-          end
-      end
-
-    Path.join(root, encoded_cwd)
+    Path.join(ExPiWeb.get_sessions_root(), encoded_cwd)
   end
 end
 

@@ -3,8 +3,13 @@ defmodule ExPiWeb.WorkdirLive do
 
   @impl true
   def mount(%{"workdir" => encoded_workdir}, _session, socket) do
+    IO.inspect(encoded_workdir, label: "WorkdirLive.mount: encoded_workdir")
     workdir = Base.url_decode64!(encoded_workdir, padding: false)
+    IO.inspect(workdir, label: "WorkdirLive.mount: decoded workdir")
+    
     sessions_dir = get_sessions_dir(workdir)
+    IO.inspect(sessions_dir, label: "WorkdirLive.mount: sessions_dir")
+    
     File.mkdir_p!(sessions_dir)
 
     {:ok, sessions} = ExPiSession.Log.list_sessions(sessions_dir)
@@ -74,7 +79,7 @@ defmodule ExPiWeb.WorkdirLive do
           <div :if={!Enum.empty?(@sessions)} class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             <.dm_card :for={s <- @sessions} variant="bordered" class="group interactive hover:shadow-lg transition-all duration-200">
               <:title>
-                <div class="flex items-center gap-3">
+                <div class="flex items-center gap-3 overflow-hidden text-on-surface">
                   <.dm_mdi name="chat-processing-outline" class="text-primary" />
                   <span class="truncate">{s}</span>
                 </div>
@@ -87,9 +92,9 @@ defmodule ExPiWeb.WorkdirLive do
               </div>
 
               <:action>
-                <.dm_link navigate={~p"/workdir/#{@encoded_workdir}/sessions/#{s}"} class="dm-btn dm-btn--outline dm-btn--sm">
+                <.dm_btn navigate={~p"/workdir/#{@encoded_workdir}/sessions/#{s}"} variant="outline" size="sm" class="w-full">
                   Open
-                </.dm_link>
+                </.dm_btn>
               </:action>
             </.dm_card>
           </div>
@@ -105,21 +110,13 @@ defmodule ExPiWeb.WorkdirLive do
     {:noreply, push_navigate(socket, to: ~p"/workdir/#{socket.assigns.encoded_workdir}/sessions/#{session_id}")}
   end
 
+  @impl true
+  def handle_event("open_session", %{"id" => id}, socket) do
+    {:noreply, push_navigate(socket, to: ~p"/workdir/#{socket.assigns.encoded_workdir}/sessions/#{id}")}
+  end
+
   defp get_sessions_dir(workdir) do
     encoded_cwd = Base.url_encode64(workdir, padding: false)
-
-    root =
-      case :code.priv_dir(:ex_pi_web) do
-        {:error, :bad_name} -> Path.expand("priv/sessions", File.cwd!())
-        path -> 
-          p = List.to_string(path)
-          if String.contains?(p, "_build") do
-             Path.expand("apps/ex_pi_web/priv/sessions", File.cwd!())
-          else
-             Path.join(p, "sessions")
-          end
-      end
-
-    Path.join(root, encoded_cwd)
+    Path.join(ExPiWeb.get_sessions_root(), encoded_cwd)
   end
 end

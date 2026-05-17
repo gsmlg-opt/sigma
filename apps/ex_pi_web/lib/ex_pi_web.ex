@@ -73,6 +73,20 @@ defmodule ExPiWeb do
     end
   end
 
+  def get_sessions_root do
+    if Mix.env() == :dev do
+      # Find umbrella root by looking for mix.exs
+      cwd = File.cwd!()
+      root = if File.exists?(Path.join(cwd, "apps")), do: cwd, else: Path.expand("../..", cwd)
+      Path.join(root, "apps/ex_pi_web/priv/sessions")
+    else
+      case :code.priv_dir(:ex_pi_web) do
+        {:error, :bad_name} -> Path.expand("priv/sessions", File.cwd!())
+        path -> Path.join(List.to_string(path), "sessions")
+      end
+    end
+  end
+
   defmacro __using__(which) when is_atom(which) do
     apply(__MODULE__, which, [])
   end

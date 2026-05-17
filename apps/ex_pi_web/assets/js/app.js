@@ -2,12 +2,14 @@ import "phoenix_html"
 import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import topbar from "topbar"
+import * as DuskmoonHooks from "phoenix_duskmoon/hooks"
 
 import "@duskmoon-dev/elements/register"
 
 let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 let liveSocket = new LiveSocket("/live", Socket, {
   params: {_csrf_token: csrfToken},
+  hooks: DuskmoonHooks
 })
 
 // Show progress bar on live navigation and form submits

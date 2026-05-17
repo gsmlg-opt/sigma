@@ -64,9 +64,9 @@ defmodule ExPiWeb.HomeLive do
 
           <:action>
             <div class="flex gap-2 w-full">
-              <.dm_link navigate={~p"/workdir/#{Base.url_encode64(repo["path"], padding: false)}"} class="dm-btn dm-btn--outline flex-1">
+              <.dm_btn navigate={~p"/workdir/#{Base.url_encode64(repo["path"], padding: false)}"} variant="outline" class="flex-1">
                 Open
-              </.dm_link>
+              </.dm_btn>
               <.dm_btn phx-click="remove_repo" phx-value-path={repo["path"]} variant="error" shape="circle" size="sm">
                 <.dm_mdi name="delete-outline" class="w-4 h-4" />
               </.dm_btn>
@@ -107,7 +107,7 @@ defmodule ExPiWeb.HomeLive do
               <div class="p-3 bg-surface-container rounded-xl border border-outline-variant text-xs font-mono break-all text-on-surface">
                  {@browsing_path}
               </div>
-              <div :if={@error} class="text-error text-xs mt-2 flex items-center gap-1 font-medium">
+              <div :if={@error} class="text-error text-sm mt-2 flex items-center gap-1 font-medium">
                 <.dm_mdi name="alert-circle" class="w-4 h-4" />
                 {@error}
               </div>
@@ -159,14 +159,14 @@ defmodule ExPiWeb.HomeLive do
   def handle_event("browser_confirm", _, socket) do
     path = socket.assigns.browsing_path
     case RepoManager.add_repo(path) do
-      {:ok, _} ->
+      {:ok, _entry} ->
         {:noreply, 
          socket 
          |> assign(show_add_modal: false)
          |> assign(repos: RepoManager.list_repos())
          |> put_flash(:info, "Repository added successfully.")}
-      _ ->
-        {:noreply, assign(socket, error: "Could not add repository.")}
+      error ->
+        {:noreply, assign(socket, error: "Could not add repository: #{inspect(error)}")}
     end
   end
 
