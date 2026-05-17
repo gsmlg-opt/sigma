@@ -3,6 +3,7 @@
     <div class="font-display text-2xl font-bold tracking-tight text-primary-content">π</div>
   </:logo>
   <:menu to={~p"/"} active={@active_tab == :home}>Home</:menu>
+  <:menu to={~p"/settings"} active={@active_tab == :settings}>Settings</:menu>
   <:user_profile>
     <.dm_theme_switcher id="theme-toggle" />
   </:user_profile>

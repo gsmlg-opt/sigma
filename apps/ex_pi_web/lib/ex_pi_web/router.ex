@@ -14,6 +14,7 @@ defmodule ExPiWeb.Router do
     pipe_through :browser
 
     live "/", HomeLive, :index
+    live "/settings", SettingsLive, :index
     live "/workdir/:workdir", WorkdirLive, :index
     live "/workdir/new/project", HomeLive, :add
     live "/workdir/:workdir/sessions/:id", SessionLive, :show

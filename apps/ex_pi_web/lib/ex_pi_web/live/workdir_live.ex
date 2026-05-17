@@ -26,43 +26,45 @@ defmodule ExPiWeb.WorkdirLive do
     <div class="flex min-h-[calc(100vh-64px)]">
       <!-- Sidebar -->
       <aside class="w-80 bg-secondary text-secondary-content border-r border-outline-variant p-6 shrink-0 flex flex-col">
-        <div class="flex items-center gap-2 mb-8 text-secondary-content">
+        <div class="flex items-center gap-2 mb-8 text-on-secondary">
           <.dm_mdi name="folder-sync" class="w-5 h-5" />
           <h2 class="font-semibold truncate" title={@workdir}>{Path.basename(@workdir)}</h2>
         </div>
 
         <.dm_left_menu id="sidebar-menu">
           <:title>Navigation</:title>
-          <.dm_left_menu_group id="actions">
-            <:title>Actions</:title>
-            <div class="p-2">
-              <.dm_btn
-                id="new-session-btn"
-                phx-click="new_session"
-                phx-hook="WebComponentHook"
-                variant="primary"
-                class="w-full mb-4"
-              >
-                <:prefix><.dm_mdi name="plus" class="w-4 h-4" /></:prefix>
-                New Session
-              </.dm_btn>
-            </div>
-          </.dm_left_menu_group>
+          <:menu>
+            <.dm_left_menu_group id="actions">
+              <:title>Actions</:title>
+              <div class="p-2">
+                <.dm_btn
+                  id="new-session-btn"
+                  phx-click="new_session"
+                  phx-hook="WebComponentHook"
+                  variant="primary"
+                  class="w-full mb-4"
+                >
+                  <:prefix><.dm_mdi name="plus" class="w-4 h-4" /></:prefix>
+                  New Session
+                </.dm_btn>
+              </div>
+            </.dm_left_menu_group>
+          </:menu>
         </.dm_left_menu>
 
-        <div class="mt-auto pt-6 border-t border-secondary-content/20">
+        <div class="mt-auto pt-6 border-t border-secondary-content/20 text-on-secondary">
           <p class="text-xs opacity-60 mb-2 uppercase tracking-wider font-bold">Full Path</p>
           <code class="text-[10px] break-all opacity-80 leading-tight font-mono">{@workdir}</code>
         </div>
       </aside>
 
       <!-- Content -->
-      <main class="flex-1 p-8 bg-surface text-on-surface">
+      <main class="flex-1 p-8 bg-surface text-on-surface font-sans">
         <div class="max-w-5xl mx-auto">
           <div class="flex justify-between items-end mb-8 border-b border-outline-variant pb-6">
             <div>
               <h1 class="font-display text-4xl font-bold">Sessions</h1>
-              <p class="text-on-surface-variant mt-2">Manage your active coding sessions for this workspace.</p>
+              <p class="text-on-surface-variant mt-2 text-lg">Manage your active coding sessions for this workspace.</p>
             </div>
           </div>
 
@@ -87,31 +89,33 @@ defmodule ExPiWeb.WorkdirLive do
             </.dm_btn>
           </div>
 
-          <div :if={!Enum.empty?(@sessions)} class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          <div :if={!Enum.empty?(@sessions)} class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
             <.dm_card
               :for={s <- @sessions}
               variant="bordered"
-              class="group interactive hover:shadow-lg transition-all duration-200"
+              class="group interactive hover:shadow-xl transition-all duration-300 bg-surface-container-low"
             >
               <:title>
-                <div class="flex items-center gap-3 overflow-hidden text-on-surface">
-                  <.dm_mdi name="chat-processing-outline" class="w-5 h-5 text-primary" />
-                  <span class="truncate">{s}</span>
+                <div class="flex items-center gap-3 overflow-hidden text-on-surface py-1">
+                  <div class="p-2 bg-primary/10 rounded-lg text-primary group-hover:bg-primary group-hover:text-primary-content transition-colors duration-300">
+                    <.dm_mdi name="chat-processing-outline" class="w-5 h-5" />
+                  </div>
+                  <span class="truncate font-bold text-lg">{s}</span>
                 </div>
               </:title>
 
-              <div class="py-4">
-                <p class="text-on-surface-variant text-sm line-clamp-2 italic">
-                  Session replayed from log.
+              <div class="py-6 px-1">
+                <p class="text-on-surface-variant text-sm italic opacity-60">
+                   Session log available
                 </p>
               </div>
 
               <:action>
                 <.dm_link
                   navigate={~p"/workdir/#{@encoded_workdir}/sessions/#{s}"}
-                  class="dm-btn dm-btn--outline dm-btn--sm w-full text-center"
+                  class="dm-btn dm-btn--primary w-full text-center py-2 font-bold"
                 >
-                  Open
+                  Open Session
                 </.dm_link>
               </:action>
             </.dm_card>

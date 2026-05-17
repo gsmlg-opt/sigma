@@ -1,6 +1,8 @@
 defmodule ExPiWeb.SessionLive do
   use ExPiWeb, :live_view
 
+  alias ExPiSession.ConfigManager
+
   @impl true
   def mount(%{"id" => session_id, "workdir" => encoded_workdir}, _session, socket) do
     workdir = Base.url_decode64!(encoded_workdir, padding: false)
@@ -32,13 +34,34 @@ defmodule ExPiWeb.SessionLive do
       Phoenix.PubSub.broadcast(ExPiWeb.PubSub, "session:#{session_id}", event)
     end
 
+    # Get active config
+    config = ConfigManager.get_active_provider()
+
+    {provider_mod, model_id, provider_id} =
+      if Mix.env() == :test do
+        {MockProvider, "mock-model", "mock"}
+      else
+        mod =
+          case config["id"] do
+            "anthropic" -> ExPiAi.Providers.Anthropic
+            "openai" -> ExPiAi.Providers.OpenAI
+            _ -> MockProvider
+          end
+
+        {mod, config["default_model"], config["id"]}
+      end
+
     # Get or start agent for this session
     _topic = "session:#{session_id}"
 
     {:ok, agent} =
       ExPiWeb.SessionManager.get_agent(session_id,
-        model: %{id: "mock-model", api: "mock", provider: "mock"},
-        provider: MockProvider,
+        model: %{id: model_id, api: provider_id, provider: provider_id},
+        provider: provider_mod,
+        options: [
+          api_key: config["api_key"],
+          base_url: config["base_url"]
+        ],
         system_prompt: "You are a helpful assistant.",
         on_event: on_event,
         tools: [ExPiCoding.Tools.Read, ExPiCoding.Tools.Bash, ExPiCoding.Tools.Edit],
@@ -87,19 +110,21 @@ defmodule ExPiWeb.SessionLive do
 
         <.dm_left_menu id="sidebar-sessions" class="flex-1 overflow-y-auto px-2 pt-4">
           <:title>Sessions</:title>
-          <.dm_left_menu_group id="sessions-list" active={@session_id}>
-            <:title>History</:title>
-            <:menu
-              :for={s <- @sessions}
-              to={~p"/workdir/#{@encoded_workdir}/sessions/#{s}"}
-              id={"session-link-#{s}"}
-            >
-              <div class="flex items-center gap-2 truncate">
-                <.dm_mdi name="chat-outline" class="w-4 h-4" />
-                <span class="truncate">{s}</span>
-              </div>
-            </:menu>
-          </.dm_left_menu_group>
+          <:menu>
+            <.dm_left_menu_group id="sessions-list" active={@session_id}>
+              <:title>History</:title>
+              <:menu
+                :for={s <- @sessions}
+                to={~p"/workdir/#{@encoded_workdir}/sessions/#{s}"}
+                id={"session-link-#{s}"}
+              >
+                <div class="flex items-center gap-2 truncate">
+                  <.dm_mdi name="chat-outline" class="w-4 h-4" />
+                  <span class="truncate">{s}</span>
+                </div>
+              </:menu>
+            </.dm_left_menu_group>
+          </:menu>
         </.dm_left_menu>
 
         <div class="p-4 border-t border-secondary-content/10 text-center">
@@ -127,7 +152,7 @@ defmodule ExPiWeb.SessionLive do
             >
               <div class="flex items-start gap-4 p-4 text-on-surface">
                 <div class={
-                  "mt-1 p-2 rounded-xl #{if message.role == :user, do: "bg-primary text-primary-content", else: "bg-secondary text-secondary-content"}"
+                  "mt-1 p-2 rounded-xl \#{if message.role == :user, do: \"bg-primary text-primary-content\", else: \"bg-secondary text-secondary-content\"}"
                 }>
                   <.dm_mdi name={if message.role == :user, do: "account", else: "robot"} class="w-5 h-5" />
                 </div>
@@ -220,8 +245,8 @@ defmodule ExPiWeb.SessionLive do
   defp render_content(content) when is_list(content) do
     Enum.map(content, fn
       %{type: :text, text: text} -> text
-      %{type: :thinking, thinking: thinking} -> "[Thinking: #{thinking}]"
-      %{type: :tool_call, name: name} -> "[Calling tool: #{name}]"
+      %{type: :thinking, thinking: thinking} -> "[Thinking: \#{thinking}]"
+      %{type: :tool_call, name: name} -> "[Calling tool: \#{name}]"
       _ -> ""
     end)
     |> Enum.join("\n")
@@ -235,15 +260,18 @@ defmodule ExPiWeb.SessionLive do
 
   @impl true
   def handle_event("fork_session", _, socket) do
-    new_id = "fork_#{System.unique_integer([:positive])}"
-    source_path = Path.join(socket.assigns.sessions_dir, "#{socket.assigns.session_id}.jsonl")
-    target_path = Path.join(socket.assigns.sessions_dir, "#{new_id}.jsonl")
+    new_id = "fork_\#{System.unique_integer([:positive])}"
+    source_path = Path.join(socket.assigns.sessions_dir, "\#{socket.assigns.session_id}.jsonl")
+    target_path = Path.join(socket.assigns.sessions_dir, "\#{new_id}.jsonl")
 
     # Fork the log (take all current messages)
     {:ok, messages} = ExPiSession.Log.replay(source_path)
     ExPiSession.Log.fork(source_path, target_path, length(messages))
 
-    {:noreply, push_navigate(socket, to: ~p"/workdir/#{socket.assigns.encoded_workdir}/sessions/#{new_id}")}
+    {:noreply,
+     push_navigate(socket,
+       to: ~p"/workdir/\#{socket.assigns.encoded_workdir}/sessions/\#{new_id}"
+     )}
   end
 
   @impl true

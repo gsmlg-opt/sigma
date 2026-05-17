@@ -16,6 +16,7 @@ defmodule ExPiAgent do
     :cwd,
     :on_event,
     :dispatcher_opts,
+    :provider_options,
     messages: [],
     subscribers: [],
     current_turn_assistant_message: nil
@@ -56,7 +57,8 @@ defmodule ExPiAgent do
       messages: opts[:messages] || [],
       cwd: opts[:cwd] || File.cwd!(),
       on_event: opts[:on_event],
-      dispatcher_opts: opts[:dispatcher_opts] || []
+      dispatcher_opts: opts[:dispatcher_opts] || [],
+      provider_options: opts[:options] || []
     }
 
     {:ok, state}
@@ -109,7 +111,7 @@ defmodule ExPiAgent do
         %{
           name: tool_mod.name(),
           description: tool_mod.description(),
-          input_schema: tool_mod.schema()
+          parameters: tool_mod.schema()
         }
       end)
 
@@ -120,7 +122,7 @@ defmodule ExPiAgent do
         system_prompt: state.system_prompt,
         tools: ai_tools
       },
-      options: []
+      options: state.provider_options
     }
 
     # 2. Stream from provider
