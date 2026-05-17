@@ -54,7 +54,7 @@
     mix phx.server
     ```
 
-Now you can visit [`localhost:4000`](http://localhost:4000) from your browser.
+Now you can visit [`localhost:4580`](http://localhost:4580) from your browser.
 
 ## Usage
 
