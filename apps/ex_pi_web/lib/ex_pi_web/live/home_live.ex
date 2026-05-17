@@ -59,24 +59,38 @@ defmodule ExPiWeb.HomeLive do
         </.dm_link>
       </div>
 
-      <div :if={@live_action == :index && !Enum.empty?(@repos)} class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        <.dm_card :for={repo <- @repos} variant="bordered" class="group interactive hover:shadow-xl transition-all duration-300">
+      <div :if={@live_action == :index && !Enum.empty?(@repos)} class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+        <.dm_card 
+          :for={repo <- @repos} 
+          variant="bordered" 
+          class="group interactive transition-all duration-300 hover:border-primary/50 hover:shadow-xl bg-surface-container-low"
+        >
           <:title>
-            <div class="flex items-center gap-3 overflow-hidden text-on-surface">
-              <div class="p-2 bg-secondary/10 rounded-lg text-secondary">
-                <.dm_mdi name={if is_git_repo?(repo["path"]), do: "git", else: "folder-sync"} class="w-5 h-5" />
+            <div class="flex items-center gap-3 py-1">
+              <div class="p-3 bg-primary/10 rounded-xl text-primary group-hover:bg-primary group-hover:text-primary-content transition-colors duration-300">
+                <.dm_mdi name={if is_git_repo?(repo["path"]), do: "git", else: "folder-sync"} class="w-6 h-6" />
               </div>
-              <span class="truncate font-bold text-lg">{repo["name"]}</span>
+              <span class="truncate font-bold text-xl tracking-tight">{repo["name"]}</span>
             </div>
           </:title>
           
-          <div class="py-4 px-1">
-            <code class="text-[10px] opacity-60 break-all leading-tight font-mono">{repo["path"]}</code>
+          <div class="py-6 px-1">
+            <div class="flex items-center gap-2 text-on-surface-variant opacity-40 mb-1">
+               <.dm_mdi name="map-marker-outline" class="w-3 h-3" />
+               <span class="text-[10px] font-bold uppercase tracking-widest">Local Path</span>
+            </div>
+            <code class="text-[11px] break-all leading-relaxed font-mono opacity-70 block bg-surface-container rounded-lg p-2 border border-outline-variant">
+              {repo["path"]}
+            </code>
           </div>
 
           <:action>
-            <.dm_link navigate={~p"/workdir/#{Base.url_encode64(repo["path"], padding: false)}"} class="dm-btn dm-btn--primary w-full text-center">
-              Open Project
+            <.dm_link 
+              navigate={~p"/workdir/#{Base.url_encode64(repo["path"], padding: false)}"} 
+              class="dm-btn dm-btn--primary w-full py-3 text-base font-bold shadow-lg shadow-primary/20 flex items-center justify-center gap-2"
+            >
+              <span>Open Project</span>
+              <.dm_mdi name="arrow-right" class="w-4 h-4" />
             </.dm_link>
           </:action>
         </.dm_card>
