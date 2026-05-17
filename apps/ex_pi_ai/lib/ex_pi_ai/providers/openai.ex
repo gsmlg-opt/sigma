@@ -33,6 +33,7 @@ defmodule ExPiAi.Providers.OpenAI do
         Req.post!(base_url <> "/chat/completions",
           json: body,
           headers: headers,
+          receive_timeout: 60_000,
           into: fn {:data, data}, {req, resp} ->
             send(self(), {:chunk, data})
             {:cont, {req, resp}}
@@ -47,7 +48,7 @@ defmodule ExPiAi.Providers.OpenAI do
             {processed_events, new_message} = process_events(events, message)
             {processed_events, {new_message, new_buffer}}
         after
-          10000 -> {:halt, {message, buffer}}
+          60_000 -> {:halt, {message, buffer}}
         end
       end,
       fn _ -> :ok end

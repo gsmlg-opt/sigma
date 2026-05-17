@@ -31,10 +31,10 @@ defmodule ExPiAi.Providers.Anthropic do
 
     Elixir.Stream.resource(
       fn ->
-        # Start the request
         Req.post!(base_url <> "/v1/messages",
           json: body,
           headers: headers,
+          receive_timeout: 60_000,
           into: fn {:data, data}, {req, resp} ->
             send(self(), {:chunk, data})
             {:cont, {req, resp}}
@@ -49,7 +49,7 @@ defmodule ExPiAi.Providers.Anthropic do
             {processed_events, new_message} = process_events(events, message)
             {processed_events, {new_message, new_buffer}}
         after
-          10000 -> {:halt, {message, buffer}}
+          60_000 -> {:halt, {message, buffer}}
         end
       end,
       fn _ -> :ok end

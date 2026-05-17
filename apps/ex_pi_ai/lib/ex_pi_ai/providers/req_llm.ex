@@ -36,7 +36,8 @@ defmodule ExPiAi.Providers.ReqLLM do
       messages: messages,
       tools: tools,
       api_key: api_key,
-      base_url: base_url
+      base_url: base_url,
+      receive_timeout: 60_000
     ]
 
     # Use ReqLLM.stream_text
