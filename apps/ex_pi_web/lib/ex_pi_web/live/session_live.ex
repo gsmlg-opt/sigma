@@ -78,9 +78,9 @@ defmodule ExPiWeb.SessionLive do
             <span class="text-xs uppercase tracking-widest font-bold opacity-70">Workspace</span>
           </div>
           <h2 class="font-semibold truncate" title={@workdir}>{Path.basename(@workdir)}</h2>
-          <.dm_btn navigate={~p"/workdir/#{@encoded_workdir}"} variant="link" class="p-0 h-auto text-[10px] text-secondary-content hover:underline mt-2 inline-block font-bold">
+          <.dm_link navigate={~p"/workdir/#{@encoded_workdir}"} class="text-[10px] text-primary-container hover:underline mt-2 inline-block font-bold">
             Change Directory
-          </.dm_btn>
+          </.dm_link>
         </div>
 
         <.dm_left_menu id="sidebar-sessions" class="flex-1 overflow-y-auto px-2 pt-4">
@@ -96,7 +96,7 @@ defmodule ExPiWeb.SessionLive do
           </.dm_left_menu_group>
         </.dm_left_menu>
 
-        <div class="p-4 border-t border-secondary-content/10">
+        <div class="p-4 border-t border-secondary-content/10 text-center">
           <.dm_btn phx-click="fork_session" variant="primary" class="w-full">
             <:prefix><.dm_mdi name="source-branch" /></:prefix>
             Fork Branch
@@ -113,7 +113,7 @@ defmodule ExPiWeb.SessionLive do
                 <div class={"mt-1 p-2 rounded-xl #{if message.role == :user, do: "bg-primary text-primary-content", else: "bg-secondary text-secondary-content"}"}>
                   <.dm_mdi name={if message.role == :user, do: "account", else: "robot"} class="w-5 h-5" />
                 </div>
-                <div class="min-w-0 flex-1">
+                <div class="flex-1 min-w-0">
                   <div class="flex justify-between items-center mb-1">
                     <span class="text-xs font-bold uppercase tracking-wider opacity-60 font-mono">{message.role}</span>
                     <span class="text-[10px] opacity-40 font-mono">{format_timestamp(message.timestamp)}</span>

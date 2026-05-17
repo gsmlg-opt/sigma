@@ -92,9 +92,9 @@ defmodule ExPiWeb.WorkdirLive do
               </div>
 
               <:action>
-                <.dm_btn navigate={~p"/workdir/#{@encoded_workdir}/sessions/#{s}"} variant="outline" size="sm" class="w-full">
+                <.dm_link navigate={~p"/workdir/#{@encoded_workdir}/sessions/#{s}"} class="dm-btn dm-btn--outline dm-btn--sm w-full text-center">
                   Open
-                </.dm_btn>
+                </.dm_link>
               </:action>
             </.dm_card>
           </div>
