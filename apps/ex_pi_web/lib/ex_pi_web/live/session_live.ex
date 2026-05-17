@@ -68,10 +68,10 @@ defmodule ExPiWeb.SessionLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="flex h-[calc(100vh-64px)] relative bg-surface text-on-surface">
+    <div class="flex h-[calc(100vh-64px)] relative bg-surface text-on-surface font-sans">
       <!-- Sidebar -->
       <aside class="w-72 bg-secondary text-secondary-content border-r border-outline-variant shrink-0 flex flex-col">
-        <div class="p-6 border-b border-secondary-content/10">
+        <div class="p-6 border-b border-secondary-content/10 text-on-secondary">
           <div class="flex items-center gap-2 mb-1">
             <.dm_mdi name="folder-outline" class="w-4 h-4 opacity-70" />
             <span class="text-xs uppercase tracking-widest font-bold opacity-70">Workspace</span>
@@ -162,7 +162,7 @@ defmodule ExPiWeb.SessionLive do
                   autocomplete="off"
                 />
                 <div class="absolute right-2 top-1/2 -translate-y-1/2">
-                  <.dm_btn id="send-prompt-btn" type="submit" variant="ghost" shape="circle" size="sm">
+                  <.dm_btn id="send-prompt-btn" type="submit" variant="ghost" shape="circle" size="sm" phx-hook="WebComponentHook">
                     <.dm_mdi name="send" class="text-primary w-5 h-5" />
                   </.dm_btn>
                 </div>
@@ -176,7 +176,7 @@ defmodule ExPiWeb.SessionLive do
       </div>
 
       <!-- Modal -->
-      <.dm_modal :if={@permission_request} id="permission-modal">
+      <.dm_modal :if={@permission_request} id="permission-modal" phx-hook="ModalHook">
         <:title>
           <div class="flex items-center gap-2 text-warning">
             <.dm_mdi name="shield-alert" class="w-6 h-6" />

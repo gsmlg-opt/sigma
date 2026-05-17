@@ -15,6 +15,7 @@ defmodule ExPiWeb.Router do
 
     live "/", HomeLive, :index
     live "/workdir/:workdir", WorkdirLive, :index
+    live "/workdir/new/project", HomeLive, :add
     live "/workdir/:workdir/sessions/:id", SessionLive, :show
   end
 end
