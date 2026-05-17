@@ -1,11 +1,13 @@
-<.dm_appbar title="ExPi" sticky>
+<.dm_appbar title="ExPi" title_to={~p"/"} sticky class="appbar-elevated border-b border-outline-variant/10">
   <:logo>
-    <div class="font-display text-2xl font-bold tracking-tight text-primary-content">π</div>
+    <div class="font-display text-3xl font-black tracking-tighter text-primary">π</div>
   </:logo>
   <:menu to={~p"/"} active={@active_tab == :home}>Home</:menu>
   <:menu to={~p"/settings"} active={@active_tab == :settings}>Settings</:menu>
   <:user_profile>
-    <.dm_theme_switcher id="theme-toggle" />
+    <div class="flex items-center gap-4 ml-6 pl-6 border-l border-outline-variant/20">
+      <.dm_theme_switcher id="theme-toggle" />
+    </div>
   </:user_profile>
 </.dm_appbar>
 
