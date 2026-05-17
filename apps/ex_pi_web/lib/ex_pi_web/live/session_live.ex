@@ -85,9 +85,9 @@ defmodule ExPiWeb.SessionLive do
 
         <.dm_left_menu id="sidebar-sessions" class="flex-1 overflow-y-auto px-2 pt-4">
           <:title>Sessions</:title>
-          <.dm_left_menu_group id="sessions-list">
+          <.dm_left_menu_group id="sessions-list" active={@session_id}>
             <:title>History</:title>
-            <:menu :for={s <- @sessions} to={~p"/workdir/#{@encoded_workdir}/sessions/#{s}"} active={s == @session_id}>
+            <:menu :for={s <- @sessions} to={~p"/workdir/#{@encoded_workdir}/sessions/#{s}"} id={s}>
               <div class="flex items-center gap-2 truncate">
                 <.dm_mdi name="chat-outline" class="w-4 h-4" />
                 <span class="truncate">{s}</span>
@@ -257,7 +257,13 @@ defmodule ExPiWeb.SessionLive do
     root =
       case :code.priv_dir(:ex_pi_web) do
         {:error, :bad_name} -> Path.expand("priv/sessions", File.cwd!())
-        path -> Path.join(List.to_string(path), "sessions")
+        path -> 
+          p = List.to_string(path)
+          if String.contains?(p, "_build") do
+             Path.expand("apps/ex_pi_web/priv/sessions", File.cwd!())
+          else
+             Path.join(p, "sessions")
+          end
       end
 
     Path.join(root, encoded_cwd)

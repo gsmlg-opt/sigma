@@ -3,13 +3,8 @@ defmodule ExPiWeb.WorkdirLive do
 
   @impl true
   def mount(%{"workdir" => encoded_workdir}, _session, socket) do
-    IO.inspect(encoded_workdir, label: "WorkdirLive.mount: encoded_workdir")
     workdir = Base.url_decode64!(encoded_workdir, padding: false)
-    IO.inspect(workdir, label: "WorkdirLive.mount: decoded workdir")
-    
     sessions_dir = get_sessions_dir(workdir)
-    IO.inspect(sessions_dir, label: "WorkdirLive.mount: sessions_dir")
-    
     File.mkdir_p!(sessions_dir)
 
     {:ok, sessions} = ExPiSession.Log.list_sessions(sessions_dir)
@@ -51,7 +46,7 @@ defmodule ExPiWeb.WorkdirLive do
 
         <div class="mt-auto pt-6 border-t border-secondary-content/20">
           <p class="text-xs opacity-60 mb-2 uppercase tracking-wider font-bold">Full Path</p>
-          <code class="text-[10px] break-all opacity-80 leading-tight">{@workdir}</code>
+          <code class="text-[10px] break-all opacity-80 leading-tight font-mono">{@workdir}</code>
         </div>
       </aside>
 
@@ -92,9 +87,9 @@ defmodule ExPiWeb.WorkdirLive do
               </div>
 
               <:action>
-                <.dm_btn phx-click="open_session" phx-value-id={s} variant="outline" size="sm">
+                <.dm_link navigate={~p"/workdir/#{@encoded_workdir}/sessions/#{s}"} class="dm-btn dm-btn--outline dm-btn--sm">
                   Open
-                </.dm_btn>
+                </.dm_link>
               </:action>
             </.dm_card>
           </div>
@@ -110,18 +105,19 @@ defmodule ExPiWeb.WorkdirLive do
     {:noreply, push_navigate(socket, to: ~p"/workdir/#{socket.assigns.encoded_workdir}/sessions/#{session_id}")}
   end
 
-  @impl true
-  def handle_event("open_session", %{"id" => id}, socket) do
-    {:noreply, push_navigate(socket, to: ~p"/workdir/#{socket.assigns.encoded_workdir}/sessions/#{id}")}
-  end
-
   defp get_sessions_dir(workdir) do
     encoded_cwd = Base.url_encode64(workdir, padding: false)
 
     root =
       case :code.priv_dir(:ex_pi_web) do
         {:error, :bad_name} -> Path.expand("priv/sessions", File.cwd!())
-        path -> Path.join(List.to_string(path), "sessions")
+        path -> 
+          p = List.to_string(path)
+          if String.contains?(p, "_build") do
+             Path.expand("apps/ex_pi_web/priv/sessions", File.cwd!())
+          else
+             Path.join(p, "sessions")
+          end
       end
 
     Path.join(root, encoded_cwd)
