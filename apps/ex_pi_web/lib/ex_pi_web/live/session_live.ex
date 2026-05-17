@@ -39,19 +39,29 @@ defmodule ExPiWeb.SessionLive do
     config = ConfigManager.get_active_provider_config()
     system_prompt = Map.get(system_config, "system_prompt")
 
-    {provider_mod, model_id, provider_id, api_key, base_url} =
-      if Mix.env() == :test do
-        {MockProvider, "mock-model", "mock", "mock-key", "https://api.mock.com"}
-      else
-        mod =
-          case config["api_type"] do
-            "anthropic" -> ExPiAi.Providers.Anthropic
-            "openai" -> ExPiAi.Providers.OpenAI
-            "req_llm" -> ExPiAi.Providers.ReqLLM
-            _ -> MockProvider
-          end
+    IO.inspect(config, label: "SessionLive: Active Provider Config")
 
-        {mod, config["model"], config["api_type"], config["resolved_key"], config["base_url"]}
+    {provider_mod, model_id, provider_id, api_key, base_url} =
+      cond do
+        Mix.env() == :test ->
+          {MockProvider, "mock-model", "mock", "mock-key", "https://api.mock.com"}
+
+        config == nil ->
+          IO.warn("No active provider configured in Settings. Falling back to MockProvider.")
+          {MockProvider, "mock-model", "mock", "mock-key", "https://api.mock.com"}
+
+        true ->
+          mod =
+            case config["api_type"] do
+              "anthropic" -> ExPiAi.Providers.Anthropic
+              "openai" -> ExPiAi.Providers.OpenAI
+              "req_llm" -> ExPiAi.Providers.ReqLLM
+              type -> 
+                IO.warn("Unknown api_type: #{inspect(type)}, falling back to MockProvider")
+                MockProvider
+            end
+
+          {mod, config["model"], config["api_type"], config["resolved_key"], config["base_url"]}
       end
 
     # Get or start agent for this session
