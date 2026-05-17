@@ -64,53 +64,58 @@ defmodule ExPiWeb.SessionLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="flex h-screen relative">
+    <div class="flex h-screen relative bg-surface-base text-surface-content">
       <!-- Sidebar -->
-      <div class="w-64 border-r bg-gray-50 flex flex-col">
-        <div class="p-4 font-bold border-b">Sessions</div>
-        <div class="flex-1 overflow-y-auto">
-          <div :for={s <- @sessions} class={"p-2 hover:bg-gray-200 cursor-pointer #{if s == @session_id, do: "bg-blue-100", else: ""}"}>
-            <.link navigate={~p"/sessions/#{s}"}>{s}</.link>
-          </div>
+      <.dm_left_menu id="sidebar" class="w-64 border-r border-base-content/10">
+        <:title>Sessions</:title>
+        <.dm_left_menu_group id="sessions-group">
+          <:title>Active Sessions</:title>
+          <:menu :for={s <- @sessions} to={~p"/sessions/#{s}"} active={s == @session_id}>
+            {s}
+          </:menu>
+        </.dm_left_menu_group>
+        <div class="p-4 border-t border-base-content/10">
+          <.dm_btn phx-click="fork_session" variant="primary" class="w-full">Fork Session</.dm_btn>
         </div>
-        <div class="p-4 border-t">
-          <button phx-click="fork_session" class="w-full px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">Fork Session</button>
-        </div>
-      </div>
+      </.dm_left_menu>
 
       <!-- Main Chat -->
       <div class="flex-1 flex flex-col min-w-0">
         <div id="messages" phx-update="stream" class="flex-1 overflow-y-auto p-4 space-y-4">
-          <div :for={{id, message} <- @streams.messages} id={id} class={"message #{message.role}"}>
-            <div class="font-bold text-sm text-gray-500 uppercase">{message.role}</div>
-            <div class="content mt-1 p-3 rounded-lg bg-white border shadow-sm">
-              {render_content(message.content)}
-            </div>
+          <div :for={{id, message} <- @streams.messages} id={id} class="w-full">
+            <.dm_card variant="bordered" class="w-full">
+              <:title>
+                <span class="text-sm font-mono opacity-60 uppercase">{message.role}</span>
+              </:title>
+              <div class="mt-2 whitespace-pre-wrap font-sans">
+                {render_content(message.content)}
+              </div>
+            </.dm_card>
           </div>
         </div>
 
-        <div class="p-4 border-t bg-white">
+        <div class="p-4 border-t border-base-content/10 bg-surface-base">
           <form phx-submit="send_prompt">
-            <input type="text" name="prompt" value={@input} placeholder="Type a message..." class="w-full border rounded p-2 focus:ring-2 focus:ring-blue-500 outline-none" autocomplete="off" />
+            <.dm_input type="text" name="prompt" value={@input} placeholder="Type a message..." class="w-full" autocomplete="off" />
           </form>
         </div>
       </div>
 
       <!-- Modal -->
-      <div :if={@permission_request} class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-        <div class="bg-white p-6 rounded-lg shadow-xl max-w-md w-full">
-          <h2 class="text-xl font-bold mb-4">Permission Required</h2>
+      <.dm_modal :if={@permission_request} id="permission-modal">
+        <:title>Permission Required</:title>
+        <:body>
           <p class="mb-4">
-            The agent wants to call tool <code class="bg-gray-100 px-1 rounded">{@permission_request.tool_call.name}</code>
+            The agent wants to call tool <code class="bg-surface-base px-1 rounded">{@permission_request.tool_call.name}</code>
             with arguments:
           </p>
-          <pre class="bg-gray-100 p-2 rounded mb-4 overflow-x-auto text-sm">{Jason.encode!(@permission_request.tool_call.arguments, pretty: true)}</pre>
-          <div class="flex justify-end space-x-2">
-            <button phx-click="permission_deny" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Deny</button>
-            <button phx-click="permission_allow" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">Allow</button>
-          </div>
-        </div>
-      </div>
+          <pre class="bg-surface-base p-2 rounded mb-4 overflow-x-auto text-sm">{Jason.encode!(@permission_request.tool_call.arguments, pretty: true)}</pre>
+        </:body>
+        <:footer>
+          <.dm_btn phx-click="permission_deny" variant="ghost">Deny</.dm_btn>
+          <.dm_btn phx-click="permission_allow" variant="primary">Allow</.dm_btn>
+        </:footer>
+      </.dm_modal>
     </div>
     """
   end

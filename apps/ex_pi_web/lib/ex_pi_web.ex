@@ -56,8 +56,8 @@ defmodule ExPiWeb do
       import Phoenix.HTML.Form
       import Phoenix.Component
 
-      alias ExPiWeb.CoreComponents
-      import ExPiWeb.CoreComponents
+      use PhoenixDuskmoon.Component
+      use PhoenixDuskmoon.ArtComponent
       use Gettext, backend: ExPiWeb.Gettext
 
       unquote(verified_routes())

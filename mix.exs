@@ -6,7 +6,8 @@ defmodule Pi.MixProject do
       apps_path: "apps",
       version: "0.1.0",
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      aliases: aliases()
     ]
   end
 
@@ -17,5 +18,19 @@ defmodule Pi.MixProject do
   # Run "mix help deps" for examples and options.
   defp deps do
     []
+  end
+
+  defp aliases do
+    [
+      setup: ["deps.get"],
+      "assets.setup": ["tailwind.install --if-missing", "bun.install --if-missing"],
+      "assets.build": ["tailwind ex_pi_web", "bun ex_pi_web"],
+      "assets.deploy": [
+        "phx.digest.clean --all",
+        "tailwind ex_pi_web --minify",
+        "bun ex_pi_web --minify",
+        "phx.digest"
+      ]
+    ]
   end
 end

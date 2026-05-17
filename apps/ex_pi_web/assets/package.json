@@ -1,0 +1,11 @@
+{
+  "name": "ex_pi_web_assets",
+  "private": true,
+  "dependencies": {
+    "@duskmoon-dev/core": "latest",
+    "@duskmoon-dev/css-art": "latest",
+    "@duskmoon-dev/elements": "latest",
+    "@duskmoon-dev/art-elements": "latest",
+    "topbar": "^0.1.4"
+  }
+}

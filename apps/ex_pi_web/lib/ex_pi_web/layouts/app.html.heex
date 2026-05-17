@@ -1,5 +1,4 @@
 <main>
-  <.flash kind={:info} title="Success!" flash={@flash} />
-  <.flash kind={:error} title="Error!" flash={@flash} />
+  <.dm_flash_group flash={@flash} />
   {@inner_content}
 </main>

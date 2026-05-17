@@ -40,7 +40,9 @@ erl_crash.dump
 .DS_Store
 
 # Javascript
+/node_modules/
 /apps/ex_pi_web/assets/node_modules/
+bun.lock
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

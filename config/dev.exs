@@ -5,4 +5,7 @@ config :ex_pi_web, ExPiWeb.Endpoint,
   debug_errors: true,
   code_reloader: true,
   check_origin: false,
-  watchers: []
+  watchers: [
+    tailwind: {Tailwind, :install_and_run, [:ex_pi_web, ~w(--watch)]},
+    bun: {Bun, :install_and_run, [:ex_pi_web, ~w(--sourcemap=inline --watch)]}
+  ]
