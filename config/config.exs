@@ -20,7 +20,8 @@ config :bun,
   version: "1.3.4",
   ex_pi_web: [
     args: ~w(build assets/js/app.js --outdir=priv/static/assets --external /fonts/* --external /images/*),
-    cd: Path.expand("../apps/ex_pi_web", __DIR__)
+    cd: Path.expand("../apps/ex_pi_web", __DIR__),
+    env: %{"NODE_PATH" => Path.expand("../deps", __DIR__)}
   ]
 
 config :tailwind,
