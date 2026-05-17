@@ -3,7 +3,7 @@ defmodule ExPiWeb.SessionLive do
 
   @impl true
   def mount(%{"id" => session_id, "workdir" => encoded_workdir}, _session, socket) do
-    workdir = Base.url_decode64!(encoded_workdir)
+    workdir = Base.url_decode64!(encoded_workdir, padding: false)
     sessions_dir = get_sessions_dir(workdir)
     File.mkdir_p!(sessions_dir)
     storage_path = Path.join(sessions_dir, "#{session_id}.jsonl")
@@ -87,7 +87,7 @@ defmodule ExPiWeb.SessionLive do
           <:title>Sessions</:title>
           <.dm_left_menu_group id="sessions-list">
             <:title>History</:title>
-            <:menu :for={s <- @sessions} to={~p"/workdir/#{@encoded_workdir}/sessions/#{s}"}>
+            <:menu :for={s <- @sessions} to={~p"/workdir/#{@encoded_workdir}/sessions/#{s}"} active={s == @session_id}>
               <div class="flex items-center gap-2 truncate">
                 <.dm_mdi name="chat-outline" class="w-4 h-4" />
                 <span class="truncate">{s}</span>
@@ -113,7 +113,7 @@ defmodule ExPiWeb.SessionLive do
                 <div class={"mt-1 p-2 rounded-xl #{if message.role == :user, do: "bg-primary text-primary-content", else: "bg-secondary text-secondary-content"}"}>
                   <.dm_mdi name={if message.role == :user, do: "account", else: "robot"} class="w-5 h-5" />
                 </div>
-                <div class="flex-1 min-w-0">
+                <div class="min-w-0 flex-1">
                   <div class="flex justify-between items-center mb-1">
                     <span class="text-xs font-bold uppercase tracking-wider opacity-60 font-mono">{message.role}</span>
                     <span class="text-[10px] opacity-40 font-mono">{format_timestamp(message.timestamp)}</span>
@@ -253,8 +253,8 @@ defmodule ExPiWeb.SessionLive do
 
   defp get_sessions_dir(workdir) do
     # Map workdir to a safe folder name
-    encoded_cwd = Base.url_encode64(workdir)
-    Path.expand("../../priv/sessions/#{encoded_cwd}", __DIR__)
+    encoded_cwd = Base.url_encode64(workdir, padding: false)
+    Path.join([:code.priv_dir(:ex_pi_web), "sessions", encoded_cwd])
   end
 end
 

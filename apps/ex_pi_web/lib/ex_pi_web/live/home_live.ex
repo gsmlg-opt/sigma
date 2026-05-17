@@ -3,7 +3,7 @@ defmodule ExPiWeb.HomeLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    sessions_root = Path.expand("../../priv/sessions", __DIR__)
+    sessions_root = get_sessions_root()
     File.mkdir_p!(sessions_root)
 
     recent_workdirs =
@@ -11,7 +11,7 @@ defmodule ExPiWeb.HomeLive do
       |> File.ls!()
       |> Enum.filter(&File.dir?(Path.join(sessions_root, &1)))
       |> Enum.map(fn encoded ->
-        case Base.url_decode64(encoded) do
+        case Base.url_decode64(encoded, padding: false) do
           {:ok, path} -> {encoded, path}
           _ -> nil
         end
@@ -115,10 +115,14 @@ defmodule ExPiWeb.HomeLive do
     path = String.trim(path)
 
     if File.dir?(path) do
-      encoded_path = Base.url_encode64(path)
+      encoded_path = Base.url_encode64(path, padding: false)
       {:noreply, push_navigate(socket, to: ~p"/workdir/#{encoded_path}")}
     else
       {:noreply, assign(socket, workdir: path, error: "Directory does not exist or is not accessible.")}
     end
+  end
+
+  defp get_sessions_root do
+    Path.join(:code.priv_dir(:ex_pi_web), "sessions")
   end
 end

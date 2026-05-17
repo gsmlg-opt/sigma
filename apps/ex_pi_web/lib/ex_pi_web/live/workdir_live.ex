@@ -3,7 +3,7 @@ defmodule ExPiWeb.WorkdirLive do
 
   @impl true
   def mount(%{"workdir" => encoded_workdir}, _session, socket) do
-    workdir = Base.url_decode64!(encoded_workdir)
+    workdir = Base.url_decode64!(encoded_workdir, padding: false)
     sessions_dir = get_sessions_dir(workdir)
     File.mkdir_p!(sessions_dir)
 
@@ -112,7 +112,7 @@ defmodule ExPiWeb.WorkdirLive do
 
   defp get_sessions_dir(workdir) do
     # Map workdir to a safe folder name
-    encoded_cwd = Base.url_encode64(workdir)
-    Path.expand("../../priv/sessions/#{encoded_cwd}", __DIR__)
+    encoded_cwd = Base.url_encode64(workdir, padding: false)
+    Path.join([:code.priv_dir(:ex_pi_web), "sessions", encoded_cwd])
   end
 end
