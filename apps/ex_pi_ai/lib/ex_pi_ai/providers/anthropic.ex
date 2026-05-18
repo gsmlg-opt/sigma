@@ -14,10 +14,12 @@ defmodule ExPiAi.Providers.Anthropic do
     base_url =
       options[:base_url] || System.get_env("ANTHROPIC_BASE_URL") || "https://api.anthropic.com"
 
+    system = build_system(context[:system_prompt])
+
     body = %{
       model: model.id,
       messages: transform_messages(context.messages),
-      system: context[:system_prompt],
+      system: system,
       max_tokens: options[:max_tokens] || 4096,
       stream: true
     }
@@ -27,7 +29,7 @@ defmodule ExPiAi.Providers.Anthropic do
       if context[:tools], do: Map.put(body, :tools, transform_tools(context.tools)), else: body
 
     # Enable extended thinking when budget is set
-    {body, thinking_headers} =
+    {body, extra_betas} =
       case options[:thinking_budget] do
         budget when is_integer(budget) and budget > 0 ->
           body =
@@ -35,18 +37,22 @@ defmodule ExPiAi.Providers.Anthropic do
             |> Map.put(:thinking, %{type: "enabled", budget_tokens: budget})
             |> Map.update!(:max_tokens, &max(&1, budget + 1000))
 
-          {body, [{"anthropic-beta", "interleaved-thinking-2025-05-14"}]}
+          {body, ["interleaved-thinking-2025-05-14"]}
 
         _ ->
           {body, []}
       end
 
-    headers =
-      [
-        {"x-api-key", api_key},
-        {"anthropic-version", "2023-06-01"},
-        {"content-type", "application/json"}
-      ] ++ thinking_headers
+    beta_value =
+      (["prompt-caching-2024-07-31"] ++ extra_betas)
+      |> Enum.join(",")
+
+    headers = [
+      {"x-api-key", api_key},
+      {"anthropic-version", "2023-06-01"},
+      {"content-type", "application/json"},
+      {"anthropic-beta", beta_value}
+    ]
 
     Elixir.Stream.resource(
       fn ->
@@ -149,13 +155,23 @@ defmodule ExPiAi.Providers.Anthropic do
     end)
   end
 
+  defp build_system(nil), do: nil
+  defp build_system(""), do: nil
+
+  defp build_system(text) do
+    [%{type: "text", text: text, cache_control: %{type: "ephemeral"}}]
+  end
+
+  defp transform_tools([]), do: []
+
   defp transform_tools(tools) do
-    Enum.map(tools, fn tool ->
-      %{
-        name: tool.name,
-        description: tool.description,
-        input_schema: tool.parameters
-      }
+    last_idx = length(tools) - 1
+
+    tools
+    |> Enum.with_index()
+    |> Enum.map(fn {tool, idx} ->
+      base = %{name: tool.name, description: tool.description, input_schema: tool.parameters}
+      if idx == last_idx, do: Map.put(base, :cache_control, %{type: "ephemeral"}), else: base
     end)
   end
 

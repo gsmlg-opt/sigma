@@ -101,6 +101,11 @@
 - **E.1: Should glob, grep, and ls be implemented as separate tools or unified into a single search tool?**
   Separate tools, matching pi's own `find`, `grep`, and `ls` modules exactly. Each tool has a distinct affordance the LLM chooses between: `glob` returns matching file paths (no content); `grep` returns matching lines with `file:line:` prefixes (content, no directory tree); `ls` returns a flat directory listing with `[dir]`/`[file]` tags. A unified "search" tool would force the LLM to specify which operation it wants via a mode parameter, adding friction and diluting the schema descriptions. All three are read-only so they default to `:allow` under the existing permission system — no policy changes needed. `grep`'s `collect_files` uses both `glob_filter` and `"**/" <> glob_filter` patterns to correctly match files at the root level as well as subdirectories, working around Erlang's `:filelib.wildcard` treatment of `**` (which may not match zero directory components in all Elixir versions).
 
+### Phase G — Prompt caching
+
+- **G.1: Where should cache_control breakpoints be placed — system+tools only, or also on message history?**
+  System and tools only for the initial implementation. These two elements are fully stable within a session — the system prompt never changes and the tool definitions never change — so they always hit the cache on turns 2+, cutting the "prefix" cost by up to 90% per Anthropic's pricing. Message-level caching (placing a breakpoint at the penultimate complete message) would give additional savings for very long conversations but requires tracking which messages are "anchored" vs freshly added, adding complexity without changing the cache semantics for the dominant use case. `build_system/1` converts the system string to the `[{type, text, cache_control}]` array form that the caching beta requires; `transform_tools/1` places a `cache_control: %{type: "ephemeral"}` on the last tool so all tool definitions up to that point are cached. The `anthropic-beta` header is now always emitted and built from a list (`["prompt-caching-2024-07-31"] ++ extra_betas`) so the thinking and caching betas compose cleanly as a comma-joined value rather than two separate header tuples. `transform_usage` already captures `cache_read_input_tokens` and `cache_creation_input_tokens`, so cache savings are visible in the existing token usage row without further UI work.
+
 ### Phase F — Extended thinking mode
 
 - **F.1: Should thinking_budget be per-session or global, and how is it persisted?**
@@ -124,6 +129,7 @@
 - [x] Phase D — Context compaction (D.1)
 - [x] Phase E — Navigation tools (E.1)
 - [x] Phase F — Extended thinking mode (F.1)
+- [x] Phase G — Prompt caching (G.1)
 
 ## Phase A Summary
 
