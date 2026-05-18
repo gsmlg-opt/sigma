@@ -157,9 +157,23 @@ defmodule ExPiWeb.SessionLive do
                     <span class="text-xs font-bold uppercase tracking-wider opacity-60 font-mono">
                       {message.role}
                     </span>
-                    <span class="text-[10px] opacity-40 font-mono">
-                      {format_timestamp(message.timestamp)}
-                    </span>
+                    <div class="flex items-center gap-2">
+                      <span class="text-[10px] opacity-40 font-mono">
+                        {format_timestamp(message.timestamp)}
+                      </span>
+                      <.dm_btn
+                        :if={message.id != nil}
+                        id={"fork-at-#{message.id}"}
+                        phx-click="fork_at"
+                        phx-value-msg-id={message.id}
+                        phx-hook="WebComponentHook"
+                        variant="ghost"
+                        size="xs"
+                        title="Fork session from here"
+                      >
+                        <.dm_mdi name="source-branch" class="w-3 h-3 opacity-50 hover:opacity-100" />
+                      </.dm_btn>
+                    </div>
                   </div>
                   <div class="content whitespace-pre-wrap font-sans text-base leading-relaxed">
                     {render_content(message.content)}
@@ -275,18 +289,12 @@ defmodule ExPiWeb.SessionLive do
 
   @impl true
   def handle_event("fork_session", _, socket) do
-    new_id = "fork_#{System.unique_integer([:positive])}"
-    source_path = Path.join(socket.assigns.sessions_dir, "#{socket.assigns.session_id}.jsonl")
-    target_path = Path.join(socket.assigns.sessions_dir, "#{new_id}.jsonl")
+    do_fork(socket, :all)
+  end
 
-    # Fork the log (take all current messages)
-    {:ok, messages} = ExPiSession.Log.replay(source_path)
-    ExPiSession.Log.fork(source_path, target_path, length(messages), socket.assigns.workdir)
-
-    {:noreply,
-     push_navigate(socket,
-       to: ~p"/workdir/\#{socket.assigns.encoded_workdir}/sessions/\#{new_id}"
-     )}
+  @impl true
+  def handle_event("fork_at", %{"msg-id" => msg_id}, socket) do
+    do_fork(socket, {:at, msg_id})
   end
 
   @impl true
@@ -373,6 +381,26 @@ defmodule ExPiWeb.SessionLive do
   @impl true
   def handle_info(_event, socket) do
     {:noreply, socket}
+  end
+
+  defp do_fork(socket, mode) do
+    new_id = "fork_#{System.unique_integer([:positive])}"
+    source_path = Path.join(socket.assigns.sessions_dir, "#{socket.assigns.session_id}.jsonl")
+    target_path = Path.join(socket.assigns.sessions_dir, "#{new_id}.jsonl")
+    workdir = socket.assigns.workdir
+
+    case mode do
+      :all ->
+        ExPiSession.Log.fork_at_message(source_path, target_path, :all, workdir)
+
+      {:at, msg_id} ->
+        ExPiSession.Log.fork_at_message(source_path, target_path, msg_id, workdir)
+    end
+
+    {:noreply,
+     push_navigate(socket,
+       to: ~p"/workdir/#{socket.assigns.encoded_workdir}/sessions/#{new_id}"
+     )}
   end
 
   defp resolve_provider(nil) do

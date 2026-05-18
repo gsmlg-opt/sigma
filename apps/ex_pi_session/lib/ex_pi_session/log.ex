@@ -81,12 +81,12 @@ defmodule ExPiSession.Log do
   @doc """
   Forks a session at the given index.
   """
-  def fork(source_storage_id, target_storage_id, index, cwd, storage_mod \\ JsonlFile) do
+  def fork(source_storage_id, target_storage_id, message_count, cwd, storage_mod \\ JsonlFile) do
     case storage_mod.read(source_storage_id) do
       {:ok, entries} ->
-        # index is message index, but entries include header.
-        # Let's take index + 1 to include the header + messages up to index.
-        prefix = Enum.take(entries, index + 1)
+        # Take all non-message entries plus up to message_count message entries,
+        # preserving order. This correctly skips compaction and other entry types.
+        prefix = take_through_nth_message(entries, message_count)
 
         # Find the session header to get the parent ID
         parent_header = Enum.find(entries, fn e -> e["type"] == "session" end)
@@ -112,6 +112,40 @@ defmodule ExPiSession.Log do
 
         storage_mod.append(target_storage_id, new_header)
         {:ok, new_session_id}
+
+      _ ->
+        {:error, "Could not fork session"}
+    end
+  end
+
+  @doc """
+  Forks a session at the message with the given ID (inclusive), or forks all messages
+  when `:all` is passed as the message_id.
+  """
+  def fork_at_message(
+        source_storage_id,
+        target_storage_id,
+        message_id,
+        cwd,
+        storage_mod \\ JsonlFile
+      ) do
+    case storage_mod.read(source_storage_id) do
+      {:ok, entries} ->
+        msg_entries = Enum.filter(entries, fn e -> e["type"] == "message" end)
+
+        count =
+          case message_id do
+            :all ->
+              length(msg_entries)
+
+            id ->
+              msg_entries
+              |> Enum.take_while(fn e -> get_in(e, ["message", "id"]) != id end)
+              |> length()
+              |> Kernel.+(1)
+          end
+
+        fork(source_storage_id, target_storage_id, count, cwd, storage_mod)
 
       _ ->
         {:error, "Could not fork session"}
@@ -184,6 +218,20 @@ defmodule ExPiSession.Log do
       _ ->
         {:ignore}
     end
+  end
+
+  defp take_through_nth_message(entries, n) do
+    {prefix, _} =
+      Enum.reduce(entries, {[], 0}, fn entry, {acc, msg_count} ->
+        if msg_count >= n do
+          {acc, msg_count}
+        else
+          new_count = if entry["type"] == "message", do: msg_count + 1, else: msg_count
+          {[entry | acc], new_count}
+        end
+      end)
+
+    Enum.reverse(prefix)
   end
 
   defp find_leaf_id(entries) do

@@ -14,6 +14,26 @@ defmodule ExPiSession.BranchingTest do
     end)
   end
 
+  test "fork_at_message at 0-based index 3 of 10-message session yields 4 messages" do
+    Log.persist_event(@test_storage, {:agent_start, "/tmp"})
+
+    ids =
+      for i <- 0..9 do
+        id = "msg_#{i}"
+        msg = Message.user(id, "message #{i}")
+        Log.persist_event(@test_storage, {:message_end, msg})
+        id
+      end
+
+    target_id = Enum.at(ids, 3)
+    {:ok, _} = Log.fork_at_message(@test_storage, @target_storage, target_id, "/tmp")
+
+    {:ok, messages} = Log.replay(@target_storage)
+    assert length(messages) == 4
+    assert Enum.at(messages, 0).id == Enum.at(ids, 0)
+    assert Enum.at(messages, 3).id == target_id
+  end
+
   test "fork copies prefix and appends new header" do
     # 1. Create source session
     Log.persist_event(@test_storage, {:agent_start, "/tmp"})
