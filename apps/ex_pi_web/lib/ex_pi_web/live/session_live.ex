@@ -53,7 +53,12 @@ defmodule ExPiWeb.SessionLive do
             options: [api_key: api_key, base_url: base_url],
             system_prompt: system_prompt,
             on_event: on_event,
-            tools: [ExPiCoding.Tools.Read, ExPiCoding.Tools.Bash, ExPiCoding.Tools.Edit],
+            tools: [
+              ExPiCoding.Tools.Read,
+              ExPiCoding.Tools.Write,
+              ExPiCoding.Tools.Bash,
+              ExPiCoding.Tools.Edit
+            ],
             dispatcher_opts: [permission_request_fn: request_fn],
             permission_rules: permission_rules,
             messages: initial_messages,
