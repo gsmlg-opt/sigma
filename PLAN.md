@@ -71,6 +71,20 @@
 - **A.5a: Does safe_resolve block symlinks that escape the cwd?**
   The original `safe_resolve/2` used `Path.expand`, which resolves `.` and `..` in the string but does NOT follow symlinks. A symlink at `<cwd>/evil -> /etc/passwd` would pass the `within_cwd?` check — the symlink file is inside cwd — but any tool that opens it would reach `/etc/passwd`. The fix: `resolve_real_path/2` walks the full path with `File.read_link/1` at each level (up to 40 hops before returning `:symlink_loop`). For paths that don't yet exist, it walks up to the nearest existing parent. Both the input path AND the cwd are resolved before the prefix check, so macOS's `/tmp → /private/tmp` indirection doesn't cause false rejections. The resolved symlink target is returned as the real path for the within-cwd comparison, but the original non-resolved path is returned to callers so they get the path they asked for.
 
+### Phase B — UI completeness and missing tools
+
+- **B.1: Should `{:turn_error}` show a flash or be silently swallowed?**
+  Flash. Silently resetting `turn_in_flight` left the user with no indication that the turn failed — the input just reappeared as if nothing happened. The handler now calls `put_flash(:error, "Turn failed: #{msg}")` with the reason string. Also fixed `get_permissions/0` to use a closed-set map (`%{"allow" => :allow, "ask" => :ask, "deny" => :deny}`) instead of `String.to_existing_atom/1`, which was fragile to atom load order in the test environment.
+
+- **B.2: Should tool calls and results render with context or as placeholders?**
+  With context. `render_content/1` now shows `→ name(...)` for `:tool_call` content blocks instead of `[Calling tool...]`. Tool result messages get a distinct console icon, a `"tool: <name>"` role label (using `message.tool_name` from the struct, since `render_content` only sees content blocks), an ERROR badge when `is_error` is true, and error-colored text. A `render_content/1` catch-all clause was added to silence unknown content block types.
+
+- **B.3: Should the Write tool create-only or create-or-overwrite?**
+  Create-only. Failing when the file already exists gives the LLM a clear semantic distinction between write (create) and edit (modify), and prevents accidental silent overwrites. Parent directories are created automatically with `File.mkdir_p!`. The tool rejects cwd-escape attempts via `PathUtils.safe_resolve` like all other tools.
+
+- **B.4: Should sessions list sort by recency or filesystem order?**
+  Recency (mtime descending). `File.ls!` returns filesystem order, which is arbitrary and bears no relation to what the user worked on most recently. `File.stat/1` is called per file to get mtime and sort descending. The `{:ok, stat}` match pattern avoids crashing on files that disappear between the `ls` and `stat` calls.
+
 ## Progress
 
 - [x] Stage 1 — `ex_pi_ai`
@@ -79,6 +93,7 @@
 - [x] Stage 4 — `ex_pi_coding`
 - [x] Stage 5 — `ex_pi_web`
 - [x] Phase A — Daily-use blockers (A.1–A.5c)
+- [x] Phase B — UI completeness and missing tools (B.1–B.4)
 
 ## Phase A Summary
 
