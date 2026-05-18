@@ -20,7 +20,12 @@ defmodule ExPiWeb.SessionLive do
     {:ok, policy} = ExPiCoding.PermissionPolicy.start_link(default: :allow)
 
     request_fn = fn tool_call ->
-      Phoenix.PubSub.broadcast(ExPiWeb.PubSub, "session:#{session_id}", {:permission_request, self(), tool_call})
+      Phoenix.PubSub.broadcast(
+        ExPiWeb.PubSub,
+        "session:#{session_id}",
+        {:permission_request, self(), tool_call}
+      )
+
       receive do
         {:permission_response, action} -> action
       after
@@ -53,10 +58,16 @@ defmodule ExPiWeb.SessionLive do
         true ->
           mod =
             case config["api_type"] do
-              "anthropic" -> ExPiAi.Providers.Anthropic
-              "openai" -> ExPiAi.Providers.OpenAI
-              "req_llm" -> ExPiAi.Providers.ReqLLM
-              type -> 
+              "anthropic" ->
+                ExPiAi.Providers.Anthropic
+
+              "openai" ->
+                ExPiAi.Providers.OpenAI
+
+              "req_llm" ->
+                ExPiAi.Providers.ReqLLM
+
+              type ->
                 IO.warn("Unknown api_type: #{inspect(type)}, falling back to MockProvider")
                 MockProvider
             end
@@ -94,6 +105,7 @@ defmodule ExPiWeb.SessionLive do
       |> assign(:sessions_dir, sessions_dir)
       |> assign(:agent, agent)
       |> assign(:input, "")
+      |> assign(:turn_in_flight, false)
       |> assign(:permission_request, nil)
       |> assign(:sessions, sessions)
       |> stream(:messages, initial_messages)
@@ -199,8 +211,27 @@ defmodule ExPiWeb.SessionLive do
                   class="w-full pr-12"
                   autocomplete="off"
                 />
-                <div class="absolute right-2 top-1/2 -translate-y-1/2">
-                  <.dm_btn id="send-prompt-btn" type="submit" variant="ghost" shape="circle" size="sm" phx-hook="WebComponentHook">
+                <div class="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1">
+                  <.dm_btn
+                    :if={@turn_in_flight}
+                    id="cancel-turn-btn"
+                    type="button"
+                    phx-click="cancel_turn"
+                    phx-hook="WebComponentHook"
+                    variant="ghost"
+                    shape="circle"
+                    size="sm"
+                  >
+                    <.dm_mdi name="stop" class="text-error w-5 h-5" />
+                  </.dm_btn>
+                  <.dm_btn
+                    id="send-prompt-btn"
+                    type="submit"
+                    variant="ghost"
+                    shape="circle"
+                    size="sm"
+                    phx-hook="WebComponentHook"
+                  >
                     <.dm_mdi name="send" class="text-primary w-5 h-5" />
                   </.dm_btn>
                 </div>
@@ -288,6 +319,12 @@ defmodule ExPiWeb.SessionLive do
   end
 
   @impl true
+  def handle_event("cancel_turn", _, socket) do
+    ExPiAgent.cancel(socket.assigns.agent)
+    {:noreply, socket}
+  end
+
+  @impl true
   def handle_event("send_prompt", %{"prompt" => prompt}, socket) do
     ExPiAgent.prompt(socket.assigns.agent, prompt)
     {:noreply, assign(socket, input: "")}
@@ -301,8 +338,32 @@ defmodule ExPiWeb.SessionLive do
 
   @impl true
   def handle_event("permission_deny", _, socket) do
-    send(socket.assigns.permission_request.from, {:permission_response, {:deny, "User denied permission"}})
+    send(
+      socket.assigns.permission_request.from,
+      {:permission_response, {:deny, "User denied permission"}}
+    )
+
     {:noreply, assign(socket, :permission_request, nil)}
+  end
+
+  @impl true
+  def handle_info({:agent_start}, socket) do
+    {:noreply, assign(socket, :turn_in_flight, true)}
+  end
+
+  @impl true
+  def handle_info({:agent_end, _}, socket) do
+    {:noreply, assign(socket, :turn_in_flight, false)}
+  end
+
+  @impl true
+  def handle_info({:turn_cancelled}, socket) do
+    {:noreply, assign(socket, :turn_in_flight, false)}
+  end
+
+  @impl true
+  def handle_info({:turn_error, _reason}, socket) do
+    {:noreply, assign(socket, :turn_in_flight, false)}
   end
 
   @impl true
@@ -348,7 +409,14 @@ defmodule MockProvider do
       model: "mock-model",
       provider: "mock-provider",
       api: "mock-api",
-      usage: %{input: 0, output: 0, cache_read: 0, cache_write: 0, total_tokens: 0, cost: %{total: 0.0, input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0}},
+      usage: %{
+        input: 0,
+        output: 0,
+        cache_read: 0,
+        cache_write: 0,
+        total_tokens: 0,
+        cost: %{total: 0.0, input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0}
+      },
       stop_reason: nil,
       timestamp: System.system_time(:millisecond)
     }

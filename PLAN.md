@@ -42,6 +42,14 @@
 - **Where does permission-blocking actually live, process-wise?**
   Permission blocking lives within the tool execution task (spawned by the `Dispatcher`). When a tool requires permission, it calls a request callback that broadcasts a PubSub event and then blocks on a `receive` block. The LiveView receives the event, renders a modal, and when the user responds, sends a message back to the waiting tool process. This ensures that only the specific tool execution is blocked, while the Agent GenServer and the LiveView remain responsive to other events.
 
+### Phase A — Daily-use blockers
+
+- **A.1: Task vs DynamicSupervisor — which did you pick, and what would have to grow before switching?**
+  Picked `Task.Supervisor.async_nolink` (Option 1). The turn is effectively a one-shot computation that emits events via a captured closure and returns the final messages list. It has no stateful needs beyond what is captured at spawn time. A `DynamicSupervisor`-per-turn would be needed only if the turn itself had to supervise sub-processes with different restart strategies, or if we needed named access to a running turn from outside the agent — neither is the case. The switch trigger: if we ever need to restart a crashed sub-turn-step independently, or if the turn needs to store mutable intermediate state in a GenServer that other processes can query.
+
+- **A.1: What happens to in-flight tool results when cancel arrives mid-tool — discard, log, or keep?**
+  Discard. When the turn task is killed with `:brutal_kill`, the Dispatcher tasks (running under `ExPiCoding.Dispatcher.TaskSupervisor`) continue running briefly. The bash tool monitors the turn task PID (the `signal` in opts) and self-aborts via `Process.monitor` + `:DOWN` detection. Results from any Dispatcher tasks that complete after the kill are sent to the dead turn task's mailbox and silently dropped by the BEAM. The agent's `messages` field is never updated (the `handle_info({ref, _})` guard only matches the current task's ref, which was cleared by the kill). This means partial results from multi-tool turns are fully discarded, which is correct — they cannot be safely spliced into the conversation without the corresponding assistant message that requested them.
+
 ## Progress
 
 - [x] Stage 1 — `ex_pi_ai`

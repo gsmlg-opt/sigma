@@ -67,8 +67,9 @@ defmodule ExPiCoding.PermissionPolicy do
 
   @impl true
   def init(opts) do
-    default = Keyword.get(opts, :default, :allow)
-    {:ok, %{default: default, rules: %{}}}
+    default = Keyword.get(opts, :default, :ask)
+    rules = Keyword.get(opts, :rules, %{})
+    {:ok, %{default: default, rules: rules}}
   end
 
   @impl true

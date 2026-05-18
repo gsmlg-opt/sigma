@@ -41,10 +41,8 @@ defmodule ExPiCoding.Tools.Bash do
     timeout_ms = if timeout && timeout > 0, do: timeout * 1000, else: :infinity
 
     if File.dir?(cwd) do
-      # Use a Task to manage the Port and stream data back.
       task =
         Task.async(fn ->
-          # Use /bin/sh -c to support shell built-ins and proper command execution
           port =
             Port.open({:spawn, "/bin/sh -c " <> quote_command(command)}, [
               :binary,
@@ -63,7 +61,6 @@ defmodule ExPiCoding.Tools.Bash do
   end
 
   defp quote_command(command) do
-    # Simple quoting for /bin/sh -c
     "'" <> String.replace(command, "'", "'\\''") <> "'"
   end
 
@@ -87,21 +84,38 @@ defmodule ExPiCoding.Tools.Bash do
   end
 
   defp wait_for_task(task, signal, timeout_ms, command) do
+    # When signal is a PID (the turn task), monitor it so we can self-abort
+    # if the turn is cancelled while bash is blocking.
+    signal_ref = if is_pid(signal), do: Process.monitor(signal), else: nil
+
+    result = receive_result(task, signal, signal_ref, timeout_ms, command)
+
+    if signal_ref, do: Process.demonitor(signal_ref, [:flush])
+
+    result
+  end
+
+  defp receive_result(task, signal, signal_ref, timeout_ms, command) do
     receive do
-      {task_ref, result} when task_ref == task.ref ->
-        Process.demonitor(task_ref, [:flush])
+      {ref, output} when ref == task.ref ->
+        Process.demonitor(task.ref, [:flush])
 
         {:ok,
          %{
-           content: [%{type: :text, text: result.output}],
-           details: %{exit_code: result.exit_code, command: command}
+           content: [%{type: :text, text: output.output}],
+           details: %{exit_code: output.exit_code, command: command}
          }}
 
-      {:abort, ^signal} when signal != nil ->
+      {:DOWN, ref, :process, _, _} when ref == signal_ref and signal_ref != nil ->
+        # Turn task was killed — abort the port task
+        Task.shutdown(task, :brutal_kill)
+        {:error, "Command aborted: turn cancelled"}
+
+      {:abort, s} when s == signal and signal != nil ->
         Task.shutdown(task, :brutal_kill)
         {:error, "Command aborted"}
 
-      {:DOWN, task_ref, :process, _pid, reason} when task_ref == task.ref ->
+      {:DOWN, ref, :process, _pid, reason} when ref == task.ref ->
         {:error, "Bash tool process crashed: #{inspect(reason)}"}
     after
       timeout_ms ->
