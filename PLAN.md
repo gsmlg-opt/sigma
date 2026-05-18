@@ -96,6 +96,11 @@
 - **C.3: Should assistant messages render markdown or plain text?**
   Markdown. `marked` parses the text and `DOMPurify` sanitizes the resulting HTML before setting `innerHTML`, guarding against prompt-injection via script tags. Non-assistant messages (user input, tool results) keep `whitespace-pre-wrap` because terminal output and plain text should not be reinterpreted as markdown. The `@tailwindcss/typography` plugin was absent, so a hand-rolled `.markdown` CSS class provides the necessary styles for `<pre>/<code>`, headings, lists, blockquotes, and tables — no additional Tailwind plugin dependency required.
 
+### Phase E — Navigation tools
+
+- **E.1: Should glob, grep, and ls be implemented as separate tools or unified into a single search tool?**
+  Separate tools, matching pi's own `find`, `grep`, and `ls` modules exactly. Each tool has a distinct affordance the LLM chooses between: `glob` returns matching file paths (no content); `grep` returns matching lines with `file:line:` prefixes (content, no directory tree); `ls` returns a flat directory listing with `[dir]`/`[file]` tags. A unified "search" tool would force the LLM to specify which operation it wants via a mode parameter, adding friction and diluting the schema descriptions. All three are read-only so they default to `:allow` under the existing permission system — no policy changes needed. `grep`'s `collect_files` uses both `glob_filter` and `"**/" <> glob_filter` patterns to correctly match files at the root level as well as subdirectories, working around Erlang's `:filelib.wildcard` treatment of `**` (which may not match zero directory components in all Elixir versions).
+
 ### Phase D — Context compaction
 
 - **D.1: Should compaction trigger automatically on a token threshold, or only when the user clicks a button?**
@@ -112,6 +117,7 @@
 - [x] Phase B — UI completeness and missing tools (B.1–B.4)
 - [x] Phase C — Streaming UX (C.1–C.3)
 - [x] Phase D — Context compaction (D.1)
+- [x] Phase E — Navigation tools (E.1)
 
 ## Phase A Summary
 

@@ -57,7 +57,10 @@ defmodule ExPiWeb.SessionLive do
               ExPiCoding.Tools.Read,
               ExPiCoding.Tools.Write,
               ExPiCoding.Tools.Bash,
-              ExPiCoding.Tools.Edit
+              ExPiCoding.Tools.Edit,
+              ExPiCoding.Tools.Glob,
+              ExPiCoding.Tools.Grep,
+              ExPiCoding.Tools.LS
             ],
             dispatcher_opts: [permission_request_fn: request_fn],
             permission_rules: permission_rules,
