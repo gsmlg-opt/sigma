@@ -201,6 +201,16 @@ defmodule ExPiWeb.SessionLive do
                   ]}>
                     {render_content(message.content)}
                   </div>
+                  <div
+                    :if={message.role == :assistant and not is_nil(message.usage)}
+                    class="mt-2 flex gap-3 text-[10px] font-mono opacity-40"
+                  >
+                    <span>in: {message.usage.input}</span>
+                    <span>out: {message.usage.output}</span>
+                    <span :if={not is_nil(get_in(message.usage, [:cost, :total]))}>
+                      ${format_cost(get_in(message.usage, [:cost, :total]))}
+                    </span>
+                  </div>
                 </div>
               </div>
             </.dm_card>
@@ -318,6 +328,14 @@ defmodule ExPiWeb.SessionLive do
   end
 
   defp format_timestamp(_), do: ""
+
+  defp format_cost(cost) when is_float(cost) and cost < 0.001,
+    do: :erlang.float_to_binary(cost, decimals: 6)
+
+  defp format_cost(cost) when is_float(cost),
+    do: :erlang.float_to_binary(cost, decimals: 4)
+
+  defp format_cost(_), do: "?"
 
   @impl true
   def handle_event("fork_session", _, socket) do
