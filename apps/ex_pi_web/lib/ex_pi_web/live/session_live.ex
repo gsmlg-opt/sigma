@@ -147,17 +147,32 @@ defmodule ExPiWeb.SessionLive do
               class="overflow-hidden"
             >
               <div class="flex items-start gap-4 p-4 text-on-surface">
-                <div class={
-                  "mt-1 p-2 rounded-xl \#{if message.role == :user, do: \"bg-primary text-primary-content\", else: \"bg-secondary text-secondary-content\"}"
-                }>
-                  <.dm_mdi name={if message.role == :user, do: "account", else: "robot"} class="w-5 h-5" />
+                <div class={[
+                  "mt-1 p-2 rounded-xl",
+                  message.role == :user && "bg-primary text-primary-content",
+                  message.role == :tool_result && "bg-tertiary text-tertiary-content",
+                  message.role not in [:user, :tool_result] && "bg-secondary text-secondary-content"
+                ]}>
+                  <.dm_mdi
+                    name={
+                      case message.role do
+                        :user -> "account"
+                        :tool_result -> "console"
+                        _ -> "robot"
+                      end
+                    }
+                    class="w-5 h-5"
+                  />
                 </div>
                 <div class="min-w-0 flex-1">
                   <div class="flex justify-between items-center mb-1">
                     <span class="text-xs font-bold uppercase tracking-wider opacity-60 font-mono">
-                      {message.role}
+                      {role_label(message)}
                     </span>
                     <div class="flex items-center gap-2">
+                      <span :if={message.is_error} class="text-[10px] font-bold text-error font-mono">
+                        ERROR
+                      </span>
                       <span class="text-[10px] opacity-40 font-mono">
                         {format_timestamp(message.timestamp)}
                       </span>
@@ -175,7 +190,10 @@ defmodule ExPiWeb.SessionLive do
                       </.dm_btn>
                     </div>
                   </div>
-                  <div class="content whitespace-pre-wrap font-sans text-base leading-relaxed">
+                  <div class={[
+                    "content whitespace-pre-wrap font-sans text-base leading-relaxed",
+                    message.is_error && "text-error"
+                  ]}>
                     {render_content(message.content)}
                   </div>
                 </div>
@@ -272,14 +290,23 @@ defmodule ExPiWeb.SessionLive do
   defp render_content(content) when is_binary(content), do: content
 
   defp render_content(content) when is_list(content) do
-    Enum.map(content, fn
+    content
+    |> Enum.map(fn
       %{type: :text, text: text} -> text
-      %{type: :thinking, thinking: _thinking} -> "[Thinking...]"
-      %{type: :tool_call, name: _name} -> "[Calling tool...]"
-      _ -> ""
+      %{type: :thinking} -> "[Thinking...]"
+      %{type: :tool_call, name: name} -> "→ #{name}(...)"
+      _ -> nil
     end)
+    |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
   end
+
+  defp render_content(_), do: ""
+
+  defp role_label(%{role: :tool_result, tool_name: name}) when is_binary(name),
+    do: "tool: #{name}"
+
+  defp role_label(%{role: role}), do: role
 
   defp format_timestamp(ts) when is_integer(ts) do
     ts |> DateTime.from_unix!(:millisecond) |> Calendar.strftime("%H:%M:%S")
