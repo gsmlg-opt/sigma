@@ -27,6 +27,14 @@ defmodule ExPiAgent do
 
   # Client API
 
+  def child_spec(opts) do
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [opts]},
+      restart: :temporary
+    }
+  end
+
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts)
   end
