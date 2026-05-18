@@ -192,17 +192,21 @@ defmodule ExPiAgent do
       options: state.provider_options
     }
 
-    {state, assistant_msg} = run_stream(state, params)
+    case run_stream(state, params) do
+      {:error, state} ->
+        state
 
-    tool_calls = extract_tool_calls(assistant_msg)
+      {state, assistant_msg} ->
+        tool_calls = extract_tool_calls(assistant_msg)
 
-    if tool_calls != [] do
-      {state, tool_result_messages} = execute_tools(state, tool_calls)
-      emit(state, {:turn_end, assistant_msg, tool_result_messages})
-      run_turn_loop(state)
-    else
-      emit(state, {:turn_end, assistant_msg, []})
-      state
+        if tool_calls != [] do
+          {state, tool_result_messages} = execute_tools(state, tool_calls)
+          emit(state, {:turn_end, assistant_msg, tool_result_messages})
+          run_turn_loop(state)
+        else
+          emit(state, {:turn_end, assistant_msg, []})
+          state
+        end
     end
   end
 
@@ -262,6 +266,10 @@ defmodule ExPiAgent do
 
     assistant_msg = final_state.current_turn_assistant_message
     {%{final_state | current_turn_assistant_message: nil}, assistant_msg}
+  rescue
+    e in [RuntimeError, Jason.DecodeError] ->
+      emit(state, {:turn_error, Exception.message(e)})
+      {:error, state}
   end
 
   defp extract_tool_calls(msg) do
@@ -279,7 +287,11 @@ defmodule ExPiAgent do
       emit(state, {:tool_execution_start, tc.id, tc.name, tc.arguments})
     end)
 
-    opts = Keyword.merge(state.dispatcher_opts, cwd: state.cwd)
+    opts =
+      state.dispatcher_opts
+      |> Keyword.put(:cwd, state.cwd)
+      |> Keyword.put(:permission_policy, state.policy)
+
     results = ExPiCoding.Dispatcher.dispatch_batch(tool_calls, state.tools, opts)
 
     tool_result_messages =

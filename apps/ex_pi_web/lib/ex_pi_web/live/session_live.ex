@@ -10,107 +10,76 @@ defmodule ExPiWeb.SessionLive do
     File.mkdir_p!(sessions_dir)
     storage_path = Path.join(sessions_dir, "#{session_id}.jsonl")
 
-    if connected?(socket) do
-      Phoenix.PubSub.subscribe(ExPiWeb.PubSub, "session:#{session_id}")
-    end
-
-    # Replay messages if they exist
-    {:ok, initial_messages} = ExPiSession.Log.replay(storage_path)
-
-    {:ok, policy} = ExPiCoding.PermissionPolicy.start_link(default: :allow)
-
-    request_fn = fn tool_call ->
-      Phoenix.PubSub.broadcast(
-        ExPiWeb.PubSub,
-        "session:#{session_id}",
-        {:permission_request, self(), tool_call}
-      )
-
-      receive do
-        {:permission_response, action} -> action
-      after
-        60_000 -> {:deny, "Timeout"}
-      end
-    end
-
-    # Subscribe to log events to persist them
-    on_event = fn event ->
-      ExPiSession.Log.persist_event(storage_path, event)
-      Phoenix.PubSub.broadcast(ExPiWeb.PubSub, "session:#{session_id}", event)
-    end
-
-    # Get active config
     system_config = ConfigManager.get_config()
     config = ConfigManager.get_active_provider_config()
     system_prompt = Map.get(system_config, "system_prompt")
 
-    IO.inspect(config, label: "SessionLive: Active Provider Config")
+    case resolve_provider(config) do
+      {:error, reason} ->
+        {:ok, socket |> put_flash(:error, reason) |> push_navigate(to: ~p"/settings")}
 
-    {provider_mod, model_id, provider_id, api_key, base_url} =
-      cond do
-        Mix.env() == :test ->
-          {MockProvider, "mock-model", "mock", "mock-key", "https://api.mock.com"}
+      {:ok, {provider_mod, model_id, provider_id, api_key, base_url}} ->
+        if connected?(socket) do
+          Phoenix.PubSub.subscribe(ExPiWeb.PubSub, "session:#{session_id}")
+        end
 
-        config == nil ->
-          IO.warn("No active provider configured in Settings. Falling back to MockProvider.")
-          {MockProvider, "mock-model", "mock", "mock-key", "https://api.mock.com"}
+        {:ok, initial_messages} = ExPiSession.Log.replay(storage_path)
 
-        true ->
-          mod =
-            case config["api_type"] do
-              "anthropic" ->
-                ExPiAi.Providers.Anthropic
+        # Blocks this LiveView process until the user clicks Allow/Deny.
+        request_fn = fn tool_call ->
+          Phoenix.PubSub.broadcast(
+            ExPiWeb.PubSub,
+            "session:#{session_id}",
+            {:permission_request, self(), tool_call}
+          )
 
-              "openai" ->
-                ExPiAi.Providers.OpenAI
+          receive do
+            {:permission_response, action} -> action
+          after
+            60_000 -> {:deny, "Timeout"}
+          end
+        end
 
-              "req_llm" ->
-                ExPiAi.Providers.ReqLLM
+        on_event = fn event ->
+          ExPiSession.Log.persist_event(storage_path, event)
+          Phoenix.PubSub.broadcast(ExPiWeb.PubSub, "session:#{session_id}", event)
+        end
 
-              type ->
-                IO.warn("Unknown api_type: #{inspect(type)}, falling back to MockProvider")
-                MockProvider
-            end
+        {:ok, {agent, _policy}} =
+          ExPiWeb.SessionManager.get_agent(session_id,
+            model: %{id: model_id, api: provider_id, provider: provider_id},
+            provider: provider_mod,
+            options: [api_key: api_key, base_url: base_url],
+            system_prompt: system_prompt,
+            on_event: on_event,
+            tools: [ExPiCoding.Tools.Read, ExPiCoding.Tools.Bash, ExPiCoding.Tools.Edit],
+            dispatcher_opts: [permission_request_fn: request_fn],
+            messages: initial_messages,
+            cwd: workdir
+          )
 
-          {mod, config["model"], config["api_type"], config["resolved_key"], config["base_url"]}
-      end
+        if connected?(socket) do
+          Process.monitor(agent)
+        end
 
-    # Get or start agent for this session
-    _topic = "session:#{session_id}"
+        {:ok, sessions} = ExPiSession.Log.list_sessions(sessions_dir)
 
-    {:ok, agent} =
-      ExPiWeb.SessionManager.get_agent(session_id,
-        model: %{id: model_id, api: provider_id, provider: provider_id},
-        provider: provider_mod,
-        options: [
-          api_key: api_key,
-          base_url: base_url
-        ],
-        system_prompt: system_prompt,
-        on_event: on_event,
-        tools: [ExPiCoding.Tools.Read, ExPiCoding.Tools.Bash, ExPiCoding.Tools.Edit],
-        dispatcher_opts: [permission_policy: policy, permission_request_fn: request_fn],
-        messages: initial_messages,
-        cwd: workdir
-      )
+        socket =
+          socket
+          |> assign(:active_tab, :workdir)
+          |> assign(:session_id, session_id)
+          |> assign(:workdir, workdir)
+          |> assign(:encoded_workdir, encoded_workdir)
+          |> assign(:sessions_dir, sessions_dir)
+          |> assign(:agent, agent)
+          |> assign(:input, "")
+          |> assign(:turn_in_flight, false)
+          |> assign(:permission_request, nil)
+          |> assign(:sessions, sessions)
+          |> stream(:messages, initial_messages)
 
-    {:ok, sessions} = ExPiSession.Log.list_sessions(sessions_dir)
-
-    socket =
-      socket
-      |> assign(:active_tab, :workdir)
-      |> assign(:session_id, session_id)
-      |> assign(:workdir, workdir)
-      |> assign(:encoded_workdir, encoded_workdir)
-      |> assign(:sessions_dir, sessions_dir)
-      |> assign(:agent, agent)
-      |> assign(:input, "")
-      |> assign(:turn_in_flight, false)
-      |> assign(:permission_request, nil)
-      |> assign(:sessions, sessions)
-      |> stream(:messages, initial_messages)
-
-    {:ok, socket}
+        {:ok, socket}
+    end
   end
 
   @impl true
@@ -387,47 +356,55 @@ defmodule ExPiWeb.SessionLive do
   end
 
   @impl true
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, socket) do
+    socket =
+      socket
+      |> put_flash(
+        :error,
+        "The agent process crashed. Your session history is preserved — refresh to reconnect."
+      )
+      |> assign(:turn_in_flight, false)
+
+    {:noreply, socket}
+  end
+
+  @impl true
   def handle_info(_event, socket) do
     {:noreply, socket}
+  end
+
+  defp resolve_provider(nil) do
+    case Application.get_env(:ex_pi_web, :test_provider_config) do
+      nil -> {:error, "No provider configured. Go to Settings to add one."}
+      config -> resolve_provider(config)
+    end
+  end
+
+  defp resolve_provider(config) do
+    provider_mod =
+      case config["api_type"] do
+        "anthropic" -> ExPiAi.Providers.Anthropic
+        "openai" -> ExPiAi.Providers.OpenAI
+        _ -> Application.get_env(:ex_pi_web, :mock_provider_module)
+      end
+
+    cond do
+      is_nil(provider_mod) ->
+        {:error, "Unknown provider type: #{config["api_type"]}"}
+
+      config["model"] in [nil, ""] ->
+        {:error,
+         "No model configured for provider #{config["name"]}. Go to Settings to configure one."}
+
+      true ->
+        {:ok,
+         {provider_mod, config["model"], config["id"], config["resolved_key"] || "",
+          config["base_url"] || ""}}
+    end
   end
 
   defp get_sessions_dir(workdir) do
     encoded_cwd = Base.url_encode64(workdir, padding: false)
     Path.join(ExPiWeb.get_sessions_root(), encoded_cwd)
-  end
-end
-
-# Temporary MockProvider for testing
-defmodule MockProvider do
-  @behaviour ExPiAi.Provider
-
-  @impl true
-  def stream(_params) do
-    initial_msg = %{
-      role: :assistant,
-      content: [],
-      model: "mock-model",
-      provider: "mock-provider",
-      api: "mock-api",
-      usage: %{
-        input: 0,
-        output: 0,
-        cache_read: 0,
-        cache_write: 0,
-        total_tokens: 0,
-        cost: %{total: 0.0, input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0}
-      },
-      stop_reason: nil,
-      timestamp: System.system_time(:millisecond)
-    }
-
-    delta_msg = %{initial_msg | content: [%{type: :text, text: "I am a mock response."}]}
-    done_msg = %{delta_msg | stop_reason: :stop}
-
-    [
-      {:start, initial_msg},
-      {:text_delta, 0, "I am a mock response.", delta_msg},
-      {:done, :stop, done_msg}
-    ]
   end
 end
