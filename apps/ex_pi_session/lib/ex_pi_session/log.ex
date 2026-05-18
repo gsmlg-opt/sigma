@@ -11,11 +11,22 @@ defmodule ExPiSession.Log do
   """
   def list_sessions(dir) do
     if File.dir?(dir) do
-      dir
-      |> File.ls!()
-      |> Enum.filter(&String.ends_with?(&1, ".jsonl"))
-      |> Enum.map(&Path.rootname/1)
-      |> then(&{:ok, &1})
+      files =
+        dir
+        |> File.ls!()
+        |> Enum.filter(&String.ends_with?(&1, ".jsonl"))
+        |> Enum.sort_by(
+          fn file ->
+            case File.stat(Path.join(dir, file)) do
+              {:ok, stat} -> stat.mtime
+              _ -> {{0, 0, 0}, {0, 0, 0}}
+            end
+          end,
+          :desc
+        )
+        |> Enum.map(&Path.rootname/1)
+
+      {:ok, files}
     else
       {:ok, []}
     end
