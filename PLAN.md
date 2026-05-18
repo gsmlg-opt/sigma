@@ -101,6 +101,11 @@
 - **E.1: Should glob, grep, and ls be implemented as separate tools or unified into a single search tool?**
   Separate tools, matching pi's own `find`, `grep`, and `ls` modules exactly. Each tool has a distinct affordance the LLM chooses between: `glob` returns matching file paths (no content); `grep` returns matching lines with `file:line:` prefixes (content, no directory tree); `ls` returns a flat directory listing with `[dir]`/`[file]` tags. A unified "search" tool would force the LLM to specify which operation it wants via a mode parameter, adding friction and diluting the schema descriptions. All three are read-only so they default to `:allow` under the existing permission system — no policy changes needed. `grep`'s `collect_files` uses both `glob_filter` and `"**/" <> glob_filter` patterns to correctly match files at the root level as well as subdirectories, working around Erlang's `:filelib.wildcard` treatment of `**` (which may not match zero directory components in all Elixir versions).
 
+### Phase H — URL fetch tool
+
+- **H.1: Should url_fetch have its own permission category in Settings, or inherit the unlisted-tool default?**
+  Inherit the default (`:allow`). Fetching a URL is read-only and reversible — the same risk profile as `read`. A "Network" permission category in Settings would need new UI tabs, new settings.json fields, and new `permission_rules` parsing keys. The simpler path is correct here, and it also surfaces a regression: the YOLO commit (`cf6b20f`) set `default: :allow` on the `PermissionPolicy` GenServer, but when policy creation moved from `SessionLive` into `ExPiAgent.init` the `default:` key was omitted, silently reverting unlisted tools (glob, grep, ls) to `:ask`. The fix is one word: pass `default: :allow` in `PermissionPolicy.start_link`. `url_fetch` uses `Req.get/2` (already a dependency) with a 30-second timeout and a 50K-character output cap. HTML is stripped in-process with a regex pass (style/script blocks first, then all tags) and entity-decoded; no new dependencies are needed. Truncation is signalled both in the returned text (`(truncated)` suffix) and in `details.truncated`.
+
 ### Phase G — Prompt caching
 
 - **G.1: Where should cache_control breakpoints be placed — system+tools only, or also on message history?**
@@ -130,6 +135,7 @@
 - [x] Phase E — Navigation tools (E.1)
 - [x] Phase F — Extended thinking mode (F.1)
 - [x] Phase G — Prompt caching (G.1)
+- [x] Phase H — URL fetch tool (H.1)
 
 ## Phase A Summary
 

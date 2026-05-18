@@ -62,7 +62,8 @@ defmodule ExPiWeb.SessionLive do
               ExPiCoding.Tools.Edit,
               ExPiCoding.Tools.Glob,
               ExPiCoding.Tools.Grep,
-              ExPiCoding.Tools.LS
+              ExPiCoding.Tools.LS,
+              ExPiCoding.Tools.UrlFetch
             ],
             dispatcher_opts: [permission_request_fn: request_fn],
             permission_rules: permission_rules,
