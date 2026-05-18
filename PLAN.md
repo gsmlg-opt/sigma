@@ -85,6 +85,17 @@
 - **B.4: Should sessions list sort by recency or filesystem order?**
   Recency (mtime descending). `File.ls!` returns filesystem order, which is arbitrary and bears no relation to what the user worked on most recently. `File.stat/1` is called per file to get mtime and sort descending. The `{:ok, stat}` match pattern avoids crashing on files that disappear between the `ls` and `stat` calls.
 
+### Phase C — Streaming UX
+
+- **C.1: Should the message stream auto-scroll or leave the user at the current position?**
+  Auto-scroll, unless the user has scrolled up to read. A `MutationObserver` on the messages container fires whenever the `phx-update="stream"` DOM changes. It checks whether the user is within 300px of the bottom before scrolling, so reading earlier messages is not interrupted. The observer is disconnected in `destroyed()` to avoid leaks after navigation.
+
+- **C.2: Should token usage be shown or hidden from the session view?**
+  Shown. `message.usage` already carries `input`, `output`, and `cost.total` from the provider response — it just needed a template row. `format_cost/1` uses 6 decimal places below `$0.001` and 4 above so sub-cent costs remain readable. The row is only rendered when `usage` is non-nil to avoid blank lines on in-progress or replayed messages that predate the usage field.
+
+- **C.3: Should assistant messages render markdown or plain text?**
+  Markdown. `marked` parses the text and `DOMPurify` sanitizes the resulting HTML before setting `innerHTML`, guarding against prompt-injection via script tags. Non-assistant messages (user input, tool results) keep `whitespace-pre-wrap` because terminal output and plain text should not be reinterpreted as markdown. The `@tailwindcss/typography` plugin was absent, so a hand-rolled `.markdown` CSS class provides the necessary styles for `<pre>/<code>`, headings, lists, blockquotes, and tables — no additional Tailwind plugin dependency required.
+
 ## Progress
 
 - [x] Stage 1 — `ex_pi_ai`
@@ -94,6 +105,7 @@
 - [x] Stage 5 — `ex_pi_web`
 - [x] Phase A — Daily-use blockers (A.1–A.5c)
 - [x] Phase B — UI completeness and missing tools (B.1–B.4)
+- [x] Phase C — Streaming UX (C.1–C.3)
 
 ## Phase A Summary
 
