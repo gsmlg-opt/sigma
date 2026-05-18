@@ -6,7 +6,12 @@ defmodule ExPiAgent.MessageTransformerTest do
   test "standard message conversion" do
     messages = [
       AgentMessage.user("1", "hello"),
-      AgentMessage.assistant("2", %{content: "hi", api: "anthropic", provider: "anthropic", model: "claude-3"})
+      AgentMessage.assistant("2", %{
+        content: "hi",
+        api: "anthropic",
+        provider: "anthropic",
+        model: "claude-3"
+      })
     ]
 
     converted = MessageTransformer.convert_to_llm(messages)
@@ -51,7 +56,12 @@ defmodule ExPiAgent.MessageTransformerTest do
       AgentMessage.user("1", "hello"),
       AgentMessage.status("2", "working"),
       AgentMessage.notification("3", "done"),
-      AgentMessage.assistant("4", %{content: "hi", api: "anthropic", provider: "anthropic", model: "claude-3"})
+      AgentMessage.assistant("4", %{
+        content: "hi",
+        api: "anthropic",
+        provider: "anthropic",
+        model: "claude-3"
+      })
     ]
 
     converted = MessageTransformer.convert_to_llm(messages)
@@ -66,7 +76,12 @@ defmodule ExPiAgent.MessageTransformerTest do
       AgentMessage.user("1", "hello"),
       AgentMessage.thought("2", "thinking hard"),
       AgentMessage.thought("3", "still thinking"),
-      AgentMessage.assistant("4", %{content: "hi", api: "anthropic", provider: "anthropic", model: "claude-3"})
+      AgentMessage.assistant("4", %{
+        content: "hi",
+        api: "anthropic",
+        provider: "anthropic",
+        model: "claude-3"
+      })
     ]
 
     converted = MessageTransformer.convert_to_llm(messages)
@@ -74,11 +89,12 @@ defmodule ExPiAgent.MessageTransformerTest do
     assert length(converted) == 2
     assistant = Enum.at(converted, 1)
     assert assistant.role == :assistant
+
     assert assistant.content == [
-      %{type: :thinking, thinking: "thinking hard", redacted: false},
-      %{type: :thinking, thinking: "still thinking", redacted: false},
-      %{type: :text, text: "hi"}
-    ]
+             %{type: :thinking, thinking: "thinking hard", redacted: false},
+             %{type: :thinking, thinking: "still thinking", redacted: false},
+             %{type: :text, text: "hi"}
+           ]
   end
 
   test "orphaned thought messages are dropped" do
@@ -117,12 +133,14 @@ defmodule ExPiAgent.MessageTransformerTest do
       messages = [AgentMessage.user("1", "hello")]
 
       add_msg = fn msgs -> msgs ++ [AgentMessage.user("2", "world")] end
+
       upcase_last = fn msgs ->
         last = List.last(msgs)
         List.replace_at(msgs, -1, %{last | content: String.upcase(last.content)})
       end
 
-      transformed = MessageTransformer.transform_context(messages, transforms: [add_msg, upcase_last])
+      transformed =
+        MessageTransformer.transform_context(messages, transforms: [add_msg, upcase_last])
 
       assert length(transformed) == 2
       assert Enum.at(transformed, 1).content == "WORLD"
@@ -170,6 +188,34 @@ defmodule ExPiAgent.MessageTransformerTest do
       assert length(truncated) == 2
       assert Enum.at(truncated, 0).id == "2"
       assert Enum.at(truncated, 1).id == "3"
+    end
+  end
+
+  describe "compaction_summary handling" do
+    test "compaction_summary is converted to assistant role for valid alternation" do
+      summary = %ExPiAgent.Message{
+        id: "compaction_1",
+        role: :compaction_summary,
+        content: "Earlier we read lib/foo.ex and edited it.",
+        timestamp: 0
+      }
+
+      user_msg = AgentMessage.user("u1", "what next?")
+
+      converted = MessageTransformer.convert_to_llm([summary, user_msg])
+
+      assert length(converted) == 2
+      assert Enum.at(converted, 0).role == :assistant
+
+      assert Enum.at(converted, 0).content == [
+               %{
+                 type: :text,
+                 text:
+                   "[Summary of earlier conversation]\n\nEarlier we read lib/foo.ex and edited it."
+               }
+             ]
+
+      assert Enum.at(converted, 1).role == :user
     end
   end
 end

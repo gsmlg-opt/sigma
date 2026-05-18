@@ -205,6 +205,24 @@ defmodule ExPiSession.Log do
 
         {:ok, entry}
 
+      {:compact, summary_msg, first_kept_id} ->
+        parent_id =
+          case storage_mod.read(storage_id) do
+            {:ok, entries} -> find_leaf_id(entries)
+            _ -> nil
+          end
+
+        entry = %{
+          "type" => "compaction",
+          "id" => generate_short_id(),
+          "parentId" => parent_id,
+          "timestamp" => DateTime.utc_now() |> DateTime.to_iso8601(),
+          "summary" => summary_msg.content,
+          "firstKeptId" => first_kept_id
+        }
+
+        {:ok, entry}
+
       {:agent_start, cwd} ->
         case storage_mod.read(storage_id) do
           {:ok, entries} ->

@@ -166,6 +166,7 @@ defmodule ExPiAgent do
     emit(state, {:message_end, user_msg})
 
     state = run_turn_loop(state)
+    state = maybe_compact(state)
 
     # Return the messages list; the agent emits {:agent_end} in handle_info
     # after updating its own state to avoid a race between the event and the
@@ -342,6 +343,152 @@ defmodule ExPiAgent do
       timestamp: ai_msg.timestamp,
       response_id: Map.get(ai_msg, :response_id)
     })
+  end
+
+  @compact_threshold 80_000
+
+  defp maybe_compact(state) do
+    input_tokens =
+      state.messages
+      |> Enum.reverse()
+      |> Enum.find_value(0, fn msg ->
+        if msg.role == :assistant and msg.usage != nil do
+          get_in(msg.usage, [:input]) || 0
+        end
+      end)
+
+    if input_tokens >= @compact_threshold do
+      run_compact(state)
+    else
+      state
+    end
+  end
+
+  defp run_compact(state) do
+    {to_summarize, to_keep} = find_compact_boundary(state.messages, 20)
+
+    case to_summarize do
+      [] ->
+        state
+
+      _ ->
+        case generate_summary(state, to_summarize) do
+          {:ok, summary_text} ->
+            first_kept_id =
+              case List.first(to_keep) do
+                nil -> nil
+                msg -> msg.id
+              end
+
+            summary_msg = %Message{
+              id: "compaction_#{System.unique_integer([:positive])}",
+              role: :compaction_summary,
+              content: summary_text,
+              timestamp: System.system_time(:millisecond)
+            }
+
+            new_state = %{state | messages: [summary_msg | to_keep]}
+            emit(new_state, {:compact, summary_msg, first_kept_id})
+            new_state
+
+          {:error, _} ->
+            state
+        end
+    end
+  end
+
+  # Split messages so to_keep starts at the first user message at or after
+  # the (total - keep_count) boundary. This ensures the compaction summary
+  # (which becomes an assistant message in convert_to_llm) is followed by a
+  # user message, producing a valid alternating sequence for all providers.
+  defp find_compact_boundary(messages, keep_count) do
+    split_at = max(0, length(messages) - keep_count)
+    {prefix, suffix} = Enum.split(messages, split_at)
+    {leading, rest} = Enum.split_while(suffix, fn msg -> msg.role != :user end)
+    {prefix ++ leading, rest}
+  end
+
+  defp generate_summary(state, messages) do
+    transcript =
+      messages
+      |> Enum.reject(fn m -> m.role in [:status, :notification] end)
+      |> Enum.map_join("\n\n---\n\n", fn msg ->
+        label =
+          case msg.role do
+            :user -> "User"
+            :assistant -> "Assistant"
+            :tool_result -> "Tool (#{msg.tool_name})"
+            :compaction_summary -> "Previous summary"
+            r -> to_string(r)
+          end
+
+        text =
+          case msg.content do
+            s when is_binary(s) ->
+              s
+
+            blocks when is_list(blocks) ->
+              Enum.map_join(blocks, "\n", fn
+                %{type: :text, text: t} -> t
+                %{type: :thinking, thinking: t} -> "[thinking: #{t}]"
+                %{"type" => "text", "text" => t} -> t
+                b -> inspect(b)
+              end)
+
+            nil ->
+              ""
+          end
+
+        "#{label}: #{text}"
+      end)
+
+    prompt = """
+    Create a detailed summary of the following coding session transcript. Preserve all important information: files read and their key content, files edited and what changed, commands run and their output, decisions made and why, and the current state of any work in progress.
+
+    <transcript>
+    #{transcript}
+    </transcript>
+
+    Reply with the summary only.
+    """
+
+    params = %{
+      model: state.model,
+      context: %{
+        messages: [%{role: :user, content: [%{type: :text, text: prompt}]}],
+        system_prompt: nil,
+        tools: []
+      },
+      options: state.provider_options
+    }
+
+    try do
+      text =
+        state.provider.stream(params)
+        |> Enum.reduce("", fn
+          {:done, _stop, ai_msg}, _ ->
+            case ai_msg.content do
+              blocks when is_list(blocks) ->
+                Enum.map_join(blocks, "", fn
+                  %{type: :text, text: t} -> t
+                  _ -> ""
+                end)
+
+              s when is_binary(s) ->
+                s
+
+              _ ->
+                ""
+            end
+
+          _, acc ->
+            acc
+        end)
+
+      {:ok, text}
+    rescue
+      _ -> {:error, "summary generation failed"}
+    end
   end
 
   defp emit(state, event) do

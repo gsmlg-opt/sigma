@@ -83,6 +83,9 @@ defmodule ExPiAgent.MessageTransformer do
         :thought ->
           [msg | acc]
 
+        :compaction_summary ->
+          [convert_compaction_summary(msg) | acc]
+
         # UI-only and other roles are dropped by default
         _ ->
           acc
@@ -176,6 +179,25 @@ defmodule ExPiAgent.MessageTransformer do
       usage: msg.usage || empty_usage(),
       stop_reason: msg.stop_reason,
       error_message: msg.error_message,
+      timestamp: msg.timestamp
+    }
+  end
+
+  # Compaction summaries are sent as assistant messages so the sequence is:
+  # assistant(summary) → user(first kept prompt) → assistant → ...
+  # which is a valid alternating order for all providers.
+  defp convert_compaction_summary(msg) do
+    %{
+      role: :assistant,
+      content: [%{type: :text, text: "[Summary of earlier conversation]\n\n#{msg.content}"}],
+      api: nil,
+      provider: nil,
+      model: nil,
+      response_model: nil,
+      response_id: nil,
+      usage: empty_usage(),
+      stop_reason: "end_turn",
+      error_message: nil,
       timestamp: msg.timestamp
     }
   end

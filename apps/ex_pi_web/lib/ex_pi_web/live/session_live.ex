@@ -196,7 +196,7 @@ defmodule ExPiWeb.SessionLive do
                     </div>
                   </div>
                   <div
-                    :if={message.role == :assistant}
+                    :if={message.role in [:assistant, :compaction_summary]}
                     id={"md-#{message.id}"}
                     phx-hook="MarkdownContent"
                     data-content={render_content(message.content)}
@@ -204,7 +204,7 @@ defmodule ExPiWeb.SessionLive do
                   >
                   </div>
                   <div
-                    :if={message.role != :assistant}
+                    :if={message.role not in [:assistant, :compaction_summary]}
                     class={[
                       "content whitespace-pre-wrap font-sans text-base leading-relaxed",
                       message.is_error && "text-error"
@@ -332,6 +332,7 @@ defmodule ExPiWeb.SessionLive do
   defp role_label(%{role: :tool_result, tool_name: name}) when is_binary(name),
     do: "tool: #{name}"
 
+  defp role_label(%{role: :compaction_summary}), do: "compacted summary"
   defp role_label(%{role: role}), do: role
 
   defp format_timestamp(ts) when is_integer(ts) do
@@ -424,6 +425,19 @@ defmodule ExPiWeb.SessionLive do
   @impl true
   def handle_info({:message_end, message}, socket) do
     {:noreply, stream_insert(socket, :messages, message)}
+  end
+
+  @impl true
+  def handle_info({:compact, summary_msg, _first_kept_id}, socket) do
+    socket =
+      socket
+      |> stream_insert(:messages, summary_msg)
+      |> put_flash(
+        :info,
+        "Context compacted — older messages summarized to stay within token limits."
+      )
+
+    {:noreply, socket}
   end
 
   @impl true
