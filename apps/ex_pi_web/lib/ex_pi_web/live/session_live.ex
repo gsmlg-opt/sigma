@@ -11,9 +11,12 @@ defmodule ExPiWeb.SessionLive do
     storage_path = Path.join(sessions_dir, "#{session_id}.jsonl")
 
     system_config = ConfigManager.get_config()
-    config = ConfigManager.get_active_provider_config()
+
+    config =
+      Application.get_env(:ex_pi_web, :test_provider_config) ||
+        ConfigManager.get_active_provider_config()
+
     system_prompt = Map.get(system_config, "system_prompt")
-    permission_rules = ConfigManager.get_permissions()
 
     case resolve_provider(config) do
       {:error, reason} ->
@@ -26,33 +29,16 @@ defmodule ExPiWeb.SessionLive do
 
         {:ok, initial_messages} = ExPiSession.Log.replay(storage_path)
 
-        # Blocks this LiveView process until the user clicks Allow/Deny.
-        request_fn = fn tool_call ->
-          Phoenix.PubSub.broadcast(
-            ExPiWeb.PubSub,
-            "session:#{session_id}",
-            {:permission_request, self(), tool_call}
-          )
-
-          receive do
-            {:permission_response, action} -> action
-          after
-            60_000 -> {:deny, "Timeout"}
-          end
-        end
-
         on_event = fn event ->
           ExPiSession.Log.persist_event(storage_path, event)
           Phoenix.PubSub.broadcast(ExPiWeb.PubSub, "session:#{session_id}", event)
         end
 
-        thinking_budget = ConfigManager.get_thinking_budget()
-
         {:ok, {agent, _policy}} =
           ExPiWeb.SessionManager.get_agent(session_id,
             model: %{id: model_id, api: provider_id, provider: provider_id},
             provider: provider_mod,
-            options: [api_key: api_key, base_url: base_url, thinking_budget: thinking_budget],
+            options: [api_key: api_key, base_url: base_url],
             system_prompt: system_prompt,
             on_event: on_event,
             tools: [
@@ -65,8 +51,7 @@ defmodule ExPiWeb.SessionLive do
               ExPiCoding.Tools.LS,
               ExPiCoding.Tools.UrlFetch
             ],
-            dispatcher_opts: [permission_request_fn: request_fn],
-            permission_rules: permission_rules,
+            dispatcher_opts: [],
             messages: initial_messages,
             cwd: workdir
           )
@@ -87,7 +72,6 @@ defmodule ExPiWeb.SessionLive do
           |> assign(:agent, agent)
           |> assign(:input, "")
           |> assign(:turn_in_flight, false)
-          |> assign(:permission_request, nil)
           |> assign(:sessions, sessions)
           |> stream(:messages, initial_messages)
 
@@ -279,42 +263,6 @@ defmodule ExPiWeb.SessionLive do
         </div>
       </div>
 
-      <!-- Modal -->
-      <.dm_modal :if={@permission_request} id="permission-modal" phx-hook="ModalHook">
-        <:title>
-          <div class="flex items-center gap-2 text-warning">
-            <.dm_mdi name="shield-alert" class="w-6 h-6" />
-            <span>Security Interceptor</span>
-          </div>
-        </:title>
-        <:body>
-          <p class="mb-4 text-on-surface">
-            The agent is requesting permission to execute a <span class="font-bold">{@permission_request.tool_call.name}</span> command.
-          </p>
-          <div class="bg-surface-container-high p-4 rounded-xl border border-outline-variant text-on-surface">
-            <p class="text-xs uppercase tracking-widest font-bold opacity-50 mb-2">Arguments</p>
-            <pre class="overflow-x-auto text-sm font-mono leading-relaxed">{Jason.encode!(@permission_request.tool_call.arguments, pretty: true)}</pre>
-          </div>
-        </:body>
-        <:footer>
-          <.dm_btn
-            id="deny-permission-btn"
-            phx-click="permission_deny"
-            phx-hook="WebComponentHook"
-            variant="ghost"
-          >
-            Deny
-          </.dm_btn>
-          <.dm_btn
-            id="allow-permission-btn"
-            phx-click="permission_allow"
-            phx-hook="WebComponentHook"
-            variant="primary"
-          >
-            Authorize Execution
-          </.dm_btn>
-        </:footer>
-      </.dm_modal>
     </div>
     """
   end
@@ -378,22 +326,6 @@ defmodule ExPiWeb.SessionLive do
   end
 
   @impl true
-  def handle_event("permission_allow", _, socket) do
-    send(socket.assigns.permission_request.from, {:permission_response, :allow})
-    {:noreply, assign(socket, :permission_request, nil)}
-  end
-
-  @impl true
-  def handle_event("permission_deny", _, socket) do
-    send(
-      socket.assigns.permission_request.from,
-      {:permission_response, {:deny, "User denied permission"}}
-    )
-
-    {:noreply, assign(socket, :permission_request, nil)}
-  end
-
-  @impl true
   def handle_info({:agent_start, _cwd}, socket) do
     {:noreply, assign(socket, :turn_in_flight, true)}
   end
@@ -444,11 +376,6 @@ defmodule ExPiWeb.SessionLive do
       )
 
     {:noreply, socket}
-  end
-
-  @impl true
-  def handle_info({:permission_request, from_pid, tool_call}, socket) do
-    {:noreply, assign(socket, :permission_request, %{from: from_pid, tool_call: tool_call})}
   end
 
   @impl true

@@ -208,35 +208,6 @@ defmodule ExPiSession.ConfigManager do
     |> save_config()
   end
 
-  def get_thinking_budget do
-    settings = load_json(@settings_file, %{})
-    Map.get(settings, "thinkingBudget", 0)
-  end
-
-  def set_thinking_budget(budget) when is_integer(budget) and budget >= 0 do
-    settings = load_json(@settings_file, %{})
-    save_json(@settings_file, Map.put(settings, "thinkingBudget", budget))
-  end
-
-  @default_permissions %{"read" => "allow", "edit" => "ask", "bash" => "ask"}
-
-  def get_permissions do
-    settings = load_json(@settings_file, %{})
-    raw = Map.get(settings, "permissions", @default_permissions)
-
-    valid = %{"allow" => :allow, "ask" => :ask, "deny" => :deny}
-
-    Enum.into(raw, %{}, fn {k, v} ->
-      {k, Map.get(valid, v, :ask)}
-    end)
-  end
-
-  def save_permissions(permissions) do
-    settings = load_json(@settings_file, %{})
-    string_perms = Enum.into(permissions, %{}, fn {k, v} -> {k, Atom.to_string(v)} end)
-    save_json(@settings_file, Map.put(settings, "permissions", string_perms))
-  end
-
   def get_active_provider_config do
     config = get_config()
     provider_id = config["active_provider_id"]

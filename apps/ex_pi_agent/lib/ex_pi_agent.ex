@@ -61,10 +61,7 @@ defmodule ExPiAgent do
   def init(opts) do
     {:ok, task_sup} = Task.Supervisor.start_link()
 
-    permission_rules = Keyword.get(opts, :permission_rules, default_permissions())
-
-    {:ok, policy} =
-      ExPiCoding.PermissionPolicy.start_link(default: :allow, rules: permission_rules)
+    {:ok, policy} = ExPiCoding.PermissionPolicy.start_link(default: :allow, rules: %{})
 
     state = %__MODULE__{
       task_supervisor: task_sup,
@@ -496,9 +493,5 @@ defmodule ExPiAgent do
   defp emit(state, event) do
     Enum.each(state.subscribers, fn sub -> send(sub, event) end)
     if state.on_event, do: state.on_event.(event)
-  end
-
-  defp default_permissions do
-    %{"read" => :allow, "edit" => :ask, "bash" => :ask}
   end
 end
