@@ -116,6 +116,28 @@
 - **F.1: Should thinking_budget be per-session or global, and how is it persisted?**
   Global (settings.json). A per-session knob would require a UI element in the session view (cluttering the chat) or a JSONL session header field (adding replay complexity). Since extended thinking is a model-capability preference rather than a per-task one, storing it globally in `settings.json` as `"thinkingBudget"` matches the precedent set by `"permissions"`. `ConfigManager.get_thinking_budget/0` reads it and returns 0 as the off default; `set_thinking_budget/1` patches only that key. `SessionLive` reads it at mount time and passes it as `options: [thinking_budget: budget]`. The Anthropic provider checks `options[:thinking_budget]` before building the request body — zero means no thinking params are added at all, so non-Anthropic providers are unaffected. `transform_content/1` accumulates `signature_delta` events into a `thinking_signature` field on each thinking block during streaming; `content_block_stop` finalizes the block preserving the signature so that if thinking blocks appear in the conversation context on the next turn, they are sent back with their signature intact (required by the Anthropic API). When signature is missing or empty, the block degrades to a plain text block to avoid API rejection.
 
+### Phase K — Project settings page (rename + relocate)
+
+- **K.1: When a user updates a project's directory path, what happens to the sessions stored on disk under the old encoded path?**
+  Rename the sessions directory atomically. Session storage lives at `<sessions_root>/<base64(path)>/`, so changing `path` from A to B without action would orphan every existing session at the old base64 key. The chosen behavior is `File.rename(old_dir, new_dir)` performed BEFORE the `repos.jsonl` entry is updated — if the rename fails (target already exists, permission error), the JSONL update never happens and the project is left in its pre-change state. The session JSONL files themselves are NOT rewritten; their internal `cwd` headers continue to record the path that was in effect at write time, which is a useful audit trail rather than a bug. New events written after relocation will record the new cwd. A `:sessions_dir_conflict` error is returned if a directory already exists at the new encoded name, preventing accidental clobber of a different project's history.
+
+- **K.2: Should the project's gear icon open a settings panel inline on the workdir view, or push to a dedicated route?**
+  Dedicated route (`/workdir/:workdir/settings`). Inline editing inside the sessions list would require gating the form behind an "edit mode" toggle and managing two simultaneous concerns in `WorkdirLive` (browsing sessions vs editing project metadata). A separate `ProjectSettingsLive` keeps each LiveView focused on a single concern, and the `:settings` segment in the URL means deep-linking to it works (e.g., from a future "fix path" flash message after a missing-directory error). The page is intentionally extensible — currently rename + relocate + remove, but the same shell handles future additions like per-project permission overrides or session-retention policies.
+
+- **K.3: Why move the "New Session" primary action out of the `dm_left_menu_group` and into the sidebar's main flow?**
+  `dm_left_menu_group` renders as `<details>`/`<summary>` and is toggleable by the user. Putting the only primary action behind a toggle meant a single accidental click hid the button with no obvious way to recover. Free-standing placement directly under the sidebar header guarantees the action is always visible. The `dm_left_menu` component is the right shape for *navigation* (multiple destinations the user might browse between), not for a singular action; this separation is now reflected in the layout — primary action button → navigation links → spacer → metadata.
+
+### Phase J — Project context file walking (AGENTS.md / CLAUDE.md)
+
+- **J.1: When multiple AGENTS.md / CLAUDE.md files are found along the path from `/` to `cwd`, in what order should they be combined into the system prompt?**
+  Global → root → cwd, matching pi. The global `~/.pi/agent/AGENTS.md` (already managed by `ConfigManager`) is the first section. Then the walk from `/` down to `cwd` concatenates each context file in oldest-first order. Deeper directories appear later in the prompt so project-specific rules have higher attention precedence than parent-directory defaults. The Settings UI continues to edit only the global file; project files are read directly from disk and require no UI affordance to be picked up — a fresh session at a new cwd automatically gets the right context.
+
+- **J.2: When a directory contains both AGENTS.md and CLAUDE.md, which should be loaded?**
+  AGENTS.md only. The fallback to CLAUDE.md is per-directory and only fires when AGENTS.md is absent in that directory. This matches the "AGENTS.md is canonical, CLAUDE.md is a courtesy alias" intent: a project that has both files almost certainly maintains AGENTS.md as the source of truth and uses CLAUDE.md only for Claude Code editor compatibility. Loading both would double the system prompt with near-duplicate content. The implementation is a single `Enum.find_value/2` over `["AGENTS.md", "CLAUDE.md"]` per directory.
+
+- **J.3: How does the walk stay deterministic during `mix test` when the test process's actual working directory contains an AGENTS.md?**
+  `walk_files/2` accepts a `:stop_at` option that caps the walk at a given path. Production code passes no option, so the walk runs all the way to `/` (matching pi). Test code passes `stop_at: tmp_dir`, isolating each test to its per-test temp directory. The `:stop_at` opt has standalone value beyond tests — it's the seed for a future "treat $HOME as project boundary" setting — so it lives in the public API rather than being a test-only hook. The comparison uses `dir == stop_at or String.starts_with?(dir, stop_at <> "/")` so `/tmp/foo` does not match `/tmp/foobar`.
+
 ### Phase D — Context compaction
 
 - **D.1: Should compaction trigger automatically on a token threshold, or only when the user clicks a button?**
@@ -136,6 +158,8 @@
 - [x] Phase F — Extended thinking mode (F.1)
 - [x] Phase G — Prompt caching (G.1)
 - [x] Phase H — URL fetch tool (H.1)
+- [x] Phase J — Context file walking (J.1–J.3)
+- [x] Phase K — Project settings page: rename, relocate, remove (K.1–K.3)
 
 ## Phase A Summary
 

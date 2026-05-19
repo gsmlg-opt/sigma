@@ -1,9 +1,9 @@
-defmodule ExPiWeb.WorkdirLive do
+defmodule ExPiWeb.RepositoryLive do
   use ExPiWeb, :live_view
 
   @impl true
-  def mount(%{"workdir" => encoded_workdir}, _session, socket) do
-    workdir = Base.url_decode64!(encoded_workdir, padding: false)
+  def mount(%{"repository" => encoded_repository}, _session, socket) do
+    workdir = Base.url_decode64!(encoded_repository, padding: false)
     sessions_dir = get_sessions_dir(workdir)
     File.mkdir_p!(sessions_dir)
 
@@ -11,9 +11,9 @@ defmodule ExPiWeb.WorkdirLive do
 
     socket =
       socket
-      |> assign(:active_tab, :workdir)
+      |> assign(:active_tab, :repository)
       |> assign(:workdir, workdir)
-      |> assign(:encoded_workdir, encoded_workdir)
+      |> assign(:encoded_repository, encoded_repository)
       |> assign(:sessions_dir, sessions_dir)
       |> assign(:sessions, sessions)
 
@@ -26,31 +26,41 @@ defmodule ExPiWeb.WorkdirLive do
     <div class="flex min-h-[calc(100vh-64px)]">
       <!-- Sidebar -->
       <aside class="w-80 bg-secondary text-secondary-content border-r border-outline-variant p-6 shrink-0 flex flex-col">
-        <div class="flex items-center gap-2 mb-8 text-on-secondary">
-          <.dm_mdi name="folder-sync" class="w-5 h-5" />
-          <h2 class="font-semibold truncate" title={@workdir}>{Path.basename(@workdir)}</h2>
+        <div class="flex items-center justify-between gap-2 mb-6 text-on-secondary">
+          <div class="flex items-center gap-2 min-w-0">
+            <.dm_mdi name="folder-sync" class="w-5 h-5 shrink-0" />
+            <h2 class="font-semibold truncate" title={@workdir}>{Path.basename(@workdir)}</h2>
+          </div>
+          <.dm_link
+            navigate={~p"/repository/#{@encoded_repository}/settings"}
+            class="dm-btn dm-btn--ghost dm-btn--sm shape-circle p-2 shrink-0"
+            id="project-settings-btn"
+            title="Repository settings"
+          >
+            <.dm_mdi name="cog-outline" class="w-4 h-4" />
+          </.dm_link>
         </div>
 
-        <.dm_left_menu id="sidebar-menu">
-          <:title>Navigation</:title>
-          <:menu>
-            <.dm_left_menu_group id="actions">
-              <:title>Actions</:title>
-              <div class="p-2">
-                <.dm_btn
-                  id="new-session-btn"
-                  phx-click="new_session"
-                  phx-hook="WebComponentHook"
-                  variant="primary"
-                  class="w-full mb-4"
-                >
-                  <:prefix><.dm_mdi name="plus" class="w-4 h-4" /></:prefix>
-                  New Session
-                </.dm_btn>
-              </div>
-            </.dm_left_menu_group>
-          </:menu>
-        </.dm_left_menu>
+        <.dm_btn
+          id="new-session-btn"
+          phx-click="new_session"
+          phx-hook="WebComponentHook"
+          variant="primary"
+          class="w-full mb-6"
+        >
+          <:prefix><.dm_mdi name="plus" class="w-4 h-4" /></:prefix>
+          New Session
+        </.dm_btn>
+
+        <.dm_link
+          navigate={~p"/"}
+          class="dm-btn dm-btn--ghost w-full justify-start"
+        >
+          <div class="flex items-center gap-2">
+            <.dm_mdi name="folder-multiple-outline" class="w-4 h-4" />
+            <span>All Repositories</span>
+          </div>
+        </.dm_link>
 
         <div class="mt-auto pt-6 border-t border-secondary-content/20 text-on-secondary">
           <p class="text-xs opacity-60 mb-2 uppercase tracking-wider font-bold">Full Path</p>
@@ -64,7 +74,7 @@ defmodule ExPiWeb.WorkdirLive do
           <div class="flex justify-between items-end mb-8 border-b border-outline-variant pb-6">
             <div>
               <h1 class="font-display text-4xl font-bold">Sessions</h1>
-              <p class="text-on-surface-variant mt-2 text-lg">Manage your active coding sessions for this workspace.</p>
+              <p class="text-on-surface-variant mt-2 text-lg">Manage your active coding sessions for this repository.</p>
             </div>
           </div>
 
@@ -112,7 +122,7 @@ defmodule ExPiWeb.WorkdirLive do
 
               <:action>
                 <.dm_link
-                  navigate={~p"/workdir/#{@encoded_workdir}/sessions/#{s}"}
+                  navigate={~p"/repository/#{@encoded_repository}/sessions/#{s}"}
                   class="dm-btn dm-btn--primary w-full text-center py-2 font-bold"
                 >
                   Open Session
@@ -129,12 +139,19 @@ defmodule ExPiWeb.WorkdirLive do
   @impl true
   def handle_event("new_session", _, socket) do
     session_id = "session_#{System.unique_integer([:positive])}"
-    {:noreply, push_navigate(socket, to: ~p"/workdir/#{socket.assigns.encoded_workdir}/sessions/#{session_id}")}
+
+    {:noreply,
+     push_navigate(socket,
+       to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{session_id}"
+     )}
   end
 
   @impl true
   def handle_event("open_session", %{"id" => id}, socket) do
-    {:noreply, push_navigate(socket, to: ~p"/workdir/#{socket.assigns.encoded_workdir}/sessions/#{id}")}
+    {:noreply,
+     push_navigate(socket,
+       to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{id}"
+     )}
   end
 
   defp get_sessions_dir(workdir) do

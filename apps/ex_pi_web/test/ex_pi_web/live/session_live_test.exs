@@ -17,13 +17,13 @@ defmodule ExPiWeb.SessionLiveTest do
   end
 
   test "renders session page", %{conn: conn} do
-    {:ok, _view, html} = live(conn, "/workdir/#{@encoded_workdir}/sessions/test")
+    {:ok, _view, html} = live(conn, "/repository/#{@encoded_workdir}/sessions/test")
     assert html =~ "Ask π anything..."
   end
 
   test "submits prompt", %{conn: conn} do
     Phoenix.PubSub.subscribe(ExPiWeb.PubSub, "session:test")
-    {:ok, view, _html} = live(conn, "/workdir/#{@encoded_workdir}/sessions/test")
+    {:ok, view, _html} = live(conn, "/repository/#{@encoded_workdir}/sessions/test")
 
     render_submit(view, "send_prompt", %{"prompt" => "hello"})
 

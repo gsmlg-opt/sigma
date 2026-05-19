@@ -6,6 +6,7 @@ defmodule ExPiWeb.HomeLive do
   @impl true
   def mount(_params, _session, socket) do
     repos = RepoManager.list_repos()
+    initial_browsing_path = System.user_home!()
 
     socket =
       socket
@@ -14,11 +15,13 @@ defmodule ExPiWeb.HomeLive do
       |> assign(:show_add_modal, false)
       |> assign(:workdir, "")
       |> assign(:error, nil)
-      |> assign(:browsing_path, System.user_home!())
+      |> assign(:browsing_path, initial_browsing_path)
       |> assign(:browser_entries, [])
       |> assign(:show_browser, true)
+      |> assign(:repo_name, Path.basename(initial_browsing_path))
+      |> assign(:name_touched, false)
 
-    socket = 
+    socket =
       if socket.assigns.live_action == :add do
         socket |> update_browser()
       else
@@ -37,7 +40,7 @@ defmodule ExPiWeb.HomeLive do
           <h1 class="font-display text-5xl font-bold mb-2 tracking-tight text-primary">Repositories</h1>
           <p class="text-on-surface-variant text-lg">Select a project directory to start an agent session.</p>
         </div>
-        <.dm_link navigate={~p"/workdir/new/project"} class="dm-btn dm-btn--primary dm-btn--lg" id="add-repo-btn">
+        <.dm_link navigate={~p"/repository/new"} class="dm-btn dm-btn--primary dm-btn--lg" id="add-repo-btn">
           <div class="flex items-center gap-2">
             <.dm_mdi name="plus" class="w-5 h-5" />
             <span>Add Repository</span>
@@ -51,7 +54,7 @@ defmodule ExPiWeb.HomeLive do
         <p class="text-on-surface-variant mt-2 max-w-sm mx-auto">
           Add your first project directory to begin collaborating with π.
         </p>
-        <.dm_link navigate={~p"/workdir/new/project"} class="dm-btn dm-btn--primary dm-btn--lg mt-8" id="add-first-repo-btn">
+        <.dm_link navigate={~p"/repository/new"} class="dm-btn dm-btn--primary dm-btn--lg mt-8" id="add-first-repo-btn">
           <div class="flex items-center gap-2">
             <.dm_mdi name="plus" class="w-5 h-5" />
             <span>Add First Repository</span>
@@ -86,7 +89,7 @@ defmodule ExPiWeb.HomeLive do
 
           <:action>
             <.dm_link 
-              navigate={~p"/workdir/#{Base.url_encode64(repo["path"], padding: false)}"} 
+              navigate={~p"/repository/#{Base.url_encode64(repo["path"], padding: false)}"}
               class="dm-btn dm-btn--primary w-full py-3 text-base font-bold shadow-lg shadow-primary/20 flex items-center justify-center gap-2"
             >
               <span>Open Project</span>
@@ -106,7 +109,23 @@ defmodule ExPiWeb.HomeLive do
         </div>
 
         <.dm_card variant="bordered" shadow="md" class="p-6">
-          <div class="flex flex-col h-[500px]">
+          <div class="flex flex-col h-[600px]">
+            <form phx-change="name_change" class="mb-4">
+              <label class="block text-[10px] font-bold uppercase tracking-widest opacity-40 mb-2">
+                Repository Name
+              </label>
+              <input
+                type="text"
+                name="name"
+                value={@repo_name}
+                placeholder="e.g. my-project"
+                class="w-full px-3 py-2 rounded-lg border border-outline-variant bg-surface-container focus:border-primary focus:outline-none"
+              />
+              <p class="text-[10px] text-on-surface-variant mt-1 opacity-60">
+                Defaults to the directory name. You can rename it later.
+              </p>
+            </form>
+
             <div class="flex items-center gap-2 mb-4 p-2 bg-surface-container-high rounded-lg border border-outline-variant">
               <.dm_btn id="browser-up-btn" phx-click="browser_up" phx-hook="WebComponentHook" variant="ghost" size="xs">
                 <.dm_mdi name="arrow-up" class="w-4 h-4" />
@@ -116,7 +135,7 @@ defmodule ExPiWeb.HomeLive do
                  <.dm_mdi name="git" class="w-4 h-4" />
               </.dm_btn>
             </div>
-            
+
             <div class="flex-1 overflow-y-auto border border-outline-variant rounded-xl divide-y divide-outline-variant bg-surface-container-low">
               <div :for={entry <- @browser_entries} 
                    id={"entry-#{Base.encode16(:crypto.hash(:md5, entry.name), case: :lower)}"}
@@ -181,7 +200,7 @@ defmodule ExPiWeb.HomeLive do
 
   @impl true
   def handle_event("show_add_modal", _, socket) do
-    {:noreply, push_navigate(socket, to: ~p"/workdir/new/project")}
+    {:noreply, push_navigate(socket, to: ~p"/repository/new")}
   end
 
   @impl true
@@ -192,47 +211,81 @@ defmodule ExPiWeb.HomeLive do
   @impl true
   def handle_event("browser_up", _, socket) do
     parent = Path.dirname(socket.assigns.browsing_path)
-    {:noreply, socket |> assign(browsing_path: parent) |> update_browser()}
+
+    {:noreply,
+     socket
+     |> assign(browsing_path: parent)
+     |> sync_name_with_path()
+     |> update_browser()}
   end
 
   @impl true
   def handle_event("browser_select", %{"name" => name}, socket) do
     new_path = Path.join(socket.assigns.browsing_path, name)
+
     if File.dir?(new_path) do
-      {:noreply, socket |> assign(browsing_path: new_path) |> update_browser()}
+      {:noreply,
+       socket
+       |> assign(browsing_path: new_path)
+       |> sync_name_with_path()
+       |> update_browser()}
     else
       {:noreply, socket}
     end
   end
 
   @impl true
+  def handle_event("name_change", %{"name" => name}, socket) do
+    {:noreply, assign(socket, repo_name: name, name_touched: true)}
+  end
+
+  @impl true
   def handle_event("browser_confirm", _, socket) do
     path = socket.assigns.browsing_path
-    case RepoManager.add_repo(path) do
-      {:ok, _entry} ->
-        {:noreply, 
-         socket 
-         |> put_flash(:info, "Repository added successfully.")
-         |> push_navigate(to: ~p"/")}
-      _error ->
-        {:noreply, assign(socket, error: "Could not add repository.")}
+    name = String.trim(socket.assigns.repo_name)
+
+    if name == "" do
+      {:noreply, assign(socket, error: "Repository name cannot be empty.")}
+    else
+      case RepoManager.add_repo(path, name: name) do
+        {:ok, _entry} ->
+          {:noreply,
+           socket
+           |> put_flash(:info, "Repository added successfully.")
+           |> push_navigate(to: ~p"/")}
+
+        _error ->
+          {:noreply, assign(socket, error: "Could not add repository.")}
+      end
+    end
+  end
+
+  defp sync_name_with_path(socket) do
+    if socket.assigns.name_touched do
+      socket
+    else
+      assign(socket, repo_name: Path.basename(socket.assigns.browsing_path))
     end
   end
 
   defp update_browser(socket) do
     path = socket.assigns.browsing_path
-    entries = 
+
+    entries =
       case File.ls(path) do
         {:ok, files} ->
           files
-          |> Enum.reject(&String.starts_with?(&1, ".")) # Hide hidden files by default for cleaner UI
-          |> Enum.map(fn f -> 
+          # Hide hidden files by default for cleaner UI
+          |> Enum.reject(&String.starts_with?(&1, "."))
+          |> Enum.map(fn f ->
             %{name: f, is_dir: File.dir?(Path.join(path, f))}
           end)
           |> Enum.sort_by(fn e -> {!e.is_dir, e.name} end)
+
         _ ->
           []
       end
+
     assign(socket, browser_entries: entries)
   end
 

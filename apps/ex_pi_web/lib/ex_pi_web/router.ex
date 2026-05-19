@@ -18,8 +18,9 @@ defmodule ExPiWeb.Router do
     live("/settings/providers", SettingsLive, :providers)
     live("/settings/system_prompt", SettingsLive, :system_prompt)
     live("/settings", SettingsLive, :index)
-    live("/workdir/:workdir", WorkdirLive, :index)
-    live("/workdir/new/project", HomeLive, :add)
-    live("/workdir/:workdir/sessions/:id", SessionLive, :show)
+    live("/repository/new", HomeLive, :add)
+    live("/repository/:repository/settings", ProjectSettingsLive, :index)
+    live("/repository/:repository/sessions/:id", SessionLive, :show)
+    live("/repository/:repository", RepositoryLive, :index)
   end
 end

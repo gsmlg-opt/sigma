@@ -4,8 +4,8 @@ defmodule ExPiWeb.SessionLive do
   alias ExPiSession.ConfigManager
 
   @impl true
-  def mount(%{"id" => session_id, "workdir" => encoded_workdir}, _session, socket) do
-    workdir = Base.url_decode64!(encoded_workdir, padding: false)
+  def mount(%{"id" => session_id, "repository" => encoded_repository}, _session, socket) do
+    workdir = Base.url_decode64!(encoded_repository, padding: false)
     sessions_dir = get_sessions_dir(workdir)
     File.mkdir_p!(sessions_dir)
     storage_path = Path.join(sessions_dir, "#{session_id}.jsonl")
@@ -16,7 +16,8 @@ defmodule ExPiWeb.SessionLive do
       Application.get_env(:ex_pi_web, :test_provider_config) ||
         ConfigManager.get_active_provider_config()
 
-    system_prompt = Map.get(system_config, "system_prompt")
+    global_prompt = Map.get(system_config, "system_prompt")
+    system_prompt = ExPiSession.ContextFiles.assemble(global_prompt, workdir)
 
     case resolve_provider(config) do
       {:error, reason} ->
@@ -64,10 +65,10 @@ defmodule ExPiWeb.SessionLive do
 
         socket =
           socket
-          |> assign(:active_tab, :workdir)
+          |> assign(:active_tab, :repository)
           |> assign(:session_id, session_id)
           |> assign(:workdir, workdir)
-          |> assign(:encoded_workdir, encoded_workdir)
+          |> assign(:encoded_repository, encoded_repository)
           |> assign(:sessions_dir, sessions_dir)
           |> assign(:agent, agent)
           |> assign(:input, "")
@@ -92,7 +93,7 @@ defmodule ExPiWeb.SessionLive do
           </div>
           <h2 class="font-semibold truncate" title={@workdir}>{Path.basename(@workdir)}</h2>
           <.dm_link
-            navigate={~p"/workdir/#{@encoded_workdir}"}
+            navigate={~p"/repository/#{@encoded_repository}"}
             class="text-[10px] text-primary-content hover:underline mt-2 inline-block font-bold"
           >
             Change Directory
@@ -106,7 +107,7 @@ defmodule ExPiWeb.SessionLive do
               <:title>History</:title>
               <:menu
                 :for={s <- @sessions}
-                to={~p"/workdir/#{@encoded_workdir}/sessions/#{s}"}
+                to={~p"/repository/#{@encoded_repository}/sessions/#{s}"}
                 id={"session-link-#{s}"}
               >
                 <div class="flex items-center gap-2 truncate">
@@ -412,7 +413,7 @@ defmodule ExPiWeb.SessionLive do
 
     {:noreply,
      push_navigate(socket,
-       to: ~p"/workdir/#{socket.assigns.encoded_workdir}/sessions/#{new_id}"
+       to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{new_id}"
      )}
   end
 
