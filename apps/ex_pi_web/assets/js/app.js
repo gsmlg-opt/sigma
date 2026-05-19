@@ -45,6 +45,29 @@ const ScrollBottom = {
   }
 }
 
+// Multi-line markdown-friendly chat input.
+// Enter submits the form. Shift+Enter inserts a newline.
+// Auto-resizes vertically as the user types, up to a max height.
+const ChatInput = {
+  mounted() {
+    this.autoresize()
+    this.el.addEventListener("input", () => this.autoresize())
+    this.el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+        e.preventDefault()
+        const form = this.el.form
+        if (form) form.requestSubmit()
+      }
+    })
+  },
+  updated() { this.autoresize() },
+  autoresize() {
+    this.el.style.height = "auto"
+    const max = 200
+    this.el.style.height = Math.min(this.el.scrollHeight, max) + "px"
+  }
+}
+
 // Parse markdown from data-content and render sanitized HTML.
 const MarkdownContent = {
   mounted() { this.render() },
@@ -62,7 +85,7 @@ let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("
 
 let liveSocket = new LiveSocket("/live", Socket, {
   params: {_csrf_token: csrfToken},
-  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, MarkdownContent }
+  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, MarkdownContent, ChatInput }
 })
 
 // Show progress bar on live navigation and form submits

@@ -63,6 +63,9 @@ defmodule ExPiWeb.SessionLive do
 
         {:ok, sessions} = ExPiSession.Log.list_sessions(sessions_dir)
 
+        active_provider = system_config["providers"][provider_id] || %{}
+        available_models = active_provider["models"] || [model_id]
+
         socket =
           socket
           |> assign(:active_tab, :repository)
@@ -74,6 +77,9 @@ defmodule ExPiWeb.SessionLive do
           |> assign(:input, "")
           |> assign(:turn_in_flight, false)
           |> assign(:sessions, sessions)
+          |> assign(:active_provider_id, provider_id)
+          |> assign(:current_model, model_id)
+          |> assign(:available_models, available_models)
           |> stream(:messages, initial_messages)
 
         {:ok, socket}
@@ -221,17 +227,32 @@ defmodule ExPiWeb.SessionLive do
 
         <div class="p-6 border-t border-outline-variant bg-surface">
           <div class="max-w-4xl mx-auto">
+            <!-- Agent status banner: only visible while a turn is in flight -->
+            <div
+              :if={@turn_in_flight}
+              id="agent-status"
+              role="status"
+              aria-live="polite"
+              class="mb-3 flex items-center gap-3 px-4 py-2 rounded-xl bg-primary-container/40 border border-primary/30 text-on-surface"
+            >
+              <.dm_loading_spinner size="sm" variant="primary" />
+              <span class="text-sm font-medium">Agent is working…</span>
+              <span class="text-[10px] opacity-60 ml-auto font-mono">streaming</span>
+            </div>
+
             <form phx-submit="send_prompt">
               <div class="relative">
-                <.dm_input
-                  type="text"
+                <textarea
+                  id="prompt-input"
                   name="prompt"
-                  value={@input}
-                  placeholder="Ask π anything..."
-                  class="w-full pr-12"
+                  rows="3"
+                  phx-hook="ChatInput"
+                  placeholder="Ask π anything… (Markdown supported, Shift+Enter for newline)"
+                  class="w-full pr-12 px-4 py-3 rounded-2xl border border-outline-variant bg-surface-container focus:border-primary focus:outline-none resize-none font-mono text-sm leading-relaxed"
                   autocomplete="off"
-                />
-                <div class="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1">
+                  spellcheck="false"
+                >{@input}</textarea>
+                <div class="absolute right-2 bottom-2 flex gap-1">
                   <.dm_btn
                     :if={@turn_in_flight}
                     id="cancel-turn-btn"
@@ -257,9 +278,30 @@ defmodule ExPiWeb.SessionLive do
                 </div>
               </div>
             </form>
-            <p class="mt-3 text-[10px] text-center text-on-surface-variant opacity-60">
-              π is an AI agent. Review its work carefully. Press Enter to send.
-            </p>
+
+            <!-- Footer row: model selector + hint -->
+            <div class="mt-3 flex items-center justify-between gap-4 text-[11px] text-on-surface-variant">
+              <form phx-change="select_model" class="flex items-center gap-2">
+                <label for="model-select" class="opacity-60 font-medium">Model</label>
+                <select
+                  id="model-select"
+                  name="model"
+                  class="px-2 py-1 rounded-lg border border-outline-variant bg-surface-container text-on-surface text-xs focus:border-primary focus:outline-none font-mono"
+                >
+                  <option
+                    :for={m <- ensure_in_list(@available_models, @current_model)}
+                    value={m}
+                    selected={m == @current_model}
+                  >{m}</option>
+                </select>
+                <span :if={@active_provider_id != nil} class="opacity-40 font-mono">
+                  · {@active_provider_id}
+                </span>
+              </form>
+              <p class="opacity-60 text-right">
+                π is an AI agent. Review its work carefully. Enter sends, Shift+Enter for newline.
+              </p>
+            </div>
           </div>
         </div>
       </div>
@@ -304,6 +346,16 @@ defmodule ExPiWeb.SessionLive do
 
   defp format_cost(_), do: "?"
 
+  # Defensive: even if the current model isn't in the configured list
+  # (e.g. user is running with a value set outside the UI), include it
+  # in the dropdown so the visible selection matches reality.
+  defp ensure_in_list(list, nil), do: list || []
+  defp ensure_in_list(nil, current), do: [current]
+
+  defp ensure_in_list(list, current) do
+    if current in list, do: list, else: [current | list]
+  end
+
   @impl true
   def handle_event("fork_session", _, socket) do
     do_fork(socket, :all)
@@ -322,8 +374,29 @@ defmodule ExPiWeb.SessionLive do
 
   @impl true
   def handle_event("send_prompt", %{"prompt" => prompt}, socket) do
-    ExPiAgent.prompt(socket.assigns.agent, prompt)
-    {:noreply, assign(socket, input: "")}
+    case String.trim(prompt) do
+      "" ->
+        {:noreply, socket}
+
+      trimmed ->
+        ExPiAgent.prompt(socket.assigns.agent, trimmed)
+        {:noreply, assign(socket, input: "")}
+    end
+  end
+
+  @impl true
+  def handle_event("select_model", %{"model" => model_id}, socket) do
+    provider_id = socket.assigns.active_provider_id
+
+    ExPiAgent.set_model(socket.assigns.agent, %{
+      id: model_id,
+      api: provider_id,
+      provider: provider_id
+    })
+
+    ConfigManager.update_provider(provider_id, %{"model" => model_id})
+
+    {:noreply, assign(socket, current_model: model_id)}
   end
 
   @impl true

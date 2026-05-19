@@ -51,6 +51,15 @@ defmodule ExPiAgent do
     GenServer.call(pid, :cancel)
   end
 
+  @doc """
+  Updates the model used by subsequent turns. Has no effect on the
+  currently in-flight turn (the model is captured into the provider
+  request at turn start).
+  """
+  def set_model(pid, model) when is_map(model) do
+    GenServer.cast(pid, {:set_model, model})
+  end
+
   def get_policy(pid) do
     GenServer.call(pid, :get_policy)
   end
@@ -101,6 +110,11 @@ defmodule ExPiAgent do
   @impl true
   def handle_call(:get_policy, _from, state) do
     {:reply, state.policy, state}
+  end
+
+  @impl true
+  def handle_cast({:set_model, model}, state) do
+    {:noreply, %{state | model: model}}
   end
 
   @impl true

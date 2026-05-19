@@ -37,6 +37,8 @@ defmodule ExPiSession.ConfigManager do
     # Providers from models.json
     providers =
       Enum.into(models_data["providers"] || %{}, %{}, fn {id, p} ->
+        model_ids = Enum.map(p["models"] || [], & &1["id"])
+
         {id,
          %{
            "id" => id,
@@ -50,7 +52,8 @@ defmodule ExPiSession.ConfigManager do
              end,
            # pi usually stores key under provider ID in auth.json
            "credential_id" => p["credential_id"] || id,
-           "model" => (p["models"] && List.first(p["models"])["id"]) || "",
+           "model" => List.first(model_ids) || "",
+           "models" => model_ids,
            "base_url" => p["baseUrl"] || ""
          }}
       end)

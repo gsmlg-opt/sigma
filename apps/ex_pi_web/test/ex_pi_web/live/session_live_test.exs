@@ -18,7 +18,8 @@ defmodule ExPiWeb.SessionLiveTest do
 
   test "renders session page", %{conn: conn} do
     {:ok, _view, html} = live(conn, "/repository/#{@encoded_workdir}/sessions/test")
-    assert html =~ "Ask π anything..."
+    assert html =~ "Ask π anything"
+    assert html =~ "Shift+Enter for newline"
   end
 
   test "submits prompt", %{conn: conn} do
