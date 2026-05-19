@@ -1,11 +1,19 @@
-<.dm_appbar title="ExPi" title_to={~p"/"} sticky class="appbar-elevated border-b border-outline-variant/10">
+<.dm_appbar title="ExPi" title_to={~p"/"} sticky class="appbar-elevated border-b border-primary-container/20 bg-primary text-primary-content">
   <:logo>
-    <div class="font-display text-3xl font-black tracking-tighter text-primary">π</div>
+    <div class="font-display text-3xl font-black tracking-tighter text-primary-content">π</div>
   </:logo>
-  <:menu to={~p"/"} active={@active_tab == :home}>Home</:menu>
-  <:menu to={~p"/settings"} active={@active_tab == :settings}>Settings</:menu>
   <:user_profile>
-    <div class="flex items-center gap-4 ml-6 pl-6 border-l border-outline-variant/20">
+    <div class="flex items-center gap-4 ml-6 pl-6 border-l border-primary-container/30">
+      <.dm_tooltip content="Home" position="bottom">
+        <.dm_link navigate={~p"/"} class={["flex items-center justify-center p-2 rounded-full hover:bg-black/10 transition-colors", @active_tab == :home && "text-primary-content bg-black/20", @active_tab != :home && "text-primary-content/70 hover:text-primary-content"]}>
+          <.dm_mdi name={if @active_tab == :home, do: "home", else: "home-outline"} class="w-6 h-6" />
+        </.dm_link>
+      </.dm_tooltip>
+      <.dm_tooltip content="Settings" position="bottom">
+        <.dm_link navigate={~p"/settings"} class={["flex items-center justify-center p-2 rounded-full hover:bg-black/10 transition-colors", @active_tab == :settings && "text-primary-content bg-black/20", @active_tab != :settings && "text-primary-content/70 hover:text-primary-content"]}>
+          <.dm_mdi name={if @active_tab == :settings, do: "cog", else: "cog-outline"} class="w-6 h-6" />
+        </.dm_link>
+      </.dm_tooltip>
       <.dm_theme_switcher id="theme-toggle" />
     </div>
   </:user_profile>

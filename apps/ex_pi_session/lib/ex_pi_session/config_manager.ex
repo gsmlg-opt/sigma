@@ -27,10 +27,10 @@ defmodule ExPiSession.ConfigManager do
       Enum.into(auth, %{}, fn {id, data} ->
         case data do
           %{"type" => "api_key", "key" => key} ->
-            {id, %{"id" => id, "name" => id, "key" => key}}
+            {id, %{"id" => id, "name" => data["name"] || id, "key" => key}}
 
           _ ->
-            {id, %{"id" => id, "name" => id, "key" => ""}}
+            {id, %{"id" => id, "name" => data["name"] || id, "key" => ""}}
         end
       end)
 
@@ -41,7 +41,7 @@ defmodule ExPiSession.ConfigManager do
          %{
            "id" => id,
            # pi uses provider ID as name in many places
-           "name" => id,
+           "name" => p["name"] || id,
            "api_type" =>
              case p["api"] do
                "anthropic-messages" -> "anthropic"
@@ -49,7 +49,7 @@ defmodule ExPiSession.ConfigManager do
                _ -> p["api"] || "anthropic"
              end,
            # pi usually stores key under provider ID in auth.json
-           "credential_id" => id,
+           "credential_id" => p["credential_id"] || id,
            "model" => (p["models"] && List.first(p["models"])["id"]) || "",
            "base_url" => p["baseUrl"] || ""
          }}
@@ -67,6 +67,11 @@ defmodule ExPiSession.ConfigManager do
     # 1. Save AGENTS.md (overwrite)
     save_text(@agents_file, config["system_prompt"])
 
+    # We need to know what to drop
+    old_config = get_config()
+    deleted_cred_ids = Map.keys(old_config["credentials"]) -- Map.keys(config["credentials"])
+    deleted_provider_ids = Map.keys(old_config["providers"]) -- Map.keys(config["providers"])
+
     # 2. Save settings.json (merge)
     active_provider = config["providers"][config["active_provider_id"]]
     existing_settings = load_json(@settings_file, %{})
@@ -81,10 +86,11 @@ defmodule ExPiSession.ConfigManager do
 
     # 3. Save auth.json (merge)
     existing_auth = load_json(@auth_file, %{})
+    existing_auth = Map.drop(existing_auth, deleted_cred_ids)
 
     new_auth_entries =
       Enum.into(config["credentials"], %{}, fn {id, c} ->
-        {id, %{"type" => "api_key", "key" => c["key"]}}
+        {id, %{"type" => "api_key", "key" => c["key"], "name" => c["name"]}}
       end)
 
     auth = Map.merge(existing_auth, new_auth_entries)
@@ -92,12 +98,15 @@ defmodule ExPiSession.ConfigManager do
 
     # 4. Save models.json (merge providers)
     existing_models = load_json(@models_file, %{"providers" => %{}})
+    existing_providers = Map.drop(existing_models["providers"] || %{}, deleted_provider_ids)
 
     new_providers =
       Enum.into(config["providers"], %{}, fn {id, p} ->
         {id,
          %{
+           "name" => p["name"],
            "baseUrl" => p["base_url"],
+           "credential_id" => p["credential_id"],
            "api" =>
              case p["api_type"] do
                "anthropic" -> "anthropic-messages"
@@ -108,7 +117,7 @@ defmodule ExPiSession.ConfigManager do
          }}
       end)
 
-    providers = Map.merge(existing_models["providers"] || %{}, new_providers)
+    providers = Map.merge(existing_providers, new_providers)
     models_data = Map.put(existing_models, "providers", providers)
     save_json(@models_file, models_data)
 

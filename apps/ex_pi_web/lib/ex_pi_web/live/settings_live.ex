@@ -165,7 +165,15 @@ defmodule ExPiWeb.SettingsLive do
             </div>
 
             <div class="md:col-span-2 flex justify-between items-center pt-4 border-t border-outline-variant mt-2">
-               <.dm_btn phx-click="delete_provider" phx-value-id={id} phx-hook="WebComponentHook" variant="error" size="sm" class="opacity-40 hover:opacity-100 transition-opacity">
+               <.dm_btn type="button" variant="error" size="sm" class="opacity-40 hover:opacity-100 transition-opacity" confirm="Are you sure you want to delete this provider?" confirm_title="Delete Provider">
+                 <:confirm_action>
+                   <.dm_btn type="button" variant="ghost" onclick="this.closest('el-dm-dialog').close()">
+                     Cancel
+                   </.dm_btn>
+                   <.dm_btn type="button" phx-click="delete_provider" phx-value-id={id} phx-hook="WebComponentHook" variant="error" onclick="this.closest('el-dm-dialog').close()">
+                     Delete
+                   </.dm_btn>
+                 </:confirm_action>
                  <.dm_mdi name="delete-outline" />
                </.dm_btn>
                <.dm_btn type="submit" phx-hook="WebComponentHook" variant="primary" size="sm">
@@ -204,9 +212,17 @@ defmodule ExPiWeb.SettingsLive do
             </div>
             <div class="flex gap-2">
                <.dm_btn type="submit" phx-hook="WebComponentHook" variant="primary" size="sm">
-                 Update
+                 Save
                </.dm_btn>
-               <.dm_btn phx-click="delete_credential" phx-value-id={id} phx-hook="WebComponentHook" variant="error" size="sm" shape="circle">
+               <.dm_btn type="button" variant="error" size="sm" shape="circle" confirm="Are you sure you want to delete this credential?" confirm_title="Delete Credential">
+                 <:confirm_action>
+                   <.dm_btn type="button" variant="ghost" onclick="this.closest('el-dm-dialog').close()">
+                     Cancel
+                   </.dm_btn>
+                   <.dm_btn type="button" phx-click="delete_credential" phx-value-id={id} phx-hook="WebComponentHook" variant="error" onclick="this.closest('el-dm-dialog').close()">
+                     Delete
+                   </.dm_btn>
+                 </:confirm_action>
                  <.dm_mdi name="delete-outline" />
                </.dm_btn>
             </div>
