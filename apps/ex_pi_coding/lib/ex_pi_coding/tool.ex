@@ -1,6 +1,6 @@
-defmodule ExPiCoding.Tool do
+defmodule PiCoding.Tool do
   @moduledoc """
-  Defines the behaviour for tools in the ExPi system.
+  Defines the behaviour for tools in the Pi system.
 
   Tools are used by the agent to perform actions like executing commands,
   reading files, or searching the codebase.
@@ -10,7 +10,7 @@ defmodule ExPiCoding.Tool do
   The result of a tool execution.
   """
   @type result :: %{
-          required(:content) => [ExPiAi.Message.text_content() | ExPiAi.Message.image_content()],
+          required(:content) => [PiAi.Message.text_content() | PiAi.Message.image_content()],
           required(:details) => any(),
           optional(:terminate) => boolean()
         }

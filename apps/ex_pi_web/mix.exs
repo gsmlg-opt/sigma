@@ -1,4 +1,4 @@
-defmodule ExPiWeb.MixProject do
+defmodule PiWeb.MixProject do
   use Mix.Project
 
   def project do
@@ -19,7 +19,7 @@ defmodule ExPiWeb.MixProject do
 
   def application do
     [
-      mod: {ExPiWeb.Application, []},
+      mod: {PiWeb.Application, []},
       extra_applications: [:logger, :runtime_tools]
     ]
   end

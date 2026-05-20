@@ -1,7 +1,7 @@
-defmodule ExPiSession.ContextFilesTest do
+defmodule PiSession.ContextFilesTest do
   use ExUnit.Case, async: true
 
-  alias ExPiSession.ContextFiles
+  alias PiSession.ContextFiles
 
   @moduletag :tmp_dir
 

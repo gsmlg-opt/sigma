@@ -1,8 +1,8 @@
-defmodule ExPiSession.IntegrationTest do
+defmodule PiSession.IntegrationTest do
   use ExUnit.Case, async: false
 
-  alias ExPiSession.Log
-  alias ExPiSession.Storage.JsonlFile
+  alias PiSession.Log
+  alias PiSession.Storage.JsonlFile
 
   @test_dir "tmp/integration_tests"
 
@@ -73,7 +73,7 @@ defmodule ExPiSession.IntegrationTest do
   end
 
   defp run_turn(agent, storage_id, prompt) do
-    ExPiAgent.prompt(agent, prompt)
+    PiAgent.prompt(agent, prompt)
 
     consume_events(storage_id)
   end
@@ -107,8 +107,8 @@ defmodule ExPiSession.IntegrationTest do
       model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
       # 1. Start agent and perform a turn
-      {:ok, agent1} = ExPiAgent.start_link(model: model, provider: MockProvider)
-      ExPiAgent.subscribe(agent1)
+      {:ok, agent1} = PiAgent.start_link(model: model, provider: MockProvider)
+      PiAgent.subscribe(agent1)
       run_turn(agent1, storage_id, "Hello 1")
 
       # Stop the agent (simulate crash)
@@ -122,13 +122,13 @@ defmodule ExPiSession.IntegrationTest do
 
       # 3. Restart new agent with replayed messages
       {:ok, agent2} =
-        ExPiAgent.start_link(
+        PiAgent.start_link(
           model: model,
           provider: MockProvider,
           messages: replayed_messages
         )
 
-      ExPiAgent.subscribe(agent2)
+      PiAgent.subscribe(agent2)
 
       # 4. Verify it continues correctly
       run_turn(agent2, storage_id, "Hello 2")
@@ -147,8 +147,8 @@ defmodule ExPiSession.IntegrationTest do
       model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
       # 1. Perform 3 turns in a parent session
-      {:ok, parent_agent} = ExPiAgent.start_link(model: model, provider: MockProvider)
-      ExPiAgent.subscribe(parent_agent)
+      {:ok, parent_agent} = PiAgent.start_link(model: model, provider: MockProvider)
+      PiAgent.subscribe(parent_agent)
       run_turn(parent_agent, parent_storage_id, "P1")
       run_turn(parent_agent, parent_storage_id, "P2")
       run_turn(parent_agent, parent_storage_id, "P3")
@@ -180,13 +180,13 @@ defmodule ExPiSession.IntegrationTest do
       assert length(replayed_branch) == 4
 
       {:ok, branch_agent} =
-        ExPiAgent.start_link(
+        PiAgent.start_link(
           model: model,
           provider: MockProvider,
           messages: replayed_branch
         )
 
-      ExPiAgent.subscribe(branch_agent)
+      PiAgent.subscribe(branch_agent)
       run_turn(branch_agent, branch_storage_id, "B3")
 
       # 4. Verify no cross-contamination
@@ -211,8 +211,8 @@ defmodule ExPiSession.IntegrationTest do
       model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
       # 1. Fork a session
-      {:ok, parent_agent} = ExPiAgent.start_link(model: model, provider: MockProvider)
-      ExPiAgent.subscribe(parent_agent)
+      {:ok, parent_agent} = PiAgent.start_link(model: model, provider: MockProvider)
+      PiAgent.subscribe(parent_agent)
       run_turn(parent_agent, parent_storage_id, "P1")
 
       {:ok, parent_entries_before} = File.read(parent_storage_id)

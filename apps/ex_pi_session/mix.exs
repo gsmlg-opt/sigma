@@ -1,4 +1,4 @@
-defmodule ExPiSession.MixProject do
+defmodule PiSession.MixProject do
   use Mix.Project
 
   def project do

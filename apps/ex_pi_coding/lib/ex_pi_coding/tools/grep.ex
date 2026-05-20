@@ -1,10 +1,10 @@
-defmodule ExPiCoding.Tools.Grep do
+defmodule PiCoding.Tools.Grep do
   @moduledoc """
   Tool for searching file contents by regex pattern.
   """
-  @behaviour ExPiCoding.Tool
+  @behaviour PiCoding.Tool
 
-  alias ExPiCoding.Utils.PathUtils
+  alias PiCoding.Utils.PathUtils
 
   @default_limit 100
   @max_line_length 500

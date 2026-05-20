@@ -1,7 +1,7 @@
-defmodule ExPiCoding.Tools.GlobTest do
+defmodule PiCoding.Tools.GlobTest do
   use ExUnit.Case, async: true
 
-  alias ExPiCoding.Tools.Glob
+  alias PiCoding.Tools.Glob
 
   setup do
     dir = System.tmp_dir!() |> Path.join("glob_test_#{System.unique_integer([:positive])}")

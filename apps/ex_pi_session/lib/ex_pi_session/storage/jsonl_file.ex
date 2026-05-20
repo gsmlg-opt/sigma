@@ -1,11 +1,11 @@
-defmodule ExPiSession.Storage.JsonlFile do
+defmodule PiSession.Storage.JsonlFile do
   @moduledoc """
-  JSONL file implementation of `ExPiSession.Storage`.
+  JSONL file implementation of `PiSession.Storage`.
   """
 
-  @behaviour ExPiSession.Storage
+  @behaviour PiSession.Storage
 
-  alias ExPiSession.Storage
+  alias PiSession.Storage
 
   @impl Storage
   def append(path, entry) do

@@ -1,4 +1,4 @@
-defmodule ExPiCoding.Utils.PathUtils do
+defmodule PiCoding.Utils.PathUtils do
   @moduledoc """
   Utilities for path resolution and safety checks.
   """

@@ -1,6 +1,6 @@
-defmodule ExPiCoding.Tools.BashTest do
+defmodule PiCoding.Tools.BashTest do
   use ExUnit.Case, async: true
-  alias ExPiCoding.Tools.Bash
+  alias PiCoding.Tools.Bash
 
   @cwd File.cwd!()
 

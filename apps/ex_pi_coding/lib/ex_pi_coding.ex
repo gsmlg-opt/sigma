@@ -1,6 +1,6 @@
-defmodule ExPiCoding do
+defmodule PiCoding do
   @moduledoc """
-  Main entry point for the ExPiCoding application.
+  Main entry point for the PiCoding application.
   Starts the dispatcher supervisor.
   """
 
@@ -9,10 +9,10 @@ defmodule ExPiCoding do
   @impl true
   def start(_type, _args) do
     children = [
-      ExPiCoding.Dispatcher
+      PiCoding.Dispatcher
     ]
 
-    opts = [strategy: :one_for_one, name: ExPiCoding.Supervisor]
+    opts = [strategy: :one_for_one, name: PiCoding.Supervisor]
     Supervisor.start_link(children, opts)
   end
 end

@@ -1,7 +1,7 @@
-defmodule ExPiSession.LogTest do
+defmodule PiSession.LogTest do
   use ExUnit.Case
-  alias ExPiSession.Log
-  alias ExPiAgent.Message
+  alias PiSession.Log
+  alias PiAgent.Message
 
   @storage_path "test_session.jsonl"
 
@@ -39,7 +39,7 @@ defmodule ExPiSession.LogTest do
     Log.persist_event(@storage_path, {:message_end, msg2})
 
     # Check entries directly
-    {:ok, entries} = ExPiSession.Storage.JsonlFile.read(@storage_path)
+    {:ok, entries} = PiSession.Storage.JsonlFile.read(@storage_path)
     assert length(entries) == 3
     [header, e1, e2] = entries
 

@@ -1,7 +1,7 @@
-defmodule ExPiCoding.Tools.LSTest do
+defmodule PiCoding.Tools.LSTest do
   use ExUnit.Case, async: true
 
-  alias ExPiCoding.Tools.LS
+  alias PiCoding.Tools.LS
 
   setup do
     dir = System.tmp_dir!() |> Path.join("ls_test_#{System.unique_integer([:positive])}")

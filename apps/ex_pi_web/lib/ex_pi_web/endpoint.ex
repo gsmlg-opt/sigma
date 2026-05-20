@@ -1,4 +1,4 @@
-defmodule ExPiWeb.Endpoint do
+defmodule PiWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :ex_pi_web
 
   @session_options [
@@ -16,7 +16,7 @@ defmodule ExPiWeb.Endpoint do
     at: "/",
     from: :ex_pi_web,
     gzip: false,
-    only: ExPiWeb.static_paths()
+    only: PiWeb.static_paths()
 
   if code_reloading? do
     socket "/phoenix/live_reload/socket", Phoenix.LiveReloader.Socket
@@ -35,5 +35,5 @@ defmodule ExPiWeb.Endpoint do
   plug Plug.MethodOverride
   plug Plug.Head
   plug Plug.Session, @session_options
-  plug ExPiWeb.Router
+  plug PiWeb.Router
 end

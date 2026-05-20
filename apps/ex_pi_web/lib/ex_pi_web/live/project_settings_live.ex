@@ -1,7 +1,7 @@
-defmodule ExPiWeb.ProjectSettingsLive do
-  use ExPiWeb, :live_view
+defmodule PiWeb.ProjectSettingsLive do
+  use PiWeb, :live_view
 
-  alias ExPiSession.RepoManager
+  alias PiSession.RepoManager
 
   @impl true
   def mount(%{"repository" => encoded_repository}, _session, socket) do
@@ -211,7 +211,7 @@ defmodule ExPiWeb.ProjectSettingsLive do
   defp rename_sessions_dir(same, same), do: :ok
 
   defp rename_sessions_dir(old_path, new_path) do
-    root = ExPiWeb.get_sessions_root()
+    root = PiWeb.get_sessions_root()
     old_dir = Path.join(root, Base.url_encode64(old_path, padding: false))
     new_dir = Path.join(root, Base.url_encode64(new_path, padding: false))
 

@@ -1,23 +1,23 @@
-defmodule ExPiWeb.Application do
+defmodule PiWeb.Application do
   @moduledoc false
   use Application
 
   @impl true
   def start(_type, _args) do
     children = [
-      {Phoenix.PubSub, name: ExPiWeb.PubSub},
-      {DynamicSupervisor, name: ExPiWeb.AgentSupervisor, strategy: :one_for_one},
-      ExPiWeb.SessionManager,
-      ExPiWeb.Endpoint
+      {Phoenix.PubSub, name: PiWeb.PubSub},
+      {DynamicSupervisor, name: PiWeb.AgentSupervisor, strategy: :one_for_one},
+      PiWeb.SessionManager,
+      PiWeb.Endpoint
     ]
 
-    opts = [strategy: :one_for_one, name: ExPiWeb.Supervisor]
+    opts = [strategy: :one_for_one, name: PiWeb.Supervisor]
     Supervisor.start_link(children, opts)
   end
 
   @impl true
   def config_change(changed, _new, removed) do
-    ExPiWeb.Endpoint.config_change(changed, removed)
+    PiWeb.Endpoint.config_change(changed, removed)
     :ok
   end
 end

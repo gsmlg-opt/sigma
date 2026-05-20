@@ -1,4 +1,4 @@
-defmodule ExPiSession.RepoManager do
+defmodule PiSession.RepoManager do
   @moduledoc """
   Manages the list of known repositories (working directories).
   """

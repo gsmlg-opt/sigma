@@ -1,13 +1,13 @@
 import Config
 
-config :ex_pi_web, ExPiWeb.Endpoint,
+config :ex_pi_web, PiWeb.Endpoint,
   url: [host: "localhost"],
   secret_key_base: "uR8T8QyHkZfTjG+lS0fWf6eQ+V8S8QyHkZfTjG+lS0fWf6eQ+V8S8QyHkZfTjG+l",
   render_errors: [
-    formats: [html: ExPiWeb.ErrorHTML, json: ExPiWeb.ErrorJSON],
+    formats: [html: PiWeb.ErrorHTML, json: PiWeb.ErrorJSON],
     layout: false
   ],
-  pubsub_server: ExPiWeb.PubSub,
+  pubsub_server: PiWeb.PubSub,
   live_view: [signing_salt: "v8Lh+K6p"]
 
 config :logger, :console,

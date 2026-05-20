@@ -1,10 +1,10 @@
-defmodule ExPiSession.Log do
+defmodule PiSession.Log do
   @moduledoc """
   Public API for session persistence and replay.
   """
 
-  alias ExPiSession.Storage.JsonlFile
-  alias ExPiAgent.Message
+  alias PiSession.Storage.JsonlFile
+  alias PiAgent.Message
 
   @doc """
   Lists all session files in the given directory.
@@ -77,7 +77,7 @@ defmodule ExPiSession.Log do
   end
 
   @doc """
-  Persists an ExPiAgent event to the log.
+  Persists an PiAgent event to the log.
   """
   def persist_event(storage_id, event, storage_mod \\ JsonlFile) do
     case event_to_entry(storage_id, event, storage_mod) do

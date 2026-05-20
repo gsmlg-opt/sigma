@@ -1,6 +1,6 @@
-defmodule ExPiCoding.Tools.WriteTest do
+defmodule PiCoding.Tools.WriteTest do
   use ExUnit.Case, async: true
-  alias ExPiCoding.Tools.Write
+  alias PiCoding.Tools.Write
 
   @cwd File.cwd!()
 

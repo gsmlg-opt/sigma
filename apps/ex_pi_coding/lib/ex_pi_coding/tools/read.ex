@@ -1,10 +1,10 @@
-defmodule ExPiCoding.Tools.Read do
+defmodule PiCoding.Tools.Read do
   @moduledoc """
   Tool for reading file contents.
   """
-  @behaviour ExPiCoding.Tool
+  @behaviour PiCoding.Tool
 
-  alias ExPiCoding.Utils.PathUtils
+  alias PiCoding.Utils.PathUtils
 
   @impl true
   def name, do: "read"

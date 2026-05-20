@@ -1,8 +1,8 @@
-defmodule ExPiWeb.HomeLiveIntegrationTest do
-  use ExPiWeb.ConnCase, async: true
+defmodule PiWeb.HomeLiveIntegrationTest do
+  use PiWeb.ConnCase, async: true
   import Phoenix.LiveViewTest
 
-  alias ExPiSession.RepoManager
+  alias PiSession.RepoManager
 
   test "renders home page grid", %{conn: conn} do
     {:ok, _view, html} = live(conn, "/")

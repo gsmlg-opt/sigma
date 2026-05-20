@@ -1,5 +1,5 @@
-defmodule ExPiCoding.Tools.UrlFetch do
-  @behaviour ExPiCoding.Tool
+defmodule PiCoding.Tools.UrlFetch do
+  @behaviour PiCoding.Tool
 
   @max_chars 50_000
   @timeout 30_000

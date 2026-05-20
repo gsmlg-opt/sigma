@@ -1,4 +1,4 @@
-defmodule ExPiCoding.Dispatcher do
+defmodule PiCoding.Dispatcher do
   @moduledoc """
   Handles dispatching tool calls to the appropriate tool modules.
   Uses a Task.Supervisor for concurrent execution.
@@ -16,7 +16,7 @@ defmodule ExPiCoding.Dispatcher do
 
   @impl true
   def init(opts) do
-    task_supervisor = Keyword.get(opts, :task_supervisor, ExPiCoding.Dispatcher.TaskSupervisor)
+    task_supervisor = Keyword.get(opts, :task_supervisor, PiCoding.Dispatcher.TaskSupervisor)
 
     children = [
       {Task.Supervisor, name: task_supervisor}
@@ -41,7 +41,7 @@ defmodule ExPiCoding.Dispatcher do
   """
   def dispatch_batch(tool_calls, tools, opts \\ []) do
     mode = Keyword.get(opts, :mode, :parallel)
-    task_supervisor = Keyword.get(opts, :task_supervisor, ExPiCoding.Dispatcher.TaskSupervisor)
+    task_supervisor = Keyword.get(opts, :task_supervisor, PiCoding.Dispatcher.TaskSupervisor)
 
     case mode do
       :sequential ->
@@ -77,7 +77,7 @@ defmodule ExPiCoding.Dispatcher do
   end
 
   defp do_dispatch(tool_call, tools, opts) do
-    case ExPiCoding.PermissionInterceptor.check(tool_call, opts) do
+    case PiCoding.PermissionInterceptor.check(tool_call, opts) do
       :allow ->
         tool = Enum.find(tools, fn t -> t.name() == tool_call.name end)
 

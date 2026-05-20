@@ -1,4 +1,4 @@
-defmodule ExPiCoding.PermissionPolicy do
+defmodule PiCoding.PermissionPolicy do
   @moduledoc """
   A GenServer that manages permission rules for tool execution.
   """

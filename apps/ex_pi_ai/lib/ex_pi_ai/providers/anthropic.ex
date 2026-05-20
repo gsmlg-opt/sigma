@@ -1,7 +1,7 @@
-defmodule ExPiAi.Providers.Anthropic do
-  @behaviour ExPiAi.Provider
+defmodule PiAi.Providers.Anthropic do
+  @behaviour PiAi.Provider
 
-  alias ExPiAi.Stream
+  alias PiAi.Stream
 
   @impl true
   def stream(params) do

@@ -1,7 +1,7 @@
-defmodule ExPiAgent.MessageTransformerTest do
+defmodule PiAgent.MessageTransformerTest do
   use ExUnit.Case, async: true
-  alias ExPiAgent.Message, as: AgentMessage
-  alias ExPiAgent.MessageTransformer
+  alias PiAgent.Message, as: AgentMessage
+  alias PiAgent.MessageTransformer
 
   test "standard message conversion" do
     messages = [
@@ -193,7 +193,7 @@ defmodule ExPiAgent.MessageTransformerTest do
 
   describe "compaction_summary handling" do
     test "compaction_summary is converted to assistant role for valid alternation" do
-      summary = %ExPiAgent.Message{
+      summary = %PiAgent.Message{
         id: "compaction_1",
         role: :compaction_summary,
         content: "Earlier we read lib/foo.ex and edited it.",

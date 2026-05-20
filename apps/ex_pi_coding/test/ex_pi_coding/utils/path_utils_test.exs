@@ -1,6 +1,6 @@
-defmodule ExPiCoding.Utils.PathUtilsTest do
+defmodule PiCoding.Utils.PathUtilsTest do
   use ExUnit.Case, async: true
-  alias ExPiCoding.Utils.PathUtils
+  alias PiCoding.Utils.PathUtils
 
   @cwd File.cwd!()
 

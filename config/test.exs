@@ -1,6 +1,6 @@
 import Config
 
-config :ex_pi_web, ExPiWeb.Endpoint,
+config :ex_pi_web, PiWeb.Endpoint,
   http: [port: 4002],
   server: false
 
@@ -15,4 +15,4 @@ config :ex_pi_web,
     "resolved_key" => "",
     "base_url" => ""
   },
-  mock_provider_module: ExPiWeb.MockProvider
+  mock_provider_module: PiWeb.MockProvider

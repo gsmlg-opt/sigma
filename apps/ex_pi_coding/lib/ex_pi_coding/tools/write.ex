@@ -1,10 +1,10 @@
-defmodule ExPiCoding.Tools.Write do
+defmodule PiCoding.Tools.Write do
   @moduledoc """
   Tool for creating new files.
   """
-  @behaviour ExPiCoding.Tool
+  @behaviour PiCoding.Tool
 
-  alias ExPiCoding.Utils.PathUtils
+  alias PiCoding.Utils.PathUtils
 
   @impl true
   def name, do: "write"

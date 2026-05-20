@@ -1,4 +1,4 @@
-defmodule ExPiAi.MixProject do
+defmodule PiAi.MixProject do
   use Mix.Project
 
   def project do

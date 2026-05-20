@@ -1,6 +1,6 @@
 import Config
 
-config :ex_pi_web, ExPiWeb.Endpoint,
+config :ex_pi_web, PiWeb.Endpoint,
   http: [port: 4580],
   debug_errors: true,
   code_reloader: true,

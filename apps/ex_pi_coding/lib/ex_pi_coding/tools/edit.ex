@@ -1,10 +1,10 @@
-defmodule ExPiCoding.Tools.Edit do
+defmodule PiCoding.Tools.Edit do
   @moduledoc """
   Tool for editing file contents.
   """
-  @behaviour ExPiCoding.Tool
+  @behaviour PiCoding.Tool
 
-  alias ExPiCoding.Utils.PathUtils
+  alias PiCoding.Utils.PathUtils
 
   @impl true
   def name, do: "edit"

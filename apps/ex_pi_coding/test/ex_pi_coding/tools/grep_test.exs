@@ -1,7 +1,7 @@
-defmodule ExPiCoding.Tools.GrepTest do
+defmodule PiCoding.Tools.GrepTest do
   use ExUnit.Case, async: true
 
-  alias ExPiCoding.Tools.Grep
+  alias PiCoding.Tools.Grep
 
   setup do
     dir = System.tmp_dir!() |> Path.join("grep_test_#{System.unique_integer([:positive])}")

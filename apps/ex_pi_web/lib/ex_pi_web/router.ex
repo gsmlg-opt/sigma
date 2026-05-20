@@ -1,16 +1,16 @@
-defmodule ExPiWeb.Router do
-  use ExPiWeb, :router
+defmodule PiWeb.Router do
+  use PiWeb, :router
 
   pipeline :browser do
     plug(:accepts, ["html"])
     plug(:fetch_session)
     plug(:fetch_live_flash)
-    plug(:put_root_layout, html: {ExPiWeb.Layouts, :root})
+    plug(:put_root_layout, html: {PiWeb.Layouts, :root})
     plug(:protect_from_forgery)
     plug(:put_secure_browser_headers)
   end
 
-  scope "/", ExPiWeb do
+  scope "/", PiWeb do
     pipe_through(:browser)
 
     live("/", HomeLive, :index)

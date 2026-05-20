@@ -1,4 +1,4 @@
-defmodule ExPiWeb do
+defmodule PiWeb do
   def static_paths, do: ~w(assets fonts images favicon.ico robots.txt)
 
   def router do
@@ -14,18 +14,18 @@ defmodule ExPiWeb do
     quote do
       use Phoenix.Controller,
         formats: [:html, :json],
-        layouts: [html: ExPiWeb.Layouts]
+        layouts: [html: PiWeb.Layouts]
 
       import Plug.Conn
-      import ExPiWeb.Gettext
-      alias ExPiWeb.Router.Helpers, as: Routes
+      import PiWeb.Gettext
+      alias PiWeb.Router.Helpers, as: Routes
     end
   end
 
   def live_view do
     quote do
       use Phoenix.LiveView,
-        layout: {ExPiWeb.Layouts, :app}
+        layout: {PiWeb.Layouts, :app}
 
       unquote(html_helpers())
     end
@@ -58,7 +58,7 @@ defmodule ExPiWeb do
 
       use PhoenixDuskmoon.Component
       use PhoenixDuskmoon.ArtComponent
-      use Gettext, backend: ExPiWeb.Gettext
+      use Gettext, backend: PiWeb.Gettext
 
       unquote(verified_routes())
     end
@@ -67,9 +67,9 @@ defmodule ExPiWeb do
   def verified_routes do
     quote do
       use Phoenix.VerifiedRoutes,
-        endpoint: ExPiWeb.Endpoint,
-        router: ExPiWeb.Router,
-        statics: ExPiWeb.static_paths()
+        endpoint: PiWeb.Endpoint,
+        router: PiWeb.Router,
+        statics: PiWeb.static_paths()
     end
   end
 

@@ -1,8 +1,8 @@
-defmodule ExPiWeb.SessionManager do
+defmodule PiWeb.SessionManager do
   @moduledoc """
-  Manages ExPiAgent processes for web sessions.
+  Manages PiAgent processes for web sessions.
 
-  Agents are started under ExPiWeb.AgentSupervisor (DynamicSupervisor) so a
+  Agents are started under PiWeb.AgentSupervisor (DynamicSupervisor) so a
   crashed agent does not affect the manager or any sibling sessions. The manager
   holds a monitor ref per agent and evicts the entry on :DOWN.
   """
@@ -54,10 +54,10 @@ defmodule ExPiWeb.SessionManager do
   def handle_info(_msg, state), do: {:noreply, state}
 
   defp start_agent(session_id, opts, state) do
-    case DynamicSupervisor.start_child(ExPiWeb.AgentSupervisor, {ExPiAgent, opts}) do
+    case DynamicSupervisor.start_child(PiWeb.AgentSupervisor, {PiAgent, opts}) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
-        policy_pid = ExPiAgent.get_policy(pid)
+        policy_pid = PiAgent.get_policy(pid)
         entry = {pid, policy_pid, ref}
         {:reply, {:ok, {pid, policy_pid}}, put_in(state.agents[session_id], entry)}
 

@@ -1,4 +1,4 @@
-defmodule ExPiAi.Message do
+defmodule PiAi.Message do
   @type role :: :system | :user | :assistant | :tool_result
 
   @type text_content :: %{

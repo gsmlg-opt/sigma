@@ -1,4 +1,4 @@
-defmodule ExPiSession.Storage do
+defmodule PiSession.Storage do
   @moduledoc """
   Behaviour for session storage.
   """

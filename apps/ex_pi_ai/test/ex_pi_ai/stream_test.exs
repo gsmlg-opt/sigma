@@ -1,6 +1,6 @@
-defmodule ExPiAi.StreamTest do
+defmodule PiAi.StreamTest do
   use ExUnit.Case
-  alias ExPiAi.Stream
+  alias PiAi.Stream
 
   test "replays anthropic_hello.txt fixture" do
     path = Path.expand("../fixtures/sse/anthropic_hello.txt", __DIR__)

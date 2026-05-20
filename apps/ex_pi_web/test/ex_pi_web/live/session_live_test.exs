@@ -1,5 +1,5 @@
-defmodule ExPiWeb.SessionLiveTest do
-  use ExPiWeb.ConnCase, async: true
+defmodule PiWeb.SessionLiveTest do
+  use PiWeb.ConnCase, async: true
   import Phoenix.LiveViewTest
 
   @workdir "/tmp/pi-test"
@@ -9,7 +9,7 @@ defmodule ExPiWeb.SessionLiveTest do
     File.mkdir_p!(@workdir)
 
     sessions_dir =
-      Path.join(ExPiWeb.get_sessions_root(), Base.url_encode64(@workdir, padding: false))
+      Path.join(PiWeb.get_sessions_root(), Base.url_encode64(@workdir, padding: false))
 
     File.rm_rf!(sessions_dir)
     on_exit(fn -> File.rm_rf!(@workdir) end)
@@ -23,7 +23,7 @@ defmodule ExPiWeb.SessionLiveTest do
   end
 
   test "submits prompt", %{conn: conn} do
-    Phoenix.PubSub.subscribe(ExPiWeb.PubSub, "session:test")
+    Phoenix.PubSub.subscribe(PiWeb.PubSub, "session:test")
     {:ok, view, _html} = live(conn, "/repository/#{@encoded_workdir}/sessions/test")
 
     render_submit(view, "send_prompt", %{"prompt" => "hello"})

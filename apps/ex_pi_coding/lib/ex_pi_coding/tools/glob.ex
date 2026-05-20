@@ -1,10 +1,10 @@
-defmodule ExPiCoding.Tools.Glob do
+defmodule PiCoding.Tools.Glob do
   @moduledoc """
   Tool for finding files by glob pattern.
   """
-  @behaviour ExPiCoding.Tool
+  @behaviour PiCoding.Tool
 
-  alias ExPiCoding.Utils.PathUtils
+  alias PiCoding.Utils.PathUtils
 
   @default_limit 1000
 

@@ -1,7 +1,7 @@
-defmodule ExPiAgentTest do
+defmodule PiAgentTest do
   use ExUnit.Case, async: true
 
-  alias ExPiAgent.Message
+  alias PiAgent.Message
 
   defmodule MockProvider do
     def stream(_params) do
@@ -38,15 +38,15 @@ defmodule ExPiAgentTest do
   test "agent manages a turn and emits events" do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
-    {:ok, agent} = ExPiAgent.start_link(
+    {:ok, agent} = PiAgent.start_link(
       model: model,
       provider: MockProvider,
       system_prompt: "You are a helpful assistant."
     )
 
-    ExPiAgent.subscribe(agent)
+    PiAgent.subscribe(agent)
 
-    ExPiAgent.prompt(agent, "Hi")
+    PiAgent.prompt(agent, "Hi")
 
     assert_receive {:agent_start, _}
     assert_receive {:message_start, %Message{role: :user, content: "Hi"}}
@@ -75,18 +75,18 @@ defmodule ExPiAgentTest do
   test "agent maintains history" do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
-    {:ok, agent} = ExPiAgent.start_link(
+    {:ok, agent} = PiAgent.start_link(
       model: model,
       provider: MockProvider
     )
 
-    ExPiAgent.subscribe(agent)
+    PiAgent.subscribe(agent)
 
-    ExPiAgent.prompt(agent, "First")
+    PiAgent.prompt(agent, "First")
     # Wait for turn to complete
     assert_receive {:agent_end, _}
 
-    ExPiAgent.prompt(agent, "Second")
+    PiAgent.prompt(agent, "Second")
     assert_receive {:agent_end, messages}
 
     # Should have 4 messages: User, Assistant, User, Assistant

@@ -1,8 +1,8 @@
-defmodule ExPiAgent.Message do
+defmodule PiAgent.Message do
   @moduledoc """
   Rich domain type for messages within the agent loop.
 
-  Mirrors `ExPiAi.Message` but adds:
+  Mirrors `PiAi.Message` but adds:
   - `id`: A unique identifier for the message in the conversation.
   - `metadata`: Arbitrary map for UI hints, tracing, etc.
   - `redacted`: Whether the message content is hidden from the LLM.
@@ -13,7 +13,7 @@ defmodule ExPiAgent.Message do
   @type id :: String.t()
 
   @type role ::
-          ExPiAi.Message.role()
+          PiAi.Message.role()
           | :thought
           | :status
           | :notification
@@ -63,8 +63,8 @@ defmodule ExPiAgent.Message do
           model: String.t() | nil,
           response_model: String.t() | nil,
           response_id: String.t() | nil,
-          usage: ExPiAi.Message.usage() | nil,
-          stop_reason: ExPiAi.Message.stop_reason() | nil,
+          usage: PiAi.Message.usage() | nil,
+          stop_reason: PiAi.Message.stop_reason() | nil,
           error_message: String.t() | nil,
           # Tool result-specific
           tool_call_id: String.t() | nil,

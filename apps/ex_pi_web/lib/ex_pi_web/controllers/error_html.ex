@@ -1,5 +1,5 @@
-defmodule ExPiWeb.ErrorHTML do
-  use ExPiWeb, :html
+defmodule PiWeb.ErrorHTML do
+  use PiWeb, :html
 
   def render(template, _assigns) do
     Phoenix.Controller.status_message_from_template(template)

@@ -1,8 +1,8 @@
-defmodule ExPiCoding.Tools.Bash do
+defmodule PiCoding.Tools.Bash do
   @moduledoc """
   Tool for executing bash commands.
   """
-  @behaviour ExPiCoding.Tool
+  @behaviour PiCoding.Tool
 
   @impl true
   def name, do: "bash"

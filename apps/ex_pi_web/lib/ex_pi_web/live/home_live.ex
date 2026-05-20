@@ -1,7 +1,7 @@
-defmodule ExPiWeb.HomeLive do
-  use ExPiWeb, :live_view
+defmodule PiWeb.HomeLive do
+  use PiWeb, :live_view
 
-  alias ExPiSession.RepoManager
+  alias PiSession.RepoManager
 
   @impl true
   def mount(_params, _session, socket) do

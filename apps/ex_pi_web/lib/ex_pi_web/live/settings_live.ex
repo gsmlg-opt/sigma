@@ -1,7 +1,7 @@
-defmodule ExPiWeb.SettingsLive do
-  use ExPiWeb, :live_view
+defmodule PiWeb.SettingsLive do
+  use PiWeb, :live_view
 
-  alias ExPiSession.ConfigManager
+  alias PiSession.ConfigManager
 
   @impl true
   def mount(_params, _session, socket) do

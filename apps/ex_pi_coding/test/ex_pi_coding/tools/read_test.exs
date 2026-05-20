@@ -1,6 +1,6 @@
-defmodule ExPiCoding.Tools.ReadTest do
+defmodule PiCoding.Tools.ReadTest do
   use ExUnit.Case, async: true
-  alias ExPiCoding.Tools.Read
+  alias PiCoding.Tools.Read
 
   @cwd File.cwd!()
 

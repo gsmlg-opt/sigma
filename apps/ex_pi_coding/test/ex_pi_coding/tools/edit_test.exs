@@ -1,6 +1,6 @@
-defmodule ExPiCoding.Tools.EditTest do
+defmodule PiCoding.Tools.EditTest do
   use ExUnit.Case, async: true
-  alias ExPiCoding.Tools.Edit
+  alias PiCoding.Tools.Edit
 
   @cwd File.cwd!()
 

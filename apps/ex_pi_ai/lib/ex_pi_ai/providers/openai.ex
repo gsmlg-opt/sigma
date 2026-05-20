@@ -1,7 +1,7 @@
-defmodule ExPiAi.Providers.OpenAI do
-  @behaviour ExPiAi.Provider
+defmodule PiAi.Providers.OpenAI do
+  @behaviour PiAi.Provider
 
-  alias ExPiAi.Stream
+  alias PiAi.Stream
 
   @impl true
   def stream(params) do

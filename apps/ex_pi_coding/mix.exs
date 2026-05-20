@@ -1,4 +1,4 @@
-defmodule ExPiCoding.MixProject do
+defmodule PiCoding.MixProject do
   use Mix.Project
 
   def project do
@@ -17,7 +17,7 @@ defmodule ExPiCoding.MixProject do
 
   def application do
     [
-      mod: {ExPiCoding, []},
+      mod: {PiCoding, []},
       extra_applications: [:logger]
     ]
   end

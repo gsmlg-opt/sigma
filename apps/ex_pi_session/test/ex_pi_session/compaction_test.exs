@@ -1,8 +1,8 @@
-defmodule ExPiSession.CompactionTest do
+defmodule PiSession.CompactionTest do
   use ExUnit.Case
 
-  alias ExPiSession.Log
-  alias ExPiAgent.Message
+  alias PiSession.Log
+  alias PiAgent.Message
 
   @test_storage "test_session_compaction.jsonl"
 
@@ -26,7 +26,7 @@ defmodule ExPiSession.CompactionTest do
     Log.compact(@test_storage, "Summary of early conversation", "m3")
 
     # 3. Check storage
-    {:ok, entries} = ExPiSession.Storage.JsonlFile.read(@test_storage)
+    {:ok, entries} = PiSession.Storage.JsonlFile.read(@test_storage)
     assert Enum.any?(entries, fn e -> e["type"] == "compaction" end)
 
     # 4. Replay and verify filtering

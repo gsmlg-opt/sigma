@@ -1,7 +1,7 @@
-defmodule ExPiWeb.SessionLive do
-  use ExPiWeb, :live_view
+defmodule PiWeb.SessionLive do
+  use PiWeb, :live_view
 
-  alias ExPiSession.ConfigManager
+  alias PiSession.ConfigManager
 
   @impl true
   def mount(%{"id" => session_id, "repository" => encoded_repository}, _session, socket) do
@@ -17,7 +17,7 @@ defmodule ExPiWeb.SessionLive do
         ConfigManager.get_active_provider_config()
 
     global_prompt = Map.get(system_config, "system_prompt")
-    system_prompt = ExPiSession.ContextFiles.assemble(global_prompt, workdir)
+    system_prompt = PiSession.ContextFiles.assemble(global_prompt, workdir)
 
     case resolve_provider(config) do
       {:error, reason} ->
@@ -25,32 +25,32 @@ defmodule ExPiWeb.SessionLive do
 
       {:ok, {provider_mod, model_id, provider_id, api_key, base_url}} ->
         if connected?(socket) do
-          Phoenix.PubSub.subscribe(ExPiWeb.PubSub, "session:#{session_id}")
+          Phoenix.PubSub.subscribe(PiWeb.PubSub, "session:#{session_id}")
         end
 
-        {:ok, initial_messages} = ExPiSession.Log.replay(storage_path)
+        {:ok, initial_messages} = PiSession.Log.replay(storage_path)
 
         on_event = fn event ->
-          ExPiSession.Log.persist_event(storage_path, event)
-          Phoenix.PubSub.broadcast(ExPiWeb.PubSub, "session:#{session_id}", event)
+          PiSession.Log.persist_event(storage_path, event)
+          Phoenix.PubSub.broadcast(PiWeb.PubSub, "session:#{session_id}", event)
         end
 
         {:ok, {agent, _policy}} =
-          ExPiWeb.SessionManager.get_agent(session_id,
+          PiWeb.SessionManager.get_agent(session_id,
             model: %{id: model_id, api: provider_id, provider: provider_id},
             provider: provider_mod,
             options: [api_key: api_key, base_url: base_url],
             system_prompt: system_prompt,
             on_event: on_event,
             tools: [
-              ExPiCoding.Tools.Read,
-              ExPiCoding.Tools.Write,
-              ExPiCoding.Tools.Bash,
-              ExPiCoding.Tools.Edit,
-              ExPiCoding.Tools.Glob,
-              ExPiCoding.Tools.Grep,
-              ExPiCoding.Tools.LS,
-              ExPiCoding.Tools.UrlFetch
+              PiCoding.Tools.Read,
+              PiCoding.Tools.Write,
+              PiCoding.Tools.Bash,
+              PiCoding.Tools.Edit,
+              PiCoding.Tools.Glob,
+              PiCoding.Tools.Grep,
+              PiCoding.Tools.LS,
+              PiCoding.Tools.UrlFetch
             ],
             dispatcher_opts: [],
             messages: initial_messages,
@@ -61,7 +61,7 @@ defmodule ExPiWeb.SessionLive do
           Process.monitor(agent)
         end
 
-        {:ok, sessions} = ExPiSession.Log.list_sessions(sessions_dir)
+        {:ok, sessions} = PiSession.Log.list_sessions(sessions_dir)
 
         active_provider = system_config["providers"][provider_id] || %{}
         available_models = active_provider["models"] || [model_id]
@@ -368,7 +368,7 @@ defmodule ExPiWeb.SessionLive do
 
   @impl true
   def handle_event("cancel_turn", _, socket) do
-    ExPiAgent.cancel(socket.assigns.agent)
+    PiAgent.cancel(socket.assigns.agent)
     {:noreply, socket}
   end
 
@@ -379,7 +379,7 @@ defmodule ExPiWeb.SessionLive do
         {:noreply, socket}
 
       trimmed ->
-        ExPiAgent.prompt(socket.assigns.agent, trimmed)
+        PiAgent.prompt(socket.assigns.agent, trimmed)
         {:noreply, assign(socket, input: "")}
     end
   end
@@ -388,7 +388,7 @@ defmodule ExPiWeb.SessionLive do
   def handle_event("select_model", %{"model" => model_id}, socket) do
     provider_id = socket.assigns.active_provider_id
 
-    ExPiAgent.set_model(socket.assigns.agent, %{
+    PiAgent.set_model(socket.assigns.agent, %{
       id: model_id,
       api: provider_id,
       provider: provider_id
@@ -478,10 +478,10 @@ defmodule ExPiWeb.SessionLive do
 
     case mode do
       :all ->
-        ExPiSession.Log.fork_at_message(source_path, target_path, :all, workdir)
+        PiSession.Log.fork_at_message(source_path, target_path, :all, workdir)
 
       {:at, msg_id} ->
-        ExPiSession.Log.fork_at_message(source_path, target_path, msg_id, workdir)
+        PiSession.Log.fork_at_message(source_path, target_path, msg_id, workdir)
     end
 
     {:noreply,
@@ -500,8 +500,8 @@ defmodule ExPiWeb.SessionLive do
   defp resolve_provider(config) do
     provider_mod =
       case config["api_type"] do
-        "anthropic" -> ExPiAi.Providers.Anthropic
-        "openai" -> ExPiAi.Providers.OpenAI
+        "anthropic" -> PiAi.Providers.Anthropic
+        "openai" -> PiAi.Providers.OpenAI
         _ -> Application.get_env(:ex_pi_web, :mock_provider_module)
       end
 
@@ -522,6 +522,6 @@ defmodule ExPiWeb.SessionLive do
 
   defp get_sessions_dir(workdir) do
     encoded_cwd = Base.url_encode64(workdir, padding: false)
-    Path.join(ExPiWeb.get_sessions_root(), encoded_cwd)
+    Path.join(PiWeb.get_sessions_root(), encoded_cwd)
   end
 end

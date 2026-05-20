@@ -1,4 +1,4 @@
-defmodule ExPiSession.ContextFiles do
+defmodule PiSession.ContextFiles do
   @moduledoc """
   Assembles the system prompt from project context files.
 

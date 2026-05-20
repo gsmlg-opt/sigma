@@ -1,5 +1,5 @@
-defmodule ExPiWeb.RepositoryLive do
-  use ExPiWeb, :live_view
+defmodule PiWeb.RepositoryLive do
+  use PiWeb, :live_view
 
   @impl true
   def mount(%{"repository" => encoded_repository}, _session, socket) do
@@ -7,7 +7,7 @@ defmodule ExPiWeb.RepositoryLive do
     sessions_dir = get_sessions_dir(workdir)
     File.mkdir_p!(sessions_dir)
 
-    {:ok, sessions} = ExPiSession.Log.list_sessions(sessions_dir)
+    {:ok, sessions} = PiSession.Log.list_sessions(sessions_dir)
 
     socket =
       socket
@@ -203,7 +203,7 @@ defmodule ExPiWeb.RepositoryLive do
 
     case File.rm(file_path) do
       :ok ->
-        {:ok, sessions} = ExPiSession.Log.list_sessions(socket.assigns.sessions_dir)
+        {:ok, sessions} = PiSession.Log.list_sessions(socket.assigns.sessions_dir)
 
         {:noreply,
          socket
@@ -238,6 +238,6 @@ defmodule ExPiWeb.RepositoryLive do
 
   defp get_sessions_dir(workdir) do
     encoded_cwd = Base.url_encode64(workdir, padding: false)
-    Path.join(ExPiWeb.get_sessions_root(), encoded_cwd)
+    Path.join(PiWeb.get_sessions_root(), encoded_cwd)
   end
 end

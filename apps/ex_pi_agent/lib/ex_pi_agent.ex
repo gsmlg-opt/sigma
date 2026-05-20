@@ -1,12 +1,12 @@
-defmodule ExPiAgent do
+defmodule PiAgent do
   @moduledoc """
   A GenServer that manages a single agent session.
   """
   use GenServer
 
-  alias ExPiAgent.Message
-  alias ExPiAgent.MessageTransformer
-  alias ExPiAi.Providers.Anthropic
+  alias PiAgent.Message
+  alias PiAgent.MessageTransformer
+  alias PiAi.Providers.Anthropic
 
   defstruct [
     :model,
@@ -70,7 +70,7 @@ defmodule ExPiAgent do
   def init(opts) do
     {:ok, task_sup} = Task.Supervisor.start_link()
 
-    {:ok, policy} = ExPiCoding.PermissionPolicy.start_link(default: :allow, rules: %{})
+    {:ok, policy} = PiCoding.PermissionPolicy.start_link(default: :allow, rules: %{})
 
     state = %__MODULE__{
       task_supervisor: task_sup,
@@ -314,7 +314,7 @@ defmodule ExPiAgent do
       |> Keyword.put(:cwd, state.cwd)
       |> Keyword.put(:permission_policy, state.policy)
 
-    results = ExPiCoding.Dispatcher.dispatch_batch(tool_calls, state.tools, opts)
+    results = PiCoding.Dispatcher.dispatch_batch(tool_calls, state.tools, opts)
 
     tool_result_messages =
       Enum.map(results, fn {tool_call, result} ->

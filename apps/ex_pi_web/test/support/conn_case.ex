@@ -1,16 +1,16 @@
-defmodule ExPiWeb.ConnCase do
+defmodule PiWeb.ConnCase do
   use ExUnit.CaseTemplate
 
   using do
     quote do
       import Plug.Conn
       import Phoenix.ConnTest
-      import ExPiWeb.ConnCase
+      import PiWeb.ConnCase
 
-      alias ExPiWeb.Router.Helpers, as: Routes
+      alias PiWeb.Router.Helpers, as: Routes
 
-      @endpoint ExPiWeb.Endpoint
-      use ExPiWeb, :verified_routes
+      @endpoint PiWeb.Endpoint
+      use PiWeb, :verified_routes
     end
   end
 

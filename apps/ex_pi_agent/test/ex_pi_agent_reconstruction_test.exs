@@ -1,8 +1,8 @@
-defmodule ExPiAgentReconstructionTest do
+defmodule PiAgentReconstructionTest do
   use ExUnit.Case
 
   defmodule MockProvider do
-    @behaviour ExPiAi.Provider
+    @behaviour PiAi.Provider
 
     @impl true
     def stream(params) do
@@ -51,19 +51,19 @@ defmodule ExPiAgentReconstructionTest do
       system_prompt: "You are a helpful assistant."
     ]
 
-    {:ok, agent} = ExPiAgent.start_link(opts)
-    ExPiAgent.subscribe(agent)
+    {:ok, agent} = PiAgent.start_link(opts)
+    PiAgent.subscribe(agent)
 
     # Turn 1
-    ExPiAgent.prompt(agent, "Turn 1")
+    PiAgent.prompt(agent, "Turn 1")
     events1 = collect_until_agent_end([])
 
     # Turn 2
-    ExPiAgent.prompt(agent, "Turn 2")
+    PiAgent.prompt(agent, "Turn 2")
     events2 = collect_until_agent_end([])
 
     # Turn 3
-    ExPiAgent.prompt(agent, "Turn 3")
+    PiAgent.prompt(agent, "Turn 3")
     events3 = collect_until_agent_end([])
 
     all_events = events1 ++ events2 ++ events3

@@ -1,9 +1,9 @@
-defmodule ExPiCoding.PermissionInterceptor do
+defmodule PiCoding.PermissionInterceptor do
   @moduledoc """
   Interprets permission rules before tool execution.
   """
 
-  alias ExPiCoding.PermissionPolicy
+  alias PiCoding.PermissionPolicy
 
   @doc """
   Checks if a tool call is allowed based on the provided options.

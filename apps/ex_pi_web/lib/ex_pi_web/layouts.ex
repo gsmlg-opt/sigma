@@ -1,5 +1,5 @@
-defmodule ExPiWeb.Layouts do
-  use ExPiWeb, :html
+defmodule PiWeb.Layouts do
+  use PiWeb, :html
 
   embed_templates "layouts/*"
 end

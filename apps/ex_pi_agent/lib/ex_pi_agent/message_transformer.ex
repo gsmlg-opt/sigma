@@ -1,10 +1,10 @@
-defmodule ExPiAgent.MessageTransformer do
+defmodule PiAgent.MessageTransformer do
   @moduledoc """
-  Transforms `ExPiAgent.Message` to `ExPiAi.Message`.
+  Transforms `PiAgent.Message` to `PiAi.Message`.
   """
 
-  alias ExPiAgent.Message, as: AgentMessage
-  alias ExPiAi.Message, as: AiMessage
+  alias PiAgent.Message, as: AgentMessage
+  alias PiAi.Message, as: AiMessage
 
   @doc """
   Applies a sequence of transformations to the message list.
@@ -51,15 +51,15 @@ defmodule ExPiAgent.MessageTransformer do
   end
 
   @doc """
-  Converts a list of `ExPiAgent.Message` to a list of `ExPiAi.Message`.
+  Converts a list of `PiAgent.Message` to a list of `PiAi.Message`.
 
   It performs the following transformations:
   - Filters out messages with `redacted: true`.
   - Filters out UI-only messages (e.g., `:status`, `:notification`).
   - Merges consecutive `:thought` messages into the following `:assistant` message as thinking blocks.
   - Drops `:thought` messages that are not followed by an `:assistant` message.
-  - Maps `:user`, `:assistant`, and `:tool_result` roles to `ExPiAi.Message` roles.
-  - Ensures content formats are compatible with `ExPiAi.Message`.
+  - Maps `:user`, `:assistant`, and `:tool_result` roles to `PiAi.Message` roles.
+  - Ensures content formats are compatible with `PiAi.Message`.
   """
   @spec convert_to_llm([AgentMessage.t()]) :: [AiMessage.t()]
   def convert_to_llm(messages) when is_list(messages) do

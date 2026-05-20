@@ -1,11 +1,11 @@
-defmodule ExPiCoding.PermissionTest do
+defmodule PiCoding.PermissionTest do
   use ExUnit.Case, async: true
 
-  alias ExPiCoding.Dispatcher
-  alias ExPiCoding.PermissionPolicy
+  alias PiCoding.Dispatcher
+  alias PiCoding.PermissionPolicy
 
   defmodule MockTool do
-    @behaviour ExPiCoding.Tool
+    @behaviour PiCoding.Tool
 
     @impl true
     def name, do: "mock_tool"

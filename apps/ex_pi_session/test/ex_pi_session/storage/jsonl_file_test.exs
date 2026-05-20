@@ -1,7 +1,7 @@
-defmodule ExPiSession.Storage.JsonlFileTest do
+defmodule PiSession.Storage.JsonlFileTest do
   use ExUnit.Case, async: true
 
-  alias ExPiSession.Storage.JsonlFile
+  alias PiSession.Storage.JsonlFile
 
   setup do
     tmp_dir = System.tmp_dir!()

@@ -1,4 +1,4 @@
-defmodule ExPiAgent.MixProject do
+defmodule PiAgent.MixProject do
   use Mix.Project
 
   def project do

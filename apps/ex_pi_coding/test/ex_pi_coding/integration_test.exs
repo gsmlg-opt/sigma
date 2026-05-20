@@ -1,10 +1,10 @@
-defmodule ExPiCoding.IntegrationTest do
+defmodule PiCoding.IntegrationTest do
   use ExUnit.Case
 
-  alias ExPiAgent.Message
+  alias PiAgent.Message
 
   defmodule MockProvider do
-    @behaviour ExPiAi.Provider
+    @behaviour PiAi.Provider
 
     @impl true
     def stream(params) do
@@ -61,25 +61,25 @@ defmodule ExPiCoding.IntegrationTest do
   test "agent executes a tool and continues", %{tmp_dir: tmp_dir} do
     model = %{id: "mock-model", api: "mock", provider: "mock"}
 
-    {:ok, agent} = ExPiAgent.start_link(
+    {:ok, agent} = PiAgent.start_link(
       model: model,
       provider: MockProvider,
-      tools: [ExPiCoding.Tools.Read],
+      tools: [PiCoding.Tools.Read],
       system_prompt: "You are a helpful assistant.",
       cwd: tmp_dir
     )
 
-    ExPiAgent.subscribe(agent)
+    PiAgent.subscribe(agent)
 
     # We need to pass the tmp_dir as cwd to tools.
-    # For now, let's assume ExPiAgent or Dispatcher can be configured with cwd.
+    # For now, let's assume PiAgent or Dispatcher can be configured with cwd.
     # Actually, the Dispatcher dispatch call needs opts.
-    # Let's update ExPiAgent to allow passing opts to execute_tools.
+    # Let's update PiAgent to allow passing opts to execute_tools.
     
-    # Wait, the current implementation of execute_tools in ExPiAgent doesn't pass cwd.
+    # Wait, the current implementation of execute_tools in PiAgent doesn't pass cwd.
     # I'll need to fix that.
     
-    ExPiAgent.prompt(agent, "Read hello.txt")
+    PiAgent.prompt(agent, "Read hello.txt")
 
     # Turn 1
     assert_receive {:agent_start, _}

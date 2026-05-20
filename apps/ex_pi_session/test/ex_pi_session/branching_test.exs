@@ -1,8 +1,8 @@
-defmodule ExPiSession.BranchingTest do
+defmodule PiSession.BranchingTest do
   use ExUnit.Case
 
-  alias ExPiSession.Log
-  alias ExPiAgent.Message
+  alias PiSession.Log
+  alias PiAgent.Message
 
   @test_storage "test_session_source.jsonl"
   @target_storage "test_session_target.jsonl"
@@ -50,7 +50,7 @@ defmodule ExPiSession.BranchingTest do
     {:ok, new_session_id} = Log.fork(@test_storage, @target_storage, 1, "/tmp")
 
     # 3. Check target storage
-    {:ok, target_entries} = ExPiSession.Storage.JsonlFile.read(@target_storage)
+    {:ok, target_entries} = PiSession.Storage.JsonlFile.read(@target_storage)
 
     assert Enum.count(target_entries) == 3
     assert Enum.at(target_entries, 0)["type"] == "session"

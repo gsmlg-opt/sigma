@@ -1,10 +1,10 @@
-defmodule ExPiCoding.Tools.LS do
+defmodule PiCoding.Tools.LS do
   @moduledoc """
   Tool for listing directory contents.
   """
-  @behaviour ExPiCoding.Tool
+  @behaviour PiCoding.Tool
 
-  alias ExPiCoding.Utils.PathUtils
+  alias PiCoding.Utils.PathUtils
 
   @default_limit 500
 

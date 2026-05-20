@@ -1,5 +1,5 @@
-defmodule ExPiWeb.MockProvider do
-  @behaviour ExPiAi.Provider
+defmodule PiWeb.MockProvider do
+  @behaviour PiAi.Provider
 
   @impl true
   def stream(_params) do

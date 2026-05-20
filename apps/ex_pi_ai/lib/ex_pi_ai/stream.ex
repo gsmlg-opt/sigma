@@ -1,4 +1,4 @@
-defmodule ExPiAi.Stream do
+defmodule PiAi.Stream do
   @moduledoc """
   Pure SSE reducer for AI provider streams.
   """
