@@ -5,12 +5,12 @@
   <:user_profile>
     <div class="flex items-center gap-4 ml-6 pl-6 border-l border-primary-container/30">
       <.dm_tooltip content="Home" position="bottom">
-        <.dm_link navigate={~p"/"} class={["flex items-center justify-center p-2 rounded-full hover:bg-black/10 transition-colors", @active_tab == :home && "text-primary-content bg-black/20", @active_tab != :home && "text-primary-content/70 hover:text-primary-content"]}>
+        <.dm_link navigate={~p"/"} class={["flex items-center justify-center p-2 rounded-full hover:bg-primary-content/10 transition-colors", @active_tab == :home && "text-primary-content bg-primary-content/20", @active_tab != :home && "text-primary-content/70 hover:text-primary-content"]}>
           <.dm_mdi name={if @active_tab == :home, do: "home", else: "home-outline"} class="w-6 h-6" />
         </.dm_link>
       </.dm_tooltip>
       <.dm_tooltip content="Settings" position="bottom">
-        <.dm_link navigate={~p"/settings"} class={["flex items-center justify-center p-2 rounded-full hover:bg-black/10 transition-colors", @active_tab == :settings && "text-primary-content bg-black/20", @active_tab != :settings && "text-primary-content/70 hover:text-primary-content"]}>
+        <.dm_link navigate={~p"/settings"} class={["flex items-center justify-center p-2 rounded-full hover:bg-primary-content/10 transition-colors", @active_tab == :settings && "text-primary-content bg-primary-content/20", @active_tab != :settings && "text-primary-content/70 hover:text-primary-content"]}>
           <.dm_mdi name={if @active_tab == :settings, do: "cog", else: "cog-outline"} class="w-6 h-6" />
         </.dm_link>
       </.dm_tooltip>

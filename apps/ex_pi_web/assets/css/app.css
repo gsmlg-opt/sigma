@@ -52,3 +52,7 @@ el-dm-dialog [slot="footer"] {
 .markdown hr { border: none; border-top: 1px solid currentColor; opacity: 0.2; margin: 1rem 0; }
 .markdown table { border-collapse: collapse; width: 100%; margin: 0.5rem 0; }
 .markdown th, .markdown td { border: 1px solid currentColor; padding: 0.25rem 0.5rem; opacity: 0.9; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

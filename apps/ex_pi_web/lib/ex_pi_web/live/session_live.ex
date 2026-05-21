@@ -10,6 +10,11 @@ defmodule PiWeb.SessionLive do
     File.mkdir_p!(sessions_dir)
     storage_path = Path.join(sessions_dir, "#{session_id}.jsonl")
 
+    meta_path = Path.join(sessions_dir, "#{session_id}.meta.json")
+    session_meta = read_session_meta(meta_path)
+    effective_cwd = Map.get(session_meta, "cwd", workdir)
+    session_branch = Map.get(session_meta, "branch")
+
     system_config = ConfigManager.get_config()
 
     config =
@@ -17,7 +22,15 @@ defmodule PiWeb.SessionLive do
         ConfigManager.get_active_provider_config()
 
     global_prompt = Map.get(system_config, "system_prompt")
-    system_prompt = PiSession.ContextFiles.assemble(global_prompt, workdir)
+    system_prompt = PiSession.ContextFiles.assemble(global_prompt, effective_cwd)
+
+    system_prompt =
+      if effective_cwd != workdir and session_branch do
+        "# Worktree Context\nYou are working in a git worktree for branch `#{session_branch}` at `#{effective_cwd}`. The project root is at `#{workdir}`.\n\n" <>
+          system_prompt
+      else
+        system_prompt
+      end
 
     case resolve_provider(config) do
       {:error, reason} ->
@@ -54,7 +67,7 @@ defmodule PiWeb.SessionLive do
             ],
             dispatcher_opts: [],
             messages: initial_messages,
-            cwd: workdir
+            cwd: effective_cwd
           )
 
         if connected?(socket) do
@@ -114,7 +127,7 @@ defmodule PiWeb.SessionLive do
           <:title>Sessions</:title>
           <:menu>
             <.dm_left_menu_group id="sessions-list" active={@session_id}>
-              <:title>History</:title>
+              <:title></:title>
               <:menu
                 :for={s <- @sessions}
                 to={~p"/repository/#{@encoded_repository}/sessions/#{s}"}
@@ -130,16 +143,12 @@ defmodule PiWeb.SessionLive do
         </.dm_left_menu>
 
         <div class="p-4 border-t border-secondary-content/10 text-center">
-          <.dm_btn
-            id="fork-session-btn"
-            phx-click="fork_session"
-            phx-hook="WebComponentHook"
-            variant="primary"
-            class="w-full"
+          <.dm_link
+            navigate={~p"/repository/#{@encoded_repository}/sessions/new"}
+            class="btn btn-primary w-full"
           >
-            <:prefix><.dm_mdi name="source-branch" class="w-4 h-4" /></:prefix>
-            Fork Branch
-          </.dm_btn>
+            <.dm_mdi name="plus" class="w-4 h-4 mr-1" /> New Session
+          </.dm_link>
         </div>
       </aside>
 
@@ -186,18 +195,14 @@ defmodule PiWeb.SessionLive do
 
             <div class="mt-3 flex items-center justify-between gap-4 text-[11px] text-on-surface-variant">
               <form phx-change="select_model" class="flex items-center gap-2">
-                <label for="model-select" class="opacity-60 font-medium">Model</label>
-                <select
-                  id="model-select"
-                  name="model"
-                  class="px-2 py-1 rounded-lg border border-outline-variant bg-surface-container text-on-surface text-xs focus:border-primary focus:outline-none font-mono"
-                >
+                <label class="opacity-60 font-medium text-[11px]">Model</label>
+                <.dm_select id="model-select" name="model" value={@current_model} size="xs">
                   <option
                     :for={m <- ensure_in_list(@available_models, @current_model)}
                     value={m}
                     selected={m == @current_model}
                   >{m}</option>
-                </select>
+                </.dm_select>
                 <span :if={@active_provider_id != nil} class="opacity-40 font-mono">
                   · {@active_provider_id}
                 </span>
@@ -209,6 +214,7 @@ defmodule PiWeb.SessionLive do
           </div>
         </div>
       </div>
+
     </div>
     """
   end
@@ -383,6 +389,11 @@ defmodule PiWeb.SessionLive do
 
   defp ensure_in_list(list, current) do
     if current in list, do: list, else: [current | list]
+  end
+
+  @impl true
+  def handle_event("theme_changed", _, socket) do
+    {:noreply, socket}
   end
 
   @impl true
@@ -594,5 +605,18 @@ defmodule PiWeb.SessionLive do
   defp get_sessions_dir(workdir) do
     encoded_cwd = Base.url_encode64(workdir, padding: false)
     Path.join(PiWeb.get_sessions_root(), encoded_cwd)
+  end
+
+  defp read_session_meta(meta_path) do
+    case File.read(meta_path) do
+      {:ok, content} ->
+        case Jason.decode(content) do
+          {:ok, meta} -> meta
+          _ -> %{}
+        end
+
+      _ ->
+        %{}
+    end
   end
 end

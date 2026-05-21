@@ -33,7 +33,7 @@ defmodule PiWeb.ProjectSettingsLive do
 
         <.dm_link
           navigate={~p"/repository/#{@encoded_repository}"}
-          class="dm-btn dm-btn--ghost w-full justify-start"
+          class="btn btn-ghost w-full justify-start"
         >
           <div class="flex items-center gap-2">
             <.dm_mdi name="arrow-left" class="w-4 h-4" />
@@ -43,7 +43,7 @@ defmodule PiWeb.ProjectSettingsLive do
 
         <.dm_link
           navigate={~p"/"}
-          class="dm-btn dm-btn--ghost w-full justify-start mt-2"
+          class="btn btn-ghost w-full justify-start mt-2"
         >
           <div class="flex items-center gap-2">
             <.dm_mdi name="folder-multiple-outline" class="w-4 h-4" />
@@ -81,33 +81,24 @@ defmodule PiWeb.ProjectSettingsLive do
             </:title>
 
             <form phx-submit="save" class="space-y-6 p-2">
-              <div>
-                <label class="block text-sm font-medium mb-2">Display Name</label>
-                <input
-                  type="text"
-                  name="name"
-                  value={@name_input}
-                  required
-                  class="w-full px-3 py-2 rounded-lg border border-outline-variant bg-surface-container focus:border-primary focus:outline-none"
-                />
-                <p class="text-xs text-on-surface-variant mt-1 opacity-70">
-                  Shown in the sidebar and on the repository card.
-                </p>
-              </div>
+              <.dm_input
+                name="name"
+                value={@name_input}
+                label="Display Name"
+                helper="Shown in the sidebar and on the repository card."
+                required={true}
+                class="w-full"
+              />
 
-              <div>
-                <label class="block text-sm font-medium mb-2">Directory Path</label>
-                <input
-                  type="text"
-                  name="path"
-                  value={@path_input}
-                  required
-                  class="w-full px-3 py-2 rounded-lg border border-outline-variant bg-surface-container focus:border-primary focus:outline-none font-mono text-sm"
-                />
-                <p class="text-xs text-on-surface-variant mt-1 opacity-70">
-                  Use this when you have moved the project to a new location on disk. Existing sessions will be relocated to follow the new path.
-                </p>
-              </div>
+              <.dm_input
+                name="path"
+                value={@path_input}
+                label="Directory Path"
+                helper="Use this when you have moved the project to a new location on disk. Existing sessions will be relocated to follow the new path."
+                required={true}
+                field_class="font-mono"
+                class="w-full"
+              />
 
               <div :if={@error} class="bg-error/10 border border-error rounded-lg p-3 text-error text-sm flex items-center gap-2">
                 <.dm_mdi name="alert-circle" class="w-4 h-4" />
@@ -115,7 +106,7 @@ defmodule PiWeb.ProjectSettingsLive do
               </div>
 
               <div class="flex justify-end gap-3 pt-2">
-                <.dm_link navigate={~p"/repository/#{@encoded_repository}"} class="dm-btn dm-btn--ghost">
+                <.dm_link navigate={~p"/repository/#{@encoded_repository}"} class="btn btn-ghost">
                   Cancel
                 </.dm_link>
                 <.dm_btn type="submit" variant="primary">
@@ -154,6 +145,11 @@ defmodule PiWeb.ProjectSettingsLive do
       </main>
     </div>
     """
+  end
+
+  @impl true
+  def handle_event("theme_changed", _, socket) do
+    {:noreply, socket}
   end
 
   @impl true

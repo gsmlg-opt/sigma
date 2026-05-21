@@ -40,11 +40,9 @@ defmodule PiWeb.HomeLive do
           <h1 class="font-display text-5xl font-bold mb-2 tracking-tight text-primary">Repositories</h1>
           <p class="text-on-surface-variant text-lg">Select a project directory to start an agent session.</p>
         </div>
-        <.dm_link navigate={~p"/repository/new"} class="dm-btn dm-btn--primary dm-btn--lg" id="add-repo-btn">
-          <div class="flex items-center gap-2">
-            <.dm_mdi name="plus" class="w-5 h-5" />
-            <span>Add Repository</span>
-          </div>
+        <.dm_link navigate={~p"/repository/new"} class="btn btn-primary btn-lg" id="add-repo-btn">
+          <.dm_mdi name="plus" class="w-5 h-5" />
+          <span>Add Repository</span>
         </.dm_link>
       </div>
 
@@ -54,11 +52,9 @@ defmodule PiWeb.HomeLive do
         <p class="text-on-surface-variant mt-2 max-w-sm mx-auto">
           Add your first project directory to begin collaborating with π.
         </p>
-        <.dm_link navigate={~p"/repository/new"} class="dm-btn dm-btn--primary dm-btn--lg mt-8" id="add-first-repo-btn">
-          <div class="flex items-center gap-2">
-            <.dm_mdi name="plus" class="w-5 h-5" />
-            <span>Add First Repository</span>
-          </div>
+        <.dm_link navigate={~p"/repository/new"} class="btn btn-primary btn-lg mt-8" id="add-first-repo-btn">
+          <.dm_mdi name="plus" class="w-5 h-5" />
+          <span>Add First Repository</span>
         </.dm_link>
       </div>
 
@@ -88,9 +84,9 @@ defmodule PiWeb.HomeLive do
           </div>
 
           <:action>
-            <.dm_link 
+            <.dm_link
               navigate={~p"/repository/#{Base.url_encode64(repo["path"], padding: false)}"}
-              class="dm-btn dm-btn--primary w-full py-3 text-base font-bold shadow-lg shadow-primary/20 flex items-center justify-center gap-2"
+              class="btn btn-primary w-full"
             >
               <span>Open Project</span>
               <.dm_mdi name="arrow-right" class="w-4 h-4" />
@@ -102,7 +98,7 @@ defmodule PiWeb.HomeLive do
       <!-- Add Project View (New Page) -->
       <div :if={@live_action == :add} class="max-w-2xl mx-auto">
         <div class="mb-8 flex items-center gap-4 text-on-surface">
-           <.dm_link navigate={~p"/"} class="dm-btn dm-btn--ghost dm-btn--sm shape-circle p-2">
+           <.dm_link navigate={~p"/"} class="btn btn-ghost btn-sm btn-circle">
              <.dm_mdi name="arrow-left" class="w-5 h-5" />
            </.dm_link>
            <h1 class="text-3xl font-bold font-display">Add Project Repository</h1>
@@ -111,19 +107,15 @@ defmodule PiWeb.HomeLive do
         <.dm_card variant="bordered" shadow="md" class="p-6">
           <div class="flex flex-col h-[600px]">
             <form phx-change="name_change" class="mb-4">
-              <label class="block text-[10px] font-bold uppercase tracking-widest opacity-40 mb-2">
-                Repository Name
-              </label>
-              <input
-                type="text"
+              <.dm_input
                 name="name"
                 value={@repo_name}
+                label="Repository Name"
                 placeholder="e.g. my-project"
-                class="w-full px-3 py-2 rounded-lg border border-outline-variant bg-surface-container focus:border-primary focus:outline-none"
+                helper="Defaults to the directory name. You can rename it later."
+                class="w-full"
+                size="sm"
               />
-              <p class="text-[10px] text-on-surface-variant mt-1 opacity-60">
-                Defaults to the directory name. You can rename it later.
-              </p>
             </form>
 
             <div class="flex items-center gap-2 mb-4 p-2 bg-surface-container-high rounded-lg border border-outline-variant">
@@ -131,9 +123,9 @@ defmodule PiWeb.HomeLive do
                 <.dm_mdi name="arrow-up" class="w-4 h-4" />
               </.dm_btn>
               <div class="text-xs font-mono truncate flex-1 text-on-surface-variant">{@browsing_path}</div>
-              <.dm_btn :if={is_git_repo?(@browsing_path)} id="is-git-badge" variant="success" size="xs" disabled>
-                 <.dm_mdi name="git" class="w-4 h-4" />
-              </.dm_btn>
+              <.dm_chip :if={is_git_repo?(@browsing_path)} id="is-git-badge" color="success" size="sm">
+                <.dm_mdi name="git" class="w-4 h-4" />
+              </.dm_chip>
             </div>
 
             <div class="flex-1 overflow-y-auto border border-outline-variant rounded-xl divide-y divide-outline-variant bg-surface-container-low">
@@ -162,7 +154,7 @@ defmodule PiWeb.HomeLive do
             </div>
 
             <div class="mt-6 flex justify-end gap-3">
-               <.dm_link navigate={~p"/"} class="dm-btn dm-btn--ghost">Cancel</.dm_link>
+               <.dm_link navigate={~p"/"} class="btn btn-ghost">Cancel</.dm_link>
                <.dm_btn id="confirm-add-btn" phx-click="browser_confirm" phx-hook="WebComponentHook" variant="primary">
                  Add This Directory
                </.dm_btn>
@@ -172,30 +164,41 @@ defmodule PiWeb.HomeLive do
       </div>
 
       <div :if={@live_action == :index} class="mt-16 grid grid-cols-1 md:grid-cols-3 gap-8 border-t border-outline-variant pt-12">
-        <div class="flex flex-col items-center text-center p-6 bg-surface-container-low rounded-2xl">
-          <.dm_mdi name="lightbulb-outline" class="w-8 h-8 text-warning mb-4" />
-          <h3 class="font-bold text-lg mb-2">Multi-Turn Reasoner</h3>
-          <p class="text-on-surface-variant text-sm leading-relaxed">
-            π thinks in steps, explains its plan, and iterates until the task is complete.
-          </p>
-        </div>
-        <div class="flex flex-col items-center text-center p-6 bg-surface-container-low rounded-2xl">
-          <.dm_mdi name="shield-check-outline" class="w-8 h-8 text-success mb-4" />
-          <h3 class="font-bold text-lg mb-2">Human-in-the-Loop</h3>
-          <p class="text-on-surface-variant text-sm leading-relaxed">
-            Restricted operations like bash commands or file edits require your explicit approval.
-          </p>
-        </div>
-        <div class="flex flex-col items-center text-center p-6 bg-surface-container-low rounded-2xl">
-          <.dm_mdi name="source-branch" class="w-8 h-8 text-primary mb-4" />
-          <h3 class="font-bold text-lg mb-2">Time-Travel Debugging</h3>
-          <p class="text-on-surface-variant text-sm leading-relaxed">
-            Fork any session at any point to explore multiple solutions simultaneously.
-          </p>
-        </div>
+        <.dm_card class="h-full">
+          <div class="flex flex-col items-center text-center p-6">
+            <.dm_mdi name="lightbulb-outline" class="w-8 h-8 text-warning mb-4" />
+            <h3 class="font-bold text-lg mb-2">Multi-Turn Reasoner</h3>
+            <p class="text-on-surface-variant text-sm leading-relaxed">
+              π thinks in steps, explains its plan, and iterates until the task is complete.
+            </p>
+          </div>
+        </.dm_card>
+        <.dm_card class="h-full">
+          <div class="flex flex-col items-center text-center p-6">
+            <.dm_mdi name="shield-check-outline" class="w-8 h-8 text-success mb-4" />
+            <h3 class="font-bold text-lg mb-2">Human-in-the-Loop</h3>
+            <p class="text-on-surface-variant text-sm leading-relaxed">
+              Restricted operations like bash commands or file edits require your explicit approval.
+            </p>
+          </div>
+        </.dm_card>
+        <.dm_card class="h-full">
+          <div class="flex flex-col items-center text-center p-6">
+            <.dm_mdi name="source-branch" class="w-8 h-8 text-primary mb-4" />
+            <h3 class="font-bold text-lg mb-2">Time-Travel Debugging</h3>
+            <p class="text-on-surface-variant text-sm leading-relaxed">
+              Fork any session at any point to explore multiple solutions simultaneously.
+            </p>
+          </div>
+        </.dm_card>
       </div>
     </div>
     """
+  end
+
+  @impl true
+  def handle_event("theme_changed", _, socket) do
+    {:noreply, socket}
   end
 
   @impl true
@@ -247,16 +250,12 @@ defmodule PiWeb.HomeLive do
     if name == "" do
       {:noreply, assign(socket, error: "Repository name cannot be empty.")}
     else
-      case RepoManager.add_repo(path, name: name) do
-        {:ok, _entry} ->
-          {:noreply,
-           socket
-           |> put_flash(:info, "Repository added successfully.")
-           |> push_navigate(to: ~p"/")}
+      {:ok, _entry} = RepoManager.add_repo(path, name: name)
 
-        _error ->
-          {:noreply, assign(socket, error: "Could not add repository.")}
-      end
+      {:noreply,
+       socket
+       |> put_flash(:info, "Repository added successfully.")
+       |> push_navigate(to: ~p"/")}
     end
   end
 

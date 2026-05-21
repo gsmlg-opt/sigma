@@ -12,6 +12,23 @@ import "@duskmoon-dev/el-input/register"
 import "@duskmoon-dev/el-menu/register"
 import "@duskmoon-dev/el-badge/register"
 import "@duskmoon-dev/el-chip/register"
+import "@duskmoon-dev/el-autocomplete/register"
+
+// Forwards the composed `change` event from el-dm-autocomplete to LiveView.
+// Use: phx-hook="AutocompleteHook" data-event="your_lv_event" name="field_name"
+const AutocompleteHook = {
+  mounted() {
+    const eventName = this.el.dataset.event || "autocomplete_change"
+    const fieldName = this.el.getAttribute("name") || "value"
+    this._handler = (e) => {
+      if (e.detail) this.pushEvent(eventName, { [fieldName]: e.detail.value })
+    }
+    this.el.addEventListener("change", this._handler)
+  },
+  destroyed() {
+    this.el.removeEventListener("change", this._handler)
+  }
+}
 
 // Auto-show dialogs when they mount
 const ModalHook = {
@@ -54,7 +71,7 @@ let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("
 
 let liveSocket = new LiveSocket("/live", Socket, {
   params: {_csrf_token: csrfToken},
-  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom }
+  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, AutocompleteHook }
 })
 
 // Show progress bar on live navigation and form submits

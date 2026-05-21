@@ -34,7 +34,7 @@ defmodule PiWeb.RepositoryLive do
           </div>
           <.dm_link
             navigate={~p"/repository/#{@encoded_repository}/settings"}
-            class="dm-btn dm-btn--ghost dm-btn--sm shape-circle p-2 shrink-0"
+            class="btn btn-ghost btn-sm btn-circle shrink-0"
             id="project-settings-btn"
             title="Repository settings"
           >
@@ -55,7 +55,7 @@ defmodule PiWeb.RepositoryLive do
 
         <.dm_link
           navigate={~p"/"}
-          class="dm-btn dm-btn--ghost w-full justify-start"
+          class="btn btn-ghost w-full justify-start"
         >
           <div class="flex items-center gap-2">
             <.dm_mdi name="folder-multiple-outline" class="w-4 h-4" />
@@ -139,7 +139,7 @@ defmodule PiWeb.RepositoryLive do
               <:action>
                 <.dm_link
                   navigate={~p"/repository/#{@encoded_repository}/sessions/#{s}"}
-                  class="dm-btn dm-btn--primary w-full text-center py-2 font-bold"
+                  class="btn btn-primary w-full"
                 >
                   Open Session
                 </.dm_link>
@@ -187,6 +187,11 @@ defmodule PiWeb.RepositoryLive do
   end
 
   @impl true
+  def handle_event("theme_changed", _, socket) do
+    {:noreply, socket}
+  end
+
+  @impl true
   def handle_event("delete_session", %{"id" => id}, socket) do
     {:noreply, assign(socket, deleting_session: id)}
   end
@@ -220,11 +225,9 @@ defmodule PiWeb.RepositoryLive do
 
   @impl true
   def handle_event("new_session", _, socket) do
-    session_id = "session_#{System.unique_integer([:positive])}"
-
     {:noreply,
      push_navigate(socket,
-       to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{session_id}"
+       to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/new"
      )}
   end
 

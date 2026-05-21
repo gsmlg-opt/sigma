@@ -37,14 +37,14 @@ defmodule PiWeb.SettingsLive do
 
       <div class="grid grid-cols-1 md:grid-cols-4 gap-8">
         <!-- Sidebar Navigation -->
-        <aside class="space-y-4">
+        <aside class="bg-secondary text-secondary-content rounded-2xl p-4 space-y-4">
           <nav class="flex flex-col gap-2">
             <.dm_link
               patch={~p"/settings/providers"}
-              class={["p-4 rounded-2xl border transition-all flex items-center gap-3 font-bold", 
-                if(@live_action == :providers, 
-                   do: "bg-primary text-primary-content border-primary shadow-lg", 
-                   else: "bg-surface-container border-outline-variant hover:bg-surface-container-high"
+              class={["p-4 rounded-2xl border transition-all flex items-center gap-3 font-bold",
+                if(@live_action == :providers,
+                   do: "bg-primary text-primary-content border-primary shadow-lg",
+                   else: "border-secondary-content/20 hover:bg-secondary-content/10 text-secondary-content"
                 )]}
             >
               <.dm_mdi name="robot-outline" class="w-5 h-5" />
@@ -53,10 +53,10 @@ defmodule PiWeb.SettingsLive do
 
             <.dm_link
               patch={~p"/settings/credentials"}
-              class={["p-4 rounded-2xl border transition-all flex items-center gap-3 font-bold", 
-                if(@live_action == :credentials, 
-                   do: "bg-primary text-primary-content border-primary shadow-lg", 
-                   else: "bg-surface-container border-outline-variant hover:bg-surface-container-high"
+              class={["p-4 rounded-2xl border transition-all flex items-center gap-3 font-bold",
+                if(@live_action == :credentials,
+                   do: "bg-primary text-primary-content border-primary shadow-lg",
+                   else: "border-secondary-content/20 hover:bg-secondary-content/10 text-secondary-content"
                 )]}
             >
               <.dm_mdi name="key-outline" class="w-5 h-5" />
@@ -68,13 +68,12 @@ defmodule PiWeb.SettingsLive do
               class={["p-4 rounded-2xl border transition-all flex items-center gap-3 font-bold",
                 if(@live_action == :system_prompt,
                   do: "bg-primary text-primary-content border-primary shadow-lg",
-                  else: "bg-surface-container border-outline-variant hover:bg-surface-container-high"
+                  else: "border-secondary-content/20 hover:bg-secondary-content/10 text-secondary-content"
                 )]}
             >
               <.dm_mdi name="text-box-outline" class="w-5 h-5" />
               <span>System Prompt</span>
             </.dm_link>
-
           </nav>
         </aside>
 
@@ -142,18 +141,15 @@ defmodule PiWeb.SettingsLive do
               <.dm_input name="name" value={p["name"]} class="w-full" size="sm" />
             </div>
             <div class="space-y-1">
-              <label class="text-[10px] font-bold opacity-40 uppercase tracking-wider text-on-surface">API Type</label>
-              <select name="api_type" class="w-full bg-surface-container rounded-lg border border-outline-variant p-2 text-sm text-on-surface">
+              <.dm_select name="api_type" value={p["api_type"]} label="API Type" size="sm" class="w-full">
                 <option value="anthropic" selected={p["api_type"] == "anthropic"}>Anthropic</option>
                 <option value="openai" selected={p["api_type"] == "openai"}>OpenAI</option>
-              </select>
+              </.dm_select>
             </div>
             <div class="space-y-1">
-              <label class="text-[10px] font-bold opacity-40 uppercase tracking-wider text-on-surface">Credential (API Key)</label>
-              <select name="credential_id" class="w-full bg-surface-container rounded-lg border border-outline-variant p-2 text-sm text-on-surface">
-                <option value="">No Key Selected</option>
+              <.dm_select name="credential_id" value={p["credential_id"]} label="Credential (API Key)" prompt="No Key Selected" size="sm" class="w-full">
                 <option :for={{cid, c} <- @credentials} value={cid} selected={p["credential_id"] == cid}>{c["name"]}</option>
-              </select>
+              </.dm_select>
             </div>
             <div class="space-y-1">
               <label class="text-[10px] font-bold opacity-40 uppercase tracking-wider text-on-surface">Model ID (Manual Input)</label>
@@ -243,12 +239,14 @@ defmodule PiWeb.SettingsLive do
       <.dm_card variant="bordered" class="bg-surface-container-low">
         <form phx-submit="save_system_prompt" class="space-y-4">
           <div class="space-y-2">
-            <label class="text-[10px] font-bold opacity-40 uppercase tracking-wider text-on-surface">Base Instructions</label>
-            <textarea
+            <.dm_textarea
               name="system_prompt"
-              rows="15"
-              class="w-full bg-surface-container rounded-xl border border-outline-variant p-4 text-sm text-on-surface font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-primary/20"
-            >{@system_prompt}</textarea>
+              value={@system_prompt}
+              label="Base Instructions"
+              rows={15}
+              class="w-full"
+              textarea_class="font-mono"
+            />
           </div>
           
           <div class="flex justify-end pt-4 border-t border-outline-variant">
@@ -274,6 +272,11 @@ defmodule PiWeb.SettingsLive do
   end
 
   # Handlers
+
+  @impl true
+  def handle_event("theme_changed", _, socket) do
+    {:noreply, socket}
+  end
 
   @impl true
   def handle_event("load_config", _, socket) do
