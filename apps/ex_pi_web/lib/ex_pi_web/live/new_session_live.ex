@@ -366,8 +366,7 @@ defmodule PiWeb.NewSessionLive do
   end
 
   defp get_sessions_dir(workdir) do
-    encoded_cwd = Base.url_encode64(workdir, padding: false)
-    Path.join(PiWeb.get_sessions_root(), encoded_cwd)
+    PiSession.ConfigManager.sessions_dir(workdir)
   end
 
   defp list_git_branches(workdir) do

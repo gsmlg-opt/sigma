@@ -207,9 +207,8 @@ defmodule PiWeb.ProjectSettingsLive do
   defp rename_sessions_dir(same, same), do: :ok
 
   defp rename_sessions_dir(old_path, new_path) do
-    root = PiWeb.get_sessions_root()
-    old_dir = Path.join(root, Base.url_encode64(old_path, padding: false))
-    new_dir = Path.join(root, Base.url_encode64(new_path, padding: false))
+    old_dir = PiSession.ConfigManager.sessions_dir(old_path)
+    new_dir = PiSession.ConfigManager.sessions_dir(new_path)
 
     cond do
       not File.dir?(old_dir) -> :ok

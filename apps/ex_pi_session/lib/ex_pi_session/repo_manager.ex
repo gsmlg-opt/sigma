@@ -121,16 +121,6 @@ defmodule PiSession.RepoManager do
   end
 
   defp get_repos_root do
-    if Mix.env() == :dev do
-      # Find umbrella root by looking for mix.exs
-      cwd = File.cwd!()
-      root = if File.exists?(Path.join(cwd, "apps")), do: cwd, else: Path.expand("../..", cwd)
-      Path.join(root, "apps/ex_pi_session/priv")
-    else
-      case :code.priv_dir(:ex_pi_session) do
-        {:error, :bad_name} -> Path.expand("priv", File.cwd!())
-        path -> List.to_string(path)
-      end
-    end
+    PiSession.ConfigManager.agent_dir()
   end
 end

@@ -238,17 +238,15 @@ defmodule PiWeb.SettingsLive do
 
       <.dm_card variant="bordered" class="bg-surface-container-low">
         <form phx-submit="save_system_prompt" class="space-y-4">
-          <div class="space-y-2">
-            <.dm_textarea
-              name="system_prompt"
-              value={@system_prompt}
-              label="Base Instructions"
-              rows={15}
-              class="w-full"
-              textarea_class="font-mono"
-            />
-          </div>
-          
+          <.dm_markdown_input
+            id="system-prompt-editor"
+            phx-hook="MarkdownInputHook"
+            name="system_prompt"
+            value={@system_prompt}
+            label="Base Instructions"
+            class="w-full"
+          />
+
           <div class="flex justify-end pt-4 border-t border-outline-variant">
              <.dm_btn type="submit" phx-hook="WebComponentHook" variant="primary" size="md">
                Save System Prompt

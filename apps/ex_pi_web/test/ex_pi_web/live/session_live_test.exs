@@ -19,7 +19,7 @@ defmodule PiWeb.SessionLiveTest do
   test "renders session page", %{conn: conn} do
     {:ok, _view, html} = live(conn, "/repository/#{@encoded_workdir}/sessions/test")
     assert html =~ "Ask π anything"
-    assert html =~ "Ctrl+Enter to send"
+    assert html =~ "⌘/Ctrl+Enter to send"
   end
 
   test "submits prompt", %{conn: conn} do

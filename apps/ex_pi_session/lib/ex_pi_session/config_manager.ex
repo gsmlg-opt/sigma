@@ -220,6 +220,43 @@ defmodule PiSession.ConfigManager do
     |> save_config()
   end
 
+  # ── Path helpers (pi-compatible) ─────────────────────────────────────────
+
+  @doc "Returns the pi agent config directory (~/.pi/agent/)."
+  def agent_dir do
+    Path.join([System.user_home!(), @agent_dir_name, @config_subdir])
+  end
+
+  @doc "Returns the root sessions directory (~/.pi/agent/sessions/)."
+  def sessions_root do
+    Path.join(agent_dir(), "sessions")
+  end
+
+  @doc """
+  Returns the session directory for a working directory, using pi's path encoding.
+
+  Pi encodes the cwd as `--Users-gao-Workspace-example--` (slashes → dashes,
+  wrapped in double dashes). This matches the original pi TypeScript agent so
+  sessions are shared between the two tools.
+  """
+  def sessions_dir(cwd) do
+    Path.join(sessions_root(), pi_safe_path(cwd))
+  end
+
+  @doc "Returns the path to repos.jsonl."
+  def repos_file do
+    Path.join(agent_dir(), "repos.jsonl")
+  end
+
+  defp pi_safe_path(cwd) do
+    safe =
+      cwd
+      |> String.replace_leading("/", "")
+      |> String.replace(~r|[/:\\]|, "-")
+
+    "--#{safe}--"
+  end
+
   def get_active_provider_config do
     config = get_config()
     provider_id = config["active_provider_id"]

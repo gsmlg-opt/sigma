@@ -240,7 +240,6 @@ defmodule PiWeb.RepositoryLive do
   end
 
   defp get_sessions_dir(workdir) do
-    encoded_cwd = Base.url_encode64(workdir, padding: false)
-    Path.join(PiWeb.get_sessions_root(), encoded_cwd)
+    PiSession.ConfigManager.sessions_dir(workdir)
   end
 end

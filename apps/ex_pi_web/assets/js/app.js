@@ -4,15 +4,23 @@ import {LiveSocket} from "phoenix_live_view"
 import topbar from "topbar"
 import * as DuskmoonHooks from "phoenix_duskmoon/hooks"
 
-import "@duskmoon-dev/el-button/register"
-import "@duskmoon-dev/el-card/register"
+import "@duskmoon-dev/elements/register"
 import "@duskmoon-dev/el-chat/register"
-import "@duskmoon-dev/el-dialog/register"
-import "@duskmoon-dev/el-input/register"
-import "@duskmoon-dev/el-menu/register"
-import "@duskmoon-dev/el-badge/register"
-import "@duskmoon-dev/el-chip/register"
-import "@duskmoon-dev/el-autocomplete/register"
+import "@duskmoon-dev/el-markdown-input/register"
+
+// WORKAROUND(upstream): duskmoon-dev/duskmoon-elements#61
+// Forces el-dm-markdown-input's `value` property to be a string on mount/update.
+// LiveView's diff protocol can deliver the value as an array of template fragments
+// instead of a joined string; this hook re-syncs from the HTML attribute, which is
+// always a plain string, fixing the "[object Object]..." display bug.
+const MarkdownInputHook = {
+  mounted() { this._syncValue() },
+  updated() { this._syncValue() },
+  _syncValue() {
+    const val = this.el.getAttribute('value') ?? ''
+    if (this.el.value !== val) this.el.value = val
+  }
+}
 
 // Forwards the composed `change` event from el-dm-autocomplete to LiveView.
 // Use: phx-hook="AutocompleteHook" data-event="your_lv_event" name="field_name"
@@ -40,6 +48,54 @@ const ModalHook = {
     }
   }
 };
+
+// Drives el-dm-menu open/close from an anchor button and forwards select events to LiveView.
+// Use: phx-hook="SessionMenuHook" data-session="session_id" anchor="#btn-id"
+const SessionMenuHook = {
+  mounted() {
+    // Forward menu select events to LiveView
+    this._selectHandler = (e) => {
+      const session = this.el.dataset.session
+      this.pushEvent("session_menu_action", { value: e.detail?.value, session })
+    }
+    this.el.addEventListener("select", this._selectHandler)
+
+    // Wire anchor button click → menu toggle (el-dm-menu anchor is positioning-only)
+    const anchorSel = this.el.getAttribute("anchor")
+    this._anchorEl = anchorSel ? document.querySelector(anchorSel) : null
+    if (this._anchorEl) {
+      this._clickHandler = (e) => { e.stopPropagation(); this.el.toggle() }
+      this._anchorEl.addEventListener("click", this._clickHandler)
+    }
+  },
+  destroyed() {
+    this.el.removeEventListener("select", this._selectHandler)
+    if (this._anchorEl && this._clickHandler) {
+      this._anchorEl.removeEventListener("click", this._clickHandler)
+    }
+  }
+}
+
+// Adds Cmd+Enter support to el-dm-chat-input (which only handles Ctrl+Enter natively).
+// Use: phx-hook="CmdEnterHook" on a wrapper element containing the el-dm-chat-input.
+const CmdEnterHook = {
+  mounted() {
+    this._chatInput = this.el.querySelector('el-dm-chat-input')
+    if (!this._chatInput) return
+    this._keyHandler = (e) => {
+      if (e.key === 'Enter' && e.metaKey && !e.shiftKey) {
+        e.preventDefault()
+        this._chatInput._send()
+      }
+    }
+    this._chatInput.addEventListener('keydown', this._keyHandler)
+  },
+  destroyed() {
+    if (this._chatInput && this._keyHandler) {
+      this._chatInput.removeEventListener('keydown', this._keyHandler)
+    }
+  }
+}
 
 // Scroll to bottom when new stream items arrive, unless the user has scrolled up
 const ScrollBottom = {
@@ -71,7 +127,7 @@ let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("
 
 let liveSocket = new LiveSocket("/live", Socket, {
   params: {_csrf_token: csrfToken},
-  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, AutocompleteHook }
+  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, AutocompleteHook, SessionMenuHook, CmdEnterHook, MarkdownInputHook }
 })
 
 // Show progress bar on live navigation and form submits

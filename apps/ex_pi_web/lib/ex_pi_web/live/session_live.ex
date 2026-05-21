@@ -94,6 +94,7 @@ defmodule PiWeb.SessionLive do
           |> assign(:tool_results, tool_results)
           |> assign(:tool_call_to_msg, tool_call_to_msg)
           |> assign(:sessions, sessions)
+          |> assign(:renaming_session, nil)
           |> assign(:active_provider_id, provider_id)
           |> assign(:current_model, model_id)
           |> assign(:available_models, available_models)
@@ -123,24 +124,58 @@ defmodule PiWeb.SessionLive do
           </.dm_link>
         </div>
 
-        <.dm_left_menu id="sidebar-sessions" class="flex-1 overflow-y-auto px-2 pt-4">
-          <:title>Sessions</:title>
-          <:menu>
-            <.dm_left_menu_group id="sessions-list" active={@session_id}>
-              <:title></:title>
-              <:menu
-                :for={s <- @sessions}
-                to={~p"/repository/#{@encoded_repository}/sessions/#{s}"}
-                id={"session-link-#{s}"}
+        <div class="flex-1 overflow-y-auto">
+          <div class="px-4 py-3 text-xs uppercase tracking-widest font-bold opacity-60 text-secondary-content">
+            Sessions
+          </div>
+          <ul class="px-2 flex flex-col gap-0.5">
+            <li :for={s <- @sessions} class="group relative flex items-center rounded-xl">
+              <% is_renaming = @renaming_session == s %>
+              <form :if={is_renaming} phx-submit="rename_session" class="flex-1 flex items-center gap-1 px-2 py-1">
+                <input type="hidden" name="old_id" value={s} />
+                <input
+                  type="text"
+                  name="new_name"
+                  value={s}
+                  autofocus
+                  class="flex-1 text-sm bg-surface text-on-surface rounded px-2 py-1 border border-primary focus:outline-none"
+                />
+              </form>
+              <.dm_link
+                :if={not is_renaming}
+                navigate={~p"/repository/#{@encoded_repository}/sessions/#{s}"}
+                class={["flex-1 flex items-center gap-2 px-3 py-2 truncate rounded-xl transition-colors text-secondary-content",
+                  if(s == @session_id, do: "bg-primary text-primary-content font-bold", else: "hover:bg-secondary-content/10")]}
               >
-                <div class="flex items-center gap-2 truncate">
-                  <.dm_mdi name="chat-outline" class="w-4 h-4" />
-                  <span class="truncate">{s}</span>
-                </div>
-              </:menu>
-            </.dm_left_menu_group>
-          </:menu>
-        </.dm_left_menu>
+                <.dm_mdi name="chat-outline" class="w-4 h-4 shrink-0 opacity-70" />
+                <span class="truncate text-xs font-mono">{s}</span>
+              </.dm_link>
+              <.dm_btn
+                :if={not is_renaming}
+                id={"session-menu-btn-#{s}"}
+                type="button"
+                variant="ghost"
+                size="xs"
+                class="shrink-0 mr-1 opacity-0 group-hover:opacity-60 transition-opacity"
+              >
+                <.dm_mdi name="dots-vertical" class="w-4 h-4" />
+              </.dm_btn>
+              <.dm_menu
+                :if={not is_renaming}
+                id={"session-menu-#{s}"}
+                anchor={"#session-menu-btn-#{s}"}
+                placement="bottom-end"
+                phx-hook="SessionMenuHook"
+                data-session={s}
+              >
+                <.dm_menu_item value="rename" icon="pencil-outline">Rename</.dm_menu_item>
+                <.dm_menu_item value="fork" icon="source-branch">Fork</.dm_menu_item>
+                <.dm_menu_item value="archive" icon="archive-outline">Archive</.dm_menu_item>
+                <.dm_menu_item value="delete" icon="delete-outline">Delete</.dm_menu_item>
+              </.dm_menu>
+            </li>
+          </ul>
+        </div>
 
         <div class="p-4 border-t border-secondary-content/10 text-center">
           <.dm_link
@@ -160,13 +195,12 @@ defmodule PiWeb.SessionLive do
               message={message}
               tool_results={@tool_results}
               streaming_message_id={@streaming_message_id}
-              encoded_repository={@encoded_repository}
             />
           </div>
         </div>
 
         <div class="p-6 border-t border-outline-variant bg-surface">
-          <div class="max-w-4xl mx-auto">
+          <div id="chat-input-area" phx-hook="CmdEnterHook" class="max-w-4xl mx-auto">
             <div :if={@turn_in_flight} class="mb-3 flex items-center justify-between gap-3">
               <div class="flex items-center gap-3 text-sm text-on-surface-variant">
                 <.dm_chat_typing />
@@ -187,7 +221,7 @@ defmodule PiWeb.SessionLive do
 
             <.dm_chat_input
               id="prompt-input"
-              placeholder="Ask π anything… (Ctrl+Enter to send)"
+              placeholder="Ask π anything… (⌘/Ctrl+Enter to send)"
               disabled={@turn_in_flight}
               clear_on_send={true}
               duskmoon-send-send="send_prompt"
@@ -227,6 +261,7 @@ defmodule PiWeb.SessionLive do
       variant="filled"
       color="secondary"
       avatar="You"
+      author="You"
       time={format_timestamp(@message.timestamp)}
       content={user_content(@message.content)}
     />
@@ -234,19 +269,59 @@ defmodule PiWeb.SessionLive do
   end
 
   defp message_bubble(%{message: %{role: :assistant}} = assigns) do
+    content = List.wrap(assigns.message.content)
+
+    assigns =
+      assigns
+      |> assign(:thinking, Enum.find(content, &(&1.type == :thinking)))
+      |> assign(:texts, Enum.filter(content, &(&1.type == :text)))
+      |> assign(:tool_calls, Enum.filter(content, &(&1.type == :tool_call)))
+
     ~H"""
     <.dm_chat
       id={@message.id}
       align="start"
       avatar="π"
+      author="π"
       time={format_timestamp(@message.timestamp)}
       streaming={@message.id == @streaming_message_id}
     >
-      <.content_block
-        :for={block <- List.wrap(@message.content)}
-        block={block}
-        tool_results={@tool_results}
-      />
+      <%!-- Reasoning block; tool calls shown inside via the tools slot --%>
+      <.dm_chat_reasoning :if={@thinking} summary="Reasoning">
+        {@thinking.thinking}
+        <:tools :if={@tool_calls != []}>
+          <.dm_chat_tool
+            :for={block <- @tool_calls}
+            name={block.name}
+            status={tool_call_status(@tool_results, block.id)}
+          >
+            <:call>
+              <pre class="text-xs overflow-x-auto p-2 whitespace-pre-wrap">{format_tool_call_args(block)}</pre>
+            </:call>
+            <:result :if={Map.has_key?(@tool_results, block.id)}>
+              <pre class="text-xs overflow-x-auto p-2 whitespace-pre-wrap">{elem(@tool_results[block.id], 0)}</pre>
+            </:result>
+          </.dm_chat_tool>
+        </:tools>
+      </.dm_chat_reasoning>
+
+      <%!-- Tool calls at top level when there is no reasoning block --%>
+      <.dm_chat_tool
+        :if={is_nil(@thinking)}
+        :for={block <- @tool_calls}
+        name={block.name}
+        status={tool_call_status(@tool_results, block.id)}
+      >
+        <:call>
+          <pre class="text-xs overflow-x-auto p-2 whitespace-pre-wrap">{format_tool_call_args(block)}</pre>
+        </:call>
+        <:result :if={Map.has_key?(@tool_results, block.id)}>
+          <pre class="text-xs overflow-x-auto p-2 whitespace-pre-wrap">{elem(@tool_results[block.id], 0)}</pre>
+        </:result>
+      </.dm_chat_tool>
+
+      <.dm_markdown :for={block <- @texts} content={block.text} />
+
       <:footer :if={not is_nil(@message.usage)}>
         <span class="text-[10px] opacity-40 font-mono">
           in: {@message.usage.input} · out: {@message.usage.output}
@@ -275,6 +350,7 @@ defmodule PiWeb.SessionLive do
       id={@message.id}
       align="start"
       avatar="∑"
+      author="Summary"
       time={format_timestamp(@message.timestamp)}
       content={@message.summary || "Context compacted."}
     />
@@ -282,35 +358,6 @@ defmodule PiWeb.SessionLive do
   end
 
   defp message_bubble(assigns), do: ~H""
-
-  defp content_block(%{block: %{type: :thinking}} = assigns) do
-    ~H"""
-    <.dm_chat_reasoning summary="Reasoning">
-      {@block.thinking}
-    </.dm_chat_reasoning>
-    """
-  end
-
-  defp content_block(%{block: %{type: :text}} = assigns) do
-    ~H"""
-    <.dm_markdown content={@block.text} />
-    """
-  end
-
-  defp content_block(%{block: %{type: :tool_call}} = assigns) do
-    ~H"""
-    <.dm_chat_tool name={@block.name} status={tool_call_status(@tool_results, @block.id)}>
-      <:call>
-        <pre class="text-xs overflow-x-auto p-2 whitespace-pre-wrap">{format_tool_call_args(@block)}</pre>
-      </:call>
-      <:result :if={Map.has_key?(@tool_results, @block.id)}>
-        <pre class="text-xs overflow-x-auto p-2 whitespace-pre-wrap">{elem(@tool_results[@block.id], 0)}</pre>
-      </:result>
-    </.dm_chat_tool>
-    """
-  end
-
-  defp content_block(assigns), do: ~H""
 
   defp user_content(content) when is_binary(content), do: content
 
@@ -411,6 +458,73 @@ defmodule PiWeb.SessionLive do
   @impl true
   def handle_event("fork_at", %{"msg-id" => msg_id}, socket) do
     do_fork(socket, {:at, msg_id})
+  end
+
+  @impl true
+  def handle_event("session_menu_action", %{"value" => action, "session" => s}, socket) do
+    case action do
+      "rename" ->
+        {:noreply, assign(socket, :renaming_session, s)}
+
+      "fork" ->
+        new_id = "fork_#{System.unique_integer([:positive])}"
+        source_path = Path.join(socket.assigns.sessions_dir, "#{s}.jsonl")
+        target_path = Path.join(socket.assigns.sessions_dir, "#{new_id}.jsonl")
+        PiSession.Log.fork_at_message(source_path, target_path, :all, socket.assigns.workdir)
+
+        {:noreply,
+         push_navigate(socket,
+           to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{new_id}"
+         )}
+
+      "archive" ->
+        {:noreply, put_flash(socket, :info, "Archive not yet implemented")}
+
+      "delete" ->
+        File.rm(Path.join(socket.assigns.sessions_dir, "#{s}.jsonl"))
+        {:ok, sessions} = PiSession.Log.list_sessions(socket.assigns.sessions_dir)
+        socket = assign(socket, :sessions, sessions)
+
+        if s == socket.assigns.session_id do
+          {:noreply,
+           push_navigate(socket, to: ~p"/repository/#{socket.assigns.encoded_repository}")}
+        else
+          {:noreply, socket}
+        end
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("rename_session", %{"old_id" => old_id, "new_name" => new_name}, socket) do
+    new_name = String.trim(new_name)
+    socket = assign(socket, :renaming_session, nil)
+
+    if new_name == "" or new_name == old_id do
+      {:noreply, socket}
+    else
+      old_path = Path.join(socket.assigns.sessions_dir, "#{old_id}.jsonl")
+      new_path = Path.join(socket.assigns.sessions_dir, "#{new_name}.jsonl")
+      File.rename(old_path, new_path)
+      {:ok, sessions} = PiSession.Log.list_sessions(socket.assigns.sessions_dir)
+      socket = assign(socket, :sessions, sessions)
+
+      if old_id == socket.assigns.session_id do
+        {:noreply,
+         push_navigate(socket,
+           to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{new_name}"
+         )}
+      else
+        {:noreply, socket}
+      end
+    end
+  end
+
+  @impl true
+  def handle_event("cancel_rename", _, socket) do
+    {:noreply, assign(socket, :renaming_session, nil)}
   end
 
   @impl true
@@ -610,8 +724,7 @@ defmodule PiWeb.SessionLive do
   end
 
   defp get_sessions_dir(workdir) do
-    encoded_cwd = Base.url_encode64(workdir, padding: false)
-    Path.join(PiWeb.get_sessions_root(), encoded_cwd)
+    PiSession.ConfigManager.sessions_dir(workdir)
   end
 
   defp read_session_meta(meta_path) do
