@@ -116,3 +116,17 @@ If you encounter missing features, bugs, or need functionality not yet available
 - **`@duskmoon-dev/css-art`** — https://github.com/gsmlg-dev/duskmoon-dev/issues
 - **`@duskmoon-dev/elements`** — https://github.com/gsmlg-dev/duskmoon-dev/issues
 - **`@duskmoon-dev/art-elements`** — https://github.com/gsmlg-dev/duskmoon-dev/issues
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub Issues for `gsmlg-dev/ex_pi` using the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default triage label vocabulary. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context repo: root `CONTEXT.md` plus `docs/adr/`. See `docs/agents/domain.md`.
