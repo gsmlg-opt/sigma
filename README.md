@@ -1,74 +1,90 @@
 # ex_pi
 
-`ex_pi` is an Elixir port of the [earendil-works/pi](https://github.com/earendil-works/pi) coding agent. This project is a study port designed to understand the architectural choices of `pi` while leveraging the strengths of the Erlang VM (BEAM), such as concurrency, fault tolerance, and real-time process communication.
+`ex_pi` is an Elixir umbrella implementation of a `pi`-style AI coding agent. It combines a Phoenix LiveView chat UI, per-session BEAM processes, streaming LLM providers, JSONL session persistence, and a small coding-tool runtime.
 
-## Architecture
+The original TypeScript `pi` source is vendored at `./source` for behavior checks while porting.
 
-`ex_pi` is built as an Elixir umbrella project consisting of five core applications:
+## Applications
 
-- **`ex_pi_ai`**: A unified interface for multiple LLM providers (Anthropic, OpenAI). It features a pure SSE reducer for side-effect-free protocol parsing.
-- **`ex_pi_agent`**: The core agent loop implemented as a `GenServer` per session. It manages conversational state, internal reasoning (thoughts), and context transformation.
-- **`ex_pi_session`**: A durable, append-only persistence layer using JSONL. It supports history replay, time-travel branching (forking), and context compaction.
-- **`ex_pi_coding`**: A robust tool system (read, edit, bash) with a concurrent dispatcher. It includes built-in security boundaries and real-time output streaming via Elixir `Port`s.
-- **`ex_pi_web`**: A modern web interface built with Phoenix LiveView. It provides real-time token streaming, session management, and interactive permission handling.
+| App | Module prefix | Role |
+| --- | --- | --- |
+| `ex_pi_ai` | `PiAi` | Provider abstraction and Anthropic/OpenAI streaming parsers |
+| `ex_pi_agent` | `PiAgent` | GenServer session loop, message transforms, compaction, tool calls |
+| `ex_pi_session` | `PiSession` | Config, repository list, context-file assembly, JSONL replay/persistence |
+| `ex_pi_coding` | `PiCoding` | Tool behaviour, dispatcher, permissions, read/write/edit/bash/search tools |
+| `ex_pi_web` | `PiWeb` | Phoenix LiveView UI, routes, session process management |
 
-## Key Features
+## Features
 
-- **Unified AI Interface**: Seamlessly switch between providers using a flattened `ExPiAi.Message` protocol.
-- **Rich Agent Logic**: Support for internal "thinking" blocks, metadata, and message redaction.
-- **Durable Sessions**: Every state change is persisted to an append-only log, ensuring seamless crash recovery.
-- **Non-Linear History**: Fork any session at any point to explore alternative solutions without losing context.
-- **Safe Tool Execution**: Tools are execution-isolated and path-restricted, with a mandatory human-in-the-loop permission system for sensitive actions.
-- **Reactive UI**: Real-time updates via Phoenix PubSub and LiveView, providing a low-latency, "alive" experience.
+- Phoenix LiveView UI for repositories, sessions, settings, and interactive permission prompts.
+- Streaming Anthropic and OpenAI-compatible chat providers.
+- Append-only JSONL session logs with replay, compaction entries, and session forking.
+- Context-file assembly from `AGENTS.md`/`CLAUDE.md`, ordered from filesystem root to the active workdir.
+- Coding tools for file reads, writes, edits, shell commands, glob/grep/ls, and URL fetches.
+- DuskMoon UI components via `phoenix_duskmoon`.
 
-## Getting Started
+## Requirements
 
-### Prerequisites
+- Elixir `~> 1.18`
+- Erlang/OTP 27 or compatible with the configured Elixir version
+- API credentials for Anthropic or an OpenAI-compatible provider
 
-- Elixir 1.18 or later
-- Erlang/OTP 27
-- An API key for Anthropic or OpenAI
+## Setup
 
-### Installation
+```bash
+mix deps.get
+mix assets.setup
+mix phx.server
+```
 
-1.  Clone the repository:
-    ```bash
-    git clone https://github.com/gsmlg-dev/ex_pi.git
-    cd ex_pi
-    ```
+Open <http://localhost:4580>.
 
-2.  Install dependencies:
-    ```bash
-    mix deps.get
-    ```
+Provider settings are managed in the UI under `/settings/providers` and are saved in pi-compatible files under `~/.pi/agent/`:
 
-3.  Configure your API keys:
-    ```bash
-    export ANTHROPIC_AUTH_TOKEN="your_key_here"
-    # OR
-    export OPENROUTER_API_KEY="your_key_here"
-    ```
+- `settings.json`
+- `auth.json`
+- `models.json`
+- `AGENTS.md`
 
-4.  Start the Phoenix server:
-    ```bash
-    mix phx.server
-    ```
+Direct provider calls can also read environment fallbacks, but the LiveView flow resolves credentials from the saved settings above:
 
-Now you can visit [`localhost:4580`](http://localhost:4580) from your browser.
+- Anthropic: `ANTHROPIC_AUTH_TOKEN`, optional `ANTHROPIC_BASE_URL`
+- OpenAI-compatible: `OPENAI_API_KEY` or `OPENROUTER_API_KEY`, optional `OPENAI_BASE_URL`
 
 ## Usage
 
-- **Start a Session**: Navigate to `/sessions/default` or enter a new session ID.
-- **Interact**: Type your prompts in the chat box. The agent will stream tokens back to you in real-time.
-- **Manage Sessions**: Use the sidebar to list existing sessions or fork the current session into a new branch.
-- **Grant Permissions**: When the agent attempts a restricted action (like a bash command), a modal will appear for you to allow or deny the execution.
+1. Add a repository from the home page or visit `/repository/new`.
+2. Open the repository session list.
+3. Create or open a session.
+4. Prompt the agent; tool calls stream back through LiveView and may request approval depending on policy.
+5. Fork a session when you want a new branch of the same conversation history.
+
+Repository routes use a Base64 URL-encoded absolute path without padding:
+
+```text
+/repository/:repository
+/repository/:repository/settings
+/repository/:repository/sessions/:id
+```
+
+In development, repository and session state is stored locally:
+
+- Repository list: `apps/ex_pi_session/priv/repos.jsonl`
+- Session logs: `apps/ex_pi_web/priv/sessions/<base64-url-workdir>/<session-id>.jsonl`
 
 ## Development
 
-- **Run Tests**: `mix test`
-- **Check Formatting**: `mix format --check-formatted`
-- **Compile with Warnings as Errors**: `mix compile --warnings-as-errors`
+```bash
+mix test
+mix test apps/ex_pi_agent/test/ex_pi_agent_test.exs
+mix test apps/ex_pi_agent/test/ex_pi_agent_test.exs:42
+mix format --check-formatted
+mix compile --warnings-as-errors
+mix assets.build
+```
+
+The web app uses DuskMoon UI. Keep UI work on `phoenix_duskmoon` components and the configured Tailwind/DuskMoon pipeline; do not add DaisyUI or Phoenix `core_components.ex`.
 
 ## License
 
-This project is licensed under the same terms as the original `pi` project.
+This project follows the licensing terms of the upstream `pi` project unless stated otherwise.
