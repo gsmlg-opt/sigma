@@ -301,7 +301,7 @@ defmodule PiWeb.SessionLive do
     ~H"""
     <.dm_chat_tool name={@block.name} status={tool_call_status(@tool_results, @block.id)}>
       <:call>
-        <pre class="text-xs overflow-x-auto p-2 whitespace-pre-wrap">{format_tool_args(@block.arguments)}</pre>
+        <pre class="text-xs overflow-x-auto p-2 whitespace-pre-wrap">{format_tool_call_args(@block)}</pre>
       </:call>
       <:result :if={Map.has_key?(@tool_results, @block.id)}>
         <pre class="text-xs overflow-x-auto p-2 whitespace-pre-wrap">{elem(@tool_results[@block.id], 0)}</pre>
@@ -341,6 +341,13 @@ defmodule PiWeb.SessionLive do
   end
 
   defp format_tool_args(args), do: inspect(args)
+
+  defp format_tool_call_args(%{arguments: args}), do: format_tool_args(args)
+
+  defp format_tool_call_args(%{partial_json: partial_json}) when is_binary(partial_json),
+    do: partial_json
+
+  defp format_tool_call_args(_), do: ""
 
   defp render_tool_result_content(content) when is_list(content) do
     content
