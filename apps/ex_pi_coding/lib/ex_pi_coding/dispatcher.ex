@@ -77,18 +77,37 @@ defmodule PiCoding.Dispatcher do
   end
 
   defp do_dispatch(tool_call, tools, opts) do
+    session_id = Keyword.get(opts, :session_id)
+
     case PiCoding.PermissionInterceptor.check(tool_call, opts) do
       :allow ->
         tool = Enum.find(tools, fn t -> t.name() == tool_call.name end)
 
         if tool do
-          try do
-            tool.execute(tool_call.id, tool_call.arguments, opts)
-          rescue
-            e -> {:error, Exception.message(e)}
-          catch
-            kind, reason -> {:error, "#{kind}: #{inspect(reason)}"}
-          end
+          :telemetry.execute(
+            [:ex_pi, :tool, :call, :start],
+            %{system_time: System.system_time()},
+            %{session_id: session_id, tool_name: tool_call.name, arguments: tool_call.arguments}
+          )
+
+          start = System.monotonic_time()
+
+          result =
+            try do
+              tool.execute(tool_call.id, tool_call.arguments, opts)
+            rescue
+              e -> {:error, Exception.message(e)}
+            catch
+              kind, reason -> {:error, "#{kind}: #{inspect(reason)}"}
+            end
+
+          :telemetry.execute(
+            [:ex_pi, :tool, :call, :stop],
+            %{duration: System.monotonic_time() - start},
+            %{session_id: session_id, tool_name: tool_call.name, result: inspect(result)}
+          )
+
+          result
         else
           {:error, "Tool #{tool_call.name} not found"}
         end

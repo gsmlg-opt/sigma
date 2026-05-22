@@ -39,6 +39,8 @@ defmodule PiWeb.SessionLive do
       {:ok, {provider_mod, model_id, provider_id, api_key, base_url}} ->
         if connected?(socket) do
           Phoenix.PubSub.subscribe(PiWeb.PubSub, "session:#{session_id}")
+          Phoenix.PubSub.subscribe(PiWeb.PubSub, "ex_pi:logs:#{session_id}")
+          PiLogs.start_session(session_id)
         end
 
         {:ok, initial_messages} = PiSession.Log.replay(storage_path)
@@ -98,6 +100,11 @@ defmodule PiWeb.SessionLive do
           |> assign(:active_provider_id, provider_id)
           |> assign(:current_model, model_id)
           |> assign(:available_models, available_models)
+          |> assign(:logs_available, true)
+          |> assign(:show_logs, false)
+          |> assign(:log_entries, [])
+          |> assign(:log_filter, nil)
+          |> assign(:log_search, "")
           |> stream(:messages, stream_messages)
 
         {:ok, socket}
@@ -250,6 +257,14 @@ defmodule PiWeb.SessionLive do
         </div>
       </div>
 
+      <.live_component
+        :if={@show_logs}
+        module={PiWeb.LogDrawerLive}
+        id="log-drawer"
+        entries={@log_entries}
+        filter={@log_filter}
+        search={@log_search}
+      />
     </div>
     """
   end
@@ -547,6 +562,39 @@ defmodule PiWeb.SessionLive do
   end
 
   @impl true
+  def handle_event("toggle_logs", _params, socket) do
+    {:noreply, assign(socket, :show_logs, !socket.assigns.show_logs)}
+  end
+
+  @impl true
+  def handle_event("set_log_filter", %{"category" => cat}, socket) do
+    category =
+      case cat do
+        "" -> nil
+        c when c in ~w(llm tool permission) -> String.to_existing_atom(c)
+        _ -> socket.assigns.log_filter
+      end
+
+    entries =
+      PiLogs.search(socket.assigns.session_id,
+        category: category,
+        text: socket.assigns.log_search
+      )
+      |> Enum.reverse()
+
+    {:noreply, socket |> assign(:log_filter, category) |> assign(:log_entries, entries)}
+  end
+
+  @impl true
+  def handle_event("set_log_search", %{"value" => q}, socket) do
+    entries =
+      PiLogs.search(socket.assigns.session_id, category: socket.assigns.log_filter, text: q)
+      |> Enum.reverse()
+
+    {:noreply, socket |> assign(:log_search, q) |> assign(:log_entries, entries)}
+  end
+
+  @impl true
   def handle_event("select_model", %{"model" => model_id}, socket) do
     provider_id = socket.assigns.active_provider_id
 
@@ -670,6 +718,25 @@ defmodule PiWeb.SessionLive do
   end
 
   @impl true
+  def handle_info({:log_entry, entry}, socket) do
+    %{log_filter: filter, log_search: search, log_entries: entries} = socket.assigns
+
+    entries =
+      if entry_matches?(entry, filter, search) do
+        [entry | entries] |> Enum.take(500)
+      else
+        entries
+      end
+
+    {:noreply, assign(socket, :log_entries, entries)}
+  end
+
+  @impl true
+  def handle_info({:toggle_logs}, socket) do
+    {:noreply, assign(socket, :show_logs, !socket.assigns.show_logs)}
+  end
+
+  @impl true
   def handle_info(_event, socket) do
     {:noreply, socket}
   end
@@ -739,5 +806,24 @@ defmodule PiWeb.SessionLive do
       _ ->
         %{}
     end
+  end
+
+  defp entry_matches?(_entry, nil, ""), do: true
+
+  defp entry_matches?(entry, category, "") when not is_nil(category),
+    do: entry.category == category
+
+  defp entry_matches?(entry, nil, text), do: String.contains?(inspect(entry.metadata), text)
+
+  defp entry_matches?(entry, category, text),
+    do: entry.category == category and String.contains?(inspect(entry.metadata), text)
+
+  @impl true
+  def terminate(_reason, socket) do
+    if socket.assigns[:session_id] do
+      PiLogs.stop_session(socket.assigns.session_id)
+    end
+
+    :ok
   end
 end

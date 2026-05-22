@@ -54,7 +54,9 @@ defmodule PiWeb.SessionManager do
   def handle_info(_msg, state), do: {:noreply, state}
 
   defp start_agent(session_id, opts, state) do
-    case DynamicSupervisor.start_child(PiWeb.AgentSupervisor, {PiAgent, opts}) do
+    agent_opts = Keyword.put(opts, :session_id, session_id)
+
+    case DynamicSupervisor.start_child(PiWeb.AgentSupervisor, {PiAgent, agent_opts}) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
         policy_pid = PiAgent.get_policy(pid)

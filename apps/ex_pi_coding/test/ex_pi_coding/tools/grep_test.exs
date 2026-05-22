@@ -61,6 +61,17 @@ defmodule PiCoding.Tools.GrepTest do
     assert text =~ "def world"
   end
 
+  test "preserves utf-8 content containing NEL continuation bytes", %{dir: dir} do
+    File.write!(Path.join(dir, "unicode.md"), "# 项目\n\n其他数据")
+
+    assert {:ok, result} = Grep.execute("id", %{"pattern" => "其他"}, cwd: dir)
+    text = hd(result.content).text
+
+    assert String.valid?(text)
+    assert text =~ "unicode.md:3: 其他数据"
+    assert {:ok, _json} = Jason.encode(%{text: text})
+  end
+
   test "rejects cwd escape", %{dir: dir} do
     assert {:error, _} = Grep.execute("id", %{"pattern" => "root", "path" => "/etc"}, cwd: dir)
   end

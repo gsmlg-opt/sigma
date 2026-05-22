@@ -57,7 +57,7 @@ defmodule PiCoding.Tools.Read do
   defp do_read(path, offset, limit) do
     case File.read(path) do
       {:ok, content} ->
-        lines = String.split(content, ~r/\R/)
+        lines = String.split(content, ~r/\R/u)
         total_lines = length(lines)
 
         # offset is 1-indexed

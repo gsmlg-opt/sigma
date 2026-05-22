@@ -142,7 +142,7 @@ defmodule PiCoding.Tools.Grep do
   end
 
   defp grep_file(content, re, rel_path, context_lines, limit) do
-    lines = String.split(content, ~r/\R/)
+    lines = String.split(content, ~r/\R/u)
     total = length(lines)
 
     matching_indices =

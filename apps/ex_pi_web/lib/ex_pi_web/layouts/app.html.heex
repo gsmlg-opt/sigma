@@ -14,6 +14,20 @@
           <.dm_mdi name={if @active_tab == :settings, do: "cog", else: "cog-outline"} class="w-6 h-6" />
         </.dm_link>
       </.dm_tooltip>
+      <%= if assigns[:logs_available] do %>
+        <.dm_tooltip content="Debug Logs" position="bottom">
+          <button
+            phx-click="toggle_logs"
+            class={[
+              "flex items-center justify-center p-2 rounded-full hover:bg-primary-content/10 transition-colors",
+              assigns[:show_logs] && "text-primary-content bg-primary-content/20",
+              !assigns[:show_logs] && "text-primary-content/70 hover:text-primary-content"
+            ]}
+          >
+            <.dm_mdi name={if assigns[:show_logs], do: "bug", else: "bug-outline"} class="w-6 h-6" />
+          </button>
+        </.dm_tooltip>
+      <% end %>
       <.dm_theme_switcher id="theme-toggle" />
     </div>
   </:user_profile>

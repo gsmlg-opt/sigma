@@ -1,9 +1,9 @@
-defmodule PiCoding.MixProject do
+defmodule PiLogs.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :ex_pi_coding,
+      app: :ex_pi_logs,
       version: "0.1.0",
       build_path: "../../_build",
       config_path: "../../config/config.exs",
@@ -17,16 +17,15 @@ defmodule PiCoding.MixProject do
 
   def application do
     [
-      mod: {PiCoding, []},
+      mod: {PiLogs.Application, []},
       extra_applications: [:logger]
     ]
   end
 
   defp deps do
     [
-      {:ex_pi_ai, in_umbrella: true},
-      {:jason, "~> 1.4"},
-      {:telemetry, "~> 1.0"}
+      {:telemetry, "~> 1.0"},
+      {:phoenix_pubsub, "~> 2.1"}
     ]
   end
 end

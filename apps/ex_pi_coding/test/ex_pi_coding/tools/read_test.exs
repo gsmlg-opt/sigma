@@ -45,6 +45,16 @@ defmodule PiCoding.Tools.ReadTest do
     assert text =~ "[Showing lines 2-3 of 5. Use offset=4 to continue.]"
   end
 
+  test "preserves utf-8 content containing NEL continuation bytes", %{tmp_dir: tmp_dir} do
+    File.write!(Path.join(tmp_dir, "unicode.md"), "# 项目\n\n其他数据")
+
+    assert {:ok, result} = Read.execute("1", %{"path" => "unicode.md"}, cwd: tmp_dir)
+    assert [%{text: text}] = result.content
+    assert String.valid?(text)
+    assert text == "# 项目\n\n其他数据"
+    assert {:ok, _json} = Jason.encode(%{text: text})
+  end
+
   test "fails for path outside cwd", %{tmp_dir: tmp_dir} do
     params = %{"path" => "/etc/passwd"}
     opts = [cwd: tmp_dir]

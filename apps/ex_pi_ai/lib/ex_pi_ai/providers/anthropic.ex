@@ -8,11 +8,9 @@ defmodule PiAi.Providers.Anthropic do
     model = params.model
     context = params.context
     options = params.options
+    session_id = Map.get(params, :session_id)
 
     api_key = options[:api_key] || System.get_env("ANTHROPIC_AUTH_TOKEN")
-
-    base_url =
-      options[:base_url] || System.get_env("ANTHROPIC_BASE_URL") || "https://api.anthropic.com"
 
     system = build_system(context[:system_prompt])
 
@@ -24,11 +22,9 @@ defmodule PiAi.Providers.Anthropic do
       stream: true
     }
 
-    # Add tools if present
     body =
       if context[:tools], do: Map.put(body, :tools, transform_tools(context.tools)), else: body
 
-    # Enable extended thinking when budget is set
     {body, extra_betas} =
       case options[:thinking_budget] do
         budget when is_integer(budget) and budget > 0 ->
@@ -43,9 +39,7 @@ defmodule PiAi.Providers.Anthropic do
           {body, []}
       end
 
-    beta_value =
-      (["prompt-caching-2024-07-31"] ++ extra_betas)
-      |> Enum.join(",")
+    beta_value = (["prompt-caching-2024-07-31"] ++ extra_betas) |> Enum.join(",")
 
     headers = [
       {"x-api-key", api_key},
@@ -53,6 +47,52 @@ defmodule PiAi.Providers.Anthropic do
       {"content-type", "application/json"},
       {"anthropic-beta", beta_value}
     ]
+
+    inner = build_inner_stream(model, body, headers, options)
+
+    Elixir.Stream.transform(
+      inner,
+      fn ->
+        :telemetry.execute(
+          [:ex_pi, :llm, :request, :start],
+          %{system_time: System.system_time()},
+          %{
+            session_id: session_id,
+            model: model.id,
+            provider: "anthropic",
+            request_body: body
+          }
+        )
+
+        System.monotonic_time()
+      end,
+      fn event, start_time ->
+        case event do
+          {:done, _stop_reason, ai_msg} ->
+            :telemetry.execute(
+              [:ex_pi, :llm, :request, :stop],
+              %{duration: System.monotonic_time() - start_time},
+              %{
+                session_id: session_id,
+                model: model.id,
+                usage: ai_msg.usage,
+                response_content: ai_msg.content
+              }
+            )
+
+            {[event], start_time}
+
+          _ ->
+            {[event], start_time}
+        end
+      end,
+      fn _start_time -> :ok end
+    )
+  end
+
+  defp build_inner_stream(model, body, headers, options) do
+    base_url =
+      options[:base_url] || System.get_env("ANTHROPIC_BASE_URL") || "https://api.anthropic.com"
 
     Elixir.Stream.resource(
       fn ->

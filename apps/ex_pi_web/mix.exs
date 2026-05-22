@@ -41,6 +41,7 @@ defmodule PiWeb.MixProject do
       {:phoenix_duskmoon, "~> 9.0"},
       {:ex_pi_agent, in_umbrella: true},
       {:ex_pi_session, in_umbrella: true},
+      {:ex_pi_logs, in_umbrella: true},
       {:floki, ">= 0.30.0", only: :test},
       {:lazy_html, ">= 0.1.0", only: :test}
     ]

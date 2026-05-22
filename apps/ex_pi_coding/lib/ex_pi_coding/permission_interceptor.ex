@@ -11,6 +11,26 @@ defmodule PiCoding.PermissionInterceptor do
   Returns `:allow`, `{:deny, reason}`, or handles `:ask` via a callback.
   """
   def check(tool_call, opts) do
+    session_id = Keyword.get(opts, :session_id)
+
+    :telemetry.execute(
+      [:ex_pi, :permission, :check, :start],
+      %{system_time: System.system_time()},
+      %{session_id: session_id, tool_name: tool_call.name}
+    )
+
+    result = do_check(tool_call, opts)
+
+    :telemetry.execute(
+      [:ex_pi, :permission, :check, :stop],
+      %{},
+      %{session_id: session_id, tool_name: tool_call.name, result: inspect(result)}
+    )
+
+    result
+  end
+
+  defp do_check(tool_call, opts) do
     policy = Keyword.get(opts, :permission_policy)
 
     cond do
@@ -29,7 +49,8 @@ defmodule PiCoding.PermissionInterceptor do
             if request_fn do
               request_fn.(tool_call)
             else
-              {:deny, "Permission required for tool '#{tool_call.name}' but no request function provided"}
+              {:deny,
+               "Permission required for tool '#{tool_call.name}' but no request function provided"}
             end
         end
 

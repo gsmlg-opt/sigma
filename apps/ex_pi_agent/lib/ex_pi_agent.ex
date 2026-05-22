@@ -9,6 +9,7 @@ defmodule PiAgent do
   alias PiAi.Providers.Anthropic
 
   defstruct [
+    :session_id,
     :model,
     :system_prompt,
     :tools,
@@ -75,6 +76,7 @@ defmodule PiAgent do
     state = %__MODULE__{
       task_supervisor: task_sup,
       policy: policy,
+      session_id: opts[:session_id],
       model: opts[:model],
       system_prompt: opts[:system_prompt],
       tools: opts[:tools] || [],
@@ -206,6 +208,7 @@ defmodule PiAgent do
 
     params = %{
       model: state.model,
+      session_id: state.session_id,
       context: %{
         messages: llm_messages,
         system_prompt: state.system_prompt,
@@ -313,6 +316,7 @@ defmodule PiAgent do
       state.dispatcher_opts
       |> Keyword.put(:cwd, state.cwd)
       |> Keyword.put(:permission_policy, state.policy)
+      |> Keyword.put(:session_id, state.session_id)
 
     results = PiCoding.Dispatcher.dispatch_batch(tool_calls, state.tools, opts)
 
@@ -467,6 +471,7 @@ defmodule PiAgent do
 
     params = %{
       model: state.model,
+      session_id: state.session_id,
       context: %{
         messages: [%{role: :user, content: [%{type: :text, text: prompt}]}],
         system_prompt: nil,
