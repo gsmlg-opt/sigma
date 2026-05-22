@@ -123,11 +123,25 @@ const ScrollBottom = {
   }
 }
 
+// Formats a server UTC millisecond timestamp as the client's local time.
+// Use: phx-hook="LocalTime" data-ts={milliseconds} id="unique-id"
+const LocalTime = {
+  mounted() { this._format() },
+  updated() { this._format() },
+  _format() {
+    const ts = parseInt(this.el.dataset.ts)
+    if (isNaN(ts)) return
+    const d = new Date(ts)
+    const pad = (n, z = 2) => String(n).padStart(z, '0')
+    this.el.textContent = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`
+  }
+}
+
 let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 
 let liveSocket = new LiveSocket("/live", Socket, {
   params: {_csrf_token: csrfToken},
-  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, AutocompleteHook, SessionMenuHook, CmdEnterHook, MarkdownInputHook }
+  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, AutocompleteHook, SessionMenuHook, CmdEnterHook, MarkdownInputHook, LocalTime }
 })
 
 // Show progress bar on live navigation and form submits

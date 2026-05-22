@@ -580,6 +580,7 @@ defmodule PiWeb.SessionLive do
         category: category,
         text: socket.assigns.log_search
       )
+      |> Enum.reverse()
 
     {:noreply, socket |> assign(:log_filter, category) |> assign(:log_entries, entries)}
   end
@@ -588,6 +589,7 @@ defmodule PiWeb.SessionLive do
   def handle_event("set_log_search", %{"value" => q}, socket) do
     entries =
       PiLogs.search(socket.assigns.session_id, category: socket.assigns.log_filter, text: q)
+      |> Enum.reverse()
 
     {:noreply, socket |> assign(:log_search, q) |> assign(:log_entries, entries)}
   end

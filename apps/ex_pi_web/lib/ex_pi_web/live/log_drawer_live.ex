@@ -2,11 +2,19 @@ defmodule PiWeb.LogDrawerLive do
   use PiWeb, :live_component
 
   @impl true
+  def update(assigns, socket) do
+    {:ok,
+     socket
+     |> assign(assigns)
+     |> assign_new(:selected_entry, fn -> nil end)}
+  end
+
+  @impl true
   def render(assigns) do
     ~H"""
     <div
       id={@id}
-      class="fixed right-0 top-0 h-full w-[480px] z-50 bg-surface text-surface-content shadow-xl flex flex-col border-l border-outline/20"
+      class="fixed right-0 top-16 h-[calc(100vh-4rem)] w-[480px] z-50 bg-surface text-surface-content shadow-xl flex flex-col border-l border-outline/20"
     >
       <%!-- Header --%>
       <div class="flex items-center justify-between px-4 py-3 border-b border-outline/20 bg-surface-variant">
@@ -46,25 +54,62 @@ defmodule PiWeb.LogDrawerLive do
 
       <%!-- Entry list --%>
       <div class="flex-1 overflow-y-auto divide-y divide-outline/10">
-        <div :for={entry <- @entries} class="px-4 py-2 hover:bg-surface-variant/50">
-          <div class="flex items-center gap-2 mb-1">
+        <div
+          :for={entry <- @entries}
+          id={"log-entry-#{entry.id}"}
+          class="px-4 py-2 hover:bg-surface-variant/50 cursor-pointer"
+          phx-click="select_entry"
+          phx-value-id={entry.id}
+          phx-target={@myself}
+        >
+          <div class="flex items-center gap-2">
             <span class={["px-1.5 py-0.5 rounded text-[10px] font-bold uppercase", category_badge_class(entry.category)]}>
               {entry.category}
             </span>
             <span class="text-xs text-surface-content/50 font-mono">{entry.event}</span>
-            <span class="ml-auto text-[10px] text-surface-content/40 font-mono">
-              {format_ts(entry.timestamp)}
-            </span>
+            <span
+              id={"log-ts-#{entry.id}"}
+              class="ml-auto text-[10px] text-surface-content/40 font-mono"
+              phx-hook="LocalTime"
+              data-ts={entry.timestamp}
+            >{format_ts(entry.timestamp)}</span>
           </div>
-          <details class="text-xs">
-            <summary class="cursor-pointer text-surface-content/60 hover:text-surface-content select-none">
-              {summarize(entry)}
-            </summary>
-            <pre class="mt-1 p-2 bg-surface-variant rounded text-[10px] overflow-x-auto whitespace-pre-wrap break-all"><%= inspect(entry.metadata, pretty: true, limit: :infinity) %></pre>
-          </details>
+          <p class="text-xs text-surface-content/60 mt-0.5 truncate">{summarize(entry)}</p>
         </div>
         <div :if={@entries == []} class="px-4 py-8 text-center text-sm text-surface-content/40">
           No log entries yet.
+        </div>
+      </div>
+
+      <%!-- Entry detail popover --%>
+      <div
+        :if={@selected_entry}
+        class="fixed inset-0 z-[100] flex items-center justify-center bg-black/50"
+        phx-click="close_entry"
+        phx-target={@myself}
+      >
+        <div
+          class="bg-surface text-surface-content rounded-lg shadow-2xl w-[90vw] max-w-4xl max-h-[90vh] flex flex-col overflow-hidden"
+          onclick="event.stopPropagation()"
+        >
+          <div class="flex items-center justify-between px-4 py-3 border-b border-outline/20 bg-surface-variant shrink-0">
+            <div class="flex items-center gap-2">
+              <span class={["px-1.5 py-0.5 rounded text-[10px] font-bold uppercase", category_badge_class(@selected_entry.category)]}>
+                {@selected_entry.category}
+              </span>
+              <span class="text-sm font-mono">{@selected_entry.event}</span>
+            </div>
+            <button
+              phx-click="close_entry"
+              phx-target={@myself}
+              class="text-surface-content/60 hover:text-surface-content"
+            >
+              <.dm_mdi name="close" class="w-5 h-5" />
+            </button>
+          </div>
+          <div class="flex-1 overflow-auto p-4">
+            <pre class="text-xs font-mono whitespace-pre-wrap break-all"><%= inspect(@selected_entry.metadata, pretty: true, limit: :infinity) %></pre>
+          </div>
         </div>
       </div>
     </div>
@@ -75,6 +120,18 @@ defmodule PiWeb.LogDrawerLive do
   def handle_event("toggle_logs", _params, socket) do
     send(self(), {:toggle_logs})
     {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("select_entry", %{"id" => id}, socket) do
+    id = String.to_integer(id)
+    entry = Enum.find(socket.assigns.entries, &(&1.id == id))
+    {:noreply, assign(socket, :selected_entry, entry)}
+  end
+
+  @impl true
+  def handle_event("close_entry", _params, socket) do
+    {:noreply, assign(socket, :selected_entry, nil)}
   end
 
   defp category_badge_class(:llm), do: "bg-primary/20 text-primary"
