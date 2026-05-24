@@ -1,7 +1,7 @@
 defmodule PiWeb.SettingsLive do
   use PiWeb, :live_view
 
-  alias PiSession.ConfigManager
+  alias PiSession.{ConfigManager, Skills}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -21,7 +21,12 @@ defmodule PiWeb.SettingsLive do
         socket
       end
 
-    {:noreply, socket |> assign(:selected_id, nil)}
+    socket =
+      socket
+      |> assign(:selected_id, nil)
+      |> maybe_load_skills()
+
+    {:noreply, socket}
   end
 
   @impl true
@@ -31,7 +36,7 @@ defmodule PiWeb.SettingsLive do
       <div class="mb-12 flex justify-between items-end text-on-surface">
         <div>
           <h1 class="font-display text-5xl font-bold mb-2 tracking-tight text-primary">Settings</h1>
-          <p class="text-on-surface-variant text-lg">Manage API credentials and AI provider configurations.</p>
+          <p class="text-on-surface-variant text-lg">Manage API credentials, AI provider configurations, and agent resources.</p>
         </div>
       </div>
 
@@ -74,6 +79,18 @@ defmodule PiWeb.SettingsLive do
               <.dm_mdi name="text-box-outline" class="w-5 h-5" />
               <span>System Prompt</span>
             </.dm_link>
+
+            <.dm_link
+              patch={~p"/settings/skills"}
+              class={["p-4 rounded-2xl border transition-all flex items-center gap-3 font-bold",
+                if(@live_action == :skills,
+                  do: "bg-primary text-primary-content border-primary shadow-lg",
+                  else: "border-secondary-content/20 hover:bg-secondary-content/10 text-secondary-content"
+                )]}
+            >
+              <.dm_mdi name="auto-fix" class="w-5 h-5" />
+              <span>Skills</span>
+            </.dm_link>
           </nav>
         </aside>
 
@@ -92,6 +109,8 @@ defmodule PiWeb.SettingsLive do
               />
             <% :system_prompt -> %>
               <.render_system_prompt system_prompt={@config["system_prompt"]} />
+            <% :skills -> %>
+              <.render_skills result={@global_skills_result} />
           <% end %>
         </main>
       </div>
@@ -270,6 +289,64 @@ defmodule PiWeb.SettingsLive do
     """
   end
 
+  defp render_skills(assigns) do
+    ~H"""
+    <div class="space-y-6">
+      <div class="flex justify-between items-center text-on-surface">
+        <div>
+          <h2 class="text-2xl font-bold font-display">Skills</h2>
+          <p class="text-sm text-on-surface-variant font-mono mt-1">{@result.dir}</p>
+        </div>
+      </div>
+
+      <div
+        :if={Enum.empty?(@result.skills)}
+        class="rounded-2xl border border-dashed border-outline-variant bg-surface-container-low p-8 text-center"
+      >
+        <.dm_mdi name="auto-fix-off" class="w-10 h-10 mx-auto text-on-surface-variant opacity-40 mb-3" />
+        <p class="font-semibold text-on-surface">No global skills found</p>
+      </div>
+
+      <div :if={!Enum.empty?(@result.skills)} class="grid grid-cols-1 gap-4">
+        <.dm_card :for={skill <- @result.skills} variant="bordered" class="bg-surface-container-low">
+          <:title>
+            <div class="flex items-center gap-3 py-1 min-w-0">
+              <div class="p-2 bg-primary/10 rounded-lg text-primary shrink-0">
+                <.dm_mdi name="auto-fix" class="w-5 h-5" />
+              </div>
+              <div class="min-w-0">
+                <div class="font-bold text-lg truncate">{skill.name}</div>
+                <div :if={skill.disable_model_invocation?} class="text-[10px] opacity-50 uppercase tracking-widest">
+                  Manual invocation
+                </div>
+              </div>
+            </div>
+          </:title>
+
+          <div class="space-y-3">
+            <p class="text-sm text-on-surface-variant leading-relaxed">{skill.description}</p>
+            <code class="block text-[11px] font-mono text-on-surface-variant break-all bg-surface-container-high rounded-lg p-3">
+              {skill.path}
+            </code>
+          </div>
+        </.dm_card>
+      </div>
+
+      <div :if={!Enum.empty?(@result.diagnostics)} class="rounded-2xl border border-warning/30 bg-warning/10 p-4 text-warning">
+        <div class="flex items-center gap-2 font-bold mb-2">
+          <.dm_mdi name="alert-outline" class="w-5 h-5" />
+          <span>Some skills could not be loaded</span>
+        </div>
+        <ul class="space-y-1 text-sm">
+          <li :for={diagnostic <- @result.diagnostics}>
+            <code class="font-mono break-all">{diagnostic.path}</code>: {diagnostic.message}
+          </li>
+        </ul>
+      </div>
+    </div>
+    """
+  end
+
   # Handlers
 
   @impl true
@@ -347,4 +424,10 @@ defmodule PiWeb.SettingsLive do
   defp load_config(socket) do
     assign(socket, :config, ConfigManager.get_config())
   end
+
+  defp maybe_load_skills(%{assigns: %{live_action: :skills}} = socket) do
+    assign(socket, :global_skills_result, Skills.list_global())
+  end
+
+  defp maybe_load_skills(socket), do: socket
 end
