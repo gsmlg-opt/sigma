@@ -249,30 +249,32 @@ defmodule PiWeb.SessionLive do
               </.dm_btn>
             </div>
 
-            <.dm_chat_input
-              id="prompt-input"
-              phx-update="ignore"
-              placeholder="Ask π anything… (⌘/Ctrl+Enter to send)"
-              disabled={@turn_in_flight}
-              clear_on_send={true}
-              duskmoon-send-send="send_prompt"
-            />
+            <div class="relative">
+              <.dm_chat_input
+                id="prompt-input"
+                phx-update="ignore"
+                placeholder="Ask π anything… (⌘/Ctrl+Enter to send)"
+                disabled={@turn_in_flight}
+                clear_on_send={true}
+                duskmoon-send-send="send_prompt"
+              />
 
-            <div class="mt-3 flex items-center justify-between gap-4 text-[11px] text-on-surface-variant">
-              <form phx-change="select_model" class="flex items-center gap-2">
-                <label class="opacity-60 font-medium text-[11px]">Model</label>
-                <.dm_select id="model-select" name="model" value={@current_model} size="xs">
+              <form phx-change="select_model" class="absolute bottom-[8px] right-[107px] z-10 flex items-center">
+                <.dm_select id="model-select" name="model" value={@current_model} size="xs" disabled={@turn_in_flight}>
                   <option
                     :for={m <- ensure_in_list(@available_models, @current_model)}
                     value={m}
                     selected={m == @current_model}
                   >{m}</option>
                 </.dm_select>
-                <span :if={@active_provider_id != nil} class="opacity-40 font-mono">
-                  · {@active_provider_id}
-                </span>
               </form>
-              <p class="opacity-60 text-right">
+            </div>
+
+            <div class="mt-3 flex items-center justify-between gap-4 text-[11px] text-on-surface-variant">
+              <span :if={@active_provider_id != nil} class="opacity-40 font-mono">
+                Provider: {@active_provider_id}
+              </span>
+              <p class="opacity-60 text-right ml-auto">
                 π is an AI agent. Review its work carefully.
               </p>
             </div>
