@@ -38,44 +38,42 @@ defmodule PiAi.Providers.OpenAI do
 
     Elixir.Stream.resource(
       fn ->
-        try do
-          Req.post!(base_url <> "/chat/completions",
-            json: body,
-            headers: headers,
-            receive_timeout: options[:receive_timeout] || 120_000,
-            into: fn {:data, data}, {req, resp} ->
-              send(self(), {:chunk, data})
-              {:cont, {req, resp}}
-            end
-          )
-        rescue
-          e in Finch.TransportError ->
-            reraise transport_error_message(e), __STACKTRACE__
-        end
+        resp =
+          try do
+            Req.post!(base_url <> "/chat/completions",
+              json: body,
+              headers: headers,
+              receive_timeout: options[:receive_timeout] || 120_000,
+              into: :self
+            )
+          rescue
+            e in [Req.TransportError, Finch.TransportError] ->
+              reraise transport_error_message(e), __STACKTRACE__
+          end
 
-        {_initial_assistant_message(model), "", :streaming}
+        {_initial_assistant_message(model), "", :streaming, resp}
       end,
       fn
-        {message, _buffer, :done} ->
-          {:halt, message}
+        {message, _buffer, :done, resp} ->
+          {:halt, {message, "", :done, resp}}
 
-        {message, buffer, :streaming} ->
+        {message, buffer, :streaming, resp} ->
           receive do
-            {:chunk, chunk} ->
-              {events, new_buffer} = Stream.decode(buffer, chunk)
-              {processed_events, new_message} = process_events(events, message)
+            req_message ->
+              {processed_events, new_message, new_buffer, status} =
+                handle_async_message(resp, req_message, message, buffer)
 
-              status =
-                if Enum.any?(processed_events, &match?({:done, _, _}, &1)),
-                  do: :done,
-                  else: :streaming
-
-              {processed_events, {new_message, new_buffer, status}}
+              {processed_events, {new_message, new_buffer, status, resp}}
           after
-            120_000 -> {:halt, message}
+            options[:receive_timeout] || 120_000 ->
+              Req.cancel_async_response(resp)
+              raise transport_error_message(%{reason: :timeout})
           end
       end,
-      fn _ -> :ok end
+      fn
+        {_message, _buffer, :streaming, resp} -> Req.cancel_async_response(resp)
+        _ -> :ok
+      end
     )
   end
 
@@ -83,14 +81,44 @@ defmodule PiAi.Providers.OpenAI do
   # expected failure — convert it into a RuntimeError with a readable
   # message so the agent surfaces it as a clean {:turn_error, ...} flash
   # instead of crashing the turn task.
-  defp transport_error_message(%Finch.TransportError{reason: :timeout}) do
+  defp transport_error_message(%{reason: :timeout}) do
     "The AI provider did not respond in time (request timed out). " <>
       "Check your network connection and API key, then try again."
   end
 
-  defp transport_error_message(%Finch.TransportError{reason: reason}) do
+  defp transport_error_message(%{reason: reason}) do
     "Network error contacting the AI provider: #{inspect(reason)}. " <>
       "Check your connection and try again."
+  end
+
+  defp handle_async_message(resp, req_message, message, buffer) do
+    case Req.parse_message(resp, req_message) do
+      {:ok, chunks} ->
+        Enum.reduce(chunks, {[], message, buffer, :streaming}, fn
+          {:data, chunk}, {acc_events, acc_message, acc_buffer, _status} ->
+            {events, new_buffer} = Stream.decode(acc_buffer, chunk)
+            {processed_events, new_message} = process_events(events, acc_message)
+
+            status =
+              if Enum.any?(processed_events, &match?({:done, _, _}, &1)),
+                do: :done,
+                else: :streaming
+
+            {acc_events ++ processed_events, new_message, new_buffer, status}
+
+          :done, {acc_events, acc_message, acc_buffer, _status} ->
+            {acc_events, acc_message, acc_buffer, :done}
+
+          _chunk, acc ->
+            acc
+        end)
+
+      {:error, %{reason: reason}} ->
+        raise transport_error_message(%{reason: reason})
+
+      :unknown ->
+        {[], message, buffer, :streaming}
+    end
   end
 
   defp _initial_assistant_message(model) do
@@ -203,6 +231,9 @@ defmodule PiAi.Providers.OpenAI do
   defp process_events(events, message) do
     Enum.map_reduce(events, message, fn event, acc ->
       case event do
+        %{"error" => error} ->
+          raise provider_error_message(error)
+
         :done ->
           {{:done, acc.stop_reason || :stop, acc}, acc}
 
@@ -279,4 +310,15 @@ defmodule PiAi.Providers.OpenAI do
       cost: %{input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0, total: 0.0}
     }
   end
+
+  defp provider_error_message(error) when is_map(error) do
+    message = error["message"] || inspect(error)
+
+    case error["code"] || error["type"] do
+      nil -> "AI provider error: #{message}"
+      code -> "AI provider error #{code}: #{message}"
+    end
+  end
+
+  defp provider_error_message(error), do: "AI provider error: #{inspect(error)}"
 end
