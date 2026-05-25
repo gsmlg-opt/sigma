@@ -86,13 +86,21 @@ Agent config is stored in `~/.pi/agent/` (pi-compatible format):
 ### Routes
 
 ```
-/                           → HomeLive (project selector)
-/workdir/:workdir           → WorkdirLive (session list for a directory)
-/workdir/:workdir/sessions/:id → SessionLive (chat UI)
-/settings                   → SettingsLive (credentials, providers, system prompt)
+/                                      -> PiWeb.HomeLive
+/repository/new                       -> PiWeb.HomeLive, add mode
+/repository/:repository               -> PiWeb.RepositoryLive
+/repository/:repository/settings      -> PiWeb.ProjectSettingsLive
+/repository/:repository/sessions/new  -> PiWeb.NewSessionLive
+/repository/:repository/sessions/:id  -> PiWeb.SessionLive
+/settings                             -> redirects to providers settings
+/settings/providers                   -> PiWeb.SettingsLive
+/settings/credentials                 -> PiWeb.SettingsLive
+/settings/mcp                         -> PiWeb.SettingsLive
+/settings/skills                      -> PiWeb.SettingsLive
+/settings/system_prompt               -> PiWeb.SettingsLive
 ```
 
-The `:workdir` route param is a Base64-URL-encoded absolute path (no padding).
+The `:repository` route param is a Base64-URL-encoded absolute path (no padding).
 
 ## UI Library
 
@@ -134,7 +142,7 @@ Single-context repo: root `CONTEXT.md` plus `docs/adr/`. See `docs/agents/domain
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **ex_pi** (487 symbols, 489 relationships, 2 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **ex_pi** (504 symbols, 506 relationships, 2 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

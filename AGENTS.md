@@ -44,7 +44,7 @@ mix compile --warnings-as-errors
 - Permission checks go through `PiCoding.PermissionInterceptor` and `PiCoding.PermissionPolicy`; LiveView approval waits must stay aligned with the interceptor timeout.
 - Session JSONL files are stored per repository/workdir. In dev, sessions live under `apps/ex_pi_web/priv/sessions/<base64-url-workdir>/`.
 - Known repositories are stored in dev at `apps/ex_pi_session/priv/repos.jsonl`.
-- Agent/provider config is pi-compatible and stored at `~/.pi/agent/`: `settings.json`, `auth.json`, `models.json`, and `AGENTS.md`.
+- Agent/provider/MCP config is pi-compatible and stored at `~/.pi/agent/`: `settings.json`, `auth.json`, `models.json`, `mcp.json`, and `AGENTS.md`.
 - Context assembly prefers `AGENTS.md` over `CLAUDE.md` in each ancestor directory, ordered root-to-workdir so deeper project instructions have later precedence.
 
 ## Routes
@@ -58,6 +58,8 @@ mix compile --warnings-as-errors
 /settings                             -> redirects to providers settings
 /settings/providers                   -> PiWeb.SettingsLive
 /settings/credentials                 -> PiWeb.SettingsLive
+/settings/mcp                         -> PiWeb.SettingsLive
+/settings/skills                      -> PiWeb.SettingsLive
 /settings/system_prompt               -> PiWeb.SettingsLive
 ```
 
@@ -83,7 +85,7 @@ The `:repository` param is a Base64 URL-encoded absolute path with no padding.
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **ex_pi** (487 symbols, 489 relationships, 2 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **ex_pi** (504 symbols, 506 relationships, 2 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

@@ -44,7 +44,10 @@ Provider settings are managed in the UI under `/settings/providers` and are save
 - `settings.json`
 - `auth.json`
 - `models.json`
+- `mcp.json`
 - `AGENTS.md`
+
+Global MCP servers are configured under `/settings/mcp`. Project settings select the default MCP servers for that repository, and new sessions can override that selection.
 
 Direct provider calls can also read environment fallbacks, but the LiveView flow resolves credentials from the saved settings above:
 
