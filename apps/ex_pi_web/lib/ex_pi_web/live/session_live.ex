@@ -1,7 +1,9 @@
 defmodule PiWeb.SessionLive do
   use PiWeb, :live_view
 
+  alias PiAgent.SessionContext
   alias PiSession.ConfigManager
+  alias PiSession.Skills
 
   @impl true
   def mount(%{"id" => session_id, "repository" => encoded_repository}, _session, socket) do
@@ -21,16 +23,34 @@ defmodule PiWeb.SessionLive do
       Application.get_env(:ex_pi_web, :test_provider_config) ||
         ConfigManager.get_active_provider_config()
 
-    global_prompt = Map.get(system_config, "system_prompt")
-    system_prompt = PiSession.ContextFiles.assemble(global_prompt, effective_cwd)
+    global_agents = Map.get(system_config, "system_prompt")
 
-    system_prompt =
+    worktree_context =
       if effective_cwd != workdir and session_branch do
-        "# Worktree Context\nYou are working in a git worktree for branch `#{session_branch}` at `#{effective_cwd}`. The project root is at `#{workdir}`.\n\n" <>
-          system_prompt
-      else
-        system_prompt
+        "# Worktree Context\nYou are working in a git worktree for branch `#{session_branch}` at `#{effective_cwd}`. The project root is at `#{workdir}`."
       end
+
+    tool_modules = [
+      PiCoding.Tools.Read,
+      PiCoding.Tools.Write,
+      PiCoding.Tools.Bash,
+      PiCoding.Tools.Edit,
+      PiCoding.Tools.Glob,
+      PiCoding.Tools.Grep,
+      PiCoding.Tools.LS,
+      PiCoding.Tools.UrlFetch
+    ]
+
+    session_context =
+      SessionContext.new(
+        skills: session_skills_context(effective_cwd),
+        agents_context: [
+          global_agents,
+          {"Worktree Context", worktree_context},
+          PiSession.ContextFiles.assemble(nil, effective_cwd)
+        ],
+        current_date: Date.utc_today()
+      )
 
     case resolve_provider(config) do
       {:error, reason} ->
@@ -55,18 +75,10 @@ defmodule PiWeb.SessionLive do
             model: %{id: model_id, api: provider_id, provider: provider_id},
             provider: provider_mod,
             options: [api_key: api_key, base_url: base_url],
-            system_prompt: system_prompt,
+            system_prompt: nil,
+            session_context: session_context,
             on_event: on_event,
-            tools: [
-              PiCoding.Tools.Read,
-              PiCoding.Tools.Write,
-              PiCoding.Tools.Bash,
-              PiCoding.Tools.Edit,
-              PiCoding.Tools.Glob,
-              PiCoding.Tools.Grep,
-              PiCoding.Tools.LS,
-              PiCoding.Tools.UrlFetch
-            ],
+            tools: tool_modules,
             dispatcher_opts: [],
             messages: initial_messages,
             cwd: effective_cwd
@@ -793,6 +805,11 @@ defmodule PiWeb.SessionLive do
 
   defp get_sessions_dir(workdir) do
     PiSession.ConfigManager.sessions_dir(workdir)
+  end
+
+  defp session_skills_context(effective_cwd) do
+    [Skills.list_global().skills, Skills.list_repository(effective_cwd).skills]
+    |> List.flatten()
   end
 
   defp read_session_meta(meta_path) do

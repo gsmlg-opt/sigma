@@ -12,7 +12,7 @@ defmodule PiAi.Providers.Anthropic do
 
     api_key = options[:api_key] || System.get_env("ANTHROPIC_AUTH_TOKEN")
 
-    system = build_system(context[:system_prompt])
+    system = build_system(context[:system] || context[:system_prompt])
 
     body = %{
       model: model.id,
@@ -227,9 +227,51 @@ defmodule PiAi.Providers.Anthropic do
   defp build_system(nil), do: nil
   defp build_system(""), do: nil
 
-  defp build_system(text) do
-    [%{type: "text", text: text, cache_control: %{type: "ephemeral"}}]
+  defp build_system(blocks) when is_list(blocks) do
+    blocks =
+      blocks
+      |> Enum.map(&transform_system_block/1)
+      |> Enum.reject(&is_nil/1)
+
+    if blocks == [], do: nil, else: blocks
   end
+
+  defp build_system(text) do
+    [%{type: "text", text: text, cache_control: %{type: "ephemeral", ttl: "1h"}}]
+  end
+
+  defp transform_system_block(text) when is_binary(text) do
+    %{type: "text", text: text, cache_control: %{type: "ephemeral", ttl: "1h"}}
+  end
+
+  defp transform_system_block(block) when is_map(block) do
+    type = Map.get(block, :type) || Map.get(block, "type")
+    text = Map.get(block, :text) || Map.get(block, "text")
+
+    if type in [:text, "text"] and is_binary(text) and text != "" do
+      %{type: "text", text: text}
+      |> maybe_put(
+        :cache_control,
+        transform_cache_control(Map.get(block, :cache_control) || Map.get(block, "cache_control"))
+      )
+    end
+  end
+
+  defp transform_system_block(_block), do: nil
+
+  defp transform_cache_control(nil), do: nil
+
+  defp transform_cache_control(cache_control) when is_map(cache_control) do
+    type = Map.get(cache_control, :type) || Map.get(cache_control, "type")
+    ttl = Map.get(cache_control, :ttl) || Map.get(cache_control, "ttl")
+
+    if type do
+      %{type: to_string(type)}
+      |> maybe_put(:ttl, ttl)
+    end
+  end
+
+  defp transform_cache_control(_cache_control), do: nil
 
   defp transform_tools([]), do: []
 
@@ -243,6 +285,9 @@ defmodule PiAi.Providers.Anthropic do
       if idx == last_idx, do: Map.put(base, :cache_control, %{type: "ephemeral"}), else: base
     end)
   end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp process_events(events, message) do
     Enum.map_reduce(events, message, fn event, acc ->

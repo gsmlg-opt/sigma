@@ -11,7 +11,7 @@ defmodule PiSession.ConfigManager do
   @models_file "models.json"
   @agents_file "AGENTS.md"
 
-  @default_system_prompt "You are an expert coding assistant operating inside π (Pi), an Elixir-based coding agent.\nYou help users by reading files, executing commands, editing code, and writing new files.\n\nGuidelines:\n- Be concise in your responses.\n- Show file paths clearly when working with files.\n- Use bash for file operations like ls, rg, find.\n- When editing files, ensure the code remains correct and idiomatic.\n- You have access to tools for reading files, executing bash commands, and editing/writing files."
+  @default_system_prompt ""
 
   def get_config do
     settings = load_json(@settings_file, %{})

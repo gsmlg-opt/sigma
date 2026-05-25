@@ -5,13 +5,15 @@ defmodule PiAgent do
   use GenServer
 
   alias PiAgent.Message
-  alias PiAgent.MessageTransformer
+  alias PiAgent.ContextBuilder
+  alias PiAgent.SessionContext
   alias PiAi.Providers.Anthropic
 
   defstruct [
     :session_id,
     :model,
     :system_prompt,
+    :session_context,
     :tools,
     :provider,
     :cwd,
@@ -79,6 +81,7 @@ defmodule PiAgent do
       session_id: opts[:session_id],
       model: opts[:model],
       system_prompt: opts[:system_prompt],
+      session_context: opts[:session_context] || SessionContext.new(),
       tools: opts[:tools] || [],
       provider: opts[:provider] || Anthropic,
       messages: opts[:messages] || [],
@@ -192,11 +195,6 @@ defmodule PiAgent do
   defp run_turn_loop(state) do
     emit(state, {:turn_start})
 
-    llm_messages =
-      state.messages
-      |> MessageTransformer.transform_context()
-      |> MessageTransformer.convert_to_llm()
-
     ai_tools =
       Enum.map(state.tools, fn tool_mod ->
         %{
@@ -206,14 +204,20 @@ defmodule PiAgent do
         }
       end)
 
+    context =
+      ContextBuilder.build(
+        messages: state.messages,
+        session_context: state.session_context,
+        system_prompt: state.system_prompt,
+        tools: ai_tools,
+        cwd: state.cwd,
+        model: state.model
+      )
+
     params = %{
       model: state.model,
       session_id: state.session_id,
-      context: %{
-        messages: llm_messages,
-        system_prompt: state.system_prompt,
-        tools: ai_tools
-      },
+      context: context,
       options: state.provider_options
     }
 

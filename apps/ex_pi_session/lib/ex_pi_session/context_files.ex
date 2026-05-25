@@ -1,6 +1,6 @@
 defmodule PiSession.ContextFiles do
   @moduledoc """
-  Assembles the system prompt from project context files.
+  Assembles project context from repo-local instruction files.
 
   Walks from filesystem root down to `cwd`. In each directory, prefers
   `AGENTS.md`; falls back to `CLAUDE.md` only when `AGENTS.md` is absent.
@@ -15,7 +15,7 @@ defmodule PiSession.ContextFiles do
   @candidates ["AGENTS.md", "CLAUDE.md"]
 
   @doc """
-  Returns the assembled system prompt: `global_prompt` followed by each
+  Returns assembled context: `global_prompt` followed by each
   discovered context file (tagged with its absolute path so the LLM can
   distinguish global rules from project rules).
 

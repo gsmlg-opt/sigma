@@ -18,7 +18,10 @@ defmodule PiAi.Providers.OpenAI do
 
     body = %{
       model: model.id,
-      messages: transform_messages(context.messages),
+      messages:
+        context.messages
+        |> transform_messages()
+        |> prepend_system_message(context[:system] || context[:system_prompt]),
       max_tokens: options[:max_tokens] || 4096,
       stream: true,
       stream_options: %{include_usage: true}
@@ -166,6 +169,36 @@ defmodule PiAi.Providers.OpenAI do
       }
     end)
   end
+
+  defp prepend_system_message(messages, system) do
+    case system_text(system) do
+      nil -> messages
+      text -> [%{role: "system", content: text} | messages]
+    end
+  end
+
+  defp system_text(nil), do: nil
+  defp system_text(""), do: nil
+  defp system_text(text) when is_binary(text), do: text
+
+  defp system_text(blocks) when is_list(blocks) do
+    blocks
+    |> Enum.map(&system_block_text/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n\n")
+    |> case do
+      "" -> nil
+      text -> text
+    end
+  end
+
+  defp system_block_text(text) when is_binary(text), do: text
+
+  defp system_block_text(block) when is_map(block) do
+    Map.get(block, :text) || Map.get(block, "text") || ""
+  end
+
+  defp system_block_text(_block), do: ""
 
   defp process_events(events, message) do
     Enum.map_reduce(events, message, fn event, acc ->
