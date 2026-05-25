@@ -21,6 +21,8 @@ defmodule PiWeb.SessionLiveTest do
     assert html =~ "Ask π anything"
     assert html =~ "⌘/Ctrl+Enter to send"
     assert html =~ ~s(id="prompt-input")
+    assert html =~ ~s(phx-hook="ChatInputHook")
+    assert html =~ "/init"
     assert html =~ ~s(phx-update="ignore")
   end
 
@@ -34,6 +36,27 @@ defmodule PiWeb.SessionLiveTest do
     assert_receive {:turn_start}, 2000
     assert_receive {:message_start, %{role: :user, content: "hello"}}, 2000
     assert_receive {:message_end, %{role: :assistant}}, 2000
+  end
+
+  test "expands init slash command before submitting to the agent", %{conn: conn} do
+    Phoenix.PubSub.subscribe(PiWeb.PubSub, "session:test")
+    {:ok, view, _html} = live(conn, "/repository/#{@encoded_workdir}/sessions/test")
+
+    render_submit(view, "send_prompt", %{"value" => "/init"})
+
+    assert_receive {:message_start, %{role: :user, content: content}}, 2000
+    assert content =~ "Create or update `AGENTS.md`"
+    assert content =~ "Inspect the current repository before editing"
+  end
+
+  test "rejects unknown slash commands", %{conn: conn} do
+    Phoenix.PubSub.subscribe(PiWeb.PubSub, "session:test")
+    {:ok, view, _html} = live(conn, "/repository/#{@encoded_workdir}/sessions/test")
+
+    assert render_submit(view, "send_prompt", %{"value" => "/compact"}) =~
+             "Unknown slash command: /compact"
+
+    refute_receive {:agent_start, _}, 200
   end
 
   test "renders streaming tool call before arguments are finalized", %{conn: conn} do

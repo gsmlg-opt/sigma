@@ -82,24 +82,174 @@ const SessionMenuHook = {
   }
 }
 
-// Adds Cmd+Enter support to el-dm-chat-input (which only handles Ctrl+Enter natively).
-// Use: phx-hook="CmdEnterHook" on a wrapper element containing the el-dm-chat-input.
-const CmdEnterHook = {
+const DEFAULT_SLASH_COMMANDS = [
+  { value: '/init', label: '/init', description: 'Create or update AGENTS.md' }
+]
+
+// Adds Cmd+Enter support and slash-command completion to el-dm-chat-input.
+// Use: phx-hook="ChatInputHook" on a wrapper element containing the el-dm-chat-input.
+const ChatInputHook = {
   mounted() {
     this._chatInput = this.el.querySelector('el-dm-chat-input')
     if (!this._chatInput) return
+    this._commands = this._parseCommands()
+    this._filteredCommands = []
+    this._activeIndex = 0
+    this._buildMenu()
+
     this._keyHandler = (e) => {
+      if (this._menuOpen && ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) {
+        this._handleMenuKey(e)
+        return
+      }
+
       if (e.key === 'Enter' && e.metaKey && !e.shiftKey) {
         e.preventDefault()
         this._chatInput._send()
       }
     }
+    this._inputHandler = () => this._syncMenu()
+    this._clickAwayHandler = (e) => {
+      if (!this.el.contains(e.target)) this._closeMenu()
+    }
+
     this._chatInput.addEventListener('keydown', this._keyHandler)
+    this._chatInput.addEventListener('input', this._inputHandler)
+    this._chatInput.addEventListener('keyup', this._inputHandler)
+    this._chatInput.addEventListener('change', this._inputHandler)
+    this._chatInput.addEventListener('focus', this._inputHandler)
+    document.addEventListener('mousedown', this._clickAwayHandler)
   },
   destroyed() {
     if (this._chatInput && this._keyHandler) {
       this._chatInput.removeEventListener('keydown', this._keyHandler)
+      this._chatInput.removeEventListener('input', this._inputHandler)
+      this._chatInput.removeEventListener('keyup', this._inputHandler)
+      this._chatInput.removeEventListener('change', this._inputHandler)
+      this._chatInput.removeEventListener('focus', this._inputHandler)
     }
+    document.removeEventListener('mousedown', this._clickAwayHandler)
+    this._menu?.remove()
+  },
+  _parseCommands() {
+    try {
+      const commands = JSON.parse(this.el.dataset.slashCommands || '[]')
+      return Array.isArray(commands) && commands.length ? commands : DEFAULT_SLASH_COMMANDS
+    } catch {
+      return DEFAULT_SLASH_COMMANDS
+    }
+  },
+  _buildMenu() {
+    this._menu = document.createElement('div')
+    this._menu.className = 'slash-command-menu hidden'
+    this._menu.setAttribute('role', 'listbox')
+    this._menu.setAttribute('aria-label', 'Slash commands')
+    this.el.appendChild(this._menu)
+  },
+  _getValue() {
+    return this._chatInput.getValue?.() ?? this._chatInput.value ?? ''
+  },
+  _setValue(value) {
+    if (typeof this._chatInput.setValue === 'function') {
+      this._chatInput.setValue(value)
+    } else {
+      this._chatInput.value = value
+    }
+    this._chatInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+  },
+  _syncMenu() {
+    const value = this._getValue()
+    const shouldOpen = value.startsWith('/') && !/\s/.test(value)
+
+    if (!shouldOpen) {
+      this._closeMenu()
+      return
+    }
+
+    const query = value.slice(1).toLowerCase()
+    this._filteredCommands = this._commands.filter((command) => {
+      return command.value.slice(1).toLowerCase().startsWith(query)
+    })
+    this._activeIndex = Math.min(this._activeIndex, Math.max(this._filteredCommands.length - 1, 0))
+
+    if (this._filteredCommands.length === 0) {
+      this._closeMenu()
+      return
+    }
+
+    this._renderMenu()
+    this._openMenu()
+  },
+  _renderMenu() {
+    this._menu.innerHTML = this._filteredCommands.map((command, index) => {
+      const active = index === this._activeIndex
+      return `
+        <button
+          type="button"
+          class="slash-command-item ${active ? 'is-active' : ''}"
+          role="option"
+          aria-selected="${active}"
+          data-index="${index}"
+        >
+          <span class="slash-command-label">${command.label || command.value}</span>
+          <span class="slash-command-description">${command.description || ''}</span>
+        </button>
+      `
+    }).join('')
+
+    this._menu.querySelectorAll('.slash-command-item').forEach((item) => {
+      item.addEventListener('mousedown', (e) => {
+        e.preventDefault()
+        this._selectCommand(Number(item.dataset.index))
+      })
+    })
+  },
+  _handleMenuKey(e) {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      this._closeMenu()
+      return
+    }
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      this._activeIndex = (this._activeIndex + 1) % this._filteredCommands.length
+      this._renderMenu()
+      return
+    }
+
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      this._activeIndex =
+        (this._activeIndex - 1 + this._filteredCommands.length) % this._filteredCommands.length
+      this._renderMenu()
+      return
+    }
+
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault()
+      this._selectCommand(this._activeIndex)
+    }
+  },
+  _selectCommand(index) {
+    const command = this._filteredCommands[index]
+    if (!command) return
+    this._setValue(`${command.value} `)
+    this._closeMenu()
+    this._focusInput()
+  },
+  _focusInput() {
+    this._chatInput.focus?.()
+    const editor = this._chatInput.shadowRoot?.querySelector('el-dm-markdown-input')
+    editor?.focus?.()
+  },
+  _openMenu() {
+    this._menuOpen = true
+    this._menu.classList.remove('hidden')
+  },
+  _closeMenu() {
+    this._menuOpen = false
+    this._menu?.classList.add('hidden')
   }
 }
 
@@ -147,7 +297,7 @@ let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("
 
 let liveSocket = new LiveSocket("/live", Socket, {
   params: {_csrf_token: csrfToken},
-  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, AutocompleteHook, SessionMenuHook, CmdEnterHook, MarkdownInputHook, LocalTime }
+  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, AutocompleteHook, SessionMenuHook, ChatInputHook, MarkdownInputHook, LocalTime }
 })
 
 // Show progress bar on live navigation and form submits

@@ -5,6 +5,7 @@ defmodule PiWeb.SessionLive do
   alias PiSession.ConfigManager
   alias PiSession.RepoManager
   alias PiSession.Skills
+  alias PiWeb.SlashCommands
 
   @impl true
   def mount(%{"id" => session_id, "repository" => encoded_repository}, _session, socket) do
@@ -230,7 +231,12 @@ defmodule PiWeb.SessionLive do
         </div>
 
         <div class="p-6 border-t border-outline-variant bg-surface">
-          <div id="chat-input-area" phx-hook="CmdEnterHook" class="max-w-4xl mx-auto">
+          <div
+            id="chat-input-area"
+            phx-hook="ChatInputHook"
+            data-slash-commands={Jason.encode!([%{value: "/init", label: "/init", description: "Create or update AGENTS.md"}])}
+            class="max-w-4xl mx-auto relative"
+          >
             <div :if={@turn_in_flight} class="mb-3 flex items-center justify-between gap-3">
               <div class="flex items-center gap-3 text-sm text-on-surface-variant">
                 <.dm_chat_typing />
@@ -581,8 +587,7 @@ defmodule PiWeb.SessionLive do
         {:noreply, socket}
 
       trimmed ->
-        PiAgent.prompt(socket.assigns.agent, trimmed)
-        {:noreply, socket}
+        handle_prompt(trimmed, socket)
     end
   end
 
@@ -632,6 +637,21 @@ defmodule PiWeb.SessionLive do
     ConfigManager.update_provider(provider_id, %{"model" => model_id})
 
     {:noreply, assign(socket, current_model: model_id)}
+  end
+
+  defp handle_prompt(prompt, socket) do
+    case SlashCommands.expand(prompt) do
+      :not_command ->
+        PiAgent.prompt(socket.assigns.agent, prompt)
+        {:noreply, socket}
+
+      {:ok, expanded_prompt} ->
+        PiAgent.prompt(socket.assigns.agent, expanded_prompt)
+        {:noreply, socket}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, reason)}
+    end
   end
 
   @impl true
