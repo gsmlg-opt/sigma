@@ -416,7 +416,6 @@ defmodule PiWeb.SessionLive do
     <.dm_chat
       id={@message.id}
       align="start"
-      variant="filled"
       color="secondary"
       avatar="You"
       author="You"

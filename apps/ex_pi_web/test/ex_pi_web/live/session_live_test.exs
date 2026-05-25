@@ -98,6 +98,8 @@ defmodule PiWeb.SessionLiveTest do
     html = render(view)
     assert html =~ ~s(id="msg_user_left")
     assert html =~ ~s(align="start")
+    assert html =~ ~s(color="secondary")
+    refute html =~ ~s(variant="filled")
   end
 
   test "renders and answers an AskUserQuestion request", %{conn: conn} do
