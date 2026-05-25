@@ -85,6 +85,7 @@ const SessionMenuHook = {
 const DEFAULT_SLASH_COMMANDS = [
   { value: '/init', label: '/init', description: 'Create or update AGENTS.md' }
 ]
+const SLASH_COMMAND_MENU_KEYS = ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape']
 
 // Adds Cmd+Enter support and slash-command completion to el-dm-chat-input.
 // Use: phx-hook="ChatInputHook" on a wrapper element containing the el-dm-chat-input.
@@ -95,10 +96,11 @@ const ChatInputHook = {
     this._commands = this._parseCommands()
     this._filteredCommands = []
     this._activeIndex = 0
+    this._editorBindings = []
     this._buildMenu()
 
     this._keyHandler = (e) => {
-      if (this._menuOpen && ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) {
+      if (this._menuOpen && SLASH_COMMAND_MENU_KEYS.includes(e.key)) {
         this._handleMenuKey(e)
         return
       }
@@ -109,6 +111,11 @@ const ChatInputHook = {
       }
     }
     this._inputHandler = () => this._syncMenu()
+    this._editorKeyHandler = (e) => {
+      if (this._menuOpen && SLASH_COMMAND_MENU_KEYS.includes(e.key)) {
+        this._handleMenuKey(e)
+      }
+    }
     this._clickAwayHandler = (e) => {
       if (!this.el.contains(e.target)) this._closeMenu()
     }
@@ -119,6 +126,12 @@ const ChatInputHook = {
     this._chatInput.addEventListener('change', this._inputHandler)
     this._chatInput.addEventListener('focus', this._inputHandler)
     document.addEventListener('mousedown', this._clickAwayHandler)
+    this._bindEditorEvents()
+    this._editorObserver = new MutationObserver(() => this._bindEditorEvents())
+    if (this._chatInput.shadowRoot) {
+      this._editorObserver.observe(this._chatInput.shadowRoot, { childList: true, subtree: true })
+    }
+    this._editorFrame = window.requestAnimationFrame(() => this._bindEditorEvents())
   },
   destroyed() {
     if (this._chatInput && this._keyHandler) {
@@ -128,6 +141,9 @@ const ChatInputHook = {
       this._chatInput.removeEventListener('change', this._inputHandler)
       this._chatInput.removeEventListener('focus', this._inputHandler)
     }
+    this._editorObserver?.disconnect()
+    if (this._editorFrame) window.cancelAnimationFrame(this._editorFrame)
+    this._clearEditorBindings()
     document.removeEventListener('mousedown', this._clickAwayHandler)
     this._menu?.remove()
   },
@@ -145,6 +161,35 @@ const ChatInputHook = {
     this._menu.setAttribute('role', 'listbox')
     this._menu.setAttribute('aria-label', 'Slash commands')
     this.el.appendChild(this._menu)
+  },
+  _bindEditorEvents() {
+    this._clearEditorBindings()
+
+    const markdownInput = this._getMarkdownInput()
+    const textarea = markdownInput?.shadowRoot?.querySelector('textarea')
+    const targets = [markdownInput, textarea].filter(Boolean)
+
+    targets.forEach((target) => {
+      this._addEditorBinding(target, 'keydown', this._editorKeyHandler, { capture: true })
+      this._addEditorBinding(target, 'input', this._inputHandler)
+      this._addEditorBinding(target, 'change', this._inputHandler)
+      this._addEditorBinding(target, 'keyup', this._inputHandler)
+      this._addEditorBinding(target, 'focus', this._inputHandler, { capture: true })
+    })
+  },
+  _addEditorBinding(target, event, handler, options = false) {
+    target.addEventListener(event, handler, options)
+    this._editorBindings.push({ target, event, handler, options })
+  },
+  _clearEditorBindings() {
+    const bindings = this._editorBindings || []
+    bindings.forEach(({ target, event, handler, options }) => {
+      target.removeEventListener(event, handler, options)
+    })
+    this._editorBindings = []
+  },
+  _getMarkdownInput() {
+    return this._chatInput?.shadowRoot?.querySelector('el-dm-markdown-input')
   },
   _getValue() {
     return this._chatInput.getValue?.() ?? this._chatInput.value ?? ''
@@ -203,9 +248,19 @@ const ChatInputHook = {
         this._selectCommand(Number(item.dataset.index))
       })
     })
+
+    this._menu.querySelector('.slash-command-item.is-active')?.scrollIntoView({ block: 'nearest' })
   },
   _handleMenuKey(e) {
+    e.stopPropagation()
+
     if (e.key === 'Escape') {
+      e.preventDefault()
+      this._closeMenu()
+      return
+    }
+
+    if (this._filteredCommands.length === 0) {
       e.preventDefault()
       this._closeMenu()
       return
@@ -237,11 +292,13 @@ const ChatInputHook = {
     this._setValue(`${command.value} `)
     this._closeMenu()
     this._focusInput()
+    window.requestAnimationFrame(() => this._focusInput())
   },
   _focusInput() {
     this._chatInput.focus?.()
-    const editor = this._chatInput.shadowRoot?.querySelector('el-dm-markdown-input')
+    const editor = this._getMarkdownInput()
     editor?.focus?.()
+    editor?.shadowRoot?.querySelector('textarea')?.focus?.()
   },
   _openMenu() {
     this._menuOpen = true

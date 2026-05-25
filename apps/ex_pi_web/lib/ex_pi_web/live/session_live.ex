@@ -5,7 +5,7 @@ defmodule PiWeb.SessionLive do
   alias PiSession.ConfigManager
   alias PiSession.RepoManager
   alias PiSession.Skills
-  alias PiWeb.SlashCommands
+  alias PiSession.SlashCommands
 
   @impl true
   def mount(%{"id" => session_id, "repository" => encoded_repository}, _session, socket) do

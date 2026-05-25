@@ -45,8 +45,9 @@ defmodule PiWeb.SessionLiveTest do
     render_submit(view, "send_prompt", %{"value" => "/init"})
 
     assert_receive {:message_start, %{role: :user, content: content}}, 2000
-    assert content =~ "Create or update `AGENTS.md`"
-    assert content =~ "Inspect the current repository before editing"
+    assert content =~ "Set up a minimal AGENTS.md"
+    assert content =~ "Project AGENTS.md gives Pi Agent persistent, team-shared instructions"
+    refute content =~ "Claude Code"
   end
 
   test "rejects unknown slash commands", %{conn: conn} do
