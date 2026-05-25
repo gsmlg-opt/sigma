@@ -21,6 +21,11 @@ defmodule PiSession.RepoManager do
     end
   end
 
+  def get_repo(path) do
+    path = Path.expand(path)
+    Enum.find(list_repos(), fn repo -> repo["path"] == path end)
+  end
+
   def add_repo(path, opts \\ []) do
     path = Path.expand(path)
     name = Keyword.get(opts, :name) |> normalize_name(path)
@@ -32,7 +37,8 @@ defmodule PiSession.RepoManager do
     entry = %{
       "path" => path,
       "added_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
-      "name" => name
+      "name" => name,
+      "mcp_server_ids" => []
     }
 
     # Append if not already present
@@ -110,6 +116,19 @@ defmodule PiSession.RepoManager do
     end
 
     :ok
+  end
+
+  def mcp_server_ids(path) do
+    path
+    |> get_repo()
+    |> case do
+      %{"mcp_server_ids" => ids} when is_list(ids) -> ids
+      _ -> []
+    end
+  end
+
+  def set_mcp_server_ids(path, ids) when is_list(ids) do
+    update_repo(path, %{"mcp_server_ids" => Enum.uniq(ids)})
   end
 
   defp write_repos(repos) do

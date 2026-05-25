@@ -9,7 +9,9 @@ defmodule PiSession.ConfigManager do
   @settings_file "settings.json"
   @auth_file "auth.json"
   @models_file "models.json"
+  @mcp_file "mcp.json"
   @agents_file "AGENTS.md"
+  @credential_ref_regex ~r/^\{\{credential:([^}]+)\}\}$/
 
   @default_system_prompt ""
 
@@ -220,11 +222,107 @@ defmodule PiSession.ConfigManager do
     |> save_config()
   end
 
+  # MCP server configuration
+
+  @doc """
+  Loads global MCP server configuration from `~/.pi/agent/mcp.json`.
+
+  The saved format uses the Claude-style `mcpServers` top-level key. Loading
+  also accepts VS Code-style `servers` so users can drop common `mcp.json`
+  files into the pi config directory.
+  """
+  def get_mcp_config do
+    @mcp_file
+    |> load_json(%{})
+    |> normalize_mcp_config()
+  end
+
+  def save_mcp_config(config) do
+    servers =
+      config
+      |> normalize_mcp_config()
+      |> Map.fetch!("servers")
+
+    save_json(@mcp_file, %{"mcpServers" => servers})
+    {:ok, %{"servers" => servers}}
+  end
+
+  def list_mcp_servers do
+    get_mcp_config()["servers"]
+  end
+
+  def get_mcp_server(id) do
+    list_mcp_servers()[id]
+  end
+
+  def put_mcp_server(id, server_config) do
+    id = normalize_mcp_server_id(id)
+
+    if id == "" do
+      {:error, :invalid_id}
+    else
+      config = get_mcp_config()
+      servers = Map.put(config["servers"], id, normalize_mcp_server(server_config))
+      save_mcp_config(%{"servers" => servers})
+    end
+  end
+
+  def update_mcp_server(old_id, updates) do
+    config = get_mcp_config()
+    old_id = normalize_mcp_server_id(old_id)
+    new_id = updates |> Map.get("id", old_id) |> normalize_mcp_server_id()
+
+    cond do
+      new_id == "" ->
+        {:error, :invalid_id}
+
+      old_id != new_id and Map.has_key?(config["servers"], new_id) ->
+        {:error, :id_conflict}
+
+      true ->
+        server =
+          config["servers"]
+          |> Map.get(old_id, %{})
+          |> Map.merge(Map.drop(updates, ["id"]))
+          |> normalize_mcp_server()
+
+        servers =
+          config["servers"]
+          |> Map.delete(old_id)
+          |> Map.put(new_id, server)
+
+        save_mcp_config(%{"servers" => servers})
+    end
+  end
+
+  def delete_mcp_server(id) do
+    config = get_mcp_config()
+    servers = Map.delete(config["servers"], id)
+    save_mcp_config(%{"servers" => servers})
+  end
+
+  def mcp_servers_for(server_ids) when is_list(server_ids) do
+    servers = list_mcp_servers()
+    credentials = get_config()["credentials"] || %{}
+
+    server_ids
+    |> Enum.filter(&Map.has_key?(servers, &1))
+    |> Enum.into(%{}, fn id -> {id, resolve_mcp_credentials(servers[id], credentials)} end)
+  end
+
+  def mcp_servers_for(_), do: %{}
+
+  @doc "Returns the path to the global mcp.json file."
+  def mcp_file do
+    Path.join(agent_dir(), @mcp_file)
+  end
+
   # ── Path helpers (pi-compatible) ─────────────────────────────────────────
 
   @doc "Returns the pi agent config directory (~/.pi/agent/)."
   def agent_dir do
-    Path.join([System.user_home!(), @agent_dir_name, @config_subdir])
+    Application.get_env(:ex_pi_session, :agent_dir) ||
+      Path.join([System.user_home!(), @agent_dir_name, @config_subdir])
   end
 
   @doc "Returns the root sessions directory (~/.pi/agent/sessions/)."
@@ -282,8 +380,14 @@ defmodule PiSession.ConfigManager do
 
     if File.exists?(path) do
       case File.read(path) do
-        {:ok, content} -> Jason.decode!(content)
-        _ -> default
+        {:ok, content} ->
+          case Jason.decode(content) do
+            {:ok, data} -> data
+            {:error, _} -> default
+          end
+
+        _ ->
+          default
       end
     else
       default
@@ -316,6 +420,112 @@ defmodule PiSession.ConfigManager do
   end
 
   defp get_config_dir do
-    Path.join([System.user_home!(), @agent_dir_name, @config_subdir])
+    agent_dir()
   end
+
+  defp normalize_mcp_config(config) when is_map(config) do
+    servers = config["mcpServers"] || config["servers"] || %{}
+
+    normalized_servers =
+      servers
+      |> Enum.into(%{}, fn {id, server} ->
+        {normalize_mcp_server_id(id), normalize_mcp_server(server)}
+      end)
+      |> Enum.reject(fn {id, _server} -> id == "" end)
+      |> Map.new()
+
+    %{"servers" => normalized_servers}
+  end
+
+  defp normalize_mcp_config(_), do: %{"servers" => %{}}
+
+  defp normalize_mcp_server(server) when is_map(server) do
+    server = stringify_keys(server)
+
+    type =
+      case server["type"] do
+        nil -> if server["url"], do: "http", else: "stdio"
+        transport when transport in ["streamable-http", "sse"] -> "http"
+        other -> other
+      end
+
+    server
+    |> Map.put("type", type)
+    |> normalize_mcp_server_fields(type)
+  end
+
+  defp normalize_mcp_server(_),
+    do: %{"type" => "stdio", "command" => "", "args" => [], "env" => %{}}
+
+  defp normalize_mcp_server_fields(server, "stdio") do
+    server
+    |> Map.drop(["url", "headers"])
+    |> Map.put("command", server["command"] || "")
+    |> Map.put("args", normalize_list(server["args"]))
+    |> Map.put("env", normalize_map(server["env"]))
+  end
+
+  defp normalize_mcp_server_fields(server, "http") do
+    server
+    |> Map.drop(["command", "args", "env"])
+    |> Map.put("url", server["url"] || "")
+    |> Map.put("headers", normalize_map(server["headers"]))
+  end
+
+  defp normalize_mcp_server_fields(server, _type), do: server
+
+  defp normalize_mcp_server_id(id) when is_binary(id) do
+    id
+    |> String.trim()
+    |> String.replace(~r/[^A-Za-z0-9_-]/, "_")
+  end
+
+  defp normalize_mcp_server_id(id), do: id |> to_string() |> normalize_mcp_server_id()
+
+  defp stringify_keys(map) do
+    Enum.into(map, %{}, fn
+      {key, value} when is_atom(key) -> {Atom.to_string(key), value}
+      {key, value} -> {to_string(key), value}
+    end)
+  end
+
+  defp normalize_list(value) when is_list(value), do: value
+  defp normalize_list(_), do: []
+
+  defp normalize_map(value) when is_map(value), do: stringify_keys(value)
+  defp normalize_map(_), do: %{}
+
+  defp resolve_mcp_credentials(server, credentials) do
+    server
+    |> Map.update(
+      "args",
+      [],
+      &Enum.map(&1, fn value -> resolve_credential_ref(value, credentials) end)
+    )
+    |> Map.update("env", %{}, &resolve_credential_map(&1, credentials))
+    |> Map.update("headers", %{}, &resolve_credential_map(&1, credentials))
+  end
+
+  defp resolve_credential_map(values, credentials) when is_map(values) do
+    Enum.into(values, %{}, fn {key, value} ->
+      {key, resolve_credential_ref(value, credentials)}
+    end)
+  end
+
+  defp resolve_credential_map(_values, _credentials), do: %{}
+
+  defp resolve_credential_ref(value, credentials) when is_binary(value) do
+    case Regex.run(@credential_ref_regex, value) do
+      [_, credential_id] ->
+        case credentials[credential_id] do
+          %{"key" => key} -> key
+          _ -> value
+        end
+
+      _ ->
+        value
+    end
+  end
+
+  defp resolve_credential_ref(value, _credentials), do: value
 end
