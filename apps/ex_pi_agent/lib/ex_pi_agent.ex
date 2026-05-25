@@ -155,7 +155,7 @@ defmodule PiAgent do
       created_at: System.monotonic_time()
     }
 
-    state = put_in(state.pending_user_questions[question_id], pending_question)
+    state = put_pending_user_question(state, question_id, pending_question)
     emit(state, {:ask_user_question, question_id, public_user_question(pending_question)})
 
     {:reply, {:ok, question_id}, state}
@@ -168,7 +168,7 @@ defmodule PiAgent do
 
   @impl true
   def handle_call({:answer_user_question, question_id, reply}, _from, state) do
-    case Map.pop(state.pending_user_questions, question_id) do
+    case Map.pop(pending_user_question_map(state), question_id) do
       {nil, _pending_questions} ->
         {:reply, {:error, :not_found}, state}
 
@@ -176,7 +176,7 @@ defmodule PiAgent do
         Process.demonitor(pending_question.monitor_ref, [:flush])
         send(pending_question.reply_to, {:ask_user_question_reply, question_id, reply})
 
-        state = %{state | pending_user_questions: pending_questions}
+        state = put_pending_user_questions(state, pending_questions)
         emit(state, {:ask_user_question_resolved, question_id})
 
         {:reply, :ok, state}
@@ -190,14 +190,14 @@ defmodule PiAgent do
 
   @impl true
   def handle_cast({:expire_user_question, question_id}, state) do
-    case Map.pop(state.pending_user_questions, question_id) do
+    case Map.pop(pending_user_question_map(state), question_id) do
       {nil, _pending_questions} ->
         {:noreply, state}
 
       {pending_question, pending_questions} ->
         Process.demonitor(pending_question.monitor_ref, [:flush])
 
-        state = %{state | pending_user_questions: pending_questions}
+        state = put_pending_user_questions(state, pending_questions)
         emit(state, {:ask_user_question_resolved, question_id})
 
         {:noreply, state}
@@ -629,7 +629,8 @@ defmodule PiAgent do
   end
 
   defp public_user_questions(state) do
-    state.pending_user_questions
+    state
+    |> pending_user_question_map()
     |> Map.values()
     |> Enum.sort_by(& &1.created_at)
     |> Enum.map(&public_user_question/1)
@@ -642,14 +643,35 @@ defmodule PiAgent do
   end
 
   defp remove_user_question_by_monitor(state, monitor_ref) do
-    case Enum.find(state.pending_user_questions, fn {_id, question} ->
+    pending_questions = pending_user_question_map(state)
+
+    case Enum.find(pending_questions, fn {_id, question} ->
            question.monitor_ref == monitor_ref
          end) do
       {question_id, _question} ->
-        {:ok, question_id, update_in(state.pending_user_questions, &Map.delete(&1, question_id))}
+        state = put_pending_user_questions(state, Map.delete(pending_questions, question_id))
+
+        {:ok, question_id, state}
 
       nil ->
         :error
     end
+  end
+
+  defp pending_user_question_map(state) do
+    Map.get(state, :pending_user_questions, %{})
+  end
+
+  defp put_pending_user_question(state, question_id, pending_question) do
+    pending_questions =
+      state
+      |> pending_user_question_map()
+      |> Map.put(question_id, pending_question)
+
+    put_pending_user_questions(state, pending_questions)
+  end
+
+  defp put_pending_user_questions(state, pending_questions) do
+    Map.put(state, :pending_user_questions, pending_questions)
   end
 end

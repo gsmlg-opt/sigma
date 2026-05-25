@@ -319,4 +319,28 @@ defmodule PiAgentTest do
     assert_receive {:ask_user_question_resolved, ^question_id}, 1_000
     assert [] = PiAgent.pending_user_questions(agent)
   end
+
+  test "handles pending user questions after hot reload from older state" do
+    {:ok, agent} =
+      PiAgent.start_link(
+        model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+        provider: EmptyProvider
+      )
+
+    PiAgent.subscribe(agent)
+    :sys.replace_state(agent, &Map.delete(&1, :pending_user_questions))
+
+    assert [] = PiAgent.pending_user_questions(agent)
+
+    task =
+      Task.async(fn ->
+        PiAgent.ask_user_question(agent, %{question: "Continue?"}, timeout: 1_000)
+      end)
+
+    assert_receive {:ask_user_question, question_id, %{question: "Continue?"}}, 1_000
+    assert [%{id: ^question_id, question: "Continue?"}] = PiAgent.pending_user_questions(agent)
+
+    assert :ok = PiAgent.answer_user_question(agent, question_id, {:ok, "yes"})
+    assert {:ok, "yes"} = Task.await(task)
+  end
 end
