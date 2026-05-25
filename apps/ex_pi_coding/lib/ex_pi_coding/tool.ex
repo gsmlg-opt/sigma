@@ -53,4 +53,29 @@ defmodule PiCoding.Tool do
   """
   @callback execute(tool_call_id :: String.t(), params :: map(), opts :: opts()) ::
               {:ok, result()} | {:error, any()}
+
+  def name(tool) when is_atom(tool), do: tool.name()
+  def name(%{name: name}), do: name
+
+  def description(tool) when is_atom(tool), do: tool.description()
+  def description(%{description: description}), do: description
+
+  def schema(tool) when is_atom(tool), do: tool.schema()
+  def schema(%{schema: schema}), do: schema
+
+  def ai_definition(tool) do
+    %{
+      name: name(tool),
+      description: description(tool),
+      parameters: schema(tool)
+    }
+  end
+
+  def execute(tool, tool_call_id, params, opts) when is_atom(tool) do
+    tool.execute(tool_call_id, params, opts)
+  end
+
+  def execute(%PiCoding.MCP.Tool{} = tool, tool_call_id, params, opts) do
+    PiCoding.MCP.call_tool(tool, tool_call_id, params, opts)
+  end
 end

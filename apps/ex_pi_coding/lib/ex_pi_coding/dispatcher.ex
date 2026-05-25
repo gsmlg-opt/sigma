@@ -81,7 +81,7 @@ defmodule PiCoding.Dispatcher do
 
     case PiCoding.PermissionInterceptor.check(tool_call, opts) do
       :allow ->
-        tool = Enum.find(tools, fn t -> t.name() == tool_call.name end)
+        tool = Enum.find(tools, fn t -> PiCoding.Tool.name(t) == tool_call.name end)
 
         if tool do
           :telemetry.execute(
@@ -94,7 +94,7 @@ defmodule PiCoding.Dispatcher do
 
           result =
             try do
-              tool.execute(tool_call.id, tool_call.arguments, opts)
+              PiCoding.Tool.execute(tool, tool_call.id, tool_call.arguments, opts)
             rescue
               e -> {:error, Exception.message(e)}
             catch
