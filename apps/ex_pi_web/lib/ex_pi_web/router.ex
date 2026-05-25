@@ -15,6 +15,7 @@ defmodule PiWeb.Router do
 
     live("/", HomeLive, :index)
     live("/settings/credentials", SettingsLive, :credentials)
+    live("/settings/mcp", SettingsLive, :mcp)
     live("/settings/providers", SettingsLive, :providers)
     live("/settings/skills", SettingsLive, :skills)
     live("/settings/system_prompt", SettingsLive, :system_prompt)

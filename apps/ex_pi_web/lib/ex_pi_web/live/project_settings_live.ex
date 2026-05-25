@@ -1,12 +1,13 @@
 defmodule PiWeb.ProjectSettingsLive do
   use PiWeb, :live_view
 
-  alias PiSession.RepoManager
+  alias PiSession.{ConfigManager, RepoManager}
 
   @impl true
   def mount(%{"repository" => encoded_repository}, _session, socket) do
     workdir = Base.url_decode64!(encoded_repository, padding: false)
-    repo = Enum.find(RepoManager.list_repos(), &(&1["path"] == workdir))
+    repo = RepoManager.get_repo(workdir)
+    mcp_servers = ConfigManager.list_mcp_servers()
 
     socket =
       socket
@@ -16,6 +17,8 @@ defmodule PiWeb.ProjectSettingsLive do
       |> assign(:repo, repo)
       |> assign(:name_input, (repo && repo["name"]) || Path.basename(workdir))
       |> assign(:path_input, workdir)
+      |> assign(:mcp_servers, mcp_servers)
+      |> assign(:selected_mcp_server_ids, repo_mcp_server_ids(repo, mcp_servers))
       |> assign(:error, nil)
 
     {:ok, socket}
@@ -100,6 +103,39 @@ defmodule PiWeb.ProjectSettingsLive do
                 class="w-full"
               />
 
+              <div class="space-y-3">
+                <div class="flex items-center gap-2 text-on-surface">
+                  <.dm_mdi name="server-network-outline" class="w-5 h-5 text-primary" />
+                  <span class="font-semibold">MCP Servers</span>
+                </div>
+
+                <div
+                  :if={map_size(@mcp_servers) == 0}
+                  class="rounded-xl border border-dashed border-outline-variant p-4 text-sm text-on-surface-variant"
+                >
+                  No global MCP servers configured.
+                </div>
+
+                <label
+                  :for={{id, server} <- @mcp_servers}
+                  class="flex items-start gap-3 p-3 rounded-xl border border-outline-variant hover:border-outline cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    name="mcp_server_ids[]"
+                    value={id}
+                    checked={id in @selected_mcp_server_ids}
+                    class="checkbox checkbox-primary mt-1"
+                  />
+                  <div class="min-w-0">
+                    <p class="font-semibold text-sm text-on-surface">{id}</p>
+                    <p class="text-xs text-on-surface-variant font-mono break-all">
+                      {mcp_server_summary(server)}
+                    </p>
+                  </div>
+                </label>
+              </div>
+
               <div :if={@error} class="bg-error/10 border border-error rounded-lg p-3 text-error text-sm flex items-center gap-2">
                 <.dm_mdi name="alert-circle" class="w-4 h-4" />
                 {@error}
@@ -153,10 +189,11 @@ defmodule PiWeb.ProjectSettingsLive do
   end
 
   @impl true
-  def handle_event("save", %{"name" => name, "path" => raw_path}, socket) do
+  def handle_event("save", %{"name" => name, "path" => raw_path} = params, socket) do
     old_path = socket.assigns.workdir
     new_path = Path.expand(String.trim(raw_path))
     new_name = String.trim(name)
+    mcp_server_ids = params |> Map.get("mcp_server_ids", []) |> List.wrap()
 
     cond do
       new_name == "" ->
@@ -166,7 +203,7 @@ defmodule PiWeb.ProjectSettingsLive do
         {:noreply, assign(socket, :error, "Directory does not exist: #{new_path}")}
 
       true ->
-        case apply_changes(old_path, new_path, new_name) do
+        case apply_changes(old_path, new_path, new_name, mcp_server_ids) do
           {:ok, new_encoded} ->
             {:noreply,
              socket
@@ -196,10 +233,14 @@ defmodule PiWeb.ProjectSettingsLive do
     {:noreply, socket |> put_flash(:info, "Repository removed.") |> push_navigate(to: ~p"/")}
   end
 
-  defp apply_changes(old_path, new_path, new_name) do
+  defp apply_changes(old_path, new_path, new_name, mcp_server_ids) do
     with :ok <- rename_sessions_dir(old_path, new_path),
          {:ok, _entry} <-
-           RepoManager.update_repo(old_path, %{"name" => new_name, "path" => new_path}) do
+           RepoManager.update_repo(old_path, %{
+             "name" => new_name,
+             "path" => new_path,
+             "mcp_server_ids" => Enum.uniq(mcp_server_ids)
+           }) do
       {:ok, Base.url_encode64(new_path, padding: false)}
     end
   end
@@ -216,4 +257,17 @@ defmodule PiWeb.ProjectSettingsLive do
       true -> File.rename(old_dir, new_dir)
     end
   end
+
+  defp repo_mcp_server_ids(%{"mcp_server_ids" => ids}, servers) when is_list(ids) do
+    Enum.filter(ids, &Map.has_key?(servers, &1))
+  end
+
+  defp repo_mcp_server_ids(_, _), do: []
+
+  defp mcp_server_summary(%{"type" => "stdio", "command" => command, "args" => args}) do
+    Enum.join([command | args], " ")
+  end
+
+  defp mcp_server_summary(%{"type" => type, "url" => url}), do: "#{type}: #{url}"
+  defp mcp_server_summary(server), do: inspect(server)
 end

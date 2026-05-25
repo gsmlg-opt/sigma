@@ -41,6 +41,12 @@ const AutocompleteHook = {
 // Auto-show dialogs when they mount
 const ModalHook = {
   mounted() {
+    this._show()
+  },
+  updated() {
+    this._show()
+  },
+  _show() {
     if (typeof this.el.show === 'function') {
       this.el.show();
     } else {

@@ -1,6 +1,8 @@
 defmodule PiWeb.NewSessionLive do
   use PiWeb, :live_view
 
+  alias PiSession.{ConfigManager, RepoManager}
+
   @impl true
   def mount(%{"repository" => encoded_repository}, _session, socket) do
     workdir = Base.url_decode64!(encoded_repository, padding: false)
@@ -9,6 +11,8 @@ defmodule PiWeb.NewSessionLive do
 
     branches = list_git_branches(workdir)
     worktrees = list_existing_worktrees(workdir)
+    mcp_servers = ConfigManager.list_mcp_servers()
+    selected_mcp_server_ids = RepoManager.mcp_server_ids(workdir) |> filter_mcp_server_ids(mcp_servers)
 
     socket =
       socket
@@ -22,6 +26,8 @@ defmodule PiWeb.NewSessionLive do
       |> assign(:mode, :project_dir)
       |> assign(:selected_worktree, List.first(worktrees))
       |> assign(:worktree_name, "")
+      |> assign(:mcp_servers, mcp_servers)
+      |> assign(:selected_mcp_server_ids, selected_mcp_server_ids)
 
     {:ok, socket}
   end
@@ -176,6 +182,36 @@ defmodule PiWeb.NewSessionLive do
               </div>
             </.dm_card>
 
+            <!-- MCP server overrides -->
+            <.dm_card :if={map_size(@mcp_servers) > 0} variant="bordered" class="bg-surface-container-low">
+              <:title>
+                <div class="flex items-center gap-2 text-on-surface py-1">
+                  <.dm_mdi name="server-network-outline" class="w-5 h-5 text-primary" />
+                  <span class="font-semibold">MCP Servers</span>
+                </div>
+              </:title>
+              <form id="session-mcp-form" phx-change="select_mcp_servers" class="py-4 px-1 space-y-2">
+                <label
+                  :for={{id, server} <- @mcp_servers}
+                  class="flex items-start gap-3 p-3 rounded-xl border border-outline-variant hover:border-outline cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    name="mcp_server_ids[]"
+                    value={id}
+                    checked={id in @selected_mcp_server_ids}
+                    class="checkbox checkbox-primary mt-1"
+                  />
+                  <div class="min-w-0">
+                    <p class="font-semibold text-sm text-on-surface">{id}</p>
+                    <p class="text-xs text-on-surface-variant font-mono break-all">
+                      {mcp_server_summary(server)}
+                    </p>
+                  </div>
+                </label>
+              </form>
+            </.dm_card>
+
             <!-- Path preview -->
             <div class="bg-surface-container rounded-xl p-4 border border-outline-variant">
               <p class="text-xs text-on-surface-variant uppercase tracking-wider font-bold mb-2">
@@ -263,6 +299,13 @@ defmodule PiWeb.NewSessionLive do
       else: "Select a branch first"
   end
 
+  defp mcp_server_summary(%{"type" => "stdio", "command" => command, "args" => args}) do
+    Enum.join([command | args], " ")
+  end
+
+  defp mcp_server_summary(%{"type" => type, "url" => url}), do: "#{type}: #{url}"
+  defp mcp_server_summary(server), do: inspect(server)
+
   defp effective_path(assigns) do
     case assigns.mode do
       :project_dir ->
@@ -322,6 +365,12 @@ defmodule PiWeb.NewSessionLive do
   end
 
   @impl true
+  def handle_event("select_mcp_servers", params, socket) do
+    ids = params |> Map.get("mcp_server_ids", []) |> List.wrap()
+    {:noreply, assign(socket, :selected_mcp_server_ids, ids)}
+  end
+
+  @impl true
   def handle_event("create_session", _, socket) do
     workdir = socket.assigns.workdir
     branch = socket.assigns.selected_branch
@@ -356,7 +405,13 @@ defmodule PiWeb.NewSessionLive do
           {workdir, false}
       end
 
-    meta = %{cwd: cwd, branch: branch, worktree: is_worktree}
+    meta = %{
+      cwd: cwd,
+      branch: branch,
+      worktree: is_worktree,
+      mcp_server_ids: socket.assigns.selected_mcp_server_ids
+    }
+
     File.write!(meta_path, Jason.encode!(meta))
 
     {:noreply,
@@ -420,5 +475,9 @@ defmodule PiWeb.NewSessionLive do
       end)
 
     if path, do: %{path: path, branch: branch}, else: nil
+  end
+
+  defp filter_mcp_server_ids(ids, servers) do
+    Enum.filter(ids, &Map.has_key?(servers, &1))
   end
 end

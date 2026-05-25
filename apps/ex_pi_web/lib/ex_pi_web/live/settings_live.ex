@@ -3,11 +3,15 @@ defmodule PiWeb.SettingsLive do
 
   alias PiSession.{ConfigManager, Skills}
 
+  @credential_ref_regex ~r/^\{\{credential:([^}]+)\}\}$/
+
   @impl true
   def mount(_params, _session, socket) do
     {:ok,
      socket
      |> assign(:active_tab, :settings)
+     |> assign(:mcp_form, nil)
+     |> assign(:deleting_mcp_server, nil)
      |> load_config()}
   end
 
@@ -25,6 +29,7 @@ defmodule PiWeb.SettingsLive do
       socket
       |> assign(:selected_id, nil)
       |> maybe_load_skills()
+      |> maybe_load_mcp()
 
     {:noreply, socket}
   end
@@ -91,6 +96,18 @@ defmodule PiWeb.SettingsLive do
               <.dm_mdi name="auto-fix" class="w-5 h-5" />
               <span>Skills</span>
             </.dm_link>
+
+            <.dm_link
+              patch={~p"/settings/mcp"}
+              class={["p-4 rounded-2xl border transition-all flex items-center gap-3 font-bold",
+                if(@live_action == :mcp,
+                  do: "bg-primary text-primary-content border-primary shadow-lg",
+                  else: "border-secondary-content/20 hover:bg-secondary-content/10 text-secondary-content"
+                )]}
+            >
+              <.dm_mdi name="server-network-outline" class="w-5 h-5" />
+              <span>MCP</span>
+            </.dm_link>
           </nav>
         </aside>
 
@@ -111,6 +128,14 @@ defmodule PiWeb.SettingsLive do
               <.render_system_prompt system_prompt={@config["system_prompt"]} />
             <% :skills -> %>
               <.render_skills result={@global_skills_result} />
+            <% :mcp -> %>
+              <.render_mcp
+                config={@mcp_config}
+                credentials={@config["credentials"]}
+                deleting_server_id={@deleting_mcp_server}
+                file={@mcp_file}
+                form={@mcp_form}
+              />
           <% end %>
         </main>
       </div>
@@ -347,6 +372,292 @@ defmodule PiWeb.SettingsLive do
     """
   end
 
+  defp render_mcp(assigns) do
+    ~H"""
+    <div class="space-y-6">
+      <div class="flex justify-between items-center text-on-surface">
+        <div>
+          <h2 class="text-2xl font-bold font-display">MCP Servers</h2>
+          <p class="text-sm text-on-surface-variant font-mono mt-1">{@file}</p>
+        </div>
+        <.dm_btn id="mcp-new-server-btn" phx-click="new_mcp_server" phx-hook="WebComponentHook" variant="primary" size="sm">
+          <:prefix><.dm_mdi name="plus" /></:prefix>
+          New Server
+        </.dm_btn>
+      </div>
+
+      <div
+        :if={map_size(@config["servers"]) == 0}
+        class="rounded-2xl border border-dashed border-outline-variant bg-surface-container-low p-8 text-center"
+      >
+        <.dm_mdi name="server-network-off" class="w-10 h-10 mx-auto text-on-surface-variant opacity-40 mb-3" />
+        <p class="font-semibold text-on-surface">No MCP servers configured</p>
+      </div>
+
+      <div :if={map_size(@config["servers"]) > 0} class="grid grid-cols-1 gap-4">
+        <.dm_card :for={{id, server} <- @config["servers"]} variant="bordered" class="bg-surface-container-low">
+          <:title>
+            <div class="flex items-center justify-between w-full text-on-surface">
+              <div class="flex items-center gap-3 min-w-0">
+                <div class="p-2 bg-primary/10 rounded-lg text-primary shrink-0">
+                  <.dm_mdi name="server-network-outline" class="w-5 h-5" />
+                </div>
+                <div class="min-w-0">
+                  <div class="font-bold truncate">{id}</div>
+                  <div class="text-[10px] opacity-40 uppercase tracking-widest">{server["type"]}</div>
+                </div>
+              </div>
+              <div class="flex items-center gap-2">
+                <.dm_btn
+                  id={"mcp-edit-server-#{id}"}
+                  type="button"
+                  phx-hook="WebComponentHook"
+                  phx-click="edit_mcp_server"
+                  phx-value-id={id}
+                  variant="outline"
+                  size="xs"
+                >
+                  Edit
+                </.dm_btn>
+                <.dm_btn
+                  id={"mcp-delete-server-#{id}"}
+                  type="button"
+                  phx-hook="WebComponentHook"
+                  phx-click="confirm_delete_mcp_server"
+                  phx-value-id={id}
+                  variant="error"
+                  size="xs"
+                  shape="circle"
+                >
+                  <.dm_mdi name="delete-outline" />
+                </.dm_btn>
+              </div>
+            </div>
+          </:title>
+
+          <div class="grid grid-cols-1 gap-3 py-2 text-sm">
+            <div class="rounded-xl bg-surface-container p-3 font-mono text-xs text-on-surface-variant break-all">
+              {mcp_server_summary(server)}
+            </div>
+            <div class="flex flex-wrap gap-2 text-[11px] text-on-surface-variant">
+              <span :if={server["type"] == "stdio"} class="px-2 py-1 rounded-full bg-surface-container-high">
+                {length(server["args"] || [])} args
+              </span>
+              <span :if={server["type"] == "stdio"} class="px-2 py-1 rounded-full bg-surface-container-high">
+                {map_size(server["env"] || %{})} env
+              </span>
+              <span :if={server["type"] == "http"} class="px-2 py-1 rounded-full bg-surface-container-high">
+                {map_size(server["headers"] || %{})} headers
+              </span>
+            </div>
+          </div>
+        </.dm_card>
+      </div>
+
+      <.dm_modal :if={@form} id="mcp-server-modal" phx-hook="ModalHook" size="xl" responsive={true} hide_close={true}>
+        <:title>
+          <div class="flex items-center gap-2 text-on-surface">
+            <.dm_mdi name="server-network-outline" class="w-6 h-6 text-primary" />
+            <span>{if @form["mode"] == "new", do: "New MCP Server", else: "Edit MCP Server"}</span>
+          </div>
+        </:title>
+        <:body>
+          <form id="mcp-server-form" phx-change="change_mcp_form" phx-submit="save_mcp_server" class="space-y-5">
+            <input type="hidden" name="mcp[mode]" value={@form["mode"]} />
+            <input type="hidden" name="mcp[original_id]" value={@form["original_id"] || ""} />
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div class="space-y-1">
+                <label class="text-[10px] font-bold opacity-40 uppercase tracking-wider text-on-surface">Server ID</label>
+                <.dm_input name="mcp[id]" value={@form["id"]} class="w-full" size="sm" />
+              </div>
+
+              <div class="space-y-1">
+                <.dm_select name="mcp[type]" value={@form["type"]} label="Transport" size="sm" class="w-full">
+                  <option value="stdio" selected={@form["type"] == "stdio"}>stdio</option>
+                  <option value="http" selected={@form["type"] == "http"}>HTTP</option>
+                </.dm_select>
+              </div>
+            </div>
+
+            <div :if={@form["type"] == "stdio"} class="space-y-5">
+              <div class="space-y-1">
+                <label class="text-[10px] font-bold opacity-40 uppercase tracking-wider text-on-surface">Command</label>
+                <.dm_input name="mcp[command]" value={@form["command"] || ""} placeholder="npx" class="w-full" size="sm" />
+              </div>
+
+              <.mcp_pair_rows
+                field="args"
+                label="Args"
+                key_label="Arg"
+                rows={@form["args"]}
+                credentials={@credentials}
+              />
+
+              <.mcp_pair_rows
+                field="env"
+                label="Env"
+                key_label="Name"
+                rows={@form["env"]}
+                credentials={@credentials}
+              />
+            </div>
+
+            <div :if={@form["type"] == "http"} class="space-y-5">
+              <div class="space-y-1">
+                <label class="text-[10px] font-bold opacity-40 uppercase tracking-wider text-on-surface">URL</label>
+                <.dm_input name="mcp[url]" value={@form["url"] || ""} placeholder="https://example.com/mcp" class="w-full" size="sm" />
+              </div>
+
+              <.mcp_pair_rows
+                field="headers"
+                label="Headers"
+                key_label="Header"
+                rows={@form["headers"]}
+                credentials={@credentials}
+              />
+            </div>
+
+            <div class="flex justify-end gap-3 pt-4 border-t border-outline-variant">
+              <.dm_btn id="mcp-cancel-server-btn" type="button" phx-click="cancel_mcp_form" phx-hook="WebComponentHook" variant="ghost">
+                Cancel
+              </.dm_btn>
+              <.dm_btn
+                id="mcp-save-server-btn"
+                type="button"
+                onclick="this.closest('form').requestSubmit()"
+                variant="primary"
+              >
+                Save Server
+              </.dm_btn>
+            </div>
+          </form>
+        </:body>
+      </.dm_modal>
+
+      <.dm_modal :if={@deleting_server_id} id="delete-mcp-server-modal" phx-hook="ModalHook">
+        <:title>
+          <div class="flex items-center gap-2 text-error">
+            <.dm_mdi name="alert-circle-outline" class="w-6 h-6" />
+            <span>Delete MCP Server</span>
+          </div>
+        </:title>
+        <:body>
+          <p class="text-on-surface">
+            Delete the MCP server <span class="font-bold">"{@deleting_server_id}"</span>?
+          </p>
+        </:body>
+        <:footer>
+          <.dm_btn
+            id="mcp-cancel-delete-server-btn"
+            type="button"
+            phx-click="cancel_delete_mcp_server"
+            phx-hook="WebComponentHook"
+            variant="ghost"
+          >
+            Cancel
+          </.dm_btn>
+          <.dm_btn
+            id="mcp-confirm-delete-server-btn"
+            type="button"
+            phx-click="delete_mcp_server"
+            phx-value-id={@deleting_server_id}
+            phx-hook="WebComponentHook"
+            variant="error"
+          >
+            Delete
+          </.dm_btn>
+        </:footer>
+      </.dm_modal>
+    </div>
+    """
+  end
+
+  defp mcp_pair_rows(assigns) do
+    assigns = assign(assigns, :rows, ensure_pair_rows(assigns.rows))
+
+    ~H"""
+    <div class="space-y-3">
+      <div class="flex items-center justify-between">
+        <label class="text-[10px] font-bold opacity-40 uppercase tracking-wider text-on-surface">
+          {@label}
+        </label>
+        <.dm_btn
+          id={"mcp-#{@field}-add-row-btn"}
+          type="button"
+          phx-click="add_mcp_pair"
+          phx-value-field={@field}
+          phx-hook="WebComponentHook"
+          variant="outline"
+          size="xs"
+        >
+          <:prefix><.dm_mdi name="plus" class="w-3 h-3" /></:prefix>
+          Add
+        </.dm_btn>
+      </div>
+
+      <div class="space-y-2">
+        <div
+          :for={{row, idx} <- Enum.with_index(@rows)}
+          class="grid grid-cols-1 md:grid-cols-[1fr_1fr_1fr_auto] gap-2 items-end"
+        >
+          <% credential_selected? = (row["credential_id"] || "") != "" %>
+          <.dm_input
+            name={"mcp[#{@field}][key][]"}
+            value={row["key"] || ""}
+            placeholder={@key_label}
+            class="w-full"
+            size="sm"
+          />
+          <input
+            :if={credential_selected?}
+            type="hidden"
+            name={"mcp[#{@field}][value][]"}
+            value=""
+          />
+          <.dm_input
+            name={"mcp[#{@field}][value][]"}
+            value={if credential_selected?, do: "", else: row["value"] || ""}
+            placeholder={if credential_selected?, do: "Using credential", else: "Value"}
+            class="w-full"
+            size="sm"
+            disabled={credential_selected?}
+          />
+          <.dm_select
+            name={"mcp[#{@field}][credential_id][]"}
+            value={row["credential_id"] || ""}
+            label="Credential"
+            size="sm"
+            class="w-full"
+          >
+            <option value="" selected={(row["credential_id"] || "") == ""}>Input value</option>
+            <option
+              :for={{credential_id, credential} <- @credentials}
+              value={credential_id}
+              selected={row["credential_id"] == credential_id}
+            >
+              {credential["name"]}
+            </option>
+          </.dm_select>
+          <.dm_btn
+            id={"mcp-#{@field}-remove-row-#{idx}-btn"}
+            type="button"
+            phx-click="remove_mcp_pair"
+            phx-value-field={@field}
+            phx-value-index={idx}
+            phx-hook="WebComponentHook"
+            variant="ghost"
+            size="sm"
+            shape="circle"
+          >
+            <.dm_mdi name="minus" class="w-4 h-4" />
+          </.dm_btn>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
   # Handlers
 
   @impl true
@@ -421,8 +732,101 @@ defmodule PiWeb.SettingsLive do
     {:noreply, socket |> load_config() |> put_flash(:info, "System prompt updated")}
   end
 
+  @impl true
+  def handle_event("new_mcp_server", _, socket) do
+    {:noreply, assign(socket, :mcp_form, blank_mcp_form())}
+  end
+
+  @impl true
+  def handle_event("edit_mcp_server", %{"id" => id}, socket) do
+    server = ConfigManager.get_mcp_server(id) || %{"type" => "stdio"}
+    {:noreply, assign(socket, :mcp_form, mcp_form_from_server(id, server))}
+  end
+
+  @impl true
+  def handle_event("cancel_mcp_form", _, socket) do
+    {:noreply, assign(socket, :mcp_form, nil)}
+  end
+
+  @impl true
+  def handle_event("confirm_delete_mcp_server", %{"id" => id}, socket) do
+    {:noreply, assign(socket, :deleting_mcp_server, id)}
+  end
+
+  @impl true
+  def handle_event("cancel_delete_mcp_server", _, socket) do
+    {:noreply, assign(socket, :deleting_mcp_server, nil)}
+  end
+
+  @impl true
+  def handle_event("change_mcp_form", %{"mcp" => params}, socket) do
+    form = socket.assigns.mcp_form || blank_mcp_form()
+    {:noreply, assign(socket, :mcp_form, merge_mcp_form_params(form, params))}
+  end
+
+  @impl true
+  def handle_event("add_mcp_pair", %{"field" => field}, socket) do
+    {:noreply,
+     update(socket, :mcp_form, fn form ->
+       update_mcp_pair_rows(form, field, &(&1 ++ [blank_pair_row()]))
+     end)}
+  end
+
+  @impl true
+  def handle_event("remove_mcp_pair", %{"field" => field, "index" => index}, socket) do
+    index = String.to_integer(index)
+
+    {:noreply,
+     update(socket, :mcp_form, fn form ->
+       update_mcp_pair_rows(form, field, &List.delete_at(&1, index))
+     end)}
+  end
+
+  @impl true
+  def handle_event("save_mcp_server", %{"mcp" => params}, socket) do
+    form =
+      socket.assigns.mcp_form
+      |> Kernel.||(blank_mcp_form())
+      |> merge_mcp_form_params(params)
+
+    with {:ok, updates} <- mcp_server_updates(form),
+         {:ok, _} <- save_mcp_server_form(form, updates) do
+      {:noreply,
+       socket
+       |> load_mcp()
+       |> assign(:mcp_form, nil)
+       |> put_flash(:info, "MCP server updated")}
+    else
+      {:error, :invalid_id} ->
+        {:noreply, put_flash(socket, :error, "MCP server ID cannot be empty.")}
+
+      {:error, :id_conflict} ->
+        {:noreply, put_flash(socket, :error, "Another MCP server already uses that ID.")}
+
+      {:error, message} ->
+        {:noreply, put_flash(socket, :error, message)}
+    end
+  end
+
+  @impl true
+  def handle_event("delete_mcp_server", %{"id" => id}, socket) do
+    ConfigManager.delete_mcp_server(id)
+
+    {:noreply,
+     socket
+     |> load_mcp()
+     |> assign(:mcp_form, nil)
+     |> assign(:deleting_mcp_server, nil)}
+  end
+
   defp load_config(socket) do
     assign(socket, :config, ConfigManager.get_config())
+  end
+
+  defp load_mcp(socket) do
+    socket
+    |> assign(:mcp_config, ConfigManager.get_mcp_config())
+    |> assign(:mcp_file, ConfigManager.mcp_file())
   end
 
   defp maybe_load_skills(%{assigns: %{live_action: :skills}} = socket) do
@@ -430,4 +834,237 @@ defmodule PiWeb.SettingsLive do
   end
 
   defp maybe_load_skills(socket), do: socket
+
+  defp maybe_load_mcp(%{assigns: %{live_action: :mcp}} = socket), do: load_mcp(socket)
+  defp maybe_load_mcp(socket), do: socket
+
+  defp blank_mcp_form do
+    %{
+      "mode" => "new",
+      "original_id" => "",
+      "id" => "server_#{System.unique_integer([:positive])}",
+      "type" => "stdio",
+      "command" => "",
+      "url" => "",
+      "args" => [blank_pair_row()],
+      "env" => [blank_pair_row()],
+      "headers" => [blank_pair_row()]
+    }
+  end
+
+  defp mcp_form_from_server(id, server) do
+    type = normalize_mcp_type(server["type"])
+
+    %{
+      "mode" => "edit",
+      "original_id" => id,
+      "id" => id,
+      "type" => type,
+      "command" => server["command"] || "",
+      "url" => server["url"] || "",
+      "args" => args_to_pair_rows(server["args"] || []),
+      "env" => map_to_pair_rows(server["env"] || %{}),
+      "headers" => map_to_pair_rows(server["headers"] || %{})
+    }
+  end
+
+  defp merge_mcp_form_params(form, params) do
+    form
+    |> Map.merge(Map.take(params, ["mode", "original_id", "id", "command", "url"]))
+    |> Map.put("type", normalize_mcp_type(params["type"] || form["type"]))
+    |> merge_pair_rows(params, "args")
+    |> merge_pair_rows(params, "env")
+    |> merge_pair_rows(params, "headers")
+  end
+
+  defp merge_pair_rows(form, params, field) do
+    if Map.has_key?(params, field) do
+      Map.put(form, field, pair_rows_from_params(params[field]))
+    else
+      form
+    end
+  end
+
+  defp update_mcp_pair_rows(nil, field, fun) do
+    blank_mcp_form()
+    |> update_mcp_pair_rows(field, fun)
+  end
+
+  defp update_mcp_pair_rows(form, field, fun) when field in ["args", "env", "headers"] do
+    rows =
+      form
+      |> Map.get(field, [])
+      |> ensure_pair_rows()
+      |> fun.()
+      |> ensure_pair_rows()
+
+    Map.put(form, field, rows)
+  end
+
+  defp update_mcp_pair_rows(form, _field, _fun), do: form
+
+  defp mcp_server_updates(form) do
+    id = form["id"] |> to_string() |> String.trim()
+    type = normalize_mcp_type(form["type"])
+
+    if id == "" do
+      {:error, :invalid_id}
+    else
+      {:ok, mcp_server_updates_for_type(id, type, form)}
+    end
+  end
+
+  defp mcp_server_updates_for_type(id, "http", form) do
+    %{
+      "id" => id,
+      "type" => "http",
+      "url" => String.trim(form["url"] || ""),
+      "headers" => map_from_pair_rows(form["headers"])
+    }
+  end
+
+  defp mcp_server_updates_for_type(id, "stdio", form) do
+    %{
+      "id" => id,
+      "type" => "stdio",
+      "command" => String.trim(form["command"] || ""),
+      "args" => args_from_pair_rows(form["args"]),
+      "env" => map_from_pair_rows(form["env"])
+    }
+  end
+
+  defp save_mcp_server_form(%{"mode" => "new"}, updates) do
+    if Map.has_key?(ConfigManager.list_mcp_servers(), updates["id"]) do
+      {:error, :id_conflict}
+    else
+      ConfigManager.put_mcp_server(updates["id"], Map.drop(updates, ["id"]))
+    end
+  end
+
+  defp save_mcp_server_form(%{"original_id" => original_id}, updates) do
+    ConfigManager.update_mcp_server(original_id, updates)
+  end
+
+  defp save_mcp_server_form(_form, updates), do: save_mcp_server_form(%{"mode" => "new"}, updates)
+
+  defp blank_pair_row, do: %{"key" => "", "value" => "", "credential_id" => ""}
+
+  defp ensure_pair_rows(rows) do
+    rows =
+      rows
+      |> List.wrap()
+      |> Enum.reject(&is_nil/1)
+
+    if rows == [], do: [blank_pair_row()], else: rows
+  end
+
+  defp pair_rows_from_params(nil), do: [blank_pair_row()]
+
+  defp pair_rows_from_params(params) do
+    keys = list_param(params["key"])
+    values = list_param(params["value"])
+    credential_ids = list_param(params["credential_id"])
+    count = Enum.max([length(keys), length(values), length(credential_ids), 1])
+
+    Enum.map(0..(count - 1), fn index ->
+      %{
+        "key" => Enum.at(keys, index, ""),
+        "value" => Enum.at(values, index, ""),
+        "credential_id" => Enum.at(credential_ids, index, "")
+      }
+    end)
+  end
+
+  defp list_param(value) when is_list(value), do: value
+  defp list_param(nil), do: []
+  defp list_param(value), do: [value]
+
+  defp args_to_pair_rows(args) do
+    args
+    |> List.wrap()
+    |> Enum.chunk_every(2, 2, [""])
+    |> Enum.map(fn [key, value] -> pair_row_from_value(key, value) end)
+    |> ensure_pair_rows()
+  end
+
+  defp map_to_pair_rows(values) when is_map(values) do
+    values
+    |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+    |> Enum.map(fn {key, value} -> pair_row_from_value(key, value) end)
+    |> ensure_pair_rows()
+  end
+
+  defp map_to_pair_rows(_values), do: [blank_pair_row()]
+
+  defp pair_row_from_value(key, value) do
+    case credential_id_from_value(value) do
+      nil ->
+        %{"key" => to_string(key), "value" => to_string(value || ""), "credential_id" => ""}
+
+      credential_id ->
+        %{"key" => to_string(key), "value" => "", "credential_id" => credential_id}
+    end
+  end
+
+  defp credential_id_from_value(value) when is_binary(value) do
+    case Regex.run(@credential_ref_regex, value) do
+      [_, credential_id] -> credential_id
+      _ -> nil
+    end
+  end
+
+  defp credential_id_from_value(_value), do: nil
+
+  defp args_from_pair_rows(rows) do
+    rows
+    |> ensure_pair_rows()
+    |> Enum.flat_map(fn row ->
+      key = String.trim(row["key"] || "")
+      value = pair_row_value(row)
+
+      cond do
+        key == "" and value == "" -> []
+        key == "" -> [value]
+        value == "" -> [key]
+        true -> [key, value]
+      end
+    end)
+  end
+
+  defp map_from_pair_rows(rows) do
+    rows
+    |> ensure_pair_rows()
+    |> Enum.reduce(%{}, fn row, acc ->
+      key = String.trim(row["key"] || "")
+
+      if key == "" do
+        acc
+      else
+        Map.put(acc, key, pair_row_value(row))
+      end
+    end)
+  end
+
+  defp pair_row_value(row) do
+    credential_id = String.trim(row["credential_id"] || "")
+
+    if credential_id == "" do
+      String.trim(row["value"] || "")
+    else
+      "{{credential:#{credential_id}}}"
+    end
+  end
+
+  defp normalize_mcp_type(type) when type in ["http", "streamable-http", "sse"], do: "http"
+  defp normalize_mcp_type(_type), do: "stdio"
+
+  defp mcp_server_summary(%{"type" => "http", "url" => url}), do: "http: #{url}"
+
+  defp mcp_server_summary(%{"type" => "stdio", "command" => command, "args" => args}) do
+    [command | args || []]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join(" ")
+  end
+
+  defp mcp_server_summary(server), do: inspect(server)
 end

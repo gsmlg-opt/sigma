@@ -3,6 +3,7 @@ defmodule PiWeb.SessionLive do
 
   alias PiAgent.SessionContext
   alias PiSession.ConfigManager
+  alias PiSession.RepoManager
   alias PiSession.Skills
 
   @impl true
@@ -16,6 +17,8 @@ defmodule PiWeb.SessionLive do
     session_meta = read_session_meta(meta_path)
     effective_cwd = Map.get(session_meta, "cwd", workdir)
     session_branch = Map.get(session_meta, "branch")
+    project_mcp_server_ids = RepoManager.mcp_server_ids(workdir)
+    mcp_server_ids = Map.get(session_meta, "mcp_server_ids", project_mcp_server_ids)
 
     system_config = ConfigManager.get_config()
 
@@ -30,7 +33,7 @@ defmodule PiWeb.SessionLive do
         "# Worktree Context\nYou are working in a git worktree for branch `#{session_branch}` at `#{effective_cwd}`. The project root is at `#{workdir}`."
       end
 
-    tool_modules = [
+    builtin_tools = [
       PiCoding.Tools.Read,
       PiCoding.Tools.Write,
       PiCoding.Tools.Bash,
@@ -40,6 +43,13 @@ defmodule PiWeb.SessionLive do
       PiCoding.Tools.LS,
       PiCoding.Tools.UrlFetch
     ]
+
+    mcp_tools =
+      mcp_server_ids
+      |> ConfigManager.mcp_servers_for()
+      |> PiCoding.MCP.tools_for_servers(cwd: effective_cwd)
+
+    tool_modules = builtin_tools ++ mcp_tools
 
     session_context =
       SessionContext.new(
@@ -113,6 +123,7 @@ defmodule PiWeb.SessionLive do
           |> assign(:current_model, model_id)
           |> assign(:available_models, available_models)
           |> assign(:logs_available, true)
+          |> assign(:mcp_server_ids, mcp_server_ids)
           |> assign(:show_logs, false)
           |> assign(:log_entries, [])
           |> assign(:log_filter, nil)
