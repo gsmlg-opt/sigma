@@ -51,6 +51,13 @@ defmodule PiAgentTest do
     end
   end
 
+  defmodule EmptyProvider do
+    @behaviour PiAi.Provider
+
+    @impl true
+    def stream(_params), do: []
+  end
+
   test "agent manages a turn and emits events" do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
@@ -87,6 +94,22 @@ defmodule PiAgentTest do
     assert [%{type: :text, text: "Hello"}] = assistant.content
     assert assistant.stop_reason == :stop
     assert assistant.usage.total_tokens == 11
+  end
+
+  test "agent reports an error when provider returns no assistant message" do
+    model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
+
+    {:ok, agent} =
+      PiAgent.start_link(
+        model: model,
+        provider: EmptyProvider
+      )
+
+    PiAgent.subscribe(agent)
+    PiAgent.prompt(agent, "Hi")
+
+    assert_receive {:turn_error, "AI provider returned no response."}, 1000
+    assert_receive {:agent_end, [%Message{role: :user, content: "Hi"}]}, 1000
   end
 
   test "injects project context into the first user message sent to the provider" do
@@ -130,7 +153,8 @@ defmodule PiAgentTest do
                           }
                         ]
                       }
-                    }}
+                    }},
+                   1000
 
     assert system_identity == "You are Pi, an Elixir-based AI coding agent."
     assert system_policy =~ "You are an interactive agent"

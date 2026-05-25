@@ -195,14 +195,7 @@ defmodule PiAgent do
   defp run_turn_loop(state) do
     emit(state, {:turn_start})
 
-    ai_tools =
-      Enum.map(state.tools, fn tool_mod ->
-        %{
-          name: tool_mod.name(),
-          description: tool_mod.description(),
-          parameters: tool_mod.schema()
-        }
-      end)
+    ai_tools = Enum.map(state.tools, &PiCoding.Tool.ai_definition/1)
 
     context =
       ContextBuilder.build(
@@ -294,7 +287,13 @@ defmodule PiAgent do
       end)
 
     assistant_msg = final_state.current_turn_assistant_message
-    {%{final_state | current_turn_assistant_message: nil}, assistant_msg}
+
+    if assistant_msg do
+      {%{final_state | current_turn_assistant_message: nil}, assistant_msg}
+    else
+      emit(state, {:turn_error, "AI provider returned no response."})
+      {:error, state}
+    end
   rescue
     e in [RuntimeError, Jason.DecodeError] ->
       emit(state, {:turn_error, Exception.message(e)})
@@ -330,7 +329,7 @@ defmodule PiAgent do
 
         {content, is_error} =
           case result do
-            {:ok, %{content: content}} -> {content, false}
+            {:ok, %{content: content} = result} -> {content, Map.get(result, :is_error, false)}
             {:error, reason} -> {[%{type: :text, text: "Error: #{inspect(reason)}"}], true}
             other -> {[%{type: :text, text: inspect(other)}], false}
           end
