@@ -25,8 +25,11 @@ defmodule PiAgent do
     :policy,
     messages: [],
     subscribers: [],
-    current_turn_assistant_message: nil
+    current_turn_assistant_message: nil,
+    pending_user_questions: %{}
   ]
+
+  @default_user_question_timeout_ms 300_000
 
   # Client API
 
@@ -46,8 +49,31 @@ defmodule PiAgent do
     GenServer.call(pid, {:subscribe, self()})
   end
 
-  def prompt(pid, prompt_text) do
-    GenServer.cast(pid, {:prompt, prompt_text})
+  def prompt(pid, prompt_text, opts \\ []) do
+    GenServer.cast(pid, {:prompt, prompt_text, opts})
+  end
+
+  def ask_user_question(pid, request, opts \\ []) when is_map(request) do
+    question_id = "ask_#{System.unique_integer([:positive])}"
+
+    timeout =
+      request[:timeout_ms] || Keyword.get(opts, :timeout, @default_user_question_timeout_ms)
+
+    case GenServer.call(pid, {:ask_user_question, question_id, self(), request}) do
+      {:ok, ^question_id} ->
+        wait_for_user_question_answer(pid, question_id, timeout)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def pending_user_questions(pid) do
+    GenServer.call(pid, :pending_user_questions)
+  end
+
+  def answer_user_question(pid, question_id, reply) when is_binary(question_id) do
+    GenServer.call(pid, {:answer_user_question, question_id, reply})
   end
 
   def cancel(pid) do
@@ -118,23 +144,90 @@ defmodule PiAgent do
   end
 
   @impl true
+  def handle_call({:ask_user_question, question_id, reply_to, request}, _from, state) do
+    monitor_ref = Process.monitor(reply_to)
+
+    pending_question = %{
+      id: question_id,
+      request: Map.put(request, :id, question_id),
+      reply_to: reply_to,
+      monitor_ref: monitor_ref,
+      created_at: System.monotonic_time()
+    }
+
+    state = put_in(state.pending_user_questions[question_id], pending_question)
+    emit(state, {:ask_user_question, question_id, public_user_question(pending_question)})
+
+    {:reply, {:ok, question_id}, state}
+  end
+
+  @impl true
+  def handle_call(:pending_user_questions, _from, state) do
+    {:reply, public_user_questions(state), state}
+  end
+
+  @impl true
+  def handle_call({:answer_user_question, question_id, reply}, _from, state) do
+    case Map.pop(state.pending_user_questions, question_id) do
+      {nil, _pending_questions} ->
+        {:reply, {:error, :not_found}, state}
+
+      {pending_question, pending_questions} ->
+        Process.demonitor(pending_question.monitor_ref, [:flush])
+        send(pending_question.reply_to, {:ask_user_question_reply, question_id, reply})
+
+        state = %{state | pending_user_questions: pending_questions}
+        emit(state, {:ask_user_question_resolved, question_id})
+
+        {:reply, :ok, state}
+    end
+  end
+
+  @impl true
   def handle_cast({:set_model, model}, state) do
     {:noreply, %{state | model: model}}
   end
 
   @impl true
-  def handle_cast({:prompt, _}, %{current_turn_task: task} = state) when task != nil do
+  def handle_cast({:expire_user_question, question_id}, state) do
+    case Map.pop(state.pending_user_questions, question_id) do
+      {nil, _pending_questions} ->
+        {:noreply, state}
+
+      {pending_question, pending_questions} ->
+        Process.demonitor(pending_question.monitor_ref, [:flush])
+
+        state = %{state | pending_user_questions: pending_questions}
+        emit(state, {:ask_user_question_resolved, question_id})
+
+        {:noreply, state}
+    end
+  end
+
+  @impl true
+  def handle_cast({:prompt, prompt_text}, state) do
+    handle_cast({:prompt, prompt_text, []}, state)
+  end
+
+  @impl true
+  def handle_cast({:prompt, _, _opts}, %{current_turn_task: task} = state) when task != nil do
     # Turn in flight — ignore until it completes or is cancelled
     {:noreply, state}
   end
 
   @impl true
-  def handle_cast({:prompt, prompt_text}, state) do
+  def handle_cast({:prompt, prompt_text, opts}, state) do
+    turn_dispatcher_opts = Keyword.get(opts, :dispatcher_opts, [])
+
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
         # self() here is the turn task PID; pass it as the abort signal so
         # bash tools can monitor for cancellation via Process.monitor/1
-        dispatcher_opts = Keyword.put(state.dispatcher_opts, :signal, self())
+        dispatcher_opts =
+          state.dispatcher_opts
+          |> Keyword.merge(turn_dispatcher_opts)
+          |> Keyword.put(:signal, self())
+
         execute_turn(%{state | dispatcher_opts: dispatcher_opts}, prompt_text)
       end)
 
@@ -165,7 +258,14 @@ defmodule PiAgent do
         {:noreply, %{state | current_turn_task: nil}}
 
       _ ->
-        {:noreply, state}
+        case remove_user_question_by_monitor(state, ref) do
+          {:ok, question_id, state} ->
+            emit(state, {:ask_user_question_resolved, question_id})
+            {:noreply, state}
+
+          :error ->
+            {:noreply, state}
+        end
     end
   end
 
@@ -515,5 +615,41 @@ defmodule PiAgent do
   defp emit(state, event) do
     Enum.each(state.subscribers, fn sub -> send(sub, event) end)
     if state.on_event, do: state.on_event.(event)
+  end
+
+  defp wait_for_user_question_answer(pid, question_id, timeout) do
+    receive do
+      {:ask_user_question_reply, ^question_id, reply} ->
+        reply
+    after
+      timeout ->
+        GenServer.cast(pid, {:expire_user_question, question_id})
+        {:error, "Timed out waiting for the user to answer."}
+    end
+  end
+
+  defp public_user_questions(state) do
+    state.pending_user_questions
+    |> Map.values()
+    |> Enum.sort_by(& &1.created_at)
+    |> Enum.map(&public_user_question/1)
+  end
+
+  defp public_user_question(pending_question) do
+    pending_question.request
+    |> Map.put(:id, pending_question.id)
+    |> Map.drop([:reply_to, :monitor_ref, :created_at])
+  end
+
+  defp remove_user_question_by_monitor(state, monitor_ref) do
+    case Enum.find(state.pending_user_questions, fn {_id, question} ->
+           question.monitor_ref == monitor_ref
+         end) do
+      {question_id, _question} ->
+        {:ok, question_id, update_in(state.pending_user_questions, &Map.delete(&1, question_id))}
+
+      nil ->
+        :error
+    end
   end
 end

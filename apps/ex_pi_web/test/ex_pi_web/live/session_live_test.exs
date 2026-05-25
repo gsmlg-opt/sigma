@@ -82,4 +82,127 @@ defmodule PiWeb.SessionLiveTest do
 
     assert render(view) =~ "read"
   end
+
+  test "renders user messages aligned to the left", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/repository/#{@encoded_workdir}/sessions/test")
+
+    message = %PiAgent.Message{
+      id: "msg_user_left",
+      role: :user,
+      content: "hello",
+      timestamp: 1_779_379_527_686
+    }
+
+    send(view.pid, {:message_start, message})
+
+    html = render(view)
+    assert html =~ ~s(id="msg_user_left")
+    assert html =~ ~s(align="start")
+  end
+
+  test "renders and answers an AskUserQuestion request", %{conn: conn} do
+    session_id = "ask_#{System.unique_integer([:positive])}"
+    path = "/repository/#{@encoded_workdir}/sessions/#{session_id}"
+    {:ok, view, _html} = live(conn, path)
+    {:ok, {agent, _policy}} = PiWeb.SessionManager.get_agent(session_id)
+
+    task =
+      Task.async(fn ->
+        PiAgent.ask_user_question(
+          agent,
+          %{
+            question: "Which setup path should I use?",
+            options: [
+              %{label: "Project", value: "project", description: "Repository instructions"},
+              %{label: "User", value: "user", description: nil}
+            ],
+            allow_freeform: true,
+            placeholder: "Type another answer"
+          },
+          timeout: 1_000
+        )
+      end)
+
+    Process.sleep(20)
+    html = render(view)
+    assert html =~ "Which setup path should I use?"
+    assert html =~ "Project"
+    assert html =~ "Type another answer"
+    assert html =~ ~s(id="ask-user-question-option-)
+
+    view
+    |> form("#ask-user-questions form", %{
+      "selected_answer" => "project",
+      "answer" => ""
+    })
+    |> render_submit()
+
+    assert {:ok, "project"} = Task.await(task)
+    refute render(view) =~ "Which setup path should I use?"
+  end
+
+  test "reopens a pending AskUserQuestion after refresh", %{conn: conn} do
+    session_id = "ask_refresh_#{System.unique_integer([:positive])}"
+    path = "/repository/#{@encoded_workdir}/sessions/#{session_id}"
+    {:ok, _view, _html} = live(conn, path)
+    {:ok, {agent, _policy}} = PiWeb.SessionManager.get_agent(session_id)
+
+    task =
+      Task.async(fn ->
+        PiAgent.ask_user_question(
+          agent,
+          %{
+            question: "Which mode should I use?",
+            options: ["Fast", "Accurate"],
+            allow_freeform: true
+          },
+          timeout: 1_000
+        )
+      end)
+
+    Process.sleep(20)
+    {:ok, refreshed_view, refreshed_html} = live(conn, path)
+
+    assert refreshed_html =~ "Which mode should I use?"
+    assert refreshed_html =~ "Fast"
+    assert refreshed_html =~ "Accurate"
+
+    refreshed_view
+    |> form("#ask-user-questions form", %{
+      "selected_answer" => "Fast",
+      "answer" => ""
+    })
+    |> render_submit()
+
+    assert {:ok, "Fast"} = Task.await(task)
+    refute render(refreshed_view) =~ "Which mode should I use?"
+  end
+
+  test "renders placeholder examples as selectable answers before freeform input", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/repository/#{@encoded_workdir}/sessions/test")
+
+    send(
+      view.pid,
+      {:ask_user_question, "ask_examples",
+       %{
+         question: "How should the faster proxy be selected?",
+         options: [],
+         allow_freeform: true,
+         placeholder: "e.g., geo-based, latency-based, load-balanced"
+       }}
+    )
+
+    html = render(view)
+    assert html =~ ~s(id="ask-user-question-option-ask_examples-1")
+    assert html =~ ~s(id="ask-user-question-custom-ask_examples")
+    assert html =~ ~s(id="ask-user-question-input-ask_examples")
+
+    assert :binary.match(html, ~s(id="ask-user-question-option-ask_examples-1")) <
+             :binary.match(html, ~s(id="ask-user-question-input-ask_examples"))
+
+    assert html =~ "geo-based"
+    assert html =~ "latency-based"
+    assert html =~ "load-balanced"
+    refute html =~ "e.g., geo-based, latency-based, load-balanced"
+  end
 end

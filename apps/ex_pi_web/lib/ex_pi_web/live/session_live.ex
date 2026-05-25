@@ -35,6 +35,7 @@ defmodule PiWeb.SessionLive do
       end
 
     builtin_tools = [
+      PiCoding.Tools.AskUserQuestion,
       PiCoding.Tools.Read,
       PiCoding.Tools.Write,
       PiCoding.Tools.Bash,
@@ -90,7 +91,6 @@ defmodule PiWeb.SessionLive do
             session_context: session_context,
             on_event: on_event,
             tools: tool_modules,
-            dispatcher_opts: [],
             messages: initial_messages,
             cwd: effective_cwd
           )
@@ -98,6 +98,8 @@ defmodule PiWeb.SessionLive do
         if connected?(socket) do
           Process.monitor(agent)
         end
+
+        pending_user_questions = PiAgent.pending_user_questions(agent)
 
         {:ok, sessions} = PiSession.Log.list_sessions(sessions_dir)
 
@@ -123,6 +125,7 @@ defmodule PiWeb.SessionLive do
           |> assign(:active_provider_id, provider_id)
           |> assign(:current_model, model_id)
           |> assign(:available_models, available_models)
+          |> assign(:pending_user_questions, pending_user_questions)
           |> assign(:logs_available, true)
           |> assign(:mcp_server_ids, mcp_server_ids)
           |> assign(:show_logs, false)
@@ -237,6 +240,8 @@ defmodule PiWeb.SessionLive do
             data-slash-commands={Jason.encode!([%{value: "/init", label: "/init", description: "Create or update AGENTS.md"}])}
             class="max-w-4xl mx-auto relative"
           >
+            <.pending_user_questions questions={@pending_user_questions} />
+
             <div :if={@turn_in_flight} class="mb-3 flex items-center justify-between gap-3">
               <div class="flex items-center gap-3 text-sm text-on-surface-variant">
                 <.dm_chat_typing />
@@ -300,11 +305,117 @@ defmodule PiWeb.SessionLive do
     """
   end
 
+  defp pending_user_questions(assigns) do
+    questions =
+      Enum.map(assigns.questions, fn question ->
+        question
+        |> normalize_user_question_request()
+        |> Map.merge(Map.take(question, [:id, :reply_to]))
+      end)
+
+    assigns = assign(assigns, :questions, questions)
+
+    ~H"""
+    <div
+      :if={@questions != []}
+      id="ask-user-questions"
+      class="mb-4 space-y-3"
+      role="group"
+      aria-label="Questions from the agent"
+    >
+      <div
+        :for={question <- @questions}
+        id={"ask-user-question-#{question.id}"}
+        class="rounded-lg border border-primary/30 bg-primary/5 p-4 shadow-sm"
+      >
+        <div class="mb-3 flex items-start gap-3">
+          <div class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-content">
+            <.dm_mdi name="help" class="h-4 w-4" />
+          </div>
+          <div class="min-w-0">
+            <p class="text-xs font-semibold uppercase text-on-surface-variant">Agent question</p>
+            <p class="text-sm font-medium text-on-surface">{question.question}</p>
+          </div>
+        </div>
+
+        <form
+          id={"ask-user-question-form-#{question.id}"}
+          phx-submit="answer_user_question"
+          class="space-y-3"
+        >
+          <input type="hidden" name="question_id" value={question.id} />
+
+          <div
+            class="space-y-2"
+            role="radiogroup"
+            aria-label={"Answers for #{question.question}"}
+          >
+            <label
+              :for={{option, index} <- Enum.with_index(question.options, 1)}
+              id={"ask-user-question-option-#{question.id}-#{index}"}
+              class="group flex cursor-pointer items-center gap-3 rounded-lg border border-outline-variant bg-surface-container-low px-3 py-2 transition-colors hover:border-primary/70 hover:bg-primary/10 has-[:checked]:border-primary has-[:checked]:bg-primary/15"
+            >
+              <input
+                type="radio"
+                name="selected_answer"
+                value={option.value}
+                class="peer sr-only"
+              />
+              <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface-container-high text-sm font-semibold text-on-surface-variant peer-checked:bg-primary peer-checked:text-primary-content">
+                {index}
+              </span>
+              <span class="min-w-0">
+                <span class="block text-sm font-medium text-on-surface">{option.label}</span>
+                <span :if={option.description} class="block text-xs text-on-surface-variant">
+                  {option.description}
+                </span>
+              </span>
+            </label>
+
+            <label
+              :if={question.allow_freeform}
+              id={"ask-user-question-custom-#{question.id}"}
+              class="flex items-center gap-3 rounded-lg border border-outline-variant bg-surface-container-low px-3 py-2 focus-within:border-primary focus-within:bg-primary/10"
+            >
+              <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface-container-high text-sm font-semibold text-on-surface-variant">
+                {length(question.options) + 1}
+              </span>
+              <input
+                id={"ask-user-question-input-#{question.id}"}
+                name="answer"
+                value=""
+                placeholder={question.placeholder || "Tell Pi Agent what to do instead"}
+                class="min-w-0 flex-1 bg-transparent text-sm text-on-surface placeholder:text-on-surface-variant focus:outline-none"
+              />
+            </label>
+          </div>
+
+          <div class="flex justify-end gap-2">
+            <.dm_btn
+              type="button"
+              phx-click="cancel_user_question"
+              phx-value-question-id={question.id}
+              phx-hook="WebComponentHook"
+              variant="ghost"
+              size="sm"
+            >
+              Cancel
+            </.dm_btn>
+            <.dm_btn type="submit" phx-hook="WebComponentHook" variant="primary" size="sm">
+              Send answer
+            </.dm_btn>
+          </div>
+        </form>
+      </div>
+    </div>
+    """
+  end
+
   defp message_bubble(%{message: %{role: :user}} = assigns) do
     ~H"""
     <.dm_chat
       id={@message.id}
-      align="end"
+      align="start"
       variant="filled"
       color="secondary"
       avatar="You"
@@ -492,6 +603,109 @@ defmodule PiWeb.SessionLive do
     if current in list, do: list, else: [current | list]
   end
 
+  defp normalize_user_question_request(request) do
+    options = request |> Map.get(:options, []) |> normalize_user_question_options()
+    placeholder = Map.get(request, :placeholder)
+
+    {options, placeholder} =
+      maybe_promote_user_question_placeholder_examples(options, placeholder)
+
+    %{
+      question: Map.get(request, :question, ""),
+      options: options,
+      allow_freeform: Map.get(request, :allow_freeform, true),
+      placeholder: placeholder
+    }
+  end
+
+  defp normalize_user_question_options(options) when is_list(options) do
+    options
+    |> Enum.map(&normalize_user_question_option/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp normalize_user_question_options(_options), do: []
+
+  defp normalize_user_question_option(option) when is_binary(option) do
+    label = String.trim(option)
+    if label == "", do: nil, else: %{label: label, value: label, description: nil}
+  end
+
+  defp normalize_user_question_option(option) when is_map(option) do
+    label =
+      option |> Map.get(:label, Map.get(option, "label", "")) |> to_string() |> String.trim()
+
+    value = option |> Map.get(:value, Map.get(option, "value", label)) |> to_string()
+    description = Map.get(option, :description, Map.get(option, "description"))
+
+    if label == "" do
+      nil
+    else
+      %{label: label, value: value, description: description}
+    end
+  end
+
+  defp normalize_user_question_option(_option), do: nil
+
+  defp maybe_promote_user_question_placeholder_examples([], placeholder)
+       when is_binary(placeholder) do
+    case user_question_example_options_from_placeholder(placeholder) do
+      [] -> {[], placeholder}
+      options -> {options, nil}
+    end
+  end
+
+  defp maybe_promote_user_question_placeholder_examples(options, placeholder),
+    do: {options, placeholder}
+
+  defp user_question_example_options_from_placeholder(placeholder) do
+    placeholder
+    |> String.trim()
+    |> String.replace(~r/^(e\.g\.?|eg\.?|for example|examples?)[:,]?\s*/i, "")
+    |> String.split(~r/\s*(?:,|;|\||\/|\bor\b)\s*/u, trim: true)
+    |> Enum.map(&String.trim(&1, " \"'`"))
+    |> Enum.reject(&(&1 == ""))
+    |> case do
+      [_single] -> []
+      examples -> Enum.map(examples, &%{label: &1, value: &1, description: nil})
+    end
+  end
+
+  defp upsert_user_question(questions, question) do
+    questions
+    |> remove_user_question(question.id)
+    |> Kernel.++([question])
+  end
+
+  defp remove_user_question(questions, question_id) do
+    Enum.reject(questions, &(&1.id == question_id))
+  end
+
+  defp reply_to_user_question(socket, question_id, reply) do
+    PiAgent.answer_user_question(socket.assigns.agent, question_id, reply)
+
+    {:noreply, update(socket, :pending_user_questions, &remove_user_question(&1, question_id))}
+  end
+
+  defp user_question_answer(params) do
+    [params["answer"], params["selected_answer"]]
+    |> Enum.map(&to_string/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.find("", &(&1 != ""))
+  end
+
+  defp submit_prompt(socket, prompt) do
+    agent = socket.assigns.agent
+
+    PiAgent.prompt(agent, prompt,
+      dispatcher_opts: [
+        ask_user_question_fn: fn request, tool_opts ->
+          PiAgent.ask_user_question(agent, request, tool_opts)
+        end
+      ]
+    )
+  end
+
   @impl true
   def handle_event("theme_changed", _, socket) do
     {:noreply, socket}
@@ -581,6 +795,22 @@ defmodule PiWeb.SessionLive do
   end
 
   @impl true
+  def handle_event("answer_user_question", params, socket) do
+    case user_question_answer(params) do
+      "" ->
+        {:noreply, put_flash(socket, :error, "Select an answer or type a response.")}
+
+      answer ->
+        reply_to_user_question(socket, params["question_id"], {:ok, answer})
+    end
+  end
+
+  @impl true
+  def handle_event("cancel_user_question", %{"question-id" => question_id}, socket) do
+    reply_to_user_question(socket, question_id, {:error, "User cancelled the question."})
+  end
+
+  @impl true
   def handle_event("send_prompt", %{"value" => prompt}, socket) do
     case String.trim(prompt) do
       "" ->
@@ -642,11 +872,11 @@ defmodule PiWeb.SessionLive do
   defp handle_prompt(prompt, socket) do
     case SlashCommands.expand(prompt) do
       :not_command ->
-        PiAgent.prompt(socket.assigns.agent, prompt)
+        submit_prompt(socket, prompt)
         {:noreply, socket}
 
       {:ok, expanded_prompt} ->
-        PiAgent.prompt(socket.assigns.agent, expanded_prompt)
+        submit_prompt(socket, expanded_prompt)
         {:noreply, socket}
 
       {:error, reason} ->
@@ -677,6 +907,21 @@ defmodule PiWeb.SessionLive do
      socket
      |> put_flash(:error, "Turn failed: #{msg}")
      |> assign(turn_in_flight: false, streaming_message_id: nil)}
+  end
+
+  @impl true
+  def handle_info({:ask_user_question, question_id, request}, socket) do
+    question =
+      request
+      |> normalize_user_question_request()
+      |> Map.put(:id, question_id)
+
+    {:noreply, update(socket, :pending_user_questions, &upsert_user_question(&1, question))}
+  end
+
+  @impl true
+  def handle_info({:ask_user_question_resolved, question_id}, socket) do
+    {:noreply, update(socket, :pending_user_questions, &remove_user_question(&1, question_id))}
   end
 
   @impl true
