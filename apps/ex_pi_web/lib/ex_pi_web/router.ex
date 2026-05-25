@@ -22,6 +22,7 @@ defmodule PiWeb.Router do
     live("/settings", SettingsLive, :index)
     live("/repository/new", HomeLive, :add)
     live("/repository/:repository/settings", ProjectSettingsLive, :index)
+    live("/repository/:repository/skills", ProjectSkillsLive, :index)
     live("/repository/:repository/sessions/new", NewSessionLive, :new)
     live("/repository/:repository/sessions/:id", SessionLive, :show)
     live("/repository/:repository", RepositoryLive, :index)

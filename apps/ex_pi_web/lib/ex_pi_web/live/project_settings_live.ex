@@ -2,6 +2,7 @@ defmodule PiWeb.ProjectSettingsLive do
   use PiWeb, :live_view
 
   alias PiSession.{ConfigManager, RepoManager}
+  import PiWeb.ProjectSidebar
 
   @impl true
   def mount(%{"repository" => encoded_repository}, _session, socket) do
@@ -28,37 +29,11 @@ defmodule PiWeb.ProjectSettingsLive do
   def render(assigns) do
     ~H"""
     <div class="flex min-h-[calc(100vh-64px)]">
-      <aside class="w-80 bg-secondary text-secondary-content border-r border-outline-variant p-6 shrink-0 flex flex-col">
-        <div class="flex items-center gap-2 mb-8 text-on-secondary">
-          <.dm_mdi name="cog-outline" class="w-5 h-5" />
-          <h2 class="font-semibold truncate" title={@workdir}>Project Settings</h2>
-        </div>
-
-        <.dm_link
-          navigate={~p"/repository/#{@encoded_repository}"}
-          class="btn btn-ghost w-full justify-start"
-        >
-          <div class="flex items-center gap-2">
-            <.dm_mdi name="arrow-left" class="w-4 h-4" />
-            <span>Back to Sessions</span>
-          </div>
-        </.dm_link>
-
-        <.dm_link
-          navigate={~p"/"}
-          class="btn btn-ghost w-full justify-start mt-2"
-        >
-          <div class="flex items-center gap-2">
-            <.dm_mdi name="folder-multiple-outline" class="w-4 h-4" />
-            <span>All Repositories</span>
-          </div>
-        </.dm_link>
-
-        <div class="mt-auto pt-6 border-t border-secondary-content/20 text-on-secondary">
-          <p class="text-xs opacity-60 mb-2 uppercase tracking-wider font-bold">Full Path</p>
-          <code class="text-[10px] break-all opacity-80 leading-tight font-mono">{@workdir}</code>
-        </div>
-      </aside>
+      <.project_sidebar
+        workdir={@workdir}
+        encoded_repository={@encoded_repository}
+        active_item={:settings}
+      />
 
       <main class="flex-1 p-8 bg-surface text-on-surface font-sans">
         <div class="max-w-2xl mx-auto">

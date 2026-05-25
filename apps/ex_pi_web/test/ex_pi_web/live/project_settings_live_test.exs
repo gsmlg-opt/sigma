@@ -18,6 +18,15 @@ defmodule PiWeb.ProjectSettingsLiveTest do
       encoded_repository = Base.url_encode64(tmp_dir, padding: false)
 
       {:ok, view, html} = live(conn, "/repository/#{encoded_repository}/settings")
+      assert html =~ "New Session"
+      assert html =~ "Skills"
+      assert html =~ "Session List"
+      assert html =~ "Settings"
+      refute html =~ "All Repositories"
+      assert html =~ ~s(href="/repository/#{encoded_repository}/sessions/new")
+      assert html =~ ~s(href="/repository/#{encoded_repository}/skills")
+      assert html =~ ~s(href="/repository/#{encoded_repository}")
+
       assert html =~ "MCP Servers"
       assert html =~ "github"
 

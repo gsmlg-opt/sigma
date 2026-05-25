@@ -24,6 +24,12 @@ defmodule PiWeb.SessionLiveTest do
     assert html =~ ~s(phx-hook="ChatInputHook")
     assert html =~ "/init"
     assert html =~ ~s(phx-update="ignore")
+    assert html =~ "Session List"
+    assert html =~ "Settings"
+    assert html =~ "Skills"
+    assert html =~ "New Session"
+    assert html =~ ~s(href="/repository/#{@encoded_workdir}/skills")
+    assert_session_sidebar_order(html)
   end
 
   test "submits prompt", %{conn: conn} do
@@ -206,5 +212,16 @@ defmodule PiWeb.SessionLiveTest do
     assert html =~ "latency-based"
     assert html =~ "load-balanced"
     refute html =~ "e.g., geo-based, latency-based, load-balanced"
+  end
+
+  defp assert_session_sidebar_order(html) do
+    assert :binary.match(html, "session-sidebar-settings") <
+             :binary.match(html, "session-sidebar-skills")
+
+    assert :binary.match(html, "session-sidebar-skills") <
+             :binary.match(html, "session-sidebar-new-session")
+
+    assert :binary.match(html, "session-sidebar-new-session") <
+             :binary.match(html, "session-sidebar-session-list")
   end
 end

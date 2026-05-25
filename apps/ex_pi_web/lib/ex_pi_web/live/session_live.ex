@@ -150,12 +150,37 @@ defmodule PiWeb.SessionLive do
             <span class="text-xs uppercase tracking-widest font-bold opacity-70">Workspace</span>
           </div>
           <h2 class="font-semibold truncate" title={@workdir}>{Path.basename(@workdir)}</h2>
-          <.dm_link
-            navigate={~p"/repository/#{@encoded_repository}"}
-            class="text-[10px] text-primary-content hover:underline mt-2 inline-block font-bold"
-          >
-            Session List
-          </.dm_link>
+
+          <nav class="flex flex-col gap-2 mt-4">
+            <.dm_link
+              id="session-sidebar-settings"
+              navigate={~p"/repository/#{@encoded_repository}/settings"}
+              class="btn btn-ghost w-full justify-start"
+            >
+              <.dm_mdi name="cog-outline" class="w-4 h-4 mr-1" /> Settings
+            </.dm_link>
+            <.dm_link
+              id="session-sidebar-skills"
+              navigate={~p"/repository/#{@encoded_repository}/skills"}
+              class="btn btn-ghost w-full justify-start"
+            >
+              <.dm_mdi name="auto-fix" class="w-4 h-4 mr-1" /> Skills
+            </.dm_link>
+            <.dm_link
+              id="session-sidebar-new-session"
+              navigate={~p"/repository/#{@encoded_repository}/sessions/new"}
+              class="btn btn-primary w-full justify-start"
+            >
+              <.dm_mdi name="plus" class="w-4 h-4 mr-1" /> New Session
+            </.dm_link>
+            <.dm_link
+              id="session-sidebar-session-list"
+              navigate={~p"/repository/#{@encoded_repository}"}
+              class="btn btn-ghost w-full justify-start"
+            >
+              <.dm_mdi name="format-list-bulleted" class="w-4 h-4 mr-1" /> Session List
+            </.dm_link>
+          </nav>
         </div>
 
         <div class="flex-1 overflow-y-auto">
@@ -211,14 +236,7 @@ defmodule PiWeb.SessionLive do
           </ul>
         </div>
 
-        <div class="p-4 border-t border-secondary-content/10 text-center">
-          <.dm_link
-            navigate={~p"/repository/#{@encoded_repository}/sessions/new"}
-            class="btn btn-primary w-full"
-          >
-            <.dm_mdi name="plus" class="w-4 h-4 mr-1" /> New Session
-          </.dm_link>
-        </div>
+        <div class="p-4 border-t border-secondary-content/10" />
       </aside>
 
       <!-- Main Chat -->

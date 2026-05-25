@@ -2,6 +2,7 @@ defmodule PiWeb.NewSessionLive do
   use PiWeb, :live_view
 
   alias PiSession.{ConfigManager, RepoManager}
+  import PiWeb.ProjectSidebar
 
   @impl true
   def mount(%{"repository" => encoded_repository}, _session, socket) do
@@ -12,7 +13,9 @@ defmodule PiWeb.NewSessionLive do
     branches = list_git_branches(workdir)
     worktrees = list_existing_worktrees(workdir)
     mcp_servers = ConfigManager.list_mcp_servers()
-    selected_mcp_server_ids = RepoManager.mcp_server_ids(workdir) |> filter_mcp_server_ids(mcp_servers)
+
+    selected_mcp_server_ids =
+      RepoManager.mcp_server_ids(workdir) |> filter_mcp_server_ids(mcp_servers)
 
     socket =
       socket
@@ -37,30 +40,11 @@ defmodule PiWeb.NewSessionLive do
     ~H"""
     <div class="flex min-h-[calc(100vh-64px)]">
       <!-- Sidebar -->
-      <aside class="w-80 bg-secondary text-secondary-content border-r border-outline-variant p-6 shrink-0 flex flex-col">
-        <div class="flex items-center gap-2 mb-1 text-on-secondary">
-          <.dm_mdi name="folder-outline" class="w-4 h-4 opacity-70" />
-          <span class="text-xs uppercase tracking-widest font-bold opacity-70">Workspace</span>
-        </div>
-        <h2 class="font-semibold truncate text-on-secondary mb-6" title={@workdir}>
-          {Path.basename(@workdir)}
-        </h2>
-
-        <.dm_link
-          navigate={~p"/repository/#{@encoded_repository}"}
-          class="btn btn-ghost w-full justify-start"
-        >
-          <div class="flex items-center gap-2">
-            <.dm_mdi name="arrow-left" class="w-4 h-4" />
-            <span>Back to Sessions</span>
-          </div>
-        </.dm_link>
-
-        <div class="mt-auto pt-6 border-t border-secondary-content/20 text-on-secondary">
-          <p class="text-xs opacity-60 mb-2 uppercase tracking-wider font-bold">Full Path</p>
-          <code class="text-[10px] break-all opacity-80 leading-tight font-mono">{@workdir}</code>
-        </div>
-      </aside>
+      <.project_sidebar
+        workdir={@workdir}
+        encoded_repository={@encoded_repository}
+        active_item={:new_session}
+      />
 
       <!-- Content -->
       <main class="flex-1 p-8 bg-surface text-on-surface font-sans">
