@@ -318,7 +318,8 @@ defmodule PiAi.Providers.Anthropic do
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
-  defp process_events(events, message) do
+  @doc false
+  def process_events(events, message) do
     Enum.map_reduce(events, message, fn event, acc ->
       case event do
         %{"type" => "error", "error" => error} ->
@@ -328,7 +329,9 @@ defmodule PiAi.Providers.Anthropic do
           raise provider_error_message(error)
 
         %{"type" => "message_start", "message" => msg} ->
-          new_acc = %{acc | response_id: msg["id"]}
+          start_usage = msg["usage"]
+          base_usage = if start_usage, do: transform_usage(start_usage), else: acc.usage
+          new_acc = %{acc | response_id: msg["id"], usage: base_usage}
           {{:start, new_acc}, new_acc}
 
         %{"type" => "content_block_start", "index" => idx, "content_block" => block} ->
@@ -461,10 +464,7 @@ defmodule PiAi.Providers.Anthropic do
               _ -> nil
             end
 
-          new_acc = %{acc | stop_reason: stop_reason, usage: transform_usage(usage)}
-          # We don't emit a separate event for message_delta usually, 
-          # but we wait for message_stop or done?
-          # Actually TS emits usage in message_delta.
+          new_acc = %{acc | stop_reason: stop_reason, usage: merge_delta_usage(acc.usage, usage)}
           {nil, new_acc}
 
         %{"type" => "message_stop"} ->
@@ -489,6 +489,25 @@ defmodule PiAi.Providers.Anthropic do
       cache_write: usage["cache_creation_input_tokens"] || 0,
       total_tokens: (usage["input_tokens"] || 0) + (usage["output_tokens"] || 0),
       cost: %{input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0, total: 0.0}
+    }
+  end
+
+  # Merges output tokens from the message_delta event with input/cache tokens
+  # already captured from message_start. The delta may omit input fields entirely
+  # (real Anthropic API), so nil-coalesce back to the baseline values.
+  defp merge_delta_usage(baseline, delta_usage) do
+    input = delta_usage["input_tokens"] || baseline.input
+    cache_read = delta_usage["cache_read_input_tokens"] || baseline.cache_read
+    cache_write = delta_usage["cache_creation_input_tokens"] || baseline.cache_write
+    output = delta_usage["output_tokens"] || baseline.output
+
+    %{
+      baseline
+      | input: input,
+        output: output,
+        cache_read: cache_read,
+        cache_write: cache_write,
+        total_tokens: input + output
     }
   end
 
