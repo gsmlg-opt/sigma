@@ -42,7 +42,9 @@ defmodule PiAgent do
   end
 
   def start_link(opts) do
-    GenServer.start_link(__MODULE__, opts)
+    {name, opts} = Keyword.pop(opts, :name)
+    gen_opts = if name, do: [name: name], else: []
+    GenServer.start_link(__MODULE__, opts, gen_opts)
   end
 
   def subscribe(pid) do
@@ -97,12 +99,28 @@ defmodule PiAgent do
 
   @impl true
   def init(opts) do
-    {:ok, task_sup} = Task.Supervisor.start_link()
+    task_supervisor =
+      case Keyword.get(opts, :task_supervisor) do
+        nil ->
+          {:ok, pid} = Task.Supervisor.start_link()
+          pid
 
-    {:ok, policy} = PiCoding.PermissionPolicy.start_link(default: :allow, rules: %{})
+        provided ->
+          provided
+      end
+
+    policy =
+      case Keyword.get(opts, :policy) do
+        nil ->
+          {:ok, pid} = PiCoding.PermissionPolicy.start_link(default: :allow, rules: %{})
+          pid
+
+        provided ->
+          provided
+      end
 
     state = %__MODULE__{
-      task_supervisor: task_sup,
+      task_supervisor: task_supervisor,
       policy: policy,
       session_id: opts[:session_id],
       model: opts[:model],
@@ -418,7 +436,7 @@ defmodule PiAgent do
     opts =
       state.dispatcher_opts
       |> Keyword.put(:cwd, state.cwd)
-      |> Keyword.put(:permission_policy, state.policy)
+      |> Keyword.put(:permission_policy, resolve_policy(state.policy))
       |> Keyword.put(:session_id, state.session_id)
 
     results = PiCoding.Dispatcher.dispatch_batch(tool_calls, state.tools, opts)
@@ -611,6 +629,10 @@ defmodule PiAgent do
       _ -> {:error, "summary generation failed"}
     end
   end
+
+  defp resolve_policy(policy) when is_pid(policy), do: policy
+  defp resolve_policy(policy) when is_atom(policy), do: policy
+  defp resolve_policy(policy), do: GenServer.whereis(policy)
 
   defp emit(state, event) do
     Enum.each(state.subscribers, fn sub -> send(sub, event) end)

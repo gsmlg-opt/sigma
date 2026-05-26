@@ -5,6 +5,7 @@ defmodule PiWeb.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      {Registry, keys: :unique, name: PiWeb.SessionRegistry},
       {Phoenix.PubSub, name: PiWeb.PubSub},
       {DynamicSupervisor, name: PiWeb.AgentSupervisor, strategy: :one_for_one},
       PiWeb.SessionManager,
