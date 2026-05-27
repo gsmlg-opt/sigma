@@ -2,11 +2,19 @@ defmodule PiWeb.SettingsLiveTest do
   use PiWeb.ConnCase, async: false
   import Phoenix.LiveViewTest
 
-  test "system prompt markdown editor ignores LiveView patches", %{conn: conn} do
+  test "context page edits AGENTS.md and shows readonly system prompt", %{conn: conn} do
     {:ok, _view, html} = live(conn, "/settings/system_prompt")
 
+    assert html =~ "Context"
+    assert html =~ "AGENTS.md"
+    assert html =~ ~s(<h3 class="text-lg font-bold">AGENTS.md</h3>)
     assert html =~ ~s(id="system-prompt-editor")
     assert html =~ ~s(phx-update="ignore")
+    assert html =~ ~s(id="system-prompt-preview")
+    assert html =~ "el-dm-markdown"
+    assert html =~ "You are Pi, an Elixir-based AI coding agent."
+    assert html =~ "{{inject_memory}}"
+    assert html =~ "{{inject_git_context}}"
   end
 
   @tag :tmp_dir

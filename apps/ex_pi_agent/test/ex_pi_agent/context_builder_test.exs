@@ -120,6 +120,19 @@ defmodule PiAgent.ContextBuilderTest do
     end
   end
 
+  test "renders default system prompt template with runtime placeholders" do
+    prompt = ContextBuilder.system_prompt_template()
+
+    assert prompt =~ "You are Pi, an Elixir-based AI coding agent."
+    assert prompt =~ "# Laws"
+    assert prompt =~ "# Memory"
+    assert prompt =~ "# Environment"
+    assert prompt =~ "{{inject_memory}}"
+    assert prompt =~ "{{inject_mcp_context}}"
+    assert prompt =~ "{{inject_git_context}}"
+    assert prompt =~ "Primary working directory: {{inject_cwd}}"
+  end
+
   defp git!(cwd, args) do
     {output, status} = System.cmd("git", args, cd: cwd, stderr_to_stdout: true)
     assert status == 0, output

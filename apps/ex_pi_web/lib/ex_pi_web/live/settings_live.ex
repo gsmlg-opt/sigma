@@ -1,6 +1,7 @@
 defmodule PiWeb.SettingsLive do
   use PiWeb, :live_view
 
+  alias PiAgent.ContextBuilder
   alias PiSession.{ConfigManager, Skills}
 
   @credential_ref_regex ~r/^\{\{credential:([^}]+)\}\}$/
@@ -82,7 +83,7 @@ defmodule PiWeb.SettingsLive do
                 )]}
             >
               <.dm_mdi name="text-box-outline" class="w-5 h-5" />
-              <span>System Prompt</span>
+              <span>Context</span>
             </.dm_link>
 
             <.dm_link
@@ -125,7 +126,10 @@ defmodule PiWeb.SettingsLive do
                 credentials={@config["credentials"]}
               />
             <% :system_prompt -> %>
-              <.render_system_prompt system_prompt={@config["system_prompt"]} />
+              <.render_context
+                agents_md={@config["system_prompt"]}
+                system_prompt={ContextBuilder.system_prompt_template()}
+              />
             <% :skills -> %>
               <.render_skills result={@global_skills_result} />
             <% :mcp -> %>
@@ -273,41 +277,58 @@ defmodule PiWeb.SettingsLive do
     """
   end
 
-  defp render_system_prompt(assigns) do
+  defp render_context(assigns) do
     ~H"""
     <div class="space-y-6">
       <div class="flex justify-between items-center text-on-surface">
-        <h2 class="text-2xl font-bold font-display">System Prompt</h2>
+        <h2 class="text-2xl font-bold font-display">Context</h2>
       </div>
 
       <.dm_card variant="bordered" class="bg-surface-container-low">
         <form phx-submit="save_system_prompt" class="space-y-4">
+          <div class="flex items-center gap-2 text-on-surface">
+            <.dm_mdi name="file-document-outline" class="w-5 h-5 text-primary" />
+            <h3 class="text-lg font-bold">AGENTS.md</h3>
+          </div>
           <.dm_markdown_input
             id="system-prompt-editor"
             phx-update="ignore"
             phx-hook="MarkdownInputHook"
             name="system_prompt"
-            value={@system_prompt}
-            label="Base Instructions"
+            value={@agents_md}
             class="w-full"
           />
 
           <div class="flex justify-end pt-4 border-t border-outline-variant">
              <.dm_btn type="submit" phx-hook="WebComponentHook" variant="primary" size="md">
-               Save System Prompt
+               Save AGENTS.md
              </.dm_btn>
           </div>
         </form>
       </.dm_card>
 
+      <.dm_card variant="bordered" class="bg-surface-container-low">
+        <:title>
+          <div class="flex items-center gap-2 text-on-surface">
+            <.dm_mdi name="shield-text-outline" class="w-5 h-5 text-primary" />
+            <span>System Prompt</span>
+          </div>
+        </:title>
+        <div
+          id="system-prompt-preview"
+          class="max-h-[36rem] overflow-y-auto rounded-xl border border-outline-variant bg-surface-container p-4 text-on-surface"
+        >
+          <.dm_markdown content={@system_prompt} />
+        </div>
+      </.dm_card>
+
       <div class="bg-primary/5 rounded-2xl p-6 border border-primary/10">
         <div class="flex items-center gap-2 text-primary mb-2">
           <.dm_mdi name="information-outline" class="w-5 h-5" />
-          <span class="font-bold">About the System Prompt</span>
+          <span class="font-bold">About Context</span>
         </div>
         <p class="text-sm text-on-surface-variant leading-relaxed">
-          The system prompt defines the core identity and rules for the agent. 
-          It is sent at the beginning of every session to ensure the AI follows specific formatting and safety guidelines.
+          AGENTS.md is user-level context loaded into sessions. The readonly system prompt below is the default provider prompt, with runtime-only sections shown as placeholders.
         </p>
       </div>
     </div>
@@ -729,7 +750,7 @@ defmodule PiWeb.SettingsLive do
   @impl true
   def handle_event("save_system_prompt", %{"system_prompt" => prompt}, socket) do
     ConfigManager.update_system_prompt(prompt)
-    {:noreply, socket |> load_config() |> put_flash(:info, "System prompt updated")}
+    {:noreply, socket |> load_config() |> put_flash(:info, "AGENTS.md updated")}
   end
 
   @impl true

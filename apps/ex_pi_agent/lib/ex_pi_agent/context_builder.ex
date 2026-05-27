@@ -115,6 +115,18 @@ defmodule PiAgent.ContextBuilder do
     end
   end
 
+  @doc """
+  Renders the default provider system prompt with runtime-only sections shown as
+  placeholders for readonly UI display.
+  """
+  @spec system_prompt_template() :: String.t()
+  def system_prompt_template do
+    system_text([
+      cached_text_block(@product_identity),
+      cached_text_block(operating_context_template())
+    ])
+  end
+
   defp default_system_blocks(opts) do
     [
       cached_text_block(@product_identity),
@@ -129,6 +141,19 @@ defmodule PiAgent.ContextBuilder do
       environment_context(opts),
       mcp_context(opts),
       git_context(Keyword.get(opts, :cwd))
+    ]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n\n")
+  end
+
+  defp operating_context_template do
+    [
+      @laws,
+      @memory_rules,
+      "{{inject_memory}}",
+      environment_context_template(),
+      "{{inject_mcp_context}}",
+      "{{inject_git_context}}"
     ]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n\n")
@@ -149,6 +174,20 @@ defmodule PiAgent.ContextBuilder do
       model_line(model)
     ]
     |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n")
+  end
+
+  defp environment_context_template do
+    [
+      "# Environment",
+      "You have been invoked in the following environment:",
+      " - Primary working directory: {{inject_cwd}}",
+      " - Is a git repository: {{inject_is_git_repository}}",
+      " - Platform: #{platform()}",
+      " - Shell: {{inject_shell}}",
+      " - OS Version: #{os_version()}",
+      " - Model: {{inject_model}}"
+    ]
     |> Enum.join("\n")
   end
 
