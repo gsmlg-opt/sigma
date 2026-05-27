@@ -40,6 +40,17 @@ defmodule PiWeb.ProjectSidebar do
         </.dm_link>
 
         <.dm_link
+          id="project-sidebar-hooks"
+          navigate={~p"/repository/#{@encoded_repository}/hooks"}
+          class={nav_item_class(@active_item == :hooks)}
+        >
+          <div class="flex items-center gap-2">
+            <.dm_mdi name="hook" class="w-4 h-4" />
+            <span>Hooks</span>
+          </div>
+        </.dm_link>
+
+        <.dm_link
           id="project-sidebar-new-session"
           navigate={~p"/repository/#{@encoded_repository}/sessions/new"}
           class={nav_item_class(@active_item == :new_session)}

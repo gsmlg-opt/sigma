@@ -317,6 +317,37 @@ defmodule PiSession.ConfigManager do
     Path.join(agent_dir(), @mcp_file)
   end
 
+  @doc "Returns the path to the user-level hooks.json file."
+  def hooks_file do
+    Path.join(agent_dir(), "hooks.json")
+  end
+
+  @doc "Returns the path to the project-level hooks.json file for the given working directory."
+  def project_hooks_file(cwd) do
+    Path.join([cwd, ".pi", "hooks.json"])
+  end
+
+  @doc "Reads a hooks.json file and returns its raw text content. Returns empty hooks skeleton if not found."
+  def get_hooks_json(path) do
+    case File.read(path) do
+      {:ok, content} -> content
+      {:error, _} -> "{\n  \"hooks\": {}\n}"
+    end
+  end
+
+  @doc "Validates and writes hooks JSON to the given path. Returns :ok or {:error, reason}."
+  def save_hooks_json(path, json_text) do
+    case Jason.decode(json_text) do
+      {:ok, _} ->
+        File.mkdir_p!(Path.dirname(path))
+        File.write!(path, json_text)
+        :ok
+
+      {:error, %Jason.DecodeError{} = err} ->
+        {:error, "Invalid JSON: #{Exception.message(err)}"}
+    end
+  end
+
   # ── Path helpers (pi-compatible) ─────────────────────────────────────────
 
   @doc "Returns the pi agent config directory (~/.pi/agent/)."
