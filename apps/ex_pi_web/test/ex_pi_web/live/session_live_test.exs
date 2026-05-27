@@ -1,5 +1,5 @@
 defmodule PiWeb.SessionLiveTest do
-  use PiWeb.ConnCase, async: true
+  use PiWeb.ConnCase, async: false
   import Phoenix.LiveViewTest
 
   @workdir "/tmp/pi-test"
@@ -17,7 +17,7 @@ defmodule PiWeb.SessionLiveTest do
   end
 
   test "renders session page", %{conn: conn} do
-    {:ok, _view, html} = live(conn, "/repository/#{@encoded_workdir}/sessions/test")
+    {:ok, _view, html} = live(conn, session_path(unique_session_id("render")))
     assert html =~ "Ask π anything"
     assert html =~ "⌘/Ctrl+Enter to send"
     assert html =~ ~s(id="prompt-input")
@@ -33,8 +33,9 @@ defmodule PiWeb.SessionLiveTest do
   end
 
   test "submits prompt", %{conn: conn} do
-    Phoenix.PubSub.subscribe(PiWeb.PubSub, "session:test")
-    {:ok, view, _html} = live(conn, "/repository/#{@encoded_workdir}/sessions/test")
+    session_id = unique_session_id("submit")
+    Phoenix.PubSub.subscribe(PiWeb.PubSub, "session:#{session_id}")
+    {:ok, view, _html} = live(conn, session_path(session_id))
 
     render_submit(view, "send_prompt", %{"value" => "hello"})
 
@@ -45,8 +46,9 @@ defmodule PiWeb.SessionLiveTest do
   end
 
   test "expands init slash command before submitting to the agent", %{conn: conn} do
-    Phoenix.PubSub.subscribe(PiWeb.PubSub, "session:test")
-    {:ok, view, _html} = live(conn, "/repository/#{@encoded_workdir}/sessions/test")
+    session_id = unique_session_id("init")
+    Phoenix.PubSub.subscribe(PiWeb.PubSub, "session:#{session_id}")
+    {:ok, view, _html} = live(conn, session_path(session_id))
 
     render_submit(view, "send_prompt", %{"value" => "/init"})
 
@@ -57,8 +59,9 @@ defmodule PiWeb.SessionLiveTest do
   end
 
   test "rejects unknown slash commands", %{conn: conn} do
-    Phoenix.PubSub.subscribe(PiWeb.PubSub, "session:test")
-    {:ok, view, _html} = live(conn, "/repository/#{@encoded_workdir}/sessions/test")
+    session_id = unique_session_id("unknown")
+    Phoenix.PubSub.subscribe(PiWeb.PubSub, "session:#{session_id}")
+    {:ok, view, _html} = live(conn, session_path(session_id))
 
     assert render_submit(view, "send_prompt", %{"value" => "/compact"}) =~
              "Unknown slash command: /compact"
@@ -67,7 +70,7 @@ defmodule PiWeb.SessionLiveTest do
   end
 
   test "renders streaming tool call before arguments are finalized", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/repository/#{@encoded_workdir}/sessions/test")
+    {:ok, view, _html} = live(conn, session_path(unique_session_id("tool_call")))
 
     message = %PiAgent.Message{
       id: "msg_assistant_tool_call",
@@ -90,7 +93,7 @@ defmodule PiWeb.SessionLiveTest do
   end
 
   test "renders user messages aligned to the left", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/repository/#{@encoded_workdir}/sessions/test")
+    {:ok, view, _html} = live(conn, session_path(unique_session_id("user_left")))
 
     message = %PiAgent.Message{
       id: "msg_user_left",
@@ -187,7 +190,7 @@ defmodule PiWeb.SessionLiveTest do
   end
 
   test "renders placeholder examples as selectable answers before freeform input", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/repository/#{@encoded_workdir}/sessions/test")
+    {:ok, view, _html} = live(conn, session_path(unique_session_id("examples")))
 
     send(
       view.pid,
@@ -223,5 +226,13 @@ defmodule PiWeb.SessionLiveTest do
 
     assert :binary.match(html, "session-sidebar-new-session") <
              :binary.match(html, "session-sidebar-session-list")
+  end
+
+  defp unique_session_id(prefix) do
+    "#{prefix}_#{System.unique_integer([:positive, :monotonic])}"
+  end
+
+  defp session_path(session_id) do
+    "/repository/#{@encoded_workdir}/sessions/#{session_id}"
   end
 end

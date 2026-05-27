@@ -48,7 +48,11 @@ defmodule PiWeb.SessionSupervisorTest do
   end
 
   defp wait_for_session_process_count(session_id, expected) do
-    wait_for_session_process_count(session_id, expected, System.monotonic_time(:millisecond) + 1_000)
+    wait_for_session_process_count(
+      session_id,
+      expected,
+      System.monotonic_time(:millisecond) + 1_000
+    )
   end
 
   defp wait_for_session_process_count(session_id, expected, deadline) do
@@ -175,6 +179,26 @@ defmodule PiWeb.SessionSupervisorTest do
     refute agent1 == agent2
   end
 
+  test "SessionManager repairs missing session registry after hot code reload" do
+    session_id = unique_session_id()
+
+    try do
+      stop_session_registry_child()
+      assert Process.whereis(PiWeb.SessionRegistry) == nil
+
+      assert {:ok, {agent_pid, policy_pid}} = PiWeb.SessionManager.get_agent(session_id)
+
+      assert is_pid(Process.whereis(PiWeb.SessionRegistry))
+      assert is_pid(agent_pid)
+      assert is_pid(policy_pid)
+      assert Registry.lookup(PiWeb.SessionRegistry, {session_id, :agent}) == [{agent_pid, nil}]
+
+      stop_session_supervisor(session_id)
+    after
+      ensure_session_registry_child()
+    end
+  end
+
   @tag :tmp_dir
   test "session supervisor, high-usage compaction, tolerant replay, and crash rebuild interact cleanly",
        %{tmp_dir: tmp_dir} do
@@ -217,6 +241,7 @@ defmodule PiWeb.SessionSupervisorTest do
     File.write!(storage_path, "{torn", [:append])
 
     assert {:ok, replayed_messages} = Log.replay(storage_path)
+
     assert [%PiAgent.Message{role: :compaction_summary, content: compact_content} | kept] =
              replayed_messages
 
@@ -241,5 +266,32 @@ defmodule PiWeb.SessionSupervisorTest do
 
     stop_session_supervisor(session_id)
     assert session_process_count(session_id) == before_count
+  end
+
+  defp stop_session_registry_child do
+    case Process.whereis(PiWeb.SessionRegistry) do
+      nil ->
+        :ok
+
+      _pid ->
+        :ok = Supervisor.terminate_child(PiWeb.Supervisor, PiWeb.SessionRegistry)
+        :ok = Supervisor.delete_child(PiWeb.Supervisor, PiWeb.SessionRegistry)
+    end
+  end
+
+  defp ensure_session_registry_child do
+    case Process.whereis(PiWeb.SessionRegistry) do
+      pid when is_pid(pid) ->
+        :ok
+
+      nil ->
+        {:ok, _pid} =
+          Supervisor.start_child(
+            PiWeb.Supervisor,
+            Registry.child_spec(keys: :unique, name: PiWeb.SessionRegistry)
+          )
+
+        :ok
+    end
   end
 end
