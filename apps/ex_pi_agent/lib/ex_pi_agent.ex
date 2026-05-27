@@ -26,7 +26,9 @@ defmodule PiAgent do
     messages: [],
     subscribers: [],
     current_turn_assistant_message: nil,
-    pending_user_questions: %{}
+    pending_user_questions: %{},
+    hook_specs: [],
+    stop_hook_active: false
   ]
 
   @default_user_question_timeout_ms 300_000
@@ -119,6 +121,9 @@ defmodule PiAgent do
           provided
       end
 
+    cwd = opts[:cwd] || File.cwd!()
+    hook_specs = PiCoding.Hooks.Discovery.load(cwd)
+
     state = %__MODULE__{
       task_supervisor: task_supervisor,
       policy: policy,
@@ -129,10 +134,11 @@ defmodule PiAgent do
       tools: opts[:tools] || [],
       provider: opts[:provider] || Anthropic,
       messages: opts[:messages] || [],
-      cwd: opts[:cwd] || File.cwd!(),
+      cwd: cwd,
       on_event: opts[:on_event],
       dispatcher_opts: opts[:dispatcher_opts] || [],
-      provider_options: opts[:options] || []
+      provider_options: opts[:options] || [],
+      hook_specs: hook_specs
     }
 
     {:ok, state}
@@ -294,20 +300,34 @@ defmodule PiAgent do
   defp execute_turn(state, prompt_text) do
     emit(state, {:agent_start, state.cwd})
 
+    # Reset stop_hook_active at the start of each turn
+    state = %{state | stop_hook_active: false}
+
+    # SessionStart hook: may prepend developer context
+    state = run_session_start_hook(state)
+
     user_id = "msg_user_#{System.unique_integer([:positive])}"
     user_msg = Message.user(user_id, prompt_text)
 
-    state = %{state | messages: state.messages ++ [user_msg]}
-    emit(state, {:message_start, user_msg})
-    emit(state, {:message_end, user_msg})
+    # UserPromptSubmit hook: may block or inject context into the prompt
+    case run_user_prompt_submit_hook(state, user_msg) do
+      {:block, reason} ->
+        emit(state, {:turn_blocked, reason})
+        state.messages
 
-    state = run_turn_loop(state)
-    state = maybe_compact(state)
+      {:ok, user_msg, state} ->
+        state = %{state | messages: state.messages ++ [user_msg]}
+        emit(state, {:message_start, user_msg})
+        emit(state, {:message_end, user_msg})
 
-    # Return the messages list; the agent emits {:agent_end} in handle_info
-    # after updating its own state to avoid a race between the event and the
-    # state update.
-    state.messages
+        state = run_turn_loop(state)
+        state = maybe_compact(state)
+
+        # Return the messages list; the agent emits {:agent_end} in handle_info
+        # after updating its own state to avoid a race between the event and the
+        # state update.
+        state.messages
+    end
   end
 
   defp run_turn_loop(state) do
@@ -345,7 +365,7 @@ defmodule PiAgent do
           run_turn_loop(state)
         else
           emit(state, {:turn_end, assistant_msg, []})
-          state
+          run_stop_hook(state, assistant_msg)
         end
     end
   end
@@ -438,6 +458,8 @@ defmodule PiAgent do
       |> Keyword.put(:cwd, state.cwd)
       |> Keyword.put(:permission_policy, resolve_policy(state.policy))
       |> Keyword.put(:session_id, state.session_id)
+      |> Keyword.put(:transcript_path, transcript_path(state))
+      |> Keyword.put(:hook_specs, state.hook_specs)
 
     results = PiCoding.Dispatcher.dispatch_batch(tool_calls, state.tools, opts)
 
@@ -633,6 +655,144 @@ defmodule PiAgent do
   defp resolve_policy(policy) when is_pid(policy), do: policy
   defp resolve_policy(policy) when is_atom(policy), do: policy
   defp resolve_policy(policy), do: GenServer.whereis(policy)
+
+  defp transcript_path(state) do
+    if state.session_id do
+      agent_dir =
+        Application.get_env(:ex_pi_session, :agent_dir) ||
+          Path.join([System.user_home!(), ".pi", "agent"])
+
+      cwd_safe =
+        state.cwd
+        |> String.replace_leading("/", "")
+        |> String.replace(~r|[/:\\]|, "-")
+
+      sessions_dir = Path.join([agent_dir, "sessions", "--#{cwd_safe}--"])
+      Path.join(sessions_dir, "#{state.session_id}.jsonl")
+    else
+      ""
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Hook helpers
+  # ---------------------------------------------------------------------------
+
+  defp hook_ctx(state) do
+    %{
+      session_id: state.session_id,
+      cwd: state.cwd,
+      transcript_path: transcript_path(state),
+      permission_mode: "default",
+      model: state.model && Map.get(state.model, "id", "")
+    }
+  end
+
+  defp run_session_start_hook(state) do
+    if PiCoding.Hooks.any_for_event?(state.hook_specs, :session_start) do
+      ctx = hook_ctx(state)
+      event_data = %{source: :startup}
+
+      {outcome, _warnings} =
+        PiCoding.Hooks.dispatch(:session_start, state.hook_specs, ctx, event_data)
+
+      case outcome do
+        {:context, text} ->
+          dev_msg =
+            Message.user(
+              "hook_ctx_#{System.unique_integer([:positive])}",
+              "[Developer context from hook]\n#{text}"
+            )
+
+          %{state | messages: [dev_msg | state.messages]}
+
+        _ ->
+          state
+      end
+    else
+      state
+    end
+  end
+
+  defp run_user_prompt_submit_hook(state, user_msg) do
+    if PiCoding.Hooks.any_for_event?(state.hook_specs, :user_prompt_submit) do
+      ctx = Map.put(hook_ctx(state), :turn_id, user_msg.id)
+      prompt_text = message_text(user_msg)
+      event_data = %{prompt: prompt_text}
+
+      {outcome, _warnings} =
+        PiCoding.Hooks.dispatch(:user_prompt_submit, state.hook_specs, ctx, event_data)
+
+      case outcome do
+        {:block, reason} ->
+          {:block, reason}
+
+        {:context, extra} ->
+          updated_msg = append_text_to_message(user_msg, extra)
+          {:ok, updated_msg, state}
+
+        _ ->
+          {:ok, user_msg, state}
+      end
+    else
+      {:ok, user_msg, state}
+    end
+  end
+
+  defp run_stop_hook(state, assistant_msg) do
+    if PiCoding.Hooks.any_for_event?(state.hook_specs, :stop) do
+      ctx = hook_ctx(state)
+      last_text = message_text(assistant_msg)
+
+      event_data = %{
+        stop_hook_active: state.stop_hook_active,
+        last_assistant_message: last_text
+      }
+
+      {outcome, _warnings} =
+        PiCoding.Hooks.dispatch(:stop, state.hook_specs, ctx, event_data)
+
+      case outcome do
+        {:halt, _} ->
+          state
+
+        {:block, reason} when not state.stop_hook_active ->
+          # Inject synthetic user turn and continue
+          synth_id = "hook_stop_#{System.unique_integer([:positive])}"
+          synth_msg = Message.user(synth_id, reason)
+          state = %{state | messages: state.messages ++ [synth_msg], stop_hook_active: true}
+          emit(state, {:message_start, synth_msg})
+          emit(state, {:message_end, synth_msg})
+          run_turn_loop(state)
+
+        _ ->
+          state
+      end
+    else
+      state
+    end
+  end
+
+  defp message_text(%{content: content}) when is_list(content) do
+    Enum.map_join(content, "\n", fn
+      %{type: :text, text: t} -> t
+      _ -> ""
+    end)
+  end
+
+  defp message_text(%{content: text}) when is_binary(text), do: text
+  defp message_text(_), do: ""
+
+  defp append_text_to_message(%{content: content} = msg, extra) when is_list(content) do
+    extra_block = %{type: :text, text: "\n\n[Additional context from hook]\n#{extra}"}
+    %{msg | content: content ++ [extra_block]}
+  end
+
+  defp append_text_to_message(%{content: text} = msg, extra) when is_binary(text) do
+    %{msg | content: text <> "\n\n[Additional context from hook]\n#{extra}"}
+  end
+
+  defp append_text_to_message(msg, _extra), do: msg
 
   defp emit(state, event) do
     Enum.each(state.subscribers, fn sub -> send(sub, event) end)
