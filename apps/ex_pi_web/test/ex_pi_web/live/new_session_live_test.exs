@@ -4,6 +4,7 @@ defmodule PiWeb.NewSessionLiveTest do
   import Phoenix.LiveViewTest
 
   alias PiSession.{ConfigManager, RepoManager}
+  alias PiSession.Storage.JsonlFile
 
   @tag :tmp_dir
   test "defaults new sessions to project MCP servers and allows disabling", %{
@@ -35,8 +36,16 @@ defmodule PiWeb.NewSessionLiveTest do
       render_click(view, "create_session")
 
       [meta_path] = Path.wildcard(Path.join(ConfigManager.sessions_dir(tmp_dir), "*.meta.json"))
+      session_id = Path.basename(meta_path, ".meta.json")
+      log_path = Path.join(ConfigManager.sessions_dir(tmp_dir), "#{session_id}.jsonl")
 
       assert %{"mcp_server_ids" => []} = meta_path |> File.read!() |> Jason.decode!()
+      assert {:ok, [%{"type" => "session", "cwd" => ^tmp_dir}]} = JsonlFile.read(log_path)
+
+      {:ok, _session_view, session_html} =
+        live(conn, "/repository/#{encoded_repository}/sessions/#{session_id}")
+
+      assert session_html =~ ~s(id="session-menu-btn-#{session_id}")
     end)
   end
 

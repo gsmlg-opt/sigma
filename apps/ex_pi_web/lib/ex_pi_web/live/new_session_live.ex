@@ -1,7 +1,7 @@
 defmodule PiWeb.NewSessionLive do
   use PiWeb, :live_view
 
-  alias PiSession.{ConfigManager, RepoManager}
+  alias PiSession.{ConfigManager, Log, RepoManager}
   import PiWeb.ProjectSidebar
 
   @impl true
@@ -362,6 +362,7 @@ defmodule PiWeb.NewSessionLive do
     session_id = "session_#{System.unique_integer([:positive])}"
     sessions_dir = socket.assigns.sessions_dir
     meta_path = Path.join(sessions_dir, "#{session_id}.meta.json")
+    log_path = Path.join(sessions_dir, "#{session_id}.jsonl")
 
     {cwd, is_worktree} =
       case mode do
@@ -397,6 +398,7 @@ defmodule PiWeb.NewSessionLive do
     }
 
     File.write!(meta_path, Jason.encode!(meta))
+    :ok = Log.persist_event(log_path, {:agent_start, cwd})
 
     {:noreply,
      push_navigate(socket,
