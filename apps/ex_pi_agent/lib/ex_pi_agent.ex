@@ -4,6 +4,8 @@ defmodule PiAgent do
   """
   use GenServer
 
+  require Logger
+
   alias PiAgent.Message
   alias PiAgent.ContextBuilder
   alias PiAgent.SessionContext
@@ -28,7 +30,8 @@ defmodule PiAgent do
     current_turn_assistant_message: nil,
     pending_user_questions: %{},
     hook_specs: [],
-    stop_hook_active: false
+    stop_hook_active: false,
+    resume_source: :startup
   ]
 
   @default_user_question_timeout_ms 300_000
@@ -138,10 +141,34 @@ defmodule PiAgent do
       on_event: opts[:on_event],
       dispatcher_opts: opts[:dispatcher_opts] || [],
       provider_options: opts[:options] || [],
-      hook_specs: hook_specs
+      hook_specs: hook_specs,
+      resume_source: Keyword.get(opts, :resume_source, :startup)
     }
 
-    {:ok, state}
+    {:ok, state, {:continue, :session_start}}
+  end
+
+  @impl true
+  def handle_continue(:session_start, state) do
+    {:noreply, run_session_start_hook(state)}
+  end
+
+  @impl true
+  def terminate(reason, state) do
+    if PiCoding.Hooks.any_for_event?(state.hook_specs, :session_end) do
+      task = Task.async(fn -> run_session_end_hook(state, reason) end)
+
+      case Task.yield(task, 2_000) do
+        nil ->
+          Task.shutdown(task, :brutal_kill)
+          Logger.warning("[PiAgent] SessionEnd hooks exceeded 2s budget, killed")
+
+        _ ->
+          :ok
+      end
+    end
+
+    :ok
   end
 
   @impl true
@@ -302,9 +329,6 @@ defmodule PiAgent do
 
     # Reset stop_hook_active at the start of each turn
     state = %{state | stop_hook_active: false}
-
-    # SessionStart hook: may prepend developer context
-    state = run_session_start_hook(state)
 
     user_id = "msg_user_#{System.unique_integer([:positive])}"
     user_msg = Message.user(user_id, prompt_text)
@@ -691,7 +715,7 @@ defmodule PiAgent do
   defp run_session_start_hook(state) do
     if PiCoding.Hooks.any_for_event?(state.hook_specs, :session_start) do
       ctx = hook_ctx(state)
-      event_data = %{source: :startup}
+      event_data = %{source: state.resume_source}
 
       {outcome, _warnings} =
         PiCoding.Hooks.dispatch(:session_start, state.hook_specs, ctx, event_data)
@@ -711,6 +735,26 @@ defmodule PiAgent do
       end
     else
       state
+    end
+  end
+
+  defp run_session_end_hook(state, otp_reason) do
+    ctx = hook_ctx(state)
+
+    reason =
+      case otp_reason do
+        :normal -> "user_close"
+        :shutdown -> "user_close"
+        {:shutdown, _} -> "user_close"
+        _ -> "crash"
+      end
+
+    event_data = %{reason: reason, last_activity_at: ""}
+
+    try do
+      PiCoding.Hooks.dispatch(:session_end, state.hook_specs, ctx, event_data)
+    rescue
+      e -> Logger.warning("[PiAgent] SessionEnd hook crashed: #{Exception.message(e)}")
     end
   end
 

@@ -50,6 +50,7 @@ defmodule PiCoding.Hooks.Spec do
           | :user_prompt_submit
           | :stop
           | :session_start
+          | :session_end
           | :pre_compact
 
   @type matcher :: Regex.t() | :any | String.t()

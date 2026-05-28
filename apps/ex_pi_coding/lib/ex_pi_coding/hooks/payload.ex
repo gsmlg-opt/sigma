@@ -81,6 +81,13 @@ defmodule PiCoding.Hooks.Payload do
     }
   end
 
+  defp event_specific(:session_end, _ctx, data) do
+    %{
+      "reason" => to_string(Map.get(data, :reason, "user_close")),
+      "last_activity_at" => Map.get(data, :last_activity_at, "")
+    }
+  end
+
   defp event_specific(:pre_compact, _ctx, data) do
     %{
       "trigger" => to_string(Map.get(data, :trigger, "auto")),
@@ -100,6 +107,7 @@ defmodule PiCoding.Hooks.Payload do
   defp event_name(:user_prompt_submit), do: "UserPromptSubmit"
   defp event_name(:stop), do: "Stop"
   defp event_name(:session_start), do: "SessionStart"
+  defp event_name(:session_end), do: "SessionEnd"
   defp event_name(:pre_compact), do: "PreCompact"
   defp event_name(event), do: to_string(event)
 

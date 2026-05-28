@@ -283,6 +283,8 @@ defmodule PiCoding.Hooks.Discovery do
     "stop" => :stop,
     "SessionStart" => :session_start,
     "session_start" => :session_start,
+    "SessionEnd" => :session_end,
+    "session_end" => :session_end,
     "PreCompact" => :pre_compact,
     "pre_compact" => :pre_compact
   }

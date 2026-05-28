@@ -251,6 +251,10 @@ defmodule PiCoding.Hooks.Outcome do
     :proceed
   end
 
+  defp decode_decision(:session_end, _decision, _reason, _json, _hso, _dialect) do
+    :proceed
+  end
+
   defp decode_decision(_event, decision, reason, _json, _hso, _dialect) do
     case decision do
       d when d in ["block", "deny"] -> {:block, reason}
