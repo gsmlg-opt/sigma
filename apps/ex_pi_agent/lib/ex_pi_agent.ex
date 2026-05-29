@@ -96,6 +96,10 @@ defmodule PiAgent do
     GenServer.cast(pid, {:set_model, model})
   end
 
+  def set_provider(pid, provider, model, options \\ []) when is_atom(provider) and is_map(model) do
+    GenServer.cast(pid, {:set_provider, provider, model, options})
+  end
+
   def get_policy(pid) do
     GenServer.call(pid, :get_policy)
   end
@@ -237,6 +241,11 @@ defmodule PiAgent do
   @impl true
   def handle_cast({:set_model, model}, state) do
     {:noreply, %{state | model: model}}
+  end
+
+  @impl true
+  def handle_cast({:set_provider, provider, model, options}, state) do
+    {:noreply, %{state | provider: provider, model: model, provider_options: options}}
   end
 
   @impl true

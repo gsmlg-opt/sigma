@@ -103,8 +103,8 @@ defmodule PiWeb.SessionLive do
 
         {:ok, sessions} = PiSession.Log.list_sessions(sessions_dir)
 
-        active_provider = system_config["providers"][provider_id] || %{}
-        available_models = active_provider["models"] || [model_id]
+        model_options = model_options(system_config, provider_id)
+        current_model_value = model_option_value(provider_id, model_id)
 
         {stream_messages, tool_results, tool_call_to_msg} = split_messages(initial_messages)
 
@@ -124,7 +124,8 @@ defmodule PiWeb.SessionLive do
           |> assign(:renaming_session, nil)
           |> assign(:active_provider_id, provider_id)
           |> assign(:current_model, model_id)
-          |> assign(:available_models, available_models)
+          |> assign(:current_model_value, current_model_value)
+          |> assign(:model_options, ensure_model_option(model_options, provider_id, model_id))
           |> assign(:pending_user_questions, pending_user_questions)
           |> assign(:logs_available, true)
           |> assign(:mcp_server_ids, mcp_server_ids)
@@ -289,12 +290,12 @@ defmodule PiWeb.SessionLive do
               />
 
               <form phx-change="select_model" class="absolute bottom-[8px] right-[107px] z-10 flex items-center">
-                <.dm_select id="model-select" name="model" value={@current_model} size="xs" disabled={@turn_in_flight}>
+                <.dm_select id="model-select" name="model" value={@current_model_value} size="xs" disabled={@turn_in_flight}>
                   <option
-                    :for={m <- ensure_in_list(@available_models, @current_model)}
-                    value={m}
-                    selected={m == @current_model}
-                  >{m}</option>
+                    :for={option <- @model_options}
+                    value={option.value}
+                    selected={option.value == @current_model_value}
+                  >{option.label}</option>
                 </.dm_select>
               </form>
             </div>
@@ -613,12 +614,67 @@ defmodule PiWeb.SessionLive do
 
   defp format_timestamp(_), do: ""
 
-  defp ensure_in_list(list, nil), do: list || []
-  defp ensure_in_list(nil, current), do: [current]
-
-  defp ensure_in_list(list, current) do
-    if current in list, do: list, else: [current | list]
+  defp model_options(system_config, active_provider_id) do
+    system_config
+    |> Map.get("providers", %{})
+    |> Enum.sort_by(fn {provider_id, provider} ->
+      {provider_id != active_provider_id, provider["name"] || provider_id}
+    end)
+    |> Enum.flat_map(fn {provider_id, provider} ->
+      provider
+      |> Map.get("models", [])
+      |> List.wrap()
+      |> Enum.map(&to_model_id/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+      |> Enum.map(&model_option(provider_id, provider, &1))
+    end)
   end
+
+  defp ensure_model_option(options, _provider_id, nil), do: options
+
+  defp ensure_model_option(options, provider_id, model_id) do
+    value = model_option_value(provider_id, model_id)
+
+    if Enum.any?(options, &(&1.value == value)) do
+      options
+    else
+      [%{value: value, label: model_id, provider_id: provider_id, model_id: model_id} | options]
+    end
+  end
+
+  defp model_option(provider_id, provider, model_id) do
+    provider_name = provider["name"] || provider_id
+
+    %{
+      value: model_option_value(provider_id, model_id),
+      label: "#{provider_name}: #{model_id}",
+      provider_id: provider_id,
+      model_id: model_id
+    }
+  end
+
+  defp model_option_value(provider_id, model_id) do
+    Jason.encode!(%{"provider_id" => provider_id, "model_id" => model_id})
+  end
+
+  defp parse_model_option_value(value) when is_binary(value) do
+    case Jason.decode(value) do
+      {:ok, %{"provider_id" => provider_id, "model_id" => model_id}}
+      when is_binary(provider_id) and is_binary(model_id) ->
+        {:ok, provider_id, model_id}
+
+      _ ->
+        :error
+    end
+  end
+
+  defp parse_model_option_value(_), do: :error
+
+  defp to_model_id(%{"id" => id}) when is_binary(id), do: id
+  defp to_model_id(%{id: id}) when is_binary(id), do: id
+  defp to_model_id(id) when is_binary(id), do: id
+  defp to_model_id(_), do: ""
 
   defp normalize_user_question_request(request) do
     options = request |> Map.get(:options, []) |> normalize_user_question_options()
@@ -872,18 +928,33 @@ defmodule PiWeb.SessionLive do
   end
 
   @impl true
-  def handle_event("select_model", %{"model" => model_id}, socket) do
-    provider_id = socket.assigns.active_provider_id
+  def handle_event("select_model", %{"model" => selected}, socket) do
+    with {:ok, provider_id, model_id} <- parse_model_option_value(selected),
+         config when is_map(config) <- ConfigManager.get_config(),
+         provider_config when is_map(provider_config) <- get_in(config, ["providers", provider_id]),
+         selected_config = Map.put(provider_config, "model", model_id),
+         {:ok, {provider_mod, _model_id, _provider_id, api_key, base_url}} <-
+           resolve_provider(selected_config) do
+      PiAgent.set_provider(
+        socket.assigns.agent,
+        provider_mod,
+        %{id: model_id, api: provider_id, provider: provider_id},
+        [api_key: api_key, base_url: base_url]
+      )
 
-    PiAgent.set_model(socket.assigns.agent, %{
-      id: model_id,
-      api: provider_id,
-      provider: provider_id
-    })
+      ConfigManager.set_active_provider(provider_id)
+      ConfigManager.update_provider(provider_id, %{"model" => model_id})
 
-    ConfigManager.update_provider(provider_id, %{"model" => model_id})
-
-    {:noreply, assign(socket, current_model: model_id)}
+      {:noreply,
+       assign(socket,
+         active_provider_id: provider_id,
+         current_model: model_id,
+         current_model_value: selected
+       )}
+    else
+      _ ->
+        {:noreply, put_flash(socket, :error, "Unknown model selection.")}
+    end
   end
 
   defp handle_prompt(prompt, socket) do

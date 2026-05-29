@@ -20,6 +20,64 @@ defmodule PiSession.ConfigManagerTest do
   end
 
   @tag :tmp_dir
+  test "uses default model as active selection while preserving configured models" do
+    File.mkdir_p!(ConfigManager.agent_dir())
+
+    File.write!(
+      Path.join(ConfigManager.agent_dir(), "settings.json"),
+      Jason.encode!(%{"defaultProvider" => "openai", "defaultModel" => "smart"})
+    )
+
+    File.write!(
+      Path.join(ConfigManager.agent_dir(), "models.json"),
+      Jason.encode!(%{
+        "providers" => %{
+          "openai" => %{
+            "name" => "OpenAI",
+            "api" => "openai-completions",
+            "models" => [
+              %{"id" => "fast"},
+              %{"id" => "smart"},
+              %{"id" => "expert"}
+            ]
+          }
+        }
+      })
+    )
+
+    assert %{
+             "active_provider_id" => "openai",
+             "providers" => %{
+               "openai" => %{
+                 "model" => "smart",
+                 "models" => ["fast", "smart", "expert"]
+               }
+             }
+           } = ConfigManager.get_config()
+
+    assert {:ok, _} = ConfigManager.update_provider("openai", %{"model" => "expert"})
+
+    saved_settings =
+      ConfigManager.agent_dir()
+      |> Path.join("settings.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    saved_models =
+      ConfigManager.agent_dir()
+      |> Path.join("models.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert saved_settings["defaultModel"] == "expert"
+    assert Enum.map(saved_models["providers"]["openai"]["models"], & &1["id"]) == [
+             "fast",
+             "smart",
+             "expert"
+           ]
+  end
+
+  @tag :tmp_dir
   test "loads VS Code-style mcp.json and saves Claude-style mcpServers" do
     File.mkdir_p!(ConfigManager.agent_dir())
 

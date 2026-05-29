@@ -32,6 +32,57 @@ defmodule PiWeb.SessionLiveTest do
     assert_session_sidebar_order(html)
   end
 
+  @tag :tmp_dir
+  test "model selector lists all configured models and selects default model", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    with_agent_config(tmp_dir, fn ->
+      write_provider_configs("openai", "smart", %{
+        "openai" => ["fast", "smart"],
+        "anthropic" => ["claude", "opus"]
+      })
+
+      {:ok, view, html} = live(conn, session_path(unique_session_id("models")))
+
+      options = Floki.parse_document!(html) |> Floki.find("#model-select option")
+
+      assert html =~ ~s(id="model-select")
+      assert Enum.map(options, &option_text/1) == [
+               "openai: fast",
+               "openai: smart",
+               "anthropic: claude",
+               "anthropic: opus"
+             ]
+
+      selected_value =
+        options
+        |> Enum.find(&selected?/1)
+        |> Floki.attribute("value")
+        |> List.first()
+
+      assert {:ok, %{"provider_id" => "openai", "model_id" => "smart"}} =
+               Jason.decode(selected_value)
+
+      anthropic_value =
+        options
+        |> Enum.find(&(option_text(&1) == "anthropic: opus"))
+        |> Floki.attribute("value")
+        |> List.first()
+
+      render_change(view, "select_model", %{"model" => anthropic_value})
+
+      settings =
+        PiSession.ConfigManager.agent_dir()
+        |> Path.join("settings.json")
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert settings["defaultProvider"] == "anthropic"
+      assert settings["defaultModel"] == "opus"
+    end)
+  end
+
   test "submits prompt", %{conn: conn} do
     session_id = unique_session_id("submit")
     Phoenix.PubSub.subscribe(PiWeb.PubSub, "session:#{session_id}")
@@ -234,5 +285,67 @@ defmodule PiWeb.SessionLiveTest do
 
   defp session_path(session_id) do
     "/repository/#{@encoded_workdir}/sessions/#{session_id}"
+  end
+
+  defp with_agent_config(tmp_dir, fun) do
+    previous_agent_dir = Application.get_env(:ex_pi_session, :agent_dir)
+    previous_provider_config = Application.get_env(:ex_pi_web, :test_provider_config)
+
+    Application.put_env(:ex_pi_session, :agent_dir, Path.join(tmp_dir, "agent"))
+    Application.delete_env(:ex_pi_web, :test_provider_config)
+
+    try do
+      fun.()
+    after
+      if previous_agent_dir do
+        Application.put_env(:ex_pi_session, :agent_dir, previous_agent_dir)
+      else
+        Application.delete_env(:ex_pi_session, :agent_dir)
+      end
+
+      if previous_provider_config do
+        Application.put_env(:ex_pi_web, :test_provider_config, previous_provider_config)
+      else
+        Application.delete_env(:ex_pi_web, :test_provider_config)
+      end
+    end
+  end
+
+  defp write_provider_configs(default_provider_id, default_model, providers) do
+    agent_dir = PiSession.ConfigManager.agent_dir()
+    File.mkdir_p!(agent_dir)
+
+    File.write!(
+      Path.join(agent_dir, "settings.json"),
+      Jason.encode!(%{"defaultProvider" => default_provider_id, "defaultModel" => default_model})
+    )
+
+    File.write!(
+      Path.join(agent_dir, "models.json"),
+      Jason.encode!(%{
+        "providers" =>
+          Enum.into(providers, %{}, fn {provider_id, models} ->
+            {provider_id,
+             %{
+               "name" => provider_id,
+               "api" => "mock",
+               "models" => Enum.map(models, &%{"id" => &1})
+             }}
+          end)
+      })
+    )
+  end
+
+  defp option_text(option) do
+    option
+    |> Floki.text()
+    |> String.trim()
+  end
+
+  defp selected?({_tag, attrs, _children}) do
+    Enum.any?(attrs, fn
+      {"selected", value} -> value in ["", "true", "selected"]
+      _ -> false
+    end)
   end
 end

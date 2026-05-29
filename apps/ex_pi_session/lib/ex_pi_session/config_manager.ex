@@ -21,8 +21,8 @@ defmodule PiSession.ConfigManager do
     models_data = load_json(@models_file, %{"providers" => %{}})
     system_prompt = load_text(@agents_file, @default_system_prompt)
 
-    # Transform pi format to our internal flat format for the UI
     active_provider_id = settings["defaultProvider"] || ""
+    default_model = settings["defaultModel"] || ""
 
     # Credentials from auth.json (API keys only for now)
     credentials =
@@ -41,6 +41,13 @@ defmodule PiSession.ConfigManager do
       Enum.into(models_data["providers"] || %{}, %{}, fn {id, p} ->
         model_ids = Enum.map(p["models"] || [], & &1["id"])
 
+        selected_model =
+          if id == active_provider_id and default_model != "" do
+            default_model
+          else
+            List.first(model_ids) || ""
+          end
+
         {id,
          %{
            "id" => id,
@@ -54,7 +61,7 @@ defmodule PiSession.ConfigManager do
              end,
            # pi usually stores key under provider ID in auth.json
            "credential_id" => p["credential_id"] || id,
-           "model" => List.first(model_ids) || "",
+           "model" => selected_model,
            "models" => model_ids,
            "base_url" => p["baseUrl"] || ""
          }}
@@ -118,7 +125,7 @@ defmodule PiSession.ConfigManager do
                "openai" -> "openai-completions"
                _ -> p["api_type"]
              end,
-           "models" => [%{"id" => p["model"]}]
+           "models" => provider_models(p)
          }}
       end)
 
@@ -221,6 +228,22 @@ defmodule PiSession.ConfigManager do
     |> Map.put("system_prompt", prompt)
     |> save_config()
   end
+
+  defp provider_models(provider) do
+    provider
+    |> Map.get("models", [])
+    |> List.wrap()
+    |> Kernel.++([provider["model"]])
+    |> Enum.map(&model_id/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+    |> Enum.map(&%{"id" => &1})
+  end
+
+  defp model_id(%{"id" => id}) when is_binary(id), do: id
+  defp model_id(%{id: id}) when is_binary(id), do: id
+  defp model_id(id) when is_binary(id), do: id
+  defp model_id(_), do: ""
 
   # MCP server configuration
 
