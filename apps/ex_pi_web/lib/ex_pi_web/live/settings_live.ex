@@ -40,94 +40,61 @@ defmodule PiWeb.SettingsLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="max-w-6xl mx-auto py-12 px-6 text-on-surface">
-      <div class="mb-12 flex justify-between items-end text-on-surface">
-        <div>
-          <h1 class="font-display text-5xl font-bold mb-2 tracking-tight text-primary">Settings</h1>
-          <p class="text-on-surface-variant text-lg">Manage API credentials, AI provider configurations, and agent resources.</p>
+    <div class="flex min-h-[calc(100vh-64px)]">
+      <aside class="w-64 lg:w-72 bg-secondary text-secondary-content border-r border-outline-variant p-5 shrink-0 flex flex-col">
+        <div class="flex items-center gap-2 mb-6 text-on-secondary">
+          <.dm_mdi name="cog-outline" class="w-4 h-4 opacity-70" />
+          <span class="text-xs uppercase tracking-widest font-bold opacity-70">Settings</span>
         </div>
-      </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-4 gap-8">
-        <!-- Sidebar Navigation -->
-        <aside class="bg-secondary text-secondary-content rounded-2xl p-4 space-y-4">
-          <nav class="flex flex-col gap-2">
-            <.dm_link
-              patch={~p"/settings/providers"}
-              class={["p-4 rounded-2xl border transition-all flex items-center gap-3 font-bold",
-                if(@live_action == :providers,
-                   do: "bg-primary text-primary-content border-primary shadow-lg",
-                   else: "border-secondary-content/20 hover:bg-secondary-content/10 text-secondary-content"
-                )]}
-            >
-              <.dm_mdi name="robot-outline" class="w-5 h-5" />
-              <span>Providers</span>
-            </.dm_link>
+        <nav class="flex flex-col gap-3">
+          <.dm_link patch={~p"/settings/providers"} class={settings_nav_class(@live_action, :providers)}>
+            <.dm_mdi name="robot-outline" class="w-5 h-5" />
+            <span>Providers</span>
+          </.dm_link>
 
-            <.dm_link
-              patch={~p"/settings/credentials"}
-              class={["p-4 rounded-2xl border transition-all flex items-center gap-3 font-bold",
-                if(@live_action == :credentials,
-                   do: "bg-primary text-primary-content border-primary shadow-lg",
-                   else: "border-secondary-content/20 hover:bg-secondary-content/10 text-secondary-content"
-                )]}
-            >
-              <.dm_mdi name="key-outline" class="w-5 h-5" />
-              <span>Credentials</span>
-            </.dm_link>
+          <.dm_link
+            patch={~p"/settings/credentials"}
+            class={settings_nav_class(@live_action, :credentials)}
+          >
+            <.dm_mdi name="key-outline" class="w-5 h-5" />
+            <span>Credentials</span>
+          </.dm_link>
 
-            <.dm_link
-              patch={~p"/settings/system_prompt"}
-              class={["p-4 rounded-2xl border transition-all flex items-center gap-3 font-bold",
-                if(@live_action == :system_prompt,
-                  do: "bg-primary text-primary-content border-primary shadow-lg",
-                  else: "border-secondary-content/20 hover:bg-secondary-content/10 text-secondary-content"
-                )]}
-            >
-              <.dm_mdi name="text-box-outline" class="w-5 h-5" />
-              <span>Context</span>
-            </.dm_link>
+          <.dm_link
+            patch={~p"/settings/system_prompt"}
+            class={settings_nav_class(@live_action, :system_prompt)}
+          >
+            <.dm_mdi name="text-box-outline" class="w-5 h-5" />
+            <span>Context</span>
+          </.dm_link>
 
-            <.dm_link
-              patch={~p"/settings/skills"}
-              class={["p-4 rounded-2xl border transition-all flex items-center gap-3 font-bold",
-                if(@live_action == :skills,
-                  do: "bg-primary text-primary-content border-primary shadow-lg",
-                  else: "border-secondary-content/20 hover:bg-secondary-content/10 text-secondary-content"
-                )]}
-            >
-              <.dm_mdi name="auto-fix" class="w-5 h-5" />
-              <span>Skills</span>
-            </.dm_link>
+          <.dm_link patch={~p"/settings/skills"} class={settings_nav_class(@live_action, :skills)}>
+            <.dm_mdi name="auto-fix" class="w-5 h-5" />
+            <span>Skills</span>
+          </.dm_link>
 
-            <.dm_link
-              patch={~p"/settings/mcp"}
-              class={["p-4 rounded-2xl border transition-all flex items-center gap-3 font-bold",
-                if(@live_action == :mcp,
-                  do: "bg-primary text-primary-content border-primary shadow-lg",
-                  else: "border-secondary-content/20 hover:bg-secondary-content/10 text-secondary-content"
-                )]}
-            >
-              <.dm_mdi name="server-network-outline" class="w-5 h-5" />
-              <span>MCP</span>
-            </.dm_link>
+          <.dm_link patch={~p"/settings/mcp"} class={settings_nav_class(@live_action, :mcp)}>
+            <.dm_mdi name="server-network-outline" class="w-5 h-5" />
+            <span>MCP</span>
+          </.dm_link>
 
-            <.dm_link
-              patch={~p"/settings/hooks"}
-              class={["p-4 rounded-2xl border transition-all flex items-center gap-3 font-bold",
-                if(@live_action == :hooks,
-                  do: "bg-primary text-primary-content border-primary shadow-lg",
-                  else: "border-secondary-content/20 hover:bg-secondary-content/10 text-secondary-content"
-                )]}
-            >
-              <.dm_mdi name="hook" class="w-5 h-5" />
-              <span>Hooks</span>
-            </.dm_link>
-          </nav>
-        </aside>
+          <.dm_link patch={~p"/settings/hooks"} class={settings_nav_class(@live_action, :hooks)}>
+            <.dm_mdi name="hook" class="w-5 h-5" />
+            <span>Hooks</span>
+          </.dm_link>
+        </nav>
+      </aside>
 
-        <!-- Main Content -->
-        <main class="md:col-span-3">
+      <main class="flex-1 p-8 bg-surface text-on-surface font-sans overflow-x-hidden">
+        <div class="max-w-6xl mx-auto">
+          <div class="mb-10 flex justify-between items-end text-on-surface border-b border-outline-variant pb-6">
+            <div>
+              <h1 class="font-display text-4xl font-bold mb-2 tracking-tight">Settings</h1>
+              <p class="text-on-surface-variant text-lg">Manage API credentials, AI provider configurations, and agent resources.</p>
+            </div>
+          </div>
+
           <%= case @live_action do %>
             <% :providers -> %>
               <.render_providers 
@@ -161,11 +128,17 @@ defmodule PiWeb.SettingsLive do
                 hooks_error={@hooks_error}
               />
           <% end %>
-        </main>
-      </div>
+        </div>
+      </main>
     </div>
     """
   end
+
+  defp settings_nav_class(current_action, item_action) when current_action == item_action,
+    do: "btn btn-primary w-full justify-start gap-3"
+
+  defp settings_nav_class(_current_action, _item_action),
+    do: "btn btn-ghost w-full justify-start gap-3"
 
   defp render_providers(assigns) do
     ~H"""
