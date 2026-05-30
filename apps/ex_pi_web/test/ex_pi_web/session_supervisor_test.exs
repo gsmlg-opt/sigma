@@ -12,51 +12,50 @@ defmodule PiWeb.SessionSupervisorTest do
     def stream(_params), do: []
   end
 
+  setup context do
+    repo = Path.join([System.tmp_dir!(), "ex-pi-session-supervisor-test", "#{context.test}"])
+    File.rm_rf!(repo)
+    File.mkdir_p!(repo)
+
+    on_exit(fn ->
+      stop_repository_supervisors(repo)
+      Process.sleep(50)
+      File.rm_rf!(repo)
+    end)
+
+    {:ok, repo: repo}
+  end
+
   defp unique_session_id, do: "test-sess-#{System.unique_integer([:positive, :monotonic])}"
 
-  defp start_session(session_id) do
-    {:ok, sup_pid} =
-      DynamicSupervisor.start_child(
-        PiWeb.AgentSupervisor,
-        {PiWeb.SessionSupervisor,
-         [
-           session_id: session_id,
-           model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
-           provider: EmptyProvider
-         ]}
+  defp start_session(repo, session_id) do
+    {:ok, handle} =
+      PiAgent.Runtime.get_session(repo, session_id,
+        model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+        provider: EmptyProvider,
+        cwd: repo
       )
 
-    sup_pid
+    handle
   end
 
-  defp via(session_id, role) do
-    {:via, Registry, {PiWeb.SessionRegistry, {session_id, role}}}
-  end
-
-  defp session_process_count(session_id) do
-    [:supervisor, :agent, :policy, :tasks]
-    |> Enum.map(fn role -> GenServer.whereis(via(session_id, role)) end)
+  defp session_process_count(repo, session_id) do
+    [:supervisor, :session, :agent, :policy, :tasks]
+    |> Enum.map(fn role -> PiAgent.Runtime.lookup(repo, session_id, role) end)
     |> Enum.count(&(is_pid(&1) and Process.alive?(&1)))
   end
 
-  defp supervisor_pid(session_id), do: GenServer.whereis(via(session_id, :supervisor))
-
-  defp wait_for_session_manager_down do
-    # Synchronize after the monitored session supervisor exits.
-    :sys.get_state(PiWeb.SessionManager)
-    :ok
-  end
-
-  defp wait_for_session_process_count(session_id, expected) do
+  defp wait_for_session_process_count(repo, session_id, expected) do
     wait_for_session_process_count(
+      repo,
       session_id,
       expected,
       System.monotonic_time(:millisecond) + 1_000
     )
   end
 
-  defp wait_for_session_process_count(session_id, expected, deadline) do
-    if session_process_count(session_id) == expected do
+  defp wait_for_session_process_count(repo, session_id, expected, deadline) do
+    if session_process_count(repo, session_id) == expected do
       :ok
     else
       if System.monotonic_time(:millisecond) >= deadline do
@@ -64,18 +63,17 @@ defmodule PiWeb.SessionSupervisorTest do
       end
 
       Process.sleep(10)
-      wait_for_session_process_count(session_id, expected, deadline)
+      wait_for_session_process_count(repo, session_id, expected, deadline)
     end
   end
 
-  defp stop_session_supervisor(session_id) do
-    case supervisor_pid(session_id) do
+  defp stop_session_supervisor(repo, session_id) do
+    case PiAgent.Runtime.lookup(repo, session_id, :supervisor) do
       pid when is_pid(pid) ->
         ref = Process.monitor(pid)
         Process.exit(pid, :kill)
         assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000
-        wait_for_session_manager_down()
-        wait_for_session_process_count(session_id, 0)
+        wait_for_session_process_count(repo, session_id, 0)
 
       nil ->
         :ok
@@ -111,107 +109,92 @@ defmodule PiWeb.SessionSupervisorTest do
     end
   end
 
-  test "killing PermissionPolicy brings down the entire session subtree" do
+  test "killing PermissionPolicy brings down the entire session subtree", %{repo: repo} do
     session_id = unique_session_id()
-    sup_pid = start_session(session_id)
+    handle = start_session(repo, session_id)
 
-    agent_pid = GenServer.whereis(via(session_id, :agent))
-    policy_pid = GenServer.whereis(via(session_id, :policy))
-    tasks_pid = GenServer.whereis(via(session_id, :tasks))
+    agent_pid = handle.agent
+    policy_pid = handle.policy
+    tasks_pid = handle.tasks
 
     assert is_pid(agent_pid)
     assert is_pid(policy_pid)
     assert is_pid(tasks_pid)
 
-    ref = Process.monitor(sup_pid)
+    ref = Process.monitor(handle.session_supervisor)
     Process.exit(policy_pid, :kill)
 
-    assert_receive {:DOWN, ^ref, :process, ^sup_pid, _}, 1_000
-    wait_for_session_process_count(session_id, 0)
+    assert_receive {:DOWN, ^ref, :process, _pid, _}, 1_000
+    wait_for_session_process_count(repo, session_id, 0)
 
     refute Process.alive?(agent_pid)
     refute Process.alive?(policy_pid)
     refute Process.alive?(tasks_pid)
 
-    assert [] = Registry.lookup(PiWeb.SessionRegistry, {session_id, :agent})
-    assert [] = Registry.lookup(PiWeb.SessionRegistry, {session_id, :policy})
+    assert [] = Registry.lookup(PiAgent.RepositoryRegistry, {repo, session_id, :agent})
+    assert [] = Registry.lookup(PiAgent.RepositoryRegistry, {repo, session_id, :policy})
   end
 
-  test "killing PiAgent brings down the entire session subtree" do
+  test "killing PiAgent brings down the entire session subtree", %{repo: repo} do
     session_id = unique_session_id()
-    sup_pid = start_session(session_id)
+    handle = start_session(repo, session_id)
 
-    agent_pid = GenServer.whereis(via(session_id, :agent))
-    policy_pid = GenServer.whereis(via(session_id, :policy))
+    ref = Process.monitor(handle.session_supervisor)
+    Process.exit(handle.agent, :kill)
 
-    ref = Process.monitor(sup_pid)
-    Process.exit(agent_pid, :kill)
+    assert_receive {:DOWN, ^ref, :process, _pid, _}, 1_000
+    wait_for_session_process_count(repo, session_id, 0)
 
-    assert_receive {:DOWN, ^ref, :process, ^sup_pid, _}, 1_000
-    wait_for_session_process_count(session_id, 0)
-
-    refute Process.alive?(policy_pid)
-    assert [] = Registry.lookup(PiWeb.SessionRegistry, {session_id, :policy})
+    refute Process.alive?(handle.policy)
+    assert [] = Registry.lookup(PiAgent.RepositoryRegistry, {repo, session_id, :policy})
   end
 
-  test "SessionManager rebuilds session after subtree crash" do
+  test "Runtime rebuilds session after subtree crash", %{repo: repo} do
     session_id = unique_session_id()
 
-    {:ok, {agent1, _policy1}} = PiWeb.SessionManager.get_agent(session_id)
-    assert is_pid(agent1)
+    {:ok, handle1} = PiAgent.Runtime.get_session(repo, session_id, cwd: repo)
+    assert is_pid(handle1.agent)
 
-    # Grab child pids before killing so we can wait for full propagation
-    sup_pid = GenServer.whereis(via(session_id, :supervisor))
-    tasks_pid = GenServer.whereis(via(session_id, :tasks))
-    sup_ref = Process.monitor(sup_pid)
-    tasks_ref = Process.monitor(tasks_pid)
+    ref = Process.monitor(handle1.session_supervisor)
+    Process.exit(handle1.session_supervisor, :kill)
+    assert_receive {:DOWN, ^ref, :process, _pid, _}, 1_000
+    wait_for_session_process_count(repo, session_id, 0)
 
-    Process.exit(sup_pid, :kill)
-    assert_receive {:DOWN, ^sup_ref, :process, ^sup_pid, _}, 1_000
-    # Wait for the task supervisor child to die so its Registry entry is released
-    assert_receive {:DOWN, ^tasks_ref, :process, ^tasks_pid, _}, 1_000
-
-    # Allow SessionManager to process the :DOWN from the supervisor
-    :sys.get_state(PiWeb.SessionManager)
-
-    {:ok, {agent2, _policy2}} = PiWeb.SessionManager.get_agent(session_id)
-    assert is_pid(agent2)
-    refute agent1 == agent2
+    {:ok, handle2} = PiAgent.Runtime.get_session(repo, session_id, cwd: repo)
+    assert is_pid(handle2.agent)
+    refute handle1.agent == handle2.agent
   end
 
-  test "SessionManager repairs missing session registry after hot code reload" do
+  test "runtime keeps repository process when a session subtree dies", %{repo: repo} do
     session_id = unique_session_id()
+    handle = start_session(repo, session_id)
 
-    try do
-      stop_session_registry_child()
-      assert Process.whereis(PiWeb.SessionRegistry) == nil
+    repo_ref = Process.monitor(handle.repository)
+    session_ref = Process.monitor(handle.session_supervisor)
+    Process.exit(handle.session_supervisor, :kill)
 
-      assert {:ok, {agent_pid, policy_pid}} = PiWeb.SessionManager.get_agent(session_id)
-
-      assert is_pid(Process.whereis(PiWeb.SessionRegistry))
-      assert is_pid(agent_pid)
-      assert is_pid(policy_pid)
-      assert Registry.lookup(PiWeb.SessionRegistry, {session_id, :agent}) == [{agent_pid, nil}]
-
-      stop_session_supervisor(session_id)
-    after
-      ensure_session_registry_child()
-    end
+    assert_receive {:DOWN, ^session_ref, :process, _pid, _}, 1_000
+    refute_receive {:DOWN, ^repo_ref, :process, _pid, _}, 100
+    assert Process.alive?(handle.repository)
   end
 
   @tag :tmp_dir
   test "session supervisor, high-usage compaction, tolerant replay, and crash rebuild interact cleanly",
-       %{tmp_dir: tmp_dir} do
+       %{tmp_dir: tmp_dir, repo: repo} do
     session_id = unique_session_id()
     storage_path = Path.join(tmp_dir, "#{session_id}.jsonl")
-    before_count = session_process_count(session_id)
+    before_count = session_process_count(repo, session_id)
 
-    {:ok, {agent1, policy1}} =
-      PiWeb.SessionManager.get_agent(session_id, agent_opts(session_id, storage_path, self()))
+    {:ok, handle1} =
+      PiAgent.Runtime.get_session(
+        repo,
+        session_id,
+        agent_opts(session_id, storage_path, self())
+      )
 
     events =
       1..11
-      |> Enum.flat_map(fn idx -> run_turn(agent1, "high usage turn #{idx}") end)
+      |> Enum.flat_map(fn idx -> run_turn(handle1.agent, "high usage turn #{idx}") end)
 
     assert {:compact, compact_msg, first_kept_id} =
              Enum.find(events, &match?({:compact, _, _}, &1))
@@ -229,14 +212,10 @@ defmodule PiWeb.SessionSupervisorTest do
                false
            end)
 
-    sup1 = supervisor_pid(session_id)
-    sup_ref = Process.monitor(sup1)
-    Process.exit(policy1, :kill)
-    assert_receive {:DOWN, ^sup_ref, :process, ^sup1, _}, 1_000
-    wait_for_session_manager_down()
-    wait_for_session_process_count(session_id, before_count)
-
-    assert session_process_count(session_id) == before_count
+    sup_ref = Process.monitor(handle1.session_supervisor)
+    Process.exit(handle1.policy, :kill)
+    assert_receive {:DOWN, ^sup_ref, :process, _pid, _}, 1_000
+    wait_for_session_process_count(repo, session_id, before_count)
 
     File.write!(storage_path, "{torn", [:append])
 
@@ -255,43 +234,46 @@ defmodule PiWeb.SessionSupervisorTest do
              |> Enum.filter(&(&1["type"] == "message"))
              |> Enum.map(&get_in(&1, ["message", "id"]))
 
-    {:ok, {agent2, _policy2}} =
-      PiWeb.SessionManager.get_agent(
+    {:ok, handle2} =
+      PiAgent.Runtime.get_session(
+        repo,
         session_id,
         agent_opts(session_id, storage_path, self(), replayed_messages)
       )
 
-    assert agent2 != agent1
-    assert %{messages: ^replayed_messages} = :sys.get_state(agent2)
+    assert handle2.agent != handle1.agent
+    assert %{messages: ^replayed_messages} = :sys.get_state(handle2.agent)
 
-    stop_session_supervisor(session_id)
-    assert session_process_count(session_id) == before_count
+    stop_session_supervisor(repo, session_id)
+    assert session_process_count(repo, session_id) == before_count
   end
 
-  defp stop_session_registry_child do
-    case Process.whereis(PiWeb.SessionRegistry) do
-      nil ->
-        :ok
+  defp stop_repository_supervisors(repo) do
+    for {_id, pid, :supervisor, [PiAgent.RepositorySupervisor]} <-
+          DynamicSupervisor.which_children(PiAgent.DynamicSupervisor),
+        Process.alive?(pid),
+        repo_supervisor_for?(pid, repo) do
+      ref = Process.monitor(pid)
+      DynamicSupervisor.terminate_child(PiAgent.DynamicSupervisor, pid)
 
-      _pid ->
-        :ok = Supervisor.terminate_child(PiWeb.Supervisor, PiWeb.SessionRegistry)
-        :ok = Supervisor.delete_child(PiWeb.Supervisor, PiWeb.SessionRegistry)
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+      after
+        500 -> :ok
+      end
     end
   end
 
-  defp ensure_session_registry_child do
-    case Process.whereis(PiWeb.SessionRegistry) do
-      pid when is_pid(pid) ->
-        :ok
+  defp repo_supervisor_for?(supervisor, repo) do
+    supervisor
+    |> Supervisor.which_children()
+    |> Enum.find_value(false, fn
+      {PiAgent.RepositoryProcess, pid, :worker, [PiAgent.RepositoryProcess]} when is_pid(pid) ->
+        %{repo_path: repo_path} = PiAgent.RepositoryProcess.status(pid)
+        repo_path == repo
 
-      nil ->
-        {:ok, _pid} =
-          Supervisor.start_child(
-            PiWeb.Supervisor,
-            Registry.child_spec(keys: :unique, name: PiWeb.SessionRegistry)
-          )
-
-        :ok
-    end
+      _ ->
+        false
+    end)
   end
 end

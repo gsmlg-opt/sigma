@@ -57,7 +57,6 @@ defmodule PiAgent.Message do
           timestamp: integer(),
           metadata: map(),
           redacted: boolean(),
-          # Assistant-specific
           api: String.t() | nil,
           provider: String.t() | nil,
           model: String.t() | nil,
@@ -66,11 +65,9 @@ defmodule PiAgent.Message do
           usage: PiAi.Message.usage() | nil,
           stop_reason: PiAi.Message.stop_reason() | nil,
           error_message: String.t() | nil,
-          # Tool result-specific
           tool_call_id: String.t() | nil,
           tool_name: String.t() | nil,
           is_error: boolean() | nil,
-          # Custom message fields
           attachments: [any()] | nil,
           status_type: atom() | nil,
           level: :info | :warning | :error | nil,
@@ -137,7 +134,12 @@ defmodule PiAgent.Message do
   @doc """
   New status message.
   """
-  def status(id, content, status_type \\ nil, timestamp \\ DateTime.to_unix(DateTime.utc_now(), :millisecond)) do
+  def status(
+        id,
+        content,
+        status_type \\ nil,
+        timestamp \\ DateTime.to_unix(DateTime.utc_now(), :millisecond)
+      ) do
     %__MODULE__{
       id: id,
       role: :status,
@@ -151,7 +153,12 @@ defmodule PiAgent.Message do
   @doc """
   New notification message.
   """
-  def notification(id, content, level \\ :info, timestamp \\ DateTime.to_unix(DateTime.utc_now(), :millisecond)) do
+  def notification(
+        id,
+        content,
+        level \\ :info,
+        timestamp \\ DateTime.to_unix(DateTime.utc_now(), :millisecond)
+      ) do
     %__MODULE__{
       id: id,
       role: :notification,

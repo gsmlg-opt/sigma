@@ -17,12 +17,14 @@ defmodule PiAgent.MixProject do
 
   def application do
     [
+      mod: {PiAgent.Application, []},
       extra_applications: [:logger]
     ]
   end
 
   defp deps do
     [
+      {:ex_pi_protocol, in_umbrella: true},
       {:ex_pi_ai, in_umbrella: true},
       {:ex_pi_coding, in_umbrella: true},
       {:jason, "~> 1.4"}

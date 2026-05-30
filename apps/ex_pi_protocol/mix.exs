@@ -1,9 +1,9 @@
-defmodule PiSession.MixProject do
+defmodule PiProtocol.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :ex_pi_session,
+      app: :ex_pi_protocol,
       version: "0.1.0",
       build_path: "../../_build",
       config_path: "../../config/config.exs",
@@ -23,10 +23,7 @@ defmodule PiSession.MixProject do
 
   defp deps do
     [
-      {:ex_pi_protocol, in_umbrella: true},
-      {:ex_pi_agent, in_umbrella: true, only: :test},
-      {:jason, "~> 1.4"},
-      {:telemetry, "~> 1.0"}
+      {:ex_pi_ai, in_umbrella: true}
     ]
   end
 end

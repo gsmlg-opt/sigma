@@ -12,7 +12,13 @@ defmodule PiWeb.SessionLiveTest do
       Path.join(PiWeb.get_sessions_root(), Base.url_encode64(@workdir, padding: false))
 
     File.rm_rf!(sessions_dir)
-    on_exit(fn -> File.rm_rf!(@workdir) end)
+
+    on_exit(fn ->
+      stop_repository_supervisors(@workdir)
+      Process.sleep(50)
+      File.rm_rf!(@workdir)
+    end)
+
     :ok
   end
 
@@ -48,6 +54,7 @@ defmodule PiWeb.SessionLiveTest do
       options = Floki.parse_document!(html) |> Floki.find("#model-select option")
 
       assert html =~ ~s(id="model-select")
+
       assert Enum.map(options, &option_text/1) == [
                "openai: fast",
                "openai: smart",
@@ -166,7 +173,7 @@ defmodule PiWeb.SessionLiveTest do
     session_id = "ask_#{System.unique_integer([:positive])}"
     path = "/repository/#{@encoded_workdir}/sessions/#{session_id}"
     {:ok, view, _html} = live(conn, path)
-    {:ok, {agent, _policy}} = PiWeb.SessionManager.get_agent(session_id)
+    {:ok, {agent, _policy}} = PiWeb.SessionManager.get_agent(session_id, repo_path: @workdir)
 
     task =
       Task.async(fn ->
@@ -207,7 +214,7 @@ defmodule PiWeb.SessionLiveTest do
     session_id = "ask_refresh_#{System.unique_integer([:positive])}"
     path = "/repository/#{@encoded_workdir}/sessions/#{session_id}"
     {:ok, _view, _html} = live(conn, path)
-    {:ok, {agent, _policy}} = PiWeb.SessionManager.get_agent(session_id)
+    {:ok, {agent, _policy}} = PiWeb.SessionManager.get_agent(session_id, repo_path: @workdir)
 
     task =
       Task.async(fn ->
@@ -285,6 +292,37 @@ defmodule PiWeb.SessionLiveTest do
 
   defp session_path(session_id) do
     "/repository/#{@encoded_workdir}/sessions/#{session_id}"
+  end
+
+  defp stop_repository_supervisors(repo) do
+    repo = PiAgent.Runtime.normalize_repo_path(repo)
+
+    for {_id, pid, :supervisor, [PiAgent.RepositorySupervisor]} <-
+          DynamicSupervisor.which_children(PiAgent.DynamicSupervisor),
+        Process.alive?(pid),
+        repo_supervisor_for?(pid, repo) do
+      ref = Process.monitor(pid)
+      DynamicSupervisor.terminate_child(PiAgent.DynamicSupervisor, pid)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+      after
+        500 -> :ok
+      end
+    end
+  end
+
+  defp repo_supervisor_for?(supervisor, repo) do
+    supervisor
+    |> Supervisor.which_children()
+    |> Enum.find_value(false, fn
+      {PiAgent.RepositoryProcess, pid, :worker, [PiAgent.RepositoryProcess]} when is_pid(pid) ->
+        %{repo_path: repo_path} = PiAgent.RepositoryProcess.status(pid)
+        repo_path == repo
+
+      _ ->
+        false
+    end)
   end
 
   defp with_agent_config(tmp_dir, fun) do

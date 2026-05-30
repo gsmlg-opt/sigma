@@ -82,8 +82,8 @@ defmodule PiWeb.SessionLive do
           Phoenix.PubSub.broadcast(PiWeb.PubSub, "session:#{session_id}", event)
         end
 
-        {:ok, {agent, _policy}} =
-          PiWeb.SessionManager.get_agent(session_id,
+        {:ok, runtime_session} =
+          PiAgent.Runtime.get_session(workdir, session_id,
             model: %{id: model_id, api: provider_id, provider: provider_id},
             provider: provider_mod,
             options: [api_key: api_key, base_url: base_url],
@@ -94,6 +94,8 @@ defmodule PiWeb.SessionLive do
             messages: initial_messages,
             cwd: effective_cwd
           )
+
+        agent = runtime_session.agent
 
         if connected?(socket) do
           Process.monitor(agent)
@@ -931,7 +933,8 @@ defmodule PiWeb.SessionLive do
   def handle_event("select_model", %{"model" => selected}, socket) do
     with {:ok, provider_id, model_id} <- parse_model_option_value(selected),
          config when is_map(config) <- ConfigManager.get_config(),
-         provider_config when is_map(provider_config) <- get_in(config, ["providers", provider_id]),
+         provider_config when is_map(provider_config) <-
+           get_in(config, ["providers", provider_id]),
          selected_config = Map.put(provider_config, "model", model_id),
          {:ok, {provider_mod, _model_id, _provider_id, api_key, base_url}} <-
            resolve_provider(selected_config) do
@@ -939,7 +942,8 @@ defmodule PiWeb.SessionLive do
         socket.assigns.agent,
         provider_mod,
         %{id: model_id, api: provider_id, provider: provider_id},
-        [api_key: api_key, base_url: base_url]
+        api_key: api_key,
+        base_url: base_url
       )
 
       ConfigManager.set_active_provider(provider_id)
