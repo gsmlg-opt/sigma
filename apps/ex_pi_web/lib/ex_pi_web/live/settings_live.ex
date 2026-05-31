@@ -138,7 +138,7 @@ defmodule PiWeb.SettingsLive do
     do: "btn btn-primary w-full justify-start gap-3"
 
   defp settings_nav_class(_current_action, _item_action),
-    do: "btn btn-ghost w-full justify-start gap-3"
+    do: "btn btn-ghost w-full justify-start gap-3 text-primary-content hover:text-primary-content"
 
   defp render_providers(assigns) do
     ~H"""
