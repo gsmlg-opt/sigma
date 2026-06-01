@@ -230,10 +230,9 @@ defmodule PiSession.ConfigManager do
   end
 
   defp provider_models(provider) do
-    provider
-    |> Map.get("models", [])
-    |> List.wrap()
-    |> Kernel.++([provider["model"]])
+    models = provider |> Map.get("models", []) |> List.wrap()
+
+    [provider["model"] | models]
     |> Enum.map(&model_id/1)
     |> Enum.reject(&(&1 == ""))
     |> Enum.uniq()

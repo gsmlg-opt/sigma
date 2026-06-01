@@ -70,11 +70,64 @@ defmodule PiSession.ConfigManagerTest do
       |> Jason.decode!()
 
     assert saved_settings["defaultModel"] == "expert"
+
     assert Enum.map(saved_models["providers"]["openai"]["models"], & &1["id"]) == [
              "fast",
              "smart",
              "expert"
            ]
+  end
+
+  @tag :tmp_dir
+  test "persists inactive provider current model as first configured model" do
+    File.mkdir_p!(ConfigManager.agent_dir())
+
+    File.write!(
+      Path.join(ConfigManager.agent_dir(), "settings.json"),
+      Jason.encode!(%{"defaultProvider" => "openai", "defaultModel" => "fast"})
+    )
+
+    File.write!(
+      Path.join(ConfigManager.agent_dir(), "models.json"),
+      Jason.encode!(%{
+        "providers" => %{
+          "openai" => %{
+            "name" => "OpenAI",
+            "api" => "openai-completions",
+            "models" => [%{"id" => "fast"}]
+          },
+          "anthropic" => %{
+            "name" => "Anthropic",
+            "api" => "anthropic-messages",
+            "models" => [
+              %{"id" => "claude"},
+              %{"id" => "opus"}
+            ]
+          }
+        }
+      })
+    )
+
+    assert {:ok, _} = ConfigManager.update_provider("anthropic", %{"model" => "opus"})
+
+    saved_models =
+      ConfigManager.agent_dir()
+      |> Path.join("models.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert Enum.map(saved_models["providers"]["anthropic"]["models"], & &1["id"]) == [
+             "opus",
+             "claude"
+           ]
+
+    assert %{
+             "active_provider_id" => "openai",
+             "providers" => %{
+               "anthropic" => %{"model" => "opus"},
+               "openai" => %{"model" => "fast"}
+             }
+           } = ConfigManager.get_config()
   end
 
   @tag :tmp_dir
