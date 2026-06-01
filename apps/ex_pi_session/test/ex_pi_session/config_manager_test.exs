@@ -131,6 +131,30 @@ defmodule PiSession.ConfigManagerTest do
   end
 
   @tag :tmp_dir
+  test "defaults global skills to enabled and persists disabled global skills" do
+    assert ConfigManager.disabled_global_skills() == []
+    assert ConfigManager.get_config()["disabled_global_skills"] == []
+
+    assert :ok = ConfigManager.set_global_skill_enabled("beta", false)
+    assert ConfigManager.disabled_global_skills() == ["beta"]
+
+    assert :ok = ConfigManager.set_global_skills_enabled(["alpha", "beta"], false)
+    assert ConfigManager.disabled_global_skills() == ["alpha", "beta"]
+
+    assert :ok = ConfigManager.set_global_skill_enabled("beta", true)
+    assert ConfigManager.disabled_global_skills() == ["alpha"]
+    assert ConfigManager.get_config()["disabled_global_skills"] == ["alpha"]
+
+    saved_settings =
+      ConfigManager.agent_dir()
+      |> Path.join("settings.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert saved_settings["disabledSkills"] == %{"global" => ["alpha"]}
+  end
+
+  @tag :tmp_dir
   test "loads VS Code-style mcp.json and saves Claude-style mcpServers" do
     File.mkdir_p!(ConfigManager.agent_dir())
 

@@ -94,6 +94,7 @@ defmodule PiAgent.SessionContext do
   @spec skills_context([map()]) :: String.t()
   def skills_context(skills) when is_list(skills) do
     skills
+    |> Enum.reject(&(Map.get(&1, :enabled?, true) == false))
     |> Enum.reject(&Map.get(&1, :disable_model_invocation?, false))
     |> Enum.map(&skill_line/1)
     |> Enum.reject(&(&1 == ""))

@@ -44,6 +44,7 @@ defmodule PiAgent.SessionContextTest do
     test "renders skills as a markdown list and skips disabled model invocation" do
       assert SessionContext.skills_context([
                %{name: "global-skill", description: "Global skill description"},
+               %{name: "disabled-skill", description: "Disabled", enabled?: false},
                %{
                  name: "manual-skill",
                  description: "Manual only",

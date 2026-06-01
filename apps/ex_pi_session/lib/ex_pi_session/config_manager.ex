@@ -70,6 +70,7 @@ defmodule PiSession.ConfigManager do
     %{
       "active_provider_id" => active_provider_id,
       "system_prompt" => system_prompt,
+      "disabled_global_skills" => disabled_global_skill_names(settings),
       "credentials" => credentials,
       "providers" => providers
     }
@@ -223,6 +224,47 @@ defmodule PiSession.ConfigManager do
     |> save_config()
   end
 
+  def disabled_global_skills do
+    @settings_file
+    |> load_json(%{})
+    |> disabled_global_skill_names()
+  end
+
+  def set_global_skill_enabled(name, enabled?) when is_binary(name) do
+    set_global_skills_enabled([name], enabled?)
+  end
+
+  def set_global_skills_enabled(names, enabled?) when is_list(names) do
+    settings = load_json(@settings_file, %{})
+    current = settings |> disabled_global_skill_names() |> MapSet.new()
+
+    changed =
+      names |> Enum.map(&normalize_skill_name/1) |> Enum.reject(&(&1 == "")) |> MapSet.new()
+
+    disabled =
+      if enabled? do
+        MapSet.difference(current, changed)
+      else
+        MapSet.union(current, changed)
+      end
+
+    disabled_scopes =
+      case settings["disabledSkills"] do
+        scopes when is_map(scopes) -> scopes
+        _ -> %{}
+      end
+
+    settings =
+      Map.put(
+        settings,
+        "disabledSkills",
+        Map.put(disabled_scopes, "global", disabled |> MapSet.to_list() |> Enum.sort())
+      )
+
+    save_json(@settings_file, settings)
+    :ok
+  end
+
   def update_system_prompt(prompt) do
     get_config()
     |> Map.put("system_prompt", prompt)
@@ -243,6 +285,31 @@ defmodule PiSession.ConfigManager do
   defp model_id(%{id: id}) when is_binary(id), do: id
   defp model_id(id) when is_binary(id), do: id
   defp model_id(_), do: ""
+
+  defp disabled_global_skill_names(settings) do
+    case settings["disabledSkills"] do
+      %{"global" => names} -> normalize_skill_names(names)
+      names when is_list(names) -> normalize_skill_names(names)
+      _ -> []
+    end
+  end
+
+  defp normalize_skill_names(names) when is_list(names) do
+    names
+    |> Enum.map(&normalize_skill_name/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp normalize_skill_names(_), do: []
+
+  defp normalize_skill_name(name) when is_binary(name), do: String.trim(name)
+
+  defp normalize_skill_name(name) when is_atom(name),
+    do: name |> Atom.to_string() |> String.trim()
+
+  defp normalize_skill_name(_), do: ""
 
   # MCP server configuration
 

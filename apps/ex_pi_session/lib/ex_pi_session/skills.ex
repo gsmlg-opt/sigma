@@ -3,11 +3,20 @@ defmodule PiSession.Skills do
   Discovers Agent Skills from user and repository skill directories.
   """
 
+  alias PiSession.ConfigManager
+
   defmodule Skill do
     @moduledoc false
 
     @enforce_keys [:name, :description, :path, :source]
-    defstruct [:name, :description, :path, :source, disable_model_invocation?: false]
+    defstruct [
+      :name,
+      :description,
+      :path,
+      :source,
+      disable_model_invocation?: false,
+      enabled?: true
+    ]
   end
 
   defmodule Diagnostic do
@@ -30,7 +39,11 @@ defmodule PiSession.Skills do
 
   @doc "Lists user-level skills from ~/.agents/skills."
   def list_global do
-    list_dir(global_skills_dir(), :global)
+    disabled = ConfigManager.disabled_global_skills() |> MapSet.new()
+
+    global_skills_dir()
+    |> list_dir(:global)
+    |> mark_enabled(disabled)
   end
 
   @doc "Lists repository-level skills from <workdir>/.agents/skills."
@@ -115,6 +128,15 @@ defmodule PiSession.Skills do
       {:error, message} ->
         {:error, %Diagnostic{path: path, message: message}}
     end
+  end
+
+  defp mark_enabled(result, disabled_names) do
+    skills =
+      Enum.map(result.skills, fn skill ->
+        %{skill | enabled?: not MapSet.member?(disabled_names, skill.name)}
+      end)
+
+    %{result | skills: skills}
   end
 
   defp required_description(metadata) do
