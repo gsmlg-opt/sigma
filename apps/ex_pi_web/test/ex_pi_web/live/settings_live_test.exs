@@ -18,6 +18,55 @@ defmodule PiWeb.SettingsLiveTest do
   end
 
   @tag :tmp_dir
+  test "shows providers in an async data table", %{conn: conn, tmp_dir: tmp_dir} do
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _} = PiSession.ConfigManager.add_credential("OpenAI Key", "secret-token")
+      [credential_id] = PiSession.ConfigManager.get_config()["credentials"] |> Map.keys()
+
+      {:ok, config} =
+        PiSession.ConfigManager.add_provider(%{
+          "name" => "Test OpenAI",
+          "api_type" => "openai",
+          "credential_id" => credential_id,
+          "model" => "gpt-4o-mini",
+          "base_url" => "https://api.openai.com/v1"
+        })
+
+      [provider_id] = config["providers"] |> Map.keys()
+      {:ok, _} = PiSession.ConfigManager.set_active_provider(provider_id)
+
+      {:ok, view, html} = live(conn, "/settings/providers")
+
+      assert html =~ "Loading settings data"
+
+      html = render_async(view)
+
+      assert html =~ ~s(id="providers-table")
+      assert html =~ "Test OpenAI"
+      assert html =~ "gpt-4o-mini"
+      assert html =~ "OpenAI Key"
+      assert html =~ "ACTIVE"
+    end)
+  end
+
+  @tag :tmp_dir
+  test "shows credentials in an async data table", %{conn: conn, tmp_dir: tmp_dir} do
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _} = PiSession.ConfigManager.add_credential("GitHub Token", "secret-token")
+
+      {:ok, view, html} = live(conn, "/settings/credentials")
+
+      assert html =~ "Loading settings data"
+
+      html = render_async(view)
+
+      assert html =~ ~s(id="credentials-table")
+      assert html =~ "GitHub Token"
+      assert html =~ "secret-token"
+    end)
+  end
+
+  @tag :tmp_dir
   test "shows globally discovered skills", %{conn: conn, tmp_dir: tmp_dir} do
     global_skills_dir = Path.join([tmp_dir, ".agents", "skills"])
     skill_dir = Path.join(global_skills_dir, "global-skill")
@@ -45,9 +94,14 @@ defmodule PiWeb.SettingsLiveTest do
       end
     end)
 
-    {:ok, _view, html} = live(conn, "/settings/skills")
+    {:ok, view, html} = live(conn, "/settings/skills")
+
+    assert html =~ "Loading settings data"
+
+    html = render_async(view)
 
     assert html =~ "Skills"
+    assert html =~ ~s(id="skills-table")
     assert html =~ "global-skill"
     assert html =~ "Global skill description"
     assert html =~ global_skills_dir
@@ -60,6 +114,10 @@ defmodule PiWeb.SettingsLiveTest do
       [credential_id] = PiSession.ConfigManager.get_config()["credentials"] |> Map.keys()
 
       {:ok, view, html} = live(conn, "/settings/mcp")
+
+      assert html =~ "Loading settings data"
+
+      html = render_async(view)
 
       assert html =~ "MCP Servers"
       assert html =~ PiSession.ConfigManager.mcp_file()
@@ -115,6 +173,9 @@ defmodule PiWeb.SettingsLiveTest do
              } = saved
 
       refute Map.has_key?(saved["mcpServers"]["github"], "headers")
+
+      html = render_async(view)
+      assert html =~ ~s(id="mcp-servers-table")
 
       view
       |> element("el-dm-button[phx-click='edit_mcp_server'][phx-value-id='github']")
@@ -183,6 +244,8 @@ defmodule PiWeb.SettingsLiveTest do
       refute Map.has_key?(saved["mcpServers"]["github"], "command")
       refute Map.has_key?(saved["mcpServers"]["github"], "args")
       refute Map.has_key?(saved["mcpServers"]["github"], "env")
+
+      render_async(view)
 
       view
       |> element("el-dm-button[phx-click='confirm_delete_mcp_server'][phx-value-id='github']")

@@ -3,6 +3,7 @@ defmodule PiWeb.SettingsLive do
 
   alias PiAgent.ContextBuilder
   alias PiSession.{ConfigManager, Skills}
+  alias Phoenix.LiveView.AsyncResult
 
   @credential_ref_regex ~r/^\{\{credential:([^}]+)\}\}$/
 
@@ -11,30 +12,29 @@ defmodule PiWeb.SettingsLive do
     {:ok,
      socket
      |> assign(:active_tab, :settings)
+     |> assign(:settings_data, AsyncResult.loading())
+     |> assign(:context_config, %{"system_prompt" => ""})
      |> assign(:mcp_form, nil)
      |> assign(:deleting_mcp_server, nil)
+     |> assign(:hooks_json, "")
+     |> assign(:hooks_file, "")
      |> assign(:hooks_error, nil)
-     |> load_config()}
+     |> assign(:selected_id, nil)}
   end
 
   @impl true
   def handle_params(_params, _url, socket) do
     # Default to providers if root /settings is visited
-    socket =
-      if socket.assigns.live_action == :index do
-        socket |> push_patch(to: ~p"/settings/providers")
-      else
-        socket
-      end
+    case socket.assigns.live_action do
+      :index ->
+        {:noreply, push_patch(socket, to: ~p"/settings/providers")}
 
-    socket =
-      socket
-      |> assign(:selected_id, nil)
-      |> maybe_load_skills()
-      |> maybe_load_mcp()
-      |> maybe_load_hooks()
-
-    {:noreply, socket}
+      action ->
+        {:noreply,
+         socket
+         |> assign(:selected_id, nil)
+         |> load_settings_action(action)}
+    end
   end
 
   @impl true
@@ -97,36 +97,44 @@ defmodule PiWeb.SettingsLive do
 
           <%= case @live_action do %>
             <% :providers -> %>
-              <.render_providers 
-                providers={@config["providers"]} 
-                credentials={@config["credentials"]}
-                active_id={@config["active_provider_id"]}
-              />
+              <.settings_async_result :let={data} assign={@settings_data}>
+                <.render_providers
+                  providers={data.providers}
+                  credentials={data.credentials}
+                  active_id={data.active_provider_id}
+                />
+              </.settings_async_result>
             <% :credentials -> %>
-              <.render_credentials 
-                credentials={@config["credentials"]}
-              />
+              <.settings_async_result :let={data} assign={@settings_data}>
+                <.render_credentials credentials={data.credentials} />
+              </.settings_async_result>
             <% :system_prompt -> %>
               <.render_context
-                agents_md={@config["system_prompt"]}
+                agents_md={@context_config["system_prompt"]}
                 system_prompt={ContextBuilder.system_prompt_template()}
               />
             <% :skills -> %>
-              <.render_skills result={@global_skills_result} />
+              <.settings_async_result :let={data} assign={@settings_data}>
+                <.render_skills result={data} />
+              </.settings_async_result>
             <% :mcp -> %>
-              <.render_mcp
-                config={@mcp_config}
-                credentials={@config["credentials"]}
-                deleting_server_id={@deleting_mcp_server}
-                file={@mcp_file}
-                form={@mcp_form}
-              />
+              <.settings_async_result :let={data} assign={@settings_data}>
+                <.render_mcp
+                  servers={data.servers}
+                  credentials={data.credentials}
+                  deleting_server_id={@deleting_mcp_server}
+                  file={data.file}
+                  form={@mcp_form}
+                />
+              </.settings_async_result>
             <% :hooks -> %>
               <.render_hooks
                 hooks_json={@hooks_json}
                 hooks_file={@hooks_file}
                 hooks_error={@hooks_error}
               />
+            <% _ -> %>
+              <.settings_loading_state />
           <% end %>
         </div>
       </main>
@@ -140,6 +148,37 @@ defmodule PiWeb.SettingsLive do
   defp settings_nav_class(_current_action, _item_action),
     do: "btn btn-ghost w-full justify-start gap-3 text-primary-content hover:text-primary-content"
 
+  defp settings_async_result(assigns) do
+    ~H"""
+    <.async_result :let={data} assign={@assign}>
+      <:loading>
+        <.settings_loading_state />
+      </:loading>
+      <:failed :let={reason}>
+        <div class="rounded-2xl border border-error/30 bg-error/10 p-6 text-error">
+          <div class="flex items-center gap-2 font-bold">
+            <.dm_mdi name="alert-circle-outline" class="w-5 h-5" />
+            <span>Could not load settings data</span>
+          </div>
+          <p class="mt-2 text-sm font-mono break-all">{inspect(reason)}</p>
+        </div>
+      </:failed>
+      {render_slot(@inner_block, data)}
+    </.async_result>
+    """
+  end
+
+  defp settings_loading_state(assigns) do
+    ~H"""
+    <div class="rounded-2xl border border-outline-variant bg-surface-container-low p-6">
+      <div class="flex items-center gap-3 text-on-surface-variant">
+        <.dm_loading_spinner size="sm" />
+        <span class="text-sm font-medium">Loading settings data...</span>
+      </div>
+    </div>
+    """
+  end
+
   defp render_providers(assigns) do
     ~H"""
     <div class="space-y-6">
@@ -151,74 +190,127 @@ defmodule PiWeb.SettingsLive do
         </.dm_btn>
       </div>
 
-      <div class="grid grid-cols-1 gap-4">
-        <.dm_card :for={{id, p} <- @providers} variant="bordered" class="bg-surface-container-low overflow-hidden">
-          <:title>
-            <div class="flex items-center justify-between w-full text-on-surface">
-              <div class="flex items-center gap-3">
-                <div class="p-2 bg-primary/10 rounded-lg text-primary">
-                   <.dm_mdi name={if p["api_type"] == "anthropic", do: "alpha-a-box", else: "alpha-o-box"} class="w-5 h-5" />
-                </div>
-                <div>
-                  <div class="font-bold">{p["name"]}</div>
-                  <div class="text-[10px] opacity-40 uppercase tracking-widest">{p["api_type"]}</div>
-                </div>
-              </div>
-              <div class="flex items-center gap-2">
-                <div :if={@active_id == id} class="bg-success/20 text-success text-[10px] font-bold px-3 py-1 rounded-full border border-success/30">
-                  ACTIVE
-                </div>
-                <.dm_btn :if={@active_id != id} phx-click="set_active_provider" phx-value-id={id} phx-hook="WebComponentHook" variant="outline" size="xs">
-                   Activate
-                </.dm_btn>
-              </div>
-            </div>
-          </:title>
+      <div
+        :if={Enum.empty?(@providers)}
+        class="rounded-2xl border border-dashed border-outline-variant bg-surface-container-low p-8 text-center"
+      >
+        <.dm_mdi name="robot-off-outline" class="w-10 h-10 mx-auto text-on-surface-variant opacity-40 mb-3" />
+        <p class="font-semibold text-on-surface">No providers configured</p>
+      </div>
 
-          <form phx-submit="save_provider" class="grid grid-cols-1 md:grid-cols-2 gap-4 py-2">
-            <input type="hidden" name="config_id" value={id} />
-            <div class="space-y-1">
-              <label class="text-[10px] font-bold opacity-40 uppercase tracking-wider text-on-surface">Display Name</label>
-              <.dm_input name="name" value={p["name"]} class="w-full" size="sm" />
+      <div :if={!Enum.empty?(@providers)} class="overflow-x-auto rounded-2xl border border-outline-variant bg-surface-container-low">
+        <.dm_table id="providers-table" data={@providers} compact hover zebra class="min-w-[72rem]">
+          <:col :let={row} label="Name" class="min-w-52">
+            <form id={"provider-form-#{row.id}"} phx-submit="save_provider">
+              <input type="hidden" name="config_id" value={row.id} />
+            </form>
+            <.dm_input
+              form={"provider-form-#{row.id}"}
+              name="name"
+              value={row.provider["name"]}
+              aria-label="Provider name"
+              class="w-full"
+              size="sm"
+            />
+          </:col>
+          <:col :let={row} label="API" class="min-w-44">
+            <select
+              form={"provider-form-#{row.id}"}
+              name="api_type"
+              class="select select-bordered select-sm select-primary w-full"
+              aria-label="Provider API type"
+            >
+              <option value="anthropic" selected={row.provider["api_type"] == "anthropic"}>
+                Anthropic
+              </option>
+              <option value="openai" selected={row.provider["api_type"] == "openai"}>
+                OpenAI
+              </option>
+            </select>
+          </:col>
+          <:col :let={row} label="Credential" class="min-w-52">
+            <select
+              form={"provider-form-#{row.id}"}
+              name="credential_id"
+              class="select select-bordered select-sm select-primary w-full"
+              aria-label="Provider credential"
+            >
+              <option
+                :for={{credential_id, credential_name} <- credential_select_options(@credentials)}
+                value={credential_id}
+                selected={row.provider["credential_id"] == credential_id}
+              >
+                {credential_name}
+              </option>
+            </select>
+          </:col>
+          <:col :let={row} label="Model" class="min-w-52">
+            <.dm_input
+              form={"provider-form-#{row.id}"}
+              name="model"
+              value={row.provider["model"]}
+              placeholder="e.g. gpt-4o"
+              aria-label="Provider model"
+              class="w-full"
+              size="sm"
+            />
+          </:col>
+          <:col :let={row} label="Base URL" class="min-w-64">
+            <.dm_input
+              form={"provider-form-#{row.id}"}
+              name="base_url"
+              value={row.provider["base_url"]}
+              aria-label="Provider base URL"
+              class="w-full"
+              size="sm"
+            />
+          </:col>
+          <:col :let={row} label="Status" class="min-w-28">
+            <div :if={@active_id == row.id} class="inline-flex bg-success/20 text-success text-[10px] font-bold px-3 py-1 rounded-full border border-success/30">
+              ACTIVE
             </div>
-            <div class="space-y-1">
-              <.dm_select name="api_type" value={p["api_type"]} label="API Type" size="sm" class="w-full">
-                <option value="anthropic" selected={p["api_type"] == "anthropic"}>Anthropic</option>
-                <option value="openai" selected={p["api_type"] == "openai"}>OpenAI</option>
-              </.dm_select>
+            <.dm_btn
+              :if={@active_id != row.id}
+              phx-click="set_active_provider"
+              phx-value-id={row.id}
+              phx-hook="WebComponentHook"
+              variant="outline"
+              size="xs"
+            >
+              Activate
+            </.dm_btn>
+          </:col>
+          <:col :let={row} label="Actions" class="min-w-36">
+            <div class="flex items-center gap-2">
+              <.dm_btn
+                type="button"
+                onclick={"document.getElementById('provider-form-#{row.id}').requestSubmit()"}
+                variant="primary"
+                size="sm"
+              >
+                Save
+              </.dm_btn>
+              <.dm_btn
+                type="button"
+                variant="error"
+                size="sm"
+                shape="circle"
+                confirm="Are you sure you want to delete this provider?"
+                confirm_title="Delete Provider"
+              >
+                <:confirm_action>
+                  <.dm_btn type="button" variant="ghost" onclick="this.closest('el-dm-dialog').close()">
+                    Cancel
+                  </.dm_btn>
+                  <.dm_btn type="button" phx-click="delete_provider" phx-value-id={row.id} phx-hook="WebComponentHook" variant="error" onclick="this.closest('el-dm-dialog').close()">
+                    Delete
+                  </.dm_btn>
+                </:confirm_action>
+                <.dm_mdi name="delete-outline" />
+              </.dm_btn>
             </div>
-            <div class="space-y-1">
-              <.dm_select name="credential_id" value={p["credential_id"]} label="Credential (API Key)" prompt="No Key Selected" size="sm" class="w-full">
-                <option :for={{cid, c} <- @credentials} value={cid} selected={p["credential_id"] == cid}>{c["name"]}</option>
-              </.dm_select>
-            </div>
-            <div class="space-y-1">
-              <label class="text-[10px] font-bold opacity-40 uppercase tracking-wider text-on-surface">Model ID (Manual Input)</label>
-              <.dm_input name="model" value={p["model"]} placeholder="e.g. gpt-4o" class="w-full" size="sm" />
-            </div>
-            <div class="md:col-span-2 space-y-1">
-              <label class="text-[10px] font-bold opacity-40 uppercase tracking-wider text-on-surface">Base URL</label>
-              <.dm_input name="base_url" value={p["base_url"]} class="w-full" size="sm" />
-            </div>
-
-            <div class="md:col-span-2 flex justify-between items-center pt-4 border-t border-outline-variant mt-2">
-               <.dm_btn type="button" variant="error" size="sm" class="opacity-40 hover:opacity-100 transition-opacity" confirm="Are you sure you want to delete this provider?" confirm_title="Delete Provider">
-                 <:confirm_action>
-                   <.dm_btn type="button" variant="ghost" onclick="this.closest('el-dm-dialog').close()">
-                     Cancel
-                   </.dm_btn>
-                   <.dm_btn type="button" phx-click="delete_provider" phx-value-id={id} phx-hook="WebComponentHook" variant="error" onclick="this.closest('el-dm-dialog').close()">
-                     Delete
-                   </.dm_btn>
-                 </:confirm_action>
-                 <.dm_mdi name="delete-outline" />
-               </.dm_btn>
-               <.dm_btn type="submit" phx-hook="WebComponentHook" variant="primary" size="sm">
-                 Save Provider
-               </.dm_btn>
-            </div>
-          </form>
-        </.dm_card>
+          </:col>
+        </.dm_table>
       </div>
     </div>
     """
@@ -235,36 +327,65 @@ defmodule PiWeb.SettingsLive do
         </.dm_btn>
       </div>
 
-      <div class="grid grid-cols-1 gap-4">
-        <.dm_card :for={{id, c} <- @credentials} variant="bordered" class="bg-surface-container-low">
-          <form phx-submit="save_credential" class="flex flex-col md:flex-row items-end gap-4">
-            <input type="hidden" name="config_id" value={id} />
-            <div class="flex-1 w-full space-y-1">
-              <label class="text-[10px] font-bold opacity-40 uppercase tracking-wider text-on-surface">Key Name</label>
-              <.dm_input name="name" value={c["name"]} class="w-full" size="sm" />
+      <div
+        :if={Enum.empty?(@credentials)}
+        class="rounded-2xl border border-dashed border-outline-variant bg-surface-container-low p-8 text-center"
+      >
+        <.dm_mdi name="key-off-outline" class="w-10 h-10 mx-auto text-on-surface-variant opacity-40 mb-3" />
+        <p class="font-semibold text-on-surface">No credentials configured</p>
+      </div>
+
+      <div :if={!Enum.empty?(@credentials)} class="overflow-x-auto rounded-2xl border border-outline-variant bg-surface-container-low">
+        <.dm_table id="credentials-table" data={@credentials} compact hover zebra class="min-w-[48rem]">
+          <:col :let={row} label="Name" class="min-w-64">
+            <form id={"credential-form-#{row.id}"} phx-submit="save_credential">
+              <input type="hidden" name="config_id" value={row.id} />
+            </form>
+            <.dm_input
+              form={"credential-form-#{row.id}"}
+              name="name"
+              value={row.credential["name"]}
+              aria-label="Credential name"
+              class="w-full"
+              size="sm"
+            />
+          </:col>
+          <:col :let={row} label="Secret Key" class="min-w-80">
+            <.dm_input
+              form={"credential-form-#{row.id}"}
+              type="password"
+              name="key"
+              value={row.credential["key"]}
+              placeholder="sk-..."
+              aria-label="Credential secret key"
+              class="w-full"
+              size="sm"
+            />
+          </:col>
+          <:col :let={row} label="Actions" class="min-w-32">
+            <div class="flex items-center gap-2">
+              <.dm_btn
+                type="button"
+                onclick={"document.getElementById('credential-form-#{row.id}').requestSubmit()"}
+                variant="primary"
+                size="sm"
+              >
+                Save
+              </.dm_btn>
+              <.dm_btn type="button" variant="error" size="sm" shape="circle" confirm="Are you sure you want to delete this credential?" confirm_title="Delete Credential">
+                <:confirm_action>
+                  <.dm_btn type="button" variant="ghost" onclick="this.closest('el-dm-dialog').close()">
+                    Cancel
+                  </.dm_btn>
+                  <.dm_btn type="button" phx-click="delete_credential" phx-value-id={row.id} phx-hook="WebComponentHook" variant="error" onclick="this.closest('el-dm-dialog').close()">
+                    Delete
+                  </.dm_btn>
+                </:confirm_action>
+                <.dm_mdi name="delete-outline" />
+              </.dm_btn>
             </div>
-            <div class="flex-1 w-full space-y-1">
-              <label class="text-[10px] font-bold opacity-40 uppercase tracking-wider text-on-surface">Secret Key</label>
-              <.dm_input type="password" name="key" value={c["key"]} placeholder="sk-..." class="w-full" size="sm" />
-            </div>
-            <div class="flex gap-2">
-               <.dm_btn type="submit" phx-hook="WebComponentHook" variant="primary" size="sm">
-                 Save
-               </.dm_btn>
-               <.dm_btn type="button" variant="error" size="sm" shape="circle" confirm="Are you sure you want to delete this credential?" confirm_title="Delete Credential">
-                 <:confirm_action>
-                   <.dm_btn type="button" variant="ghost" onclick="this.closest('el-dm-dialog').close()">
-                     Cancel
-                   </.dm_btn>
-                   <.dm_btn type="button" phx-click="delete_credential" phx-value-id={id} phx-hook="WebComponentHook" variant="error" onclick="this.closest('el-dm-dialog').close()">
-                     Delete
-                   </.dm_btn>
-                 </:confirm_action>
-                 <.dm_mdi name="delete-outline" />
-               </.dm_btn>
-            </div>
-          </form>
-        </.dm_card>
+          </:col>
+        </.dm_table>
       </div>
     </div>
     """
@@ -346,29 +467,30 @@ defmodule PiWeb.SettingsLive do
         <p class="font-semibold text-on-surface">No global skills found</p>
       </div>
 
-      <div :if={!Enum.empty?(@result.skills)} class="grid grid-cols-1 gap-4">
-        <.dm_card :for={skill <- @result.skills} variant="bordered" class="bg-surface-container-low">
-          <:title>
-            <div class="flex items-center gap-3 py-1 min-w-0">
+      <div :if={!Enum.empty?(@result.skills)} class="overflow-x-auto rounded-2xl border border-outline-variant bg-surface-container-low">
+        <.dm_table id="skills-table" data={@result.skills} compact hover zebra class="min-w-[64rem]">
+          <:col :let={skill} label="Name" class="min-w-56">
+            <div class="flex items-center gap-3 min-w-0">
               <div class="p-2 bg-primary/10 rounded-lg text-primary shrink-0">
                 <.dm_mdi name="auto-fix" class="w-5 h-5" />
               </div>
-              <div class="min-w-0">
-                <div class="font-bold text-lg truncate">{skill.name}</div>
-                <div :if={skill.disable_model_invocation?} class="text-[10px] opacity-50 uppercase tracking-widest">
-                  Manual invocation
-                </div>
-              </div>
+              <span class="font-bold truncate">{skill.name}</span>
             </div>
-          </:title>
-
-          <div class="space-y-3">
+          </:col>
+          <:col :let={skill} label="Invocation" class="min-w-36">
+            <span class="inline-flex rounded-full bg-surface-container-high px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-on-surface-variant">
+              {if skill.disable_model_invocation?, do: "Manual", else: "Model"}
+            </span>
+          </:col>
+          <:col :let={skill} label="Description" class="min-w-80">
             <p class="text-sm text-on-surface-variant leading-relaxed">{skill.description}</p>
-            <code class="block text-[11px] font-mono text-on-surface-variant break-all bg-surface-container-high rounded-lg p-3">
+          </:col>
+          <:col :let={skill} label="Path" class="min-w-96">
+            <code class="block text-[11px] font-mono text-on-surface-variant break-all">
               {skill.path}
             </code>
-          </div>
-        </.dm_card>
+          </:col>
+        </.dm_table>
       </div>
 
       <div :if={!Enum.empty?(@result.diagnostics)} class="rounded-2xl border border-warning/30 bg-warning/10 p-4 text-warning">
@@ -401,71 +523,74 @@ defmodule PiWeb.SettingsLive do
       </div>
 
       <div
-        :if={map_size(@config["servers"]) == 0}
+        :if={Enum.empty?(@servers)}
         class="rounded-2xl border border-dashed border-outline-variant bg-surface-container-low p-8 text-center"
       >
         <.dm_mdi name="server-network-off" class="w-10 h-10 mx-auto text-on-surface-variant opacity-40 mb-3" />
         <p class="font-semibold text-on-surface">No MCP servers configured</p>
       </div>
 
-      <div :if={map_size(@config["servers"]) > 0} class="grid grid-cols-1 gap-4">
-        <.dm_card :for={{id, server} <- @config["servers"]} variant="bordered" class="bg-surface-container-low">
-          <:title>
-            <div class="flex items-center justify-between w-full text-on-surface">
-              <div class="flex items-center gap-3 min-w-0">
-                <div class="p-2 bg-primary/10 rounded-lg text-primary shrink-0">
-                  <.dm_mdi name="server-network-outline" class="w-5 h-5" />
-                </div>
-                <div class="min-w-0">
-                  <div class="font-bold truncate">{id}</div>
-                  <div class="text-[10px] opacity-40 uppercase tracking-widest">{server["type"]}</div>
-                </div>
+      <div :if={!Enum.empty?(@servers)} class="overflow-x-auto rounded-2xl border border-outline-variant bg-surface-container-low">
+        <.dm_table id="mcp-servers-table" data={@servers} compact hover zebra class="min-w-[64rem]">
+          <:col :let={row} label="Server" class="min-w-56">
+            <div class="flex items-center gap-3 min-w-0">
+              <div class="p-2 bg-primary/10 rounded-lg text-primary shrink-0">
+                <.dm_mdi name="server-network-outline" class="w-5 h-5" />
               </div>
-              <div class="flex items-center gap-2">
-                <.dm_btn
-                  id={"mcp-edit-server-#{id}"}
-                  type="button"
-                  phx-hook="WebComponentHook"
-                  phx-click="edit_mcp_server"
-                  phx-value-id={id}
-                  variant="outline"
-                  size="xs"
-                >
-                  Edit
-                </.dm_btn>
-                <.dm_btn
-                  id={"mcp-delete-server-#{id}"}
-                  type="button"
-                  phx-hook="WebComponentHook"
-                  phx-click="confirm_delete_mcp_server"
-                  phx-value-id={id}
-                  variant="error"
-                  size="xs"
-                  shape="circle"
-                >
-                  <.dm_mdi name="delete-outline" />
-                </.dm_btn>
-              </div>
+              <span class="font-bold truncate">{row.id}</span>
             </div>
-          </:title>
-
-          <div class="grid grid-cols-1 gap-3 py-2 text-sm">
-            <div class="rounded-xl bg-surface-container p-3 font-mono text-xs text-on-surface-variant break-all">
-              {mcp_server_summary(server)}
-            </div>
+          </:col>
+          <:col :let={row} label="Transport" class="min-w-28">
+            <span class="inline-flex rounded-full bg-surface-container-high px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-on-surface-variant">
+              {row.server["type"]}
+            </span>
+          </:col>
+          <:col :let={row} label="Endpoint / Command" class="min-w-96">
+            <code class="block font-mono text-xs text-on-surface-variant break-all">
+              {mcp_server_summary(row.server)}
+            </code>
+          </:col>
+          <:col :let={row} label="Linked Values" class="min-w-44">
             <div class="flex flex-wrap gap-2 text-[11px] text-on-surface-variant">
-              <span :if={server["type"] == "stdio"} class="px-2 py-1 rounded-full bg-surface-container-high">
-                {length(server["args"] || [])} args
+              <span :if={row.server["type"] == "stdio"} class="px-2 py-1 rounded-full bg-surface-container-high">
+                {length(row.server["args"] || [])} args
               </span>
-              <span :if={server["type"] == "stdio"} class="px-2 py-1 rounded-full bg-surface-container-high">
-                {map_size(server["env"] || %{})} env
+              <span :if={row.server["type"] == "stdio"} class="px-2 py-1 rounded-full bg-surface-container-high">
+                {map_size(row.server["env"] || %{})} env
               </span>
-              <span :if={server["type"] == "http"} class="px-2 py-1 rounded-full bg-surface-container-high">
-                {map_size(server["headers"] || %{})} headers
+              <span :if={row.server["type"] == "http"} class="px-2 py-1 rounded-full bg-surface-container-high">
+                {map_size(row.server["headers"] || %{})} headers
               </span>
             </div>
-          </div>
-        </.dm_card>
+          </:col>
+          <:col :let={row} label="Actions" class="min-w-28">
+            <div class="flex items-center gap-2">
+              <.dm_btn
+                id={"mcp-edit-server-#{row.id}"}
+                type="button"
+                phx-hook="WebComponentHook"
+                phx-click="edit_mcp_server"
+                phx-value-id={row.id}
+                variant="outline"
+                size="xs"
+              >
+                Edit
+              </.dm_btn>
+              <.dm_btn
+                id={"mcp-delete-server-#{row.id}"}
+                type="button"
+                phx-hook="WebComponentHook"
+                phx-click="confirm_delete_mcp_server"
+                phx-value-id={row.id}
+                variant="error"
+                size="xs"
+                shape="circle"
+              >
+                <.dm_mdi name="delete-outline" />
+              </.dm_btn>
+            </div>
+          </:col>
+        </.dm_table>
       </div>
 
       <.dm_modal :if={@form} id="mcp-server-modal" phx-hook="ModalHook" size="xl" responsive={true} hide_close={true}>
@@ -781,7 +906,7 @@ defmodule PiWeb.SettingsLive do
 
   @impl true
   def handle_event("load_config", _, socket) do
-    {:noreply, load_config(socket)}
+    {:noreply, reload_current_settings_data(socket)}
   end
 
   # Provider Handlers
@@ -796,7 +921,7 @@ defmodule PiWeb.SettingsLive do
       "base_url" => "https://api.anthropic.com"
     })
 
-    {:noreply, load_config(socket)}
+    {:noreply, reload_current_settings_data(socket)}
   end
 
   @impl true
@@ -804,19 +929,19 @@ defmodule PiWeb.SettingsLive do
     %{"config_id" => id} = params
     updates = Map.drop(params, ["config_id", "_csrf_token"])
     ConfigManager.update_provider(id, updates)
-    {:noreply, socket |> load_config() |> put_flash(:info, "Provider updated")}
+    {:noreply, socket |> reload_current_settings_data() |> put_flash(:info, "Provider updated")}
   end
 
   @impl true
   def handle_event("delete_provider", %{"id" => id}, socket) do
     ConfigManager.delete_provider(id)
-    {:noreply, load_config(socket)}
+    {:noreply, reload_current_settings_data(socket)}
   end
 
   @impl true
   def handle_event("set_active_provider", %{"id" => id}, socket) do
     ConfigManager.set_active_provider(id)
-    {:noreply, load_config(socket)}
+    {:noreply, reload_current_settings_data(socket)}
   end
 
   # Credential Handlers
@@ -824,26 +949,26 @@ defmodule PiWeb.SettingsLive do
   @impl true
   def handle_event("add_credential", _, socket) do
     ConfigManager.add_credential("New Key", "")
-    {:noreply, load_config(socket)}
+    {:noreply, reload_current_settings_data(socket)}
   end
 
   @impl true
   def handle_event("save_credential", params, socket) do
     %{"config_id" => id, "name" => name, "key" => key} = params
     ConfigManager.update_credential(id, %{"name" => name, "key" => key})
-    {:noreply, socket |> load_config() |> put_flash(:info, "Credential updated")}
+    {:noreply, socket |> reload_current_settings_data() |> put_flash(:info, "Credential updated")}
   end
 
   @impl true
   def handle_event("delete_credential", %{"id" => id}, socket) do
     ConfigManager.delete_credential(id)
-    {:noreply, load_config(socket)}
+    {:noreply, reload_current_settings_data(socket)}
   end
 
   @impl true
   def handle_event("save_system_prompt", %{"system_prompt" => prompt}, socket) do
     ConfigManager.update_system_prompt(prompt)
-    {:noreply, socket |> load_config() |> put_flash(:info, "AGENTS.md updated")}
+    {:noreply, socket |> load_context() |> put_flash(:info, "AGENTS.md updated")}
   end
 
   @impl true
@@ -907,8 +1032,8 @@ defmodule PiWeb.SettingsLive do
          {:ok, _} <- save_mcp_server_form(form, updates) do
       {:noreply,
        socket
-       |> load_mcp()
        |> assign(:mcp_form, nil)
+       |> assign_settings_data_async(:mcp)
        |> put_flash(:info, "MCP server updated")}
     else
       {:error, :invalid_id} ->
@@ -928,9 +1053,9 @@ defmodule PiWeb.SettingsLive do
 
     {:noreply,
      socket
-     |> load_mcp()
      |> assign(:mcp_form, nil)
-     |> assign(:deleting_mcp_server, nil)}
+     |> assign(:deleting_mcp_server, nil)
+     |> assign_settings_data_async(:mcp)}
   end
 
   @impl true
@@ -966,27 +1091,83 @@ defmodule PiWeb.SettingsLive do
     end
   end
 
-  defp load_config(socket) do
-    assign(socket, :config, ConfigManager.get_config())
-  end
-
-  defp load_mcp(socket) do
+  defp load_settings_action(socket, action)
+       when action in [:providers, :credentials, :skills, :mcp] do
     socket
-    |> assign(:mcp_config, ConfigManager.get_mcp_config())
-    |> assign(:mcp_file, ConfigManager.mcp_file())
+    |> clear_mcp_state(action)
+    |> assign_settings_data_async(action)
   end
 
-  defp maybe_load_skills(%{assigns: %{live_action: :skills}} = socket) do
-    assign(socket, :global_skills_result, Skills.list_global())
+  defp load_settings_action(socket, :system_prompt) do
+    socket
+    |> clear_mcp_state(:system_prompt)
+    |> load_context()
   end
 
-  defp maybe_load_skills(socket), do: socket
+  defp load_settings_action(socket, :hooks) do
+    socket
+    |> clear_mcp_state(:hooks)
+    |> load_hooks()
+  end
 
-  defp maybe_load_mcp(%{assigns: %{live_action: :mcp}} = socket), do: load_mcp(socket)
-  defp maybe_load_mcp(socket), do: socket
+  defp load_settings_action(socket, _action), do: socket
 
-  defp maybe_load_hooks(%{assigns: %{live_action: :hooks}} = socket), do: load_hooks(socket)
-  defp maybe_load_hooks(socket), do: socket
+  defp clear_mcp_state(socket, :mcp), do: socket
+
+  defp clear_mcp_state(socket, _action) do
+    socket
+    |> assign(:mcp_form, nil)
+    |> assign(:deleting_mcp_server, nil)
+  end
+
+  defp assign_settings_data_async(socket, action) do
+    socket
+    |> assign(:settings_data, AsyncResult.loading())
+    |> assign_async(:settings_data, fn ->
+      {:ok, %{settings_data: load_settings_data(action)}}
+    end)
+  end
+
+  defp reload_current_settings_data(%{assigns: %{live_action: action}} = socket)
+       when action in [:providers, :credentials, :skills, :mcp],
+       do: assign_settings_data_async(socket, action)
+
+  defp reload_current_settings_data(socket), do: socket
+
+  defp load_settings_data(:providers) do
+    config = ConfigManager.get_config()
+
+    %{
+      providers: provider_rows(config["providers"]),
+      credentials: config["credentials"] || %{},
+      active_provider_id: config["active_provider_id"] || ""
+    }
+  end
+
+  defp load_settings_data(:credentials) do
+    config = ConfigManager.get_config()
+
+    %{
+      credentials: credential_rows(config["credentials"])
+    }
+  end
+
+  defp load_settings_data(:skills), do: Skills.list_global()
+
+  defp load_settings_data(:mcp) do
+    config = ConfigManager.get_config()
+    mcp_config = ConfigManager.get_mcp_config()
+
+    %{
+      servers: mcp_server_rows(mcp_config["servers"]),
+      credentials: config["credentials"] || %{},
+      file: ConfigManager.mcp_file()
+    }
+  end
+
+  defp load_context(socket) do
+    assign(socket, :context_config, ConfigManager.get_config())
+  end
 
   defp load_hooks(socket) do
     path = ConfigManager.hooks_file()
@@ -994,6 +1175,37 @@ defmodule PiWeb.SettingsLive do
     socket
     |> assign(:hooks_json, ConfigManager.get_hooks_json(path))
     |> assign(:hooks_file, path)
+  end
+
+  defp provider_rows(providers) when is_map(providers) do
+    providers
+    |> Enum.sort_by(fn {id, provider} -> {String.downcase(provider["name"] || id), id} end)
+    |> Enum.map(fn {id, provider} -> %{id: id, provider: provider} end)
+  end
+
+  defp provider_rows(_providers), do: []
+
+  defp credential_rows(credentials) when is_map(credentials) do
+    credentials
+    |> Enum.sort_by(fn {id, credential} -> {String.downcase(credential["name"] || id), id} end)
+    |> Enum.map(fn {id, credential} -> %{id: id, credential: credential} end)
+  end
+
+  defp credential_rows(_credentials), do: []
+
+  defp mcp_server_rows(servers) when is_map(servers) do
+    servers
+    |> Enum.sort_by(fn {id, _server} -> id end)
+    |> Enum.map(fn {id, server} -> %{id: id, server: server} end)
+  end
+
+  defp mcp_server_rows(_servers), do: []
+
+  defp credential_select_options(credentials) do
+    [
+      {"", "No Key Selected"}
+      | Enum.map(credential_rows(credentials), &{&1.id, &1.credential["name"] || &1.id})
+    ]
   end
 
   defp blank_mcp_form do
