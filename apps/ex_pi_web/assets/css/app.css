@@ -15,6 +15,31 @@ el-dm-dialog [slot="footer"] {
   gap: 0.5rem;
 }
 
+.settings-table thead {
+  display: table-header-group !important;
+}
+
+.settings-skills-description-cell {
+  width: 25%;
+  max-width: 25%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-skills-description-cell el-dm-popover,
+.settings-skills-description-cell [slot="trigger"],
+.settings-skills-description-cell p {
+  max-width: 100%;
+}
+
+.settings-skills-description-trigger {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Markdown content rendering */
 .markdown p { margin: 0.5rem 0; }
 .markdown h1, .markdown h2, .markdown h3, .markdown h4 { font-weight: 700; margin: 1rem 0 0.5rem; }

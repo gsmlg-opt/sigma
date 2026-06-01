@@ -16,6 +16,12 @@ defmodule PiWeb.SettingsLive do
      |> assign(:context_config, %{"system_prompt" => ""})
      |> assign(:mcp_form, nil)
      |> assign(:deleting_mcp_server, nil)
+     |> assign(:provider_form, nil)
+     |> assign(:deleting_provider, nil)
+     |> assign(:credential_form, nil)
+     |> assign(:deleting_credential, nil)
+     |> assign(:skills_query, "")
+     |> assign(:selected_skill_names, [])
      |> assign(:hooks_json, "")
      |> assign(:hooks_file, "")
      |> assign(:hooks_error, nil)
@@ -102,11 +108,17 @@ defmodule PiWeb.SettingsLive do
                   providers={data.providers}
                   credentials={data.credentials}
                   active_id={data.active_provider_id}
+                  form={@provider_form}
+                  deleting_provider={@deleting_provider}
                 />
               </.settings_async_result>
             <% :credentials -> %>
               <.settings_async_result :let={data} assign={@settings_data}>
-                <.render_credentials credentials={data.credentials} />
+                <.render_credentials
+                  credentials={data.credentials}
+                  form={@credential_form}
+                  deleting_credential={@deleting_credential}
+                />
               </.settings_async_result>
             <% :system_prompt -> %>
               <.render_context
@@ -115,7 +127,11 @@ defmodule PiWeb.SettingsLive do
               />
             <% :skills -> %>
               <.settings_async_result :let={data} assign={@settings_data}>
-                <.render_skills result={data} />
+                <.render_skills
+                  result={data}
+                  query={@skills_query}
+                  selected_skill_names={@selected_skill_names}
+                />
               </.settings_async_result>
             <% :mcp -> %>
               <.settings_async_result :let={data} assign={@settings_data}>
@@ -143,10 +159,12 @@ defmodule PiWeb.SettingsLive do
   end
 
   defp settings_nav_class(current_action, item_action) when current_action == item_action,
-    do: "btn btn-primary w-full justify-start gap-3"
+    do:
+      "flex w-full items-center justify-start gap-3 rounded-lg bg-primary px-4 py-3 font-medium text-primary-content transition-colors hover:bg-primary hover:text-primary-content hover:!opacity-100"
 
   defp settings_nav_class(_current_action, _item_action),
-    do: "btn btn-ghost w-full justify-start gap-3 text-primary-content hover:text-primary-content"
+    do:
+      "flex w-full items-center justify-start gap-3 rounded-lg px-4 py-3 font-medium text-secondary-content transition-colors hover:bg-secondary-content/10 hover:text-secondary-content hover:!opacity-100"
 
   defp settings_async_result(assigns) do
     ~H"""
@@ -184,7 +202,13 @@ defmodule PiWeb.SettingsLive do
     <div class="space-y-6">
       <div class="flex justify-between items-center text-on-surface">
         <h2 class="text-2xl font-bold font-display">AI Providers</h2>
-        <.dm_btn phx-click="add_provider" phx-hook="WebComponentHook" variant="primary" size="sm">
+        <.dm_btn
+          id="provider-new-btn"
+          phx-click="add_provider"
+          phx-hook="WebComponentHook"
+          variant="primary"
+          size="sm"
+        >
           <:prefix><.dm_mdi name="plus" /></:prefix>
           New Provider
         </.dm_btn>
@@ -199,119 +223,189 @@ defmodule PiWeb.SettingsLive do
       </div>
 
       <div :if={!Enum.empty?(@providers)} class="overflow-x-auto rounded-2xl border border-outline-variant bg-surface-container-low">
-        <.dm_table id="providers-table" data={@providers} compact hover zebra class="min-w-[72rem]">
+        <.dm_table id="providers-table" data={@providers} compact hover zebra class="settings-table min-w-[60rem]">
           <:col :let={row} label="Name" class="min-w-52">
-            <form id={"provider-form-#{row.id}"} phx-submit="save_provider">
-              <input type="hidden" name="config_id" value={row.id} />
-            </form>
-            <.dm_input
-              form={"provider-form-#{row.id}"}
-              name="name"
-              value={row.provider["name"]}
-              aria-label="Provider name"
-              class="w-full"
-              size="sm"
-            />
+            <div class="font-semibold text-on-surface">{row.provider["name"] || row.id}</div>
+            <div class="text-xs text-on-surface-variant font-mono">{row.id}</div>
           </:col>
-          <:col :let={row} label="API" class="min-w-44">
-            <select
-              form={"provider-form-#{row.id}"}
-              name="api_type"
-              class="select select-bordered select-sm select-primary w-full"
-              aria-label="Provider API type"
-            >
-              <option value="anthropic" selected={row.provider["api_type"] == "anthropic"}>
-                Anthropic
-              </option>
-              <option value="openai" selected={row.provider["api_type"] == "openai"}>
-                OpenAI
-              </option>
-            </select>
+          <:col :let={row} label="API" class="min-w-36">
+            {format_api_type(row.provider["api_type"])}
           </:col>
           <:col :let={row} label="Credential" class="min-w-52">
-            <select
-              form={"provider-form-#{row.id}"}
-              name="credential_id"
-              class="select select-bordered select-sm select-primary w-full"
-              aria-label="Provider credential"
-            >
-              <option
-                :for={{credential_id, credential_name} <- credential_select_options(@credentials)}
-                value={credential_id}
-                selected={row.provider["credential_id"] == credential_id}
-              >
-                {credential_name}
-              </option>
-            </select>
+            {credential_name(@credentials, row.provider["credential_id"])}
           </:col>
           <:col :let={row} label="Model" class="min-w-52">
-            <.dm_input
-              form={"provider-form-#{row.id}"}
-              name="model"
-              value={row.provider["model"]}
-              placeholder="e.g. gpt-4o"
-              aria-label="Provider model"
-              class="w-full"
-              size="sm"
-            />
+            <span class="font-mono text-xs">{row.provider["model"] || "-"}</span>
           </:col>
           <:col :let={row} label="Base URL" class="min-w-64">
-            <.dm_input
-              form={"provider-form-#{row.id}"}
-              name="base_url"
-              value={row.provider["base_url"]}
-              aria-label="Provider base URL"
-              class="w-full"
-              size="sm"
-            />
+            <span class="font-mono text-xs text-on-surface-variant">
+              {blank_fallback(row.provider["base_url"], "Default endpoint")}
+            </span>
           </:col>
           <:col :let={row} label="Status" class="min-w-28">
             <div :if={@active_id == row.id} class="inline-flex bg-success/20 text-success text-[10px] font-bold px-3 py-1 rounded-full border border-success/30">
               ACTIVE
             </div>
-            <.dm_btn
-              :if={@active_id != row.id}
-              phx-click="set_active_provider"
-              phx-value-id={row.id}
-              phx-hook="WebComponentHook"
-              variant="outline"
-              size="xs"
-            >
-              Activate
-            </.dm_btn>
-          </:col>
-          <:col :let={row} label="Actions" class="min-w-36">
-            <div class="flex items-center gap-2">
+            <.dm_tooltip :if={@active_id != row.id} content="Activate">
               <.dm_btn
-                type="button"
-                onclick={"document.getElementById('provider-form-#{row.id}').requestSubmit()"}
-                variant="primary"
-                size="sm"
-              >
-                Save
-              </.dm_btn>
-              <.dm_btn
-                type="button"
-                variant="error"
-                size="sm"
+                phx-click="set_active_provider"
+                phx-value-id={row.id}
+                phx-hook="WebComponentHook"
+                variant="outline"
+                size="xs"
                 shape="circle"
-                confirm="Are you sure you want to delete this provider?"
-                confirm_title="Delete Provider"
+                aria-label="Activate"
               >
-                <:confirm_action>
-                  <.dm_btn type="button" variant="ghost" onclick="this.closest('el-dm-dialog').close()">
-                    Cancel
-                  </.dm_btn>
-                  <.dm_btn type="button" phx-click="delete_provider" phx-value-id={row.id} phx-hook="WebComponentHook" variant="error" onclick="this.closest('el-dm-dialog').close()">
-                    Delete
-                  </.dm_btn>
-                </:confirm_action>
-                <.dm_mdi name="delete-outline" />
+                <.dm_mdi name="check-circle-outline" />
               </.dm_btn>
+            </.dm_tooltip>
+          </:col>
+          <:col :let={row} label="Actions" class="min-w-32">
+            <div class="flex items-center gap-2">
+              <.dm_tooltip content="Edit">
+                <.dm_btn
+                  id={"provider-edit-#{row.id}"}
+                  type="button"
+                  phx-click="edit_provider"
+                  phx-value-id={row.id}
+                  phx-hook="WebComponentHook"
+                  variant="outline"
+                  size="xs"
+                  shape="circle"
+                  aria-label="Edit"
+                >
+                  <.dm_mdi name="pencil-outline" />
+                </.dm_btn>
+              </.dm_tooltip>
+              <.dm_tooltip content="Delete">
+                <.dm_btn
+                  id={"provider-delete-#{row.id}"}
+                  type="button"
+                  phx-click="confirm_delete_provider"
+                  phx-value-id={row.id}
+                  phx-hook="WebComponentHook"
+                  variant="error"
+                  size="xs"
+                  shape="circle"
+                  aria-label="Delete"
+                >
+                  <.dm_mdi name="delete-outline" />
+                </.dm_btn>
+              </.dm_tooltip>
             </div>
           </:col>
         </.dm_table>
       </div>
+
+      <.dm_modal :if={@form} id="provider-settings-modal" phx-hook="ModalHook" size="lg" responsive={true} hide_close={true}>
+        <:title>
+          <div class="flex items-center gap-2 text-on-surface">
+            <.dm_mdi name="robot-outline" class="w-6 h-6 text-primary" />
+            <span>{if @form["mode"] == "new", do: "New Provider", else: "Edit Provider"}</span>
+          </div>
+        </:title>
+        <:body>
+          <form id="provider-settings-form" phx-submit="save_provider" class="space-y-5">
+            <input type="hidden" name="provider[mode]" value={@form["mode"]} />
+            <input type="hidden" name="provider[id]" value={@form["id"] || ""} />
+
+            <.dm_input
+              name="provider[name]"
+              value={@form["name"]}
+              label="Name"
+              placeholder="Anthropic"
+              class="w-full"
+              size="sm"
+            />
+            <.dm_select
+              name="provider[api_type]"
+              value={@form["api_type"]}
+              label="API"
+              options={provider_api_options()}
+              size="sm"
+              class="w-full"
+            />
+            <.dm_select
+              name="provider[credential_id]"
+              value={@form["credential_id"]}
+              label="Credential"
+              options={credential_select_options(@credentials)}
+              size="sm"
+              class="w-full"
+            />
+            <.dm_input
+              name="provider[model]"
+              value={@form["model"]}
+              label="Current Model"
+              placeholder="claude-3-5-sonnet-latest"
+              class="w-full"
+              size="sm"
+            />
+            <.dm_input
+              name="provider[base_url]"
+              value={@form["base_url"]}
+              label="Base URL"
+              placeholder="https://api.anthropic.com"
+              class="w-full"
+              size="sm"
+            />
+          </form>
+        </:body>
+        <:footer>
+          <.dm_btn
+            id="provider-cancel-form-btn"
+            type="button"
+            phx-click="cancel_provider_form"
+            phx-hook="WebComponentHook"
+            variant="ghost"
+          >
+            Cancel
+          </.dm_btn>
+          <.dm_btn
+            id="provider-save-form-btn"
+            type="button"
+            onclick="document.getElementById('provider-settings-form').requestSubmit()"
+            variant="primary"
+          >
+            Save Provider
+          </.dm_btn>
+        </:footer>
+      </.dm_modal>
+
+      <.dm_modal :if={@deleting_provider} id="delete-provider-modal" phx-hook="ModalHook">
+        <:title>
+          <div class="flex items-center gap-2 text-error">
+            <.dm_mdi name="alert-circle-outline" class="w-6 h-6" />
+            <span>Delete Provider</span>
+          </div>
+        </:title>
+        <:body>
+          <p class="text-on-surface">
+            Delete the provider <span class="font-bold">"{@deleting_provider["name"]}"</span>?
+          </p>
+        </:body>
+        <:footer>
+          <.dm_btn
+            id="provider-cancel-delete-btn"
+            type="button"
+            phx-click="cancel_delete_provider"
+            phx-hook="WebComponentHook"
+            variant="ghost"
+          >
+            Cancel
+          </.dm_btn>
+          <.dm_btn
+            id="provider-confirm-delete-btn"
+            type="button"
+            phx-click="delete_provider"
+            phx-value-id={@deleting_provider["id"]}
+            phx-hook="WebComponentHook"
+            variant="error"
+          >
+            Delete
+          </.dm_btn>
+        </:footer>
+      </.dm_modal>
     </div>
     """
   end
@@ -321,7 +415,13 @@ defmodule PiWeb.SettingsLive do
     <div class="space-y-6">
       <div class="flex justify-between items-center text-on-surface">
         <h2 class="text-2xl font-bold font-display">API Credentials</h2>
-        <.dm_btn phx-click="add_credential" phx-hook="WebComponentHook" variant="primary" size="sm">
+        <.dm_btn
+          id="credential-new-btn"
+          phx-click="add_credential"
+          phx-hook="WebComponentHook"
+          variant="primary"
+          size="sm"
+        >
           <:prefix><.dm_mdi name="plus" /></:prefix>
           Add Key
         </.dm_btn>
@@ -336,57 +436,140 @@ defmodule PiWeb.SettingsLive do
       </div>
 
       <div :if={!Enum.empty?(@credentials)} class="overflow-x-auto rounded-2xl border border-outline-variant bg-surface-container-low">
-        <.dm_table id="credentials-table" data={@credentials} compact hover zebra class="min-w-[48rem]">
+        <.dm_table id="credentials-table" data={@credentials} compact hover zebra class="settings-table min-w-[48rem]">
           <:col :let={row} label="Name" class="min-w-64">
-            <form id={"credential-form-#{row.id}"} phx-submit="save_credential">
-              <input type="hidden" name="config_id" value={row.id} />
-            </form>
-            <.dm_input
-              form={"credential-form-#{row.id}"}
-              name="name"
-              value={row.credential["name"]}
-              aria-label="Credential name"
-              class="w-full"
-              size="sm"
-            />
+            <div class="font-semibold text-on-surface">{row.credential["name"] || row.id}</div>
+            <div class="text-xs text-on-surface-variant font-mono">{row.id}</div>
           </:col>
           <:col :let={row} label="Secret Key" class="min-w-80">
-            <.dm_input
-              form={"credential-form-#{row.id}"}
-              type="password"
-              name="key"
-              value={row.credential["key"]}
-              placeholder="sk-..."
-              aria-label="Credential secret key"
-              class="w-full"
-              size="sm"
-            />
+            <span class="font-mono text-xs text-on-surface-variant">
+              {credential_key_preview(row.credential["key"])}
+            </span>
           </:col>
           <:col :let={row} label="Actions" class="min-w-32">
             <div class="flex items-center gap-2">
-              <.dm_btn
-                type="button"
-                onclick={"document.getElementById('credential-form-#{row.id}').requestSubmit()"}
-                variant="primary"
-                size="sm"
-              >
-                Save
-              </.dm_btn>
-              <.dm_btn type="button" variant="error" size="sm" shape="circle" confirm="Are you sure you want to delete this credential?" confirm_title="Delete Credential">
-                <:confirm_action>
-                  <.dm_btn type="button" variant="ghost" onclick="this.closest('el-dm-dialog').close()">
-                    Cancel
-                  </.dm_btn>
-                  <.dm_btn type="button" phx-click="delete_credential" phx-value-id={row.id} phx-hook="WebComponentHook" variant="error" onclick="this.closest('el-dm-dialog').close()">
-                    Delete
-                  </.dm_btn>
-                </:confirm_action>
-                <.dm_mdi name="delete-outline" />
-              </.dm_btn>
+              <.dm_tooltip content="Edit">
+                <.dm_btn
+                  id={"credential-edit-#{row.id}"}
+                  type="button"
+                  phx-click="edit_credential"
+                  phx-value-id={row.id}
+                  phx-hook="WebComponentHook"
+                  variant="outline"
+                  size="xs"
+                  shape="circle"
+                  aria-label="Edit"
+                >
+                  <.dm_mdi name="pencil-outline" />
+                </.dm_btn>
+              </.dm_tooltip>
+              <.dm_tooltip content="Delete">
+                <.dm_btn
+                  id={"credential-delete-#{row.id}"}
+                  type="button"
+                  phx-click="confirm_delete_credential"
+                  phx-value-id={row.id}
+                  phx-hook="WebComponentHook"
+                  variant="error"
+                  size="xs"
+                  shape="circle"
+                  aria-label="Delete"
+                >
+                  <.dm_mdi name="delete-outline" />
+                </.dm_btn>
+              </.dm_tooltip>
             </div>
           </:col>
         </.dm_table>
       </div>
+
+      <.dm_modal :if={@form} id="credential-settings-modal" phx-hook="ModalHook" size="md" responsive={true} hide_close={true}>
+        <:title>
+          <div class="flex items-center gap-2 text-on-surface">
+            <.dm_mdi name="key-outline" class="w-6 h-6 text-primary" />
+            <span>{if @form["mode"] == "new", do: "New Credential", else: "Edit Credential"}</span>
+          </div>
+        </:title>
+        <:body>
+          <form id="credential-settings-form" phx-submit="save_credential" class="space-y-5">
+            <input type="hidden" name="credential[mode]" value={@form["mode"]} />
+            <input type="hidden" name="credential[id]" value={@form["id"] || ""} />
+
+            <.dm_input
+              name="credential[name]"
+              value={@form["name"]}
+              label="Name"
+              placeholder="OpenAI Key"
+              class="w-full"
+              size="sm"
+            />
+            <.dm_input
+              name="credential[key]"
+              value={@form["key"]}
+              type="password"
+              label="Secret Key"
+              placeholder="sk-..."
+              class="w-full"
+              size="sm"
+            />
+          </form>
+        </:body>
+        <:footer>
+          <.dm_btn
+            id="credential-cancel-form-btn"
+            type="button"
+            phx-click="cancel_credential_form"
+            phx-hook="WebComponentHook"
+            variant="ghost"
+          >
+            Cancel
+          </.dm_btn>
+          <.dm_btn
+            id="credential-save-form-btn"
+            type="button"
+            onclick="document.getElementById('credential-settings-form').requestSubmit()"
+            variant="primary"
+          >
+            Save Credential
+          </.dm_btn>
+        </:footer>
+      </.dm_modal>
+
+      <.dm_modal :if={@deleting_credential} id="delete-credential-modal" phx-hook="ModalHook">
+        <:title>
+          <div class="flex items-center gap-2 text-error">
+            <.dm_mdi name="alert-circle-outline" class="w-6 h-6" />
+            <span>Delete Credential</span>
+          </div>
+        </:title>
+        <:body>
+          <p class="text-on-surface">
+            Delete the credential <span class="font-bold">"{@deleting_credential["name"]}"</span>?
+            Providers using it will keep their provider record but lose the credential reference.
+          </p>
+        </:body>
+        <:footer>
+          <.dm_btn
+            id="credential-cancel-delete-btn"
+            type="button"
+            phx-click="cancel_delete_credential"
+            phx-hook="WebComponentHook"
+            variant="ghost"
+          >
+            Cancel
+          </.dm_btn>
+          <.dm_btn
+            id="credential-confirm-delete-btn"
+            type="button"
+            phx-click="delete_credential"
+            phx-value-id={@deleting_credential["id"]}
+            phx-hook="WebComponentHook"
+            variant="error"
+          >
+            Delete
+          </.dm_btn>
+        </:footer>
+      </.dm_modal>
     </div>
     """
   end
@@ -450,12 +633,98 @@ defmodule PiWeb.SettingsLive do
   end
 
   defp render_skills(assigns) do
+    query = assigns[:query] || ""
+    selected_skill_names = assigns[:selected_skill_names] || []
+    skills = assigns.result.skills
+    filtered_skills = filter_skills(skills, query)
+    visible_skill_names = Enum.map(filtered_skills, & &1.name)
+    selected_visible_skill_count = Enum.count(visible_skill_names, &(&1 in selected_skill_names))
+
+    all_visible_skills_selected? =
+      filtered_skills != [] and selected_visible_skill_count == length(filtered_skills)
+
+    some_visible_skills_selected? =
+      selected_visible_skill_count > 0 and !all_visible_skills_selected?
+
+    assigns =
+      assigns
+      |> assign(:query, query)
+      |> assign(:selected_skill_names, selected_skill_names)
+      |> assign(:filtered_skills, filtered_skills)
+      |> assign(:total_skills, length(skills))
+      |> assign(:shown_skills, length(filtered_skills))
+      |> assign(:selected_skill_count, length(selected_skill_names))
+      |> assign(:all_visible_skills_selected?, all_visible_skills_selected?)
+      |> assign(:some_visible_skills_selected?, some_visible_skills_selected?)
+      |> assign(:enabled_skills, Enum.count(skills, & &1.enabled?))
+
     ~H"""
     <div class="space-y-6">
       <div class="flex justify-between items-center text-on-surface">
         <div>
           <h2 class="text-2xl font-bold font-display">Skills</h2>
           <p class="text-sm text-on-surface-variant font-mono mt-1">{@result.dir}</p>
+        </div>
+      </div>
+
+      <div
+        :if={!Enum.empty?(@result.skills)}
+        class="flex flex-col gap-3 rounded-2xl border border-outline-variant bg-surface-container-low p-4 md:flex-row md:items-end md:justify-between"
+      >
+        <form id="skills-filter-form" phx-change="filter_skills" class="w-full md:max-w-md">
+          <.dm_input
+            id="skills-search"
+            type="search"
+            name="skills[query]"
+            label="Search"
+            value={@query}
+            placeholder="Name, description, or path"
+            phx-debounce="200"
+          />
+        </form>
+
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-xs font-medium text-on-surface-variant">
+            {@shown_skills} shown / {@selected_skill_count} selected / {@enabled_skills} enabled
+          </span>
+          <.dm_btn
+            id="skills-clear-selection"
+            type="button"
+            phx-hook="WebComponentHook"
+            phx-click="clear_skill_selection"
+            variant="outline"
+            size="sm"
+            disabled={@selected_skill_count == 0}
+          >
+            <:prefix><.dm_mdi name="checkbox-blank-off-outline" /></:prefix>
+            Clear
+          </.dm_btn>
+          <.dm_btn
+            id="skills-enable-selected"
+            type="button"
+            phx-hook="WebComponentHook"
+            phx-click="set_selected_skills_enabled"
+            phx-value-enabled="true"
+            variant="outline"
+            size="sm"
+            disabled={@selected_skill_count == 0}
+          >
+            <:prefix><.dm_mdi name="check-circle-outline" /></:prefix>
+            Enable selected
+          </.dm_btn>
+          <.dm_btn
+            id="skills-disable-selected"
+            type="button"
+            phx-hook="WebComponentHook"
+            phx-click="set_selected_skills_enabled"
+            phx-value-enabled="false"
+            variant="outline"
+            size="sm"
+            disabled={@selected_skill_count == 0}
+          >
+            <:prefix><.dm_mdi name="close-circle-outline" /></:prefix>
+            Disable selected
+          </.dm_btn>
         </div>
       </div>
 
@@ -467,30 +736,118 @@ defmodule PiWeb.SettingsLive do
         <p class="font-semibold text-on-surface">No global skills found</p>
       </div>
 
-      <div :if={!Enum.empty?(@result.skills)} class="overflow-x-auto rounded-2xl border border-outline-variant bg-surface-container-low">
-        <.dm_table id="skills-table" data={@result.skills} compact hover zebra class="min-w-[64rem]">
-          <:col :let={skill} label="Name" class="min-w-56">
-            <div class="flex items-center gap-3 min-w-0">
-              <div class="p-2 bg-primary/10 rounded-lg text-primary shrink-0">
-                <.dm_mdi name="auto-fix" class="w-5 h-5" />
-              </div>
-              <span class="font-bold truncate">{skill.name}</span>
-            </div>
-          </:col>
-          <:col :let={skill} label="Invocation" class="min-w-36">
-            <span class="inline-flex rounded-full bg-surface-container-high px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-on-surface-variant">
-              {if skill.disable_model_invocation?, do: "Manual", else: "Model"}
-            </span>
-          </:col>
-          <:col :let={skill} label="Description" class="min-w-80">
-            <p class="text-sm text-on-surface-variant leading-relaxed">{skill.description}</p>
-          </:col>
-          <:col :let={skill} label="Path" class="min-w-96">
-            <code class="block text-[11px] font-mono text-on-surface-variant break-all">
-              {skill.path}
-            </code>
-          </:col>
-        </.dm_table>
+      <div
+        :if={!Enum.empty?(@result.skills) and Enum.empty?(@filtered_skills)}
+        class="rounded-2xl border border-dashed border-outline-variant bg-surface-container-low p-8 text-center"
+      >
+        <.dm_mdi name="magnify-close" class="w-10 h-10 mx-auto text-on-surface-variant opacity-40 mb-3" />
+        <p class="font-semibold text-on-surface">No matching skills</p>
+      </div>
+
+      <div
+        :if={!Enum.empty?(@filtered_skills)}
+        class="overflow-x-auto rounded-2xl border border-outline-variant bg-surface-container-low"
+      >
+        <table
+          role="table"
+          id="skills-table"
+          class="table table-zebra table-hover table-compact settings-table table-fixed min-w-[72rem]"
+        >
+          <thead role="row-group" class="sticky top-0">
+            <tr role="row">
+              <th role="columnheader" scope="col" class="w-16">
+                <.dm_checkbox
+                  id="skills-select-all"
+                  name="skills_select_all"
+                  checked={@all_visible_skills_selected?}
+                  indeterminate={@some_visible_skills_selected?}
+                  size="sm"
+                  aria-label="Select all shown skills"
+                  phx-click="toggle_visible_skill_selection"
+                  phx-value-selected={to_string(!@all_visible_skills_selected?)}
+                />
+              </th>
+              <th role="columnheader" scope="col" class="min-w-56">Name</th>
+              <th role="columnheader" scope="col" class="min-w-28">Enabled</th>
+              <th role="columnheader" scope="col" class="min-w-36">Invocation</th>
+              <th
+                role="columnheader"
+                scope="col"
+                class="settings-skills-description-cell"
+              >
+                Description
+              </th>
+              <th role="columnheader" scope="col" class="min-w-96">Path</th>
+            </tr>
+          </thead>
+          <tbody role="row-group">
+            <tr :for={skill <- @filtered_skills} role="row">
+              <td data-label="Select" role="cell" class="w-16">
+                <.dm_checkbox
+                  id={"skill-select-#{skill_row_id(skill)}"}
+                  name={"skill_selected[#{skill.name}]"}
+                  checked={skill_selected?(@selected_skill_names, skill.name)}
+                  size="sm"
+                  aria-label={"Select #{skill.name}"}
+                  phx-click="toggle_skill_selection"
+                  phx-value-name={skill.name}
+                  phx-value-selected={to_string(!skill_selected?(@selected_skill_names, skill.name))}
+                />
+              </td>
+              <td data-label="Name" role="cell" class="min-w-56">
+                <div class="flex items-center gap-3 min-w-0">
+                  <div class="p-2 bg-primary/10 rounded-lg text-primary shrink-0">
+                    <.dm_mdi name="auto-fix" class="w-5 h-5" />
+                  </div>
+                  <span class="font-bold truncate">{skill.name}</span>
+                </div>
+              </td>
+              <td data-label="Enabled" role="cell" class="min-w-28">
+                <.dm_switch
+                  id={"skill-enabled-#{skill_row_id(skill)}"}
+                  name={"skill_enabled[#{skill.name}]"}
+                  checked={skill.enabled?}
+                  size="sm"
+                  aria-label={"Enable #{skill.name}"}
+                  phx-click="toggle_skill"
+                  phx-value-name={skill.name}
+                  phx-value-enabled={to_string(!skill.enabled?)}
+                />
+              </td>
+              <td data-label="Invocation" role="cell" class="min-w-36">
+                <span class="inline-flex rounded-full bg-surface-container-high px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-on-surface-variant">
+                  {if skill.disable_model_invocation?, do: "Manual", else: "Model"}
+                </span>
+              </td>
+              <td
+                data-label="Description"
+                role="cell"
+                class="settings-skills-description-cell"
+              >
+                <.dm_popover
+                  id={"skill-description-#{skill_row_id(skill)}"}
+                  trigger_mode="hover"
+                  placement="top-start"
+                  class="max-w-md"
+                >
+                  <:trigger>
+                    <p class="settings-skills-description-trigger text-sm text-on-surface-variant">
+                      {skill.description}
+                    </p>
+                  </:trigger>
+                  <p class="max-w-md whitespace-normal text-sm leading-relaxed text-on-surface">
+                    {skill.description}
+                  </p>
+                </.dm_popover>
+              </td>
+              <td data-label="Path" role="cell" class="min-w-96">
+                <code class="block text-[11px] font-mono text-on-surface-variant break-all">
+                  {skill.path}
+                </code>
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
       <div :if={!Enum.empty?(@result.diagnostics)} class="rounded-2xl border border-warning/30 bg-warning/10 p-4 text-warning">
@@ -531,7 +888,7 @@ defmodule PiWeb.SettingsLive do
       </div>
 
       <div :if={!Enum.empty?(@servers)} class="overflow-x-auto rounded-2xl border border-outline-variant bg-surface-container-low">
-        <.dm_table id="mcp-servers-table" data={@servers} compact hover zebra class="min-w-[64rem]">
+        <.dm_table id="mcp-servers-table" data={@servers} compact hover zebra class="settings-table min-w-[64rem]">
           <:col :let={row} label="Server" class="min-w-56">
             <div class="flex items-center gap-3 min-w-0">
               <div class="p-2 bg-primary/10 rounded-lg text-primary shrink-0">
@@ -565,29 +922,36 @@ defmodule PiWeb.SettingsLive do
           </:col>
           <:col :let={row} label="Actions" class="min-w-28">
             <div class="flex items-center gap-2">
-              <.dm_btn
-                id={"mcp-edit-server-#{row.id}"}
-                type="button"
-                phx-hook="WebComponentHook"
-                phx-click="edit_mcp_server"
-                phx-value-id={row.id}
-                variant="outline"
-                size="xs"
-              >
-                Edit
-              </.dm_btn>
-              <.dm_btn
-                id={"mcp-delete-server-#{row.id}"}
-                type="button"
-                phx-hook="WebComponentHook"
-                phx-click="confirm_delete_mcp_server"
-                phx-value-id={row.id}
-                variant="error"
-                size="xs"
-                shape="circle"
-              >
-                <.dm_mdi name="delete-outline" />
-              </.dm_btn>
+              <.dm_tooltip content="Edit">
+                <.dm_btn
+                  id={"mcp-edit-server-#{row.id}"}
+                  type="button"
+                  phx-hook="WebComponentHook"
+                  phx-click="edit_mcp_server"
+                  phx-value-id={row.id}
+                  variant="outline"
+                  size="xs"
+                  shape="circle"
+                  aria-label="Edit"
+                >
+                  <.dm_mdi name="pencil-outline" />
+                </.dm_btn>
+              </.dm_tooltip>
+              <.dm_tooltip content="Delete">
+                <.dm_btn
+                  id={"mcp-delete-server-#{row.id}"}
+                  type="button"
+                  phx-hook="WebComponentHook"
+                  phx-click="confirm_delete_mcp_server"
+                  phx-value-id={row.id}
+                  variant="error"
+                  size="xs"
+                  shape="circle"
+                  aria-label="Delete"
+                >
+                  <.dm_mdi name="delete-outline" />
+                </.dm_btn>
+              </.dm_tooltip>
             </div>
           </:col>
         </.dm_table>
@@ -913,29 +1277,62 @@ defmodule PiWeb.SettingsLive do
 
   @impl true
   def handle_event("add_provider", _, socket) do
-    ConfigManager.add_provider(%{
-      "name" => "New Provider",
-      "api_type" => "anthropic",
-      "credential_id" => "",
-      "model" => "claude-3-5-sonnet-latest",
-      "base_url" => "https://api.anthropic.com"
-    })
-
-    {:noreply, reload_current_settings_data(socket)}
+    {:noreply, assign(socket, :provider_form, blank_provider_form())}
   end
 
   @impl true
-  def handle_event("save_provider", params, socket) do
-    %{"config_id" => id} = params
-    updates = Map.drop(params, ["config_id", "_csrf_token"])
-    ConfigManager.update_provider(id, updates)
-    {:noreply, socket |> reload_current_settings_data() |> put_flash(:info, "Provider updated")}
+  def handle_event("edit_provider", %{"id" => id}, socket) do
+    config = ConfigManager.get_config()
+    provider = get_in(config, ["providers", id]) || %{"id" => id}
+    {:noreply, assign(socket, :provider_form, provider_form_from_config(id, provider))}
+  end
+
+  @impl true
+  def handle_event("cancel_provider_form", _, socket) do
+    {:noreply, assign(socket, :provider_form, nil)}
+  end
+
+  @impl true
+  def handle_event("save_provider", %{"provider" => params}, socket) do
+    form =
+      socket.assigns.provider_form
+      |> Kernel.||(blank_provider_form())
+      |> Map.merge(params)
+
+    {:ok, _} = save_provider_form(form)
+
+    {:noreply,
+     socket
+     |> assign(:provider_form, nil)
+     |> reload_current_settings_data()
+     |> put_flash(:info, provider_saved_message(form))}
+  end
+
+  @impl true
+  def handle_event("confirm_delete_provider", %{"id" => id}, socket) do
+    provider =
+      ConfigManager.get_config() |> get_in(["providers", id]) |> Kernel.||(%{"name" => id})
+
+    {:noreply,
+     assign(socket, :deleting_provider, %{
+       "id" => id,
+       "name" => provider["name"] || id
+     })}
+  end
+
+  @impl true
+  def handle_event("cancel_delete_provider", _, socket) do
+    {:noreply, assign(socket, :deleting_provider, nil)}
   end
 
   @impl true
   def handle_event("delete_provider", %{"id" => id}, socket) do
     ConfigManager.delete_provider(id)
-    {:noreply, reload_current_settings_data(socket)}
+
+    {:noreply,
+     socket
+     |> assign(:deleting_provider, nil)
+     |> reload_current_settings_data()}
   end
 
   @impl true
@@ -948,27 +1345,139 @@ defmodule PiWeb.SettingsLive do
 
   @impl true
   def handle_event("add_credential", _, socket) do
-    ConfigManager.add_credential("New Key", "")
-    {:noreply, reload_current_settings_data(socket)}
+    {:noreply, assign(socket, :credential_form, blank_credential_form())}
   end
 
   @impl true
-  def handle_event("save_credential", params, socket) do
-    %{"config_id" => id, "name" => name, "key" => key} = params
-    ConfigManager.update_credential(id, %{"name" => name, "key" => key})
-    {:noreply, socket |> reload_current_settings_data() |> put_flash(:info, "Credential updated")}
+  def handle_event("edit_credential", %{"id" => id}, socket) do
+    config = ConfigManager.get_config()
+    credential = get_in(config, ["credentials", id]) || %{"id" => id}
+    {:noreply, assign(socket, :credential_form, credential_form_from_config(id, credential))}
+  end
+
+  @impl true
+  def handle_event("cancel_credential_form", _, socket) do
+    {:noreply, assign(socket, :credential_form, nil)}
+  end
+
+  @impl true
+  def handle_event("save_credential", %{"credential" => params}, socket) do
+    form =
+      socket.assigns.credential_form
+      |> Kernel.||(blank_credential_form())
+      |> Map.merge(params)
+
+    {:ok, _} = save_credential_form(form)
+
+    {:noreply,
+     socket
+     |> assign(:credential_form, nil)
+     |> reload_current_settings_data()
+     |> put_flash(:info, credential_saved_message(form))}
+  end
+
+  @impl true
+  def handle_event("confirm_delete_credential", %{"id" => id}, socket) do
+    credential =
+      ConfigManager.get_config() |> get_in(["credentials", id]) |> Kernel.||(%{"name" => id})
+
+    {:noreply,
+     assign(socket, :deleting_credential, %{
+       "id" => id,
+       "name" => credential["name"] || id
+     })}
+  end
+
+  @impl true
+  def handle_event("cancel_delete_credential", _, socket) do
+    {:noreply, assign(socket, :deleting_credential, nil)}
   end
 
   @impl true
   def handle_event("delete_credential", %{"id" => id}, socket) do
     ConfigManager.delete_credential(id)
-    {:noreply, reload_current_settings_data(socket)}
+
+    {:noreply,
+     socket
+     |> assign(:deleting_credential, nil)
+     |> reload_current_settings_data()}
   end
 
   @impl true
   def handle_event("save_system_prompt", %{"system_prompt" => prompt}, socket) do
     ConfigManager.update_system_prompt(prompt)
     {:noreply, socket |> load_context() |> put_flash(:info, "AGENTS.md updated")}
+  end
+
+  # Skills Handlers
+
+  @impl true
+  def handle_event("filter_skills", %{"skills" => %{"query" => query}}, socket) do
+    {:noreply, assign(socket, :skills_query, trim_form_value(query))}
+  end
+
+  @impl true
+  def handle_event("filter_skills", _, socket) do
+    {:noreply, assign(socket, :skills_query, "")}
+  end
+
+  @impl true
+  def handle_event("toggle_skill_selection", %{"name" => name, "selected" => selected}, socket) do
+    selected_skill_names =
+      socket.assigns.selected_skill_names
+      |> set_skill_selection(name, selected == "true")
+
+    {:noreply, assign(socket, :selected_skill_names, selected_skill_names)}
+  end
+
+  @impl true
+  def handle_event("toggle_visible_skill_selection", %{"selected" => selected}, socket) do
+    visible_names =
+      Skills.list_global().skills
+      |> filter_skills(socket.assigns.skills_query)
+      |> Enum.map(& &1.name)
+
+    selected_skill_names =
+      if selected == "true" do
+        merge_skill_selection(socket.assigns.selected_skill_names, visible_names)
+      else
+        remove_skill_selection(socket.assigns.selected_skill_names, visible_names)
+      end
+
+    {:noreply, assign(socket, :selected_skill_names, selected_skill_names)}
+  end
+
+  @impl true
+  def handle_event("clear_skill_selection", _, socket) do
+    {:noreply, assign(socket, :selected_skill_names, [])}
+  end
+
+  @impl true
+  def handle_event("toggle_skill", %{"name" => name, "enabled" => enabled}, socket) do
+    enabled? = enabled == "true"
+    ConfigManager.set_global_skill_enabled(name, enabled?)
+
+    {:noreply,
+     socket
+     |> reload_current_settings_data()
+     |> put_flash(:info, skill_status_message(name, enabled?))}
+  end
+
+  @impl true
+  def handle_event("set_selected_skills_enabled", %{"enabled" => enabled}, socket) do
+    enabled? = enabled == "true"
+
+    names =
+      Skills.list_global().skills
+      |> selected_existing_skill_names(socket.assigns.selected_skill_names)
+
+    ConfigManager.set_global_skills_enabled(names, enabled?)
+
+    {:noreply,
+     socket
+     |> assign(:selected_skill_names, [])
+     |> reload_current_settings_data()
+     |> put_flash(:info, bulk_skill_status_message(names, enabled?))}
   end
 
   @impl true
@@ -1094,23 +1603,31 @@ defmodule PiWeb.SettingsLive do
   defp load_settings_action(socket, action)
        when action in [:providers, :credentials, :skills, :mcp] do
     socket
-    |> clear_mcp_state(action)
+    |> clear_settings_transient_state(action)
     |> assign_settings_data_async(action)
   end
 
   defp load_settings_action(socket, :system_prompt) do
     socket
-    |> clear_mcp_state(:system_prompt)
+    |> clear_settings_transient_state(:system_prompt)
     |> load_context()
   end
 
   defp load_settings_action(socket, :hooks) do
     socket
-    |> clear_mcp_state(:hooks)
+    |> clear_settings_transient_state(:hooks)
     |> load_hooks()
   end
 
   defp load_settings_action(socket, _action), do: socket
+
+  defp clear_settings_transient_state(socket, action) do
+    socket
+    |> clear_mcp_state(action)
+    |> clear_provider_state(action)
+    |> clear_credential_state(action)
+    |> clear_skills_state(action)
+  end
 
   defp clear_mcp_state(socket, :mcp), do: socket
 
@@ -1118,6 +1635,30 @@ defmodule PiWeb.SettingsLive do
     socket
     |> assign(:mcp_form, nil)
     |> assign(:deleting_mcp_server, nil)
+  end
+
+  defp clear_provider_state(socket, :providers), do: socket
+
+  defp clear_provider_state(socket, _action) do
+    socket
+    |> assign(:provider_form, nil)
+    |> assign(:deleting_provider, nil)
+  end
+
+  defp clear_credential_state(socket, :credentials), do: socket
+
+  defp clear_credential_state(socket, _action) do
+    socket
+    |> assign(:credential_form, nil)
+    |> assign(:deleting_credential, nil)
+  end
+
+  defp clear_skills_state(socket, :skills), do: socket
+
+  defp clear_skills_state(socket, _action) do
+    socket
+    |> assign(:skills_query, "")
+    |> assign(:selected_skill_names, [])
   end
 
   defp assign_settings_data_async(socket, action) do
@@ -1201,12 +1742,224 @@ defmodule PiWeb.SettingsLive do
 
   defp mcp_server_rows(_servers), do: []
 
+  defp filter_skills(skills, query) do
+    query = (query || "") |> to_string() |> String.trim() |> String.downcase()
+
+    if query == "" do
+      skills
+    else
+      Enum.filter(skills, fn skill ->
+        skill
+        |> skill_search_text()
+        |> String.contains?(query)
+      end)
+    end
+  end
+
+  defp skill_search_text(skill) do
+    [
+      skill.name,
+      skill.description,
+      skill.path,
+      if(skill.enabled?, do: "enabled", else: "disabled"),
+      if(skill.disable_model_invocation?, do: "manual", else: "model")
+    ]
+    |> Enum.join(" ")
+    |> String.downcase()
+  end
+
+  defp skill_row_id(skill) do
+    skill.name
+    |> String.replace(~r/[^a-zA-Z0-9_-]+/, "-")
+    |> String.trim("-")
+    |> case do
+      "" -> "unnamed"
+      id -> id
+    end
+  end
+
+  defp skill_selected?(selected_skill_names, name) do
+    Enum.member?(selected_skill_names, name)
+  end
+
+  defp set_skill_selection(selected_skill_names, name, selected?) do
+    selected_skill_names =
+      selected_skill_names
+      |> List.wrap()
+      |> Enum.reject(&(&1 in [nil, ""]))
+
+    if selected? do
+      [name | selected_skill_names]
+    else
+      Enum.reject(selected_skill_names, &(&1 == name))
+    end
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp merge_skill_selection(selected_skill_names, names) do
+    (List.wrap(selected_skill_names) ++ List.wrap(names))
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp remove_skill_selection(selected_skill_names, names) do
+    names = names |> List.wrap() |> MapSet.new()
+
+    selected_skill_names
+    |> List.wrap()
+    |> Enum.reject(&MapSet.member?(names, &1))
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp selected_existing_skill_names(skills, selected_skill_names) do
+    existing_names = skills |> Enum.map(& &1.name) |> MapSet.new()
+
+    selected_skill_names
+    |> List.wrap()
+    |> Enum.filter(&MapSet.member?(existing_names, &1))
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp skill_status_message(name, true), do: "#{name} enabled"
+  defp skill_status_message(name, false), do: "#{name} disabled"
+
+  defp bulk_skill_status_message([], _enabled?), do: "No matching skills"
+
+  defp bulk_skill_status_message(names, true), do: "#{length(names)} skills enabled"
+  defp bulk_skill_status_message(names, false), do: "#{length(names)} skills disabled"
+
   defp credential_select_options(credentials) do
     [
       {"", "No Key Selected"}
       | Enum.map(credential_rows(credentials), &{&1.id, &1.credential["name"] || &1.id})
     ]
   end
+
+  defp provider_api_options do
+    [{"anthropic", "Anthropic"}, {"openai", "OpenAI"}]
+  end
+
+  defp format_api_type("anthropic"), do: "Anthropic"
+  defp format_api_type("openai"), do: "OpenAI"
+  defp format_api_type(value), do: blank_fallback(value, "-")
+
+  defp credential_name(_credentials, id) when id in [nil, ""], do: "No Key Selected"
+
+  defp credential_name(credentials, id) when is_map(credentials) do
+    case credentials[id] do
+      %{"name" => name} when is_binary(name) and name != "" -> name
+      _ -> id
+    end
+  end
+
+  defp credential_name(_credentials, id), do: id || "No Key Selected"
+
+  defp blank_fallback(value, fallback) when value in [nil, ""], do: fallback
+  defp blank_fallback(value, _fallback), do: value
+
+  defp credential_key_preview(value) when value in [nil, ""], do: "Not set"
+
+  defp credential_key_preview(value) do
+    value = to_string(value)
+    "********" <> String.slice(value, -4, 4)
+  end
+
+  defp blank_provider_form do
+    %{
+      "mode" => "new",
+      "id" => "",
+      "name" => "New Provider",
+      "api_type" => "anthropic",
+      "credential_id" => "",
+      "model" => "claude-3-5-sonnet-latest",
+      "base_url" => "https://api.anthropic.com"
+    }
+  end
+
+  defp provider_form_from_config(id, provider) do
+    blank_provider_form()
+    |> Map.merge(%{
+      "mode" => "edit",
+      "id" => id,
+      "name" => provider["name"] || "",
+      "api_type" => provider["api_type"] || "anthropic",
+      "credential_id" => provider["credential_id"] || "",
+      "model" => provider["model"] || "",
+      "base_url" => provider["base_url"] || ""
+    })
+  end
+
+  defp save_provider_form(%{"mode" => "edit", "id" => id} = form)
+       when is_binary(id) and id != "" do
+    ConfigManager.update_provider(id, provider_form_updates(form))
+  end
+
+  defp save_provider_form(form) do
+    ConfigManager.add_provider(provider_form_updates(form))
+  end
+
+  defp provider_form_updates(form) do
+    %{
+      "name" => trim_form_value(form["name"]),
+      "api_type" => normalize_provider_api_type(form["api_type"]),
+      "credential_id" => form["credential_id"] || "",
+      "model" => trim_form_value(form["model"]),
+      "base_url" => trim_form_value(form["base_url"])
+    }
+  end
+
+  defp normalize_provider_api_type("openai"), do: "openai"
+  defp normalize_provider_api_type(_api_type), do: "anthropic"
+
+  defp provider_saved_message(%{"mode" => "new"}), do: "Provider created"
+  defp provider_saved_message(_form), do: "Provider updated"
+
+  defp blank_credential_form do
+    %{
+      "mode" => "new",
+      "id" => "",
+      "name" => "New Key",
+      "key" => ""
+    }
+  end
+
+  defp credential_form_from_config(id, credential) do
+    blank_credential_form()
+    |> Map.merge(%{
+      "mode" => "edit",
+      "id" => id,
+      "name" => credential["name"] || "",
+      "key" => credential["key"] || ""
+    })
+  end
+
+  defp save_credential_form(%{"mode" => "edit", "id" => id} = form)
+       when is_binary(id) and id != "" do
+    ConfigManager.update_credential(id, credential_form_updates(form))
+  end
+
+  defp save_credential_form(form) do
+    updates = credential_form_updates(form)
+    ConfigManager.add_credential(updates["name"], updates["key"])
+  end
+
+  defp credential_form_updates(form) do
+    %{
+      "name" => trim_form_value(form["name"]),
+      "key" => form["key"] || ""
+    }
+  end
+
+  defp credential_saved_message(%{"mode" => "new"}), do: "Credential created"
+  defp credential_saved_message(_form), do: "Credential updated"
+
+  defp trim_form_value(value) when is_binary(value), do: String.trim(value)
+  defp trim_form_value(_value), do: ""
 
   defp blank_mcp_form do
     %{

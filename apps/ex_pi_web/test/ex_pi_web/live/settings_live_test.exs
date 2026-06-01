@@ -2,6 +2,8 @@ defmodule PiWeb.SettingsLiveTest do
   use PiWeb.ConnCase, async: false
   import Phoenix.LiveViewTest
 
+  @app_css Path.expand("../../../assets/css/app.css", __DIR__)
+
   test "context page edits AGENTS.md and shows readonly system prompt", %{conn: conn} do
     {:ok, _view, html} = live(conn, "/settings/system_prompt")
 
@@ -17,8 +19,28 @@ defmodule PiWeb.SettingsLiveTest do
     assert html =~ "{{inject_git_context}}"
   end
 
+  test "settings sidebar uses readable active and hover colors", %{conn: conn} do
+    {:ok, _view, html} = live(conn, "/settings/mcp")
+
+    tree = Floki.parse_document!(html)
+    [active_link] = Floki.find(tree, ~s(a[href="/settings/mcp"]))
+    [inactive_link] = Floki.find(tree, ~s(a[href="/settings/skills"]))
+
+    assert class_values(active_link) =~ "bg-primary"
+    assert class_values(active_link) =~ "text-primary-content"
+    assert class_values(active_link) =~ "hover:!opacity-100"
+
+    assert class_values(inactive_link) =~ "text-secondary-content"
+    assert class_values(inactive_link) =~ "hover:bg-secondary-content/10"
+    assert class_values(inactive_link) =~ "hover:text-secondary-content"
+    refute class_values(inactive_link) =~ "text-primary-content"
+  end
+
   @tag :tmp_dir
-  test "shows providers in an async data table", %{conn: conn, tmp_dir: tmp_dir} do
+  test "manages providers with modal forms and delete confirmation", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
     with_agent_dir(tmp_dir, fn ->
       {:ok, _} = PiSession.ConfigManager.add_credential("OpenAI Key", "secret-token")
       [credential_id] = PiSession.ConfigManager.get_config()["credentials"] |> Map.keys()
@@ -46,11 +68,91 @@ defmodule PiWeb.SettingsLiveTest do
       assert html =~ "gpt-4o-mini"
       assert html =~ "OpenAI Key"
       assert html =~ "ACTIVE"
+      assert_settings_table(html, "providers-table")
+      assert_icon_tooltip_action(html, "provider-edit-#{provider_id}", "Edit")
+      assert_icon_tooltip_action(html, "provider-delete-#{provider_id}", "Delete")
+
+      render_click(view, "add_provider")
+
+      new_provider_html = render(view)
+
+      assert new_provider_html =~ "New Provider"
+      assert new_provider_html =~ ~s(id="provider-settings-modal")
+      assert new_provider_html =~ ~s(id="provider-settings-form")
+
+      render_submit(view, "save_provider", %{
+        "provider" => %{
+          "mode" => "new",
+          "id" => "",
+          "name" => "Modal OpenAI",
+          "api_type" => "openai",
+          "credential_id" => credential_id,
+          "model" => "gpt-4.1-mini",
+          "base_url" => "https://api.openai.com/v1"
+        }
+      })
+
+      html = render_async(view)
+
+      assert html =~ "Modal OpenAI"
+      assert html =~ "gpt-4.1-mini"
+
+      config = PiSession.ConfigManager.get_config()
+      provider_id = provider_id_by_name(config["providers"], "Modal OpenAI")
+
+      view
+      |> element("el-dm-button[phx-click='edit_provider'][phx-value-id='#{provider_id}']")
+      |> render_click()
+
+      edit_provider_html = render(view)
+
+      assert edit_provider_html =~ "Edit Provider"
+      assert edit_provider_html =~ "Modal OpenAI"
+
+      render_submit(view, "save_provider", %{
+        "provider" => %{
+          "mode" => "edit",
+          "id" => provider_id,
+          "name" => "Modal Anthropic",
+          "api_type" => "anthropic",
+          "credential_id" => credential_id,
+          "model" => "claude-3-5-sonnet-latest",
+          "base_url" => "https://api.anthropic.com"
+        }
+      })
+
+      html = render_async(view)
+
+      assert html =~ "Modal Anthropic"
+      refute html =~ "Modal OpenAI"
+
+      view
+      |> element(
+        "el-dm-button[phx-click='confirm_delete_provider'][phx-value-id='#{provider_id}']"
+      )
+      |> render_click()
+
+      delete_provider_html = render(view)
+
+      assert delete_provider_html =~ "Delete Provider"
+      assert delete_provider_html =~ "Modal Anthropic"
+
+      view
+      |> element("el-dm-button[phx-click='delete_provider'][phx-value-id='#{provider_id}']")
+      |> render_click()
+
+      html = render_async(view)
+
+      refute html =~ "Modal Anthropic"
+      refute Map.has_key?(PiSession.ConfigManager.get_config()["providers"], provider_id)
     end)
   end
 
   @tag :tmp_dir
-  test "shows credentials in an async data table", %{conn: conn, tmp_dir: tmp_dir} do
+  test "manages credentials with modal forms and delete confirmation", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
     with_agent_dir(tmp_dir, fn ->
       {:ok, _} = PiSession.ConfigManager.add_credential("GitHub Token", "secret-token")
 
@@ -62,26 +164,90 @@ defmodule PiWeb.SettingsLiveTest do
 
       assert html =~ ~s(id="credentials-table")
       assert html =~ "GitHub Token"
-      assert html =~ "secret-token"
+      assert html =~ "********oken"
+      refute html =~ "secret-token"
+      [credential_id] = PiSession.ConfigManager.get_config()["credentials"] |> Map.keys()
+      assert_settings_table(html, "credentials-table")
+      assert_icon_tooltip_action(html, "credential-edit-#{credential_id}", "Edit")
+      assert_icon_tooltip_action(html, "credential-delete-#{credential_id}", "Delete")
+
+      render_click(view, "add_credential")
+
+      new_credential_html = render(view)
+
+      assert new_credential_html =~ "New Credential"
+      assert new_credential_html =~ ~s(id="credential-settings-modal")
+      assert new_credential_html =~ ~s(id="credential-settings-form")
+
+      render_submit(view, "save_credential", %{
+        "credential" => %{
+          "mode" => "new",
+          "id" => "",
+          "name" => "OpenAI Token",
+          "key" => "openai-secret"
+        }
+      })
+
+      html = render_async(view)
+
+      assert html =~ "OpenAI Token"
+      assert html =~ "********cret"
+
+      config = PiSession.ConfigManager.get_config()
+      credential_id = credential_id_by_name(config["credentials"], "OpenAI Token")
+
+      view
+      |> element("el-dm-button[phx-click='edit_credential'][phx-value-id='#{credential_id}']")
+      |> render_click()
+
+      edit_credential_html = render(view)
+
+      assert edit_credential_html =~ "Edit Credential"
+      assert edit_credential_html =~ "OpenAI Token"
+      assert edit_credential_html =~ "openai-secret"
+
+      render_submit(view, "save_credential", %{
+        "credential" => %{
+          "mode" => "edit",
+          "id" => credential_id,
+          "name" => "Anthropic Token",
+          "key" => "anthropic-secret"
+        }
+      })
+
+      html = render_async(view)
+
+      assert html =~ "Anthropic Token"
+      assert html =~ "********cret"
+      refute html =~ "OpenAI Token"
+
+      view
+      |> element(
+        "el-dm-button[phx-click='confirm_delete_credential'][phx-value-id='#{credential_id}']"
+      )
+      |> render_click()
+
+      delete_credential_html = render(view)
+
+      assert delete_credential_html =~ "Delete Credential"
+      assert delete_credential_html =~ "Anthropic Token"
+
+      view
+      |> element("el-dm-button[phx-click='delete_credential'][phx-value-id='#{credential_id}']")
+      |> render_click()
+
+      html = render_async(view)
+
+      refute html =~ "Anthropic Token"
+      refute Map.has_key?(PiSession.ConfigManager.get_config()["credentials"], credential_id)
     end)
   end
 
   @tag :tmp_dir
   test "shows globally discovered skills", %{conn: conn, tmp_dir: tmp_dir} do
     global_skills_dir = Path.join([tmp_dir, ".agents", "skills"])
-    skill_dir = Path.join(global_skills_dir, "global-skill")
-    File.mkdir_p!(skill_dir)
-
-    File.write!(
-      Path.join(skill_dir, "SKILL.md"),
-      """
-      ---
-      name: global-skill
-      description: Global skill description
-      ---
-      Use this skill.
-      """
-    )
+    write_skill(global_skills_dir, "global-skill", "Global skill description")
+    write_skill(global_skills_dir, "other-skill", "Another capability")
 
     previous = Application.get_env(:ex_pi_session, :global_skills_dir)
     Application.put_env(:ex_pi_session, :global_skills_dir, global_skills_dir)
@@ -94,17 +260,90 @@ defmodule PiWeb.SettingsLiveTest do
       end
     end)
 
-    {:ok, view, html} = live(conn, "/settings/skills")
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, view, html} = live(conn, "/settings/skills")
 
-    assert html =~ "Loading settings data"
+      assert html =~ "Loading settings data"
 
-    html = render_async(view)
+      html = render_async(view)
 
-    assert html =~ "Skills"
-    assert html =~ ~s(id="skills-table")
-    assert html =~ "global-skill"
-    assert html =~ "Global skill description"
-    assert html =~ global_skills_dir
+      assert html =~ "Skills"
+      assert html =~ ~s(id="skills-table")
+      assert html =~ ~s(id="skills-search")
+      assert html =~ ~s(id="skills-select-all")
+      assert html =~ ~s(id="skills-clear-selection")
+      assert html =~ ~s(id="skills-enable-selected")
+      assert html =~ ~s(id="skills-disable-selected")
+      assert html =~ "global-skill"
+      assert html =~ "Global skill description"
+      assert html =~ "other-skill"
+      assert html =~ global_skills_dir
+      assert_settings_table(html, "skills-table")
+      assert_skill_enabled(html, "global-skill", true)
+      assert_skill_selected(html, "global-skill", false)
+      assert_select_all_checked(html, false)
+      assert_skill_description_popover(html, "global-skill")
+
+      view
+      |> element("#skill-enabled-global-skill")
+      |> render_click()
+
+      html = render_async(view)
+
+      assert PiSession.ConfigManager.disabled_global_skills() == ["global-skill"]
+      assert_skill_enabled(html, "global-skill", false)
+
+      view
+      |> form("#skills-filter-form", %{"skills" => %{"query" => "other"}})
+      |> render_change()
+
+      html = render(view)
+
+      assert html =~ "other-skill"
+      refute html_has_id?(html, "skill-enabled-global-skill")
+      assert_select_all_checked(html, false)
+
+      view
+      |> element("#skills-select-all")
+      |> render_click()
+
+      html = render(view)
+
+      assert_skill_selected(html, "other-skill", true)
+      assert_select_all_checked(html, true)
+
+      view
+      |> element("#skills-disable-selected")
+      |> render_click()
+
+      html = render_async(view)
+
+      assert PiSession.ConfigManager.disabled_global_skills() == ["global-skill", "other-skill"]
+      assert html =~ "other-skill"
+      refute html_has_id?(html, "skill-enabled-global-skill")
+      assert_skill_enabled(html, "other-skill", false)
+      assert_skill_selected(html, "other-skill", false)
+      assert_select_all_checked(html, false)
+
+      view
+      |> element("#skills-select-all")
+      |> render_click()
+
+      html = render(view)
+
+      assert_skill_selected(html, "other-skill", true)
+      assert_select_all_checked(html, true)
+
+      view
+      |> element("#skills-enable-selected")
+      |> render_click()
+
+      html = render_async(view)
+
+      assert PiSession.ConfigManager.disabled_global_skills() == ["global-skill"]
+      assert html =~ "other-skill"
+      assert_skill_enabled(html, "other-skill", true)
+    end)
   end
 
   @tag :tmp_dir
@@ -176,6 +415,9 @@ defmodule PiWeb.SettingsLiveTest do
 
       html = render_async(view)
       assert html =~ ~s(id="mcp-servers-table")
+      assert_settings_table(html, "mcp-servers-table")
+      assert_icon_tooltip_action(html, "mcp-edit-server-github", "Edit")
+      assert_icon_tooltip_action(html, "mcp-delete-server-github", "Delete")
 
       view
       |> element("el-dm-button[phx-click='edit_mcp_server'][phx-value-id='github']")
@@ -265,6 +507,22 @@ defmodule PiWeb.SettingsLiveTest do
     end)
   end
 
+  defp write_skill(global_skills_dir, name, description) do
+    skill_dir = Path.join(global_skills_dir, name)
+    File.mkdir_p!(skill_dir)
+
+    File.write!(
+      Path.join(skill_dir, "SKILL.md"),
+      """
+      ---
+      name: #{name}
+      description: #{description}
+      ---
+      Use this skill.
+      """
+    )
+  end
+
   defp with_agent_dir(tmp_dir, fun) do
     previous = Application.get_env(:ex_pi_session, :agent_dir)
     Application.put_env(:ex_pi_session, :agent_dir, Path.join(tmp_dir, "agent"))
@@ -281,6 +539,95 @@ defmodule PiWeb.SettingsLiveTest do
   end
 
   defp attr?({_tag, attrs, _children}, name, value), do: {name, value} in attrs
+
+  defp assert_settings_table(html, id) do
+    tree = Floki.parse_document!(html)
+    [table] = Floki.find(tree, "##{id}")
+    assert class_values(table) =~ "settings-table"
+
+    css = File.read!(@app_css)
+    assert css =~ ".settings-table thead"
+    assert css =~ "display: table-header-group !important;"
+  end
+
+  defp assert_icon_tooltip_action(html, id, label) do
+    tree = Floki.parse_document!(html)
+    [button] = Floki.find(tree, "##{id}")
+
+    assert attr?(button, "aria-label", label)
+    assert Floki.text(button) |> String.trim() == ""
+
+    assert html =~ ~s(role="tooltip">#{label}</span>)
+  end
+
+  defp assert_skill_enabled(html, id, expected) do
+    tree = Floki.parse_document!(html)
+    [input] = Floki.find(tree, "#skill-enabled-#{id}")
+    assert checked?(input) == expected
+  end
+
+  defp assert_skill_selected(html, id, expected) do
+    tree = Floki.parse_document!(html)
+    [input] = Floki.find(tree, "#skill-select-#{id}")
+    assert checked?(input) == expected
+  end
+
+  defp assert_select_all_checked(html, expected) do
+    tree = Floki.parse_document!(html)
+    [input] = Floki.find(tree, "#skills-select-all")
+    assert checked?(input) == expected
+  end
+
+  defp assert_skill_description_popover(html, id) do
+    tree = Floki.parse_document!(html)
+    [popover] = Floki.find(tree, "#skill-description-#{id}")
+    assert Floki.find(popover, "p.settings-skills-description-trigger") != []
+    assert Floki.text(popover) =~ "Global skill description"
+    assert html =~ "settings-skills-description-cell"
+
+    css = File.read!(@app_css)
+    assert css =~ ".settings-skills-description-cell"
+    assert css =~ "width: 25%;"
+    assert css =~ "max-width: 25%;"
+    assert css =~ "overflow: hidden;"
+    assert css =~ "text-overflow: ellipsis;"
+  end
+
+  defp class_values({_tag, attrs, _children}) do
+    attrs
+    |> List.keyfind("class", 0, {"class", ""})
+    |> elem(1)
+  end
+
+  defp checked?({_tag, attrs, _children}) do
+    Enum.any?(attrs, fn
+      {"checked", _value} -> true
+      _ -> false
+    end)
+  end
+
+  defp html_has_id?(html, id) do
+    html
+    |> Floki.parse_document!()
+    |> Floki.find("##{id}")
+    |> Enum.any?()
+  end
+
+  defp provider_id_by_name(providers, name) do
+    providers
+    |> Enum.find_value(fn
+      {id, %{"name" => ^name}} -> id
+      _ -> nil
+    end)
+  end
+
+  defp credential_id_by_name(credentials, name) do
+    credentials
+    |> Enum.find_value(fn
+      {id, %{"name" => ^name}} -> id
+      _ -> nil
+    end)
+  end
 
   defp disabled?({_tag, attrs, _children}) do
     Enum.any?(attrs, fn
