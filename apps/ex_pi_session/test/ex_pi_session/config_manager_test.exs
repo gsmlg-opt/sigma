@@ -72,9 +72,9 @@ defmodule PiSession.ConfigManagerTest do
     assert saved_settings["defaultModel"] == "expert"
 
     assert Enum.map(saved_models["providers"]["openai"]["models"], & &1["id"]) == [
+             "expert",
              "fast",
-             "smart",
-             "expert"
+             "smart"
            ]
   end
 
