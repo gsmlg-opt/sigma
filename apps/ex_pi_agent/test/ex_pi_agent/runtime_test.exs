@@ -89,6 +89,18 @@ defmodule PiAgent.RuntimeTest do
     assert repo_pid1 == repo_pid2
   end
 
+  test "restarts the agent application when the runtime supervisor is missing", context do
+    repo = tmp_repo!(context, "repo-app-restart")
+
+    assert :ok = Application.stop(:ex_pi_agent)
+    refute Process.whereis(PiAgent.DynamicSupervisor)
+
+    assert {:ok, %{repository: repo_pid}} = PiAgent.Runtime.ensure_repository(repo)
+    assert is_pid(Process.whereis(PiAgent.DynamicSupervisor))
+    assert is_pid(repo_pid)
+    assert Process.alive?(repo_pid)
+  end
+
   test "isolates repositories and sessions under separate repository subtrees", context do
     repo_a = tmp_repo!(context, "repo-a")
     repo_b = tmp_repo!(context, "repo-b")

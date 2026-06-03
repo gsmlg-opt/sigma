@@ -6,18 +6,20 @@ defmodule PiAgent.Runtime do
   def ensure_repository(repo_path, opts \\ []) when is_binary(repo_path) do
     repo_path = normalize_repo_path(repo_path)
 
-    case DynamicSupervisor.start_child(
-           PiAgent.DynamicSupervisor,
-           {PiAgent.RepositorySupervisor, Keyword.put(opts, :repo_path, repo_path)}
-         ) do
-      {:ok, supervisor} ->
-        {:ok, repository_handle(repo_path, supervisor)}
+    with :ok <- ensure_runtime_started() do
+      case DynamicSupervisor.start_child(
+             PiAgent.DynamicSupervisor,
+             {PiAgent.RepositorySupervisor, Keyword.put(opts, :repo_path, repo_path)}
+           ) do
+        {:ok, supervisor} ->
+          {:ok, repository_handle(repo_path, supervisor)}
 
-      {:error, {:already_started, supervisor}} ->
-        {:ok, repository_handle(repo_path, supervisor)}
+        {:error, {:already_started, supervisor}} ->
+          {:ok, repository_handle(repo_path, supervisor)}
 
-      {:error, reason} ->
-        {:error, reason}
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
@@ -65,18 +67,46 @@ defmodule PiAgent.Runtime do
   end
 
   def lookup(repo_path, role) do
-    case Registry.lookup(PiAgent.RepositoryRegistry, {normalize_repo_path(repo_path), role}) do
-      [{pid, _}] -> pid
-      [] -> nil
+    with pid when is_pid(pid) <- Process.whereis(PiAgent.RepositoryRegistry),
+         [{target_pid, _}] <-
+           Registry.lookup(PiAgent.RepositoryRegistry, {normalize_repo_path(repo_path), role}) do
+      target_pid
+    else
+      _ -> nil
     end
   end
 
   def lookup(repo_path, session_id, role) do
     key = {normalize_repo_path(repo_path), session_id, role}
 
-    case Registry.lookup(PiAgent.RepositoryRegistry, key) do
-      [{pid, _}] -> pid
-      [] -> nil
+    with pid when is_pid(pid) <- Process.whereis(PiAgent.RepositoryRegistry),
+         [{target_pid, _}] <- Registry.lookup(PiAgent.RepositoryRegistry, key) do
+      target_pid
+    else
+      _ -> nil
+    end
+  end
+
+  defp ensure_runtime_started do
+    case Process.whereis(PiAgent.DynamicSupervisor) do
+      pid when is_pid(pid) ->
+        :ok
+
+      nil ->
+        case Application.ensure_all_started(:ex_pi_agent) do
+          {:ok, _apps} -> ensure_runtime_processes_started()
+          {:error, reason} -> {:error, {:application_start_failed, reason}}
+        end
+    end
+  end
+
+  defp ensure_runtime_processes_started do
+    with registry_pid when is_pid(registry_pid) <- Process.whereis(PiAgent.RepositoryRegistry),
+         supervisor_pid when is_pid(supervisor_pid) <- Process.whereis(PiAgent.DynamicSupervisor) do
+      _ = {registry_pid, supervisor_pid}
+      :ok
+    else
+      _ -> {:error, :runtime_not_started}
     end
   end
 
