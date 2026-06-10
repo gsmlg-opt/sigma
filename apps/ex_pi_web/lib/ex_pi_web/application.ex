@@ -6,6 +6,7 @@ defmodule PiWeb.Application do
   def start(_type, _args) do
     children = [
       {Phoenix.PubSub, name: PiWeb.PubSub},
+      {DynamicSupervisor, name: PiWeb.WebShellSupervisor, strategy: :one_for_one},
       PiWeb.Endpoint
     ]
 

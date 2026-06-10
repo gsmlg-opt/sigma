@@ -97,9 +97,7 @@ defmodule PiWeb.SessionLive do
 
         agent = runtime_session.agent
 
-        if connected?(socket) do
-          Process.monitor(agent)
-        end
+        agent_ref = if connected?(socket), do: Process.monitor(agent), else: nil
 
         pending_user_questions = PiAgent.pending_user_questions(agent)
 
@@ -115,9 +113,11 @@ defmodule PiWeb.SessionLive do
           |> assign(:active_tab, :repository)
           |> assign(:session_id, session_id)
           |> assign(:workdir, workdir)
+          |> assign(:effective_cwd, effective_cwd)
           |> assign(:encoded_repository, encoded_repository)
           |> assign(:sessions_dir, sessions_dir)
           |> assign(:agent, agent)
+          |> assign(:agent_ref, agent_ref)
           |> assign(:turn_in_flight, false)
           |> assign(:streaming_message_id, nil)
           |> assign(:tool_results, tool_results)
@@ -135,6 +135,10 @@ defmodule PiWeb.SessionLive do
           |> assign(:log_entries, [])
           |> assign(:log_filter, nil)
           |> assign(:log_search, "")
+          |> assign(:show_web_shell, false)
+          |> assign(:web_shell_pid, nil)
+          |> assign(:web_shell_ref, nil)
+          |> assign(:web_shell_status, "Shell ready")
           |> stream(:messages, stream_messages)
 
         {:ok, socket}
@@ -183,6 +187,16 @@ defmodule PiWeb.SessionLive do
             >
               <.dm_mdi name="format-list-bulleted" class="w-4 h-4 mr-1" /> Session List
             </.dm_link>
+            <.dm_btn
+              id="web-shell-open-btn"
+              type="button"
+              phx-click="open_web_shell"
+              phx-hook="WebComponentHook"
+              variant="ghost"
+              class="w-full justify-start"
+            >
+              <.dm_mdi name="console-line" class="w-4 h-4 mr-1" /> Terminal
+            </.dm_btn>
           </nav>
         </div>
 
@@ -314,6 +328,12 @@ defmodule PiWeb.SessionLive do
         </div>
       </div>
 
+      <.web_shell_panel
+        :if={@show_web_shell}
+        cwd={@effective_cwd}
+        status={@web_shell_status}
+      />
+
       <.live_component
         :if={@show_logs}
         module={PiWeb.LogDrawerLive}
@@ -323,6 +343,51 @@ defmodule PiWeb.SessionLive do
         search={@log_search}
       />
     </div>
+    """
+  end
+
+  defp web_shell_panel(assigns) do
+    ~H"""
+    <section
+      id="web-shell-panel"
+      class="absolute left-72 right-0 bottom-0 z-20 flex max-h-[48vh] flex-col border-t border-outline-variant bg-surface shadow-2xl"
+    >
+      <div class="flex min-h-12 items-center justify-between gap-4 border-b border-outline-variant px-4 py-2">
+        <div class="flex min-w-0 items-center gap-3">
+          <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-surface-container-high text-on-surface-variant">
+            <.dm_mdi name="console-line" class="h-4 w-4" />
+          </span>
+          <div class="min-w-0">
+            <h2 class="text-sm font-semibold text-on-surface">Terminal</h2>
+            <p class="truncate font-mono text-xs text-on-surface-variant" title={@cwd}>{@cwd}</p>
+          </div>
+        </div>
+        <div class="flex shrink-0 items-center gap-3">
+          <span id="web-shell-status" class="font-mono text-xs text-on-surface-variant">
+            {@status}
+          </span>
+          <.dm_btn
+            id="web-shell-close-btn"
+            type="button"
+            phx-click="close_web_shell"
+            phx-hook="WebComponentHook"
+            variant="ghost"
+            size="xs"
+            title="Close terminal"
+          >
+            <.dm_mdi name="close" class="h-4 w-4" />
+          </.dm_btn>
+        </div>
+      </div>
+      <div
+        id="web-shell-terminal"
+        phx-update="ignore"
+        phx-hook="WebShellTerminal"
+        data-cwd={@cwd}
+        class="web-shell-terminal"
+        aria-label="Repository terminal"
+      />
+    </section>
     """
   end
 
@@ -897,6 +962,42 @@ defmodule PiWeb.SessionLive do
   end
 
   @impl true
+  def handle_event("open_web_shell", _params, socket) do
+    if is_pid(socket.assigns.web_shell_pid) and Process.alive?(socket.assigns.web_shell_pid) do
+      {:noreply,
+       socket
+       |> assign(:show_web_shell, true)
+       |> assign(:web_shell_status, "Shell ready")
+       |> push_event("web_shell_focus", %{})}
+    else
+      start_web_shell(socket)
+    end
+  end
+
+  @impl true
+  def handle_event("close_web_shell", _params, socket) do
+    {:noreply, socket |> stop_web_shell() |> push_event("web_shell_closed", %{})}
+  end
+
+  @impl true
+  def handle_event("web_shell_input", %{"data" => data}, socket) when is_binary(data) do
+    if is_pid(socket.assigns.web_shell_pid) do
+      PiWeb.WebShell.input(socket.assigns.web_shell_pid, data)
+    end
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("web_shell_resize", %{"cols" => cols, "rows" => rows}, socket) do
+    if is_pid(socket.assigns.web_shell_pid) do
+      PiWeb.WebShell.resize(socket.assigns.web_shell_pid, cols, rows)
+    end
+
+    {:noreply, socket}
+  end
+
+  @impl true
   def handle_event("toggle_logs", _params, socket) do
     {:noreply, assign(socket, :show_logs, !socket.assigns.show_logs)}
   end
@@ -974,6 +1075,75 @@ defmodule PiWeb.SessionLive do
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, reason)}
     end
+  end
+
+  defp start_web_shell(socket) do
+    case PiWeb.WebShell.open(owner: self(), cwd: socket.assigns.effective_cwd) do
+      {:ok, pid} ->
+        ref = Process.monitor(pid)
+
+        {:noreply,
+         socket
+         |> clear_web_shell_monitor()
+         |> assign(:show_web_shell, true)
+         |> assign(:web_shell_pid, pid)
+         |> assign(:web_shell_ref, ref)
+         |> assign(:web_shell_status, "Shell ready")
+         |> push_event("web_shell_opened", %{cwd: socket.assigns.effective_cwd})}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, web_shell_error(reason))}
+    end
+  end
+
+  defp stop_web_shell(socket) do
+    if is_pid(socket.assigns.web_shell_pid) and Process.alive?(socket.assigns.web_shell_pid) do
+      PiWeb.WebShell.stop(socket.assigns.web_shell_pid)
+    end
+
+    socket
+    |> clear_web_shell_monitor()
+    |> assign(:show_web_shell, false)
+    |> assign(:web_shell_pid, nil)
+    |> assign(:web_shell_status, "Shell closed")
+  rescue
+    _ ->
+      socket
+      |> clear_web_shell_monitor()
+      |> assign(:show_web_shell, false)
+      |> assign(:web_shell_pid, nil)
+      |> assign(:web_shell_status, "Shell closed")
+  end
+
+  defp clear_web_shell_monitor(socket) do
+    if is_reference(socket.assigns.web_shell_ref) do
+      Process.demonitor(socket.assigns.web_shell_ref, [:flush])
+    end
+
+    assign(socket, :web_shell_ref, nil)
+  end
+
+  defp web_shell_error({:shutdown, reason}), do: web_shell_error(reason)
+  defp web_shell_error(reason) when is_binary(reason), do: reason
+  defp web_shell_error(reason), do: "Could not open terminal: #{inspect(reason)}"
+
+  @impl true
+  def handle_info({:web_shell_output, pid, data}, socket)
+      when pid == socket.assigns.web_shell_pid do
+    {:noreply, push_event(socket, "web_shell_output", %{data: data})}
+  end
+
+  @impl true
+  def handle_info({:web_shell_exit, pid, status}, socket)
+      when pid == socket.assigns.web_shell_pid do
+    socket =
+      socket
+      |> clear_web_shell_monitor()
+      |> assign(:web_shell_pid, nil)
+      |> assign(:web_shell_status, "Shell exited (#{status})")
+      |> push_event("web_shell_output", %{data: "\r\n[process exited with status #{status}]\r\n"})
+
+    {:noreply, socket}
   end
 
   @impl true
@@ -1087,16 +1257,29 @@ defmodule PiWeb.SessionLive do
   end
 
   @impl true
-  def handle_info({:DOWN, _ref, :process, _pid, _reason}, socket) do
-    socket =
-      socket
-      |> put_flash(
-        :error,
-        "The agent process crashed. Your session history is preserved — refresh to reconnect."
-      )
-      |> assign(turn_in_flight: false, streaming_message_id: nil)
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, socket) do
+    cond do
+      ref == socket.assigns.web_shell_ref ->
+        {:noreply,
+         socket
+         |> assign(:web_shell_pid, nil)
+         |> assign(:web_shell_ref, nil)
+         |> assign(:web_shell_status, "Shell closed")}
 
-    {:noreply, socket}
+      ref == socket.assigns.agent_ref ->
+        socket =
+          socket
+          |> put_flash(
+            :error,
+            "The agent process crashed. Your session history is preserved — refresh to reconnect."
+          )
+          |> assign(turn_in_flight: false, streaming_message_id: nil)
+
+        {:noreply, socket}
+
+      true ->
+        {:noreply, socket}
+    end
   end
 
   @impl true

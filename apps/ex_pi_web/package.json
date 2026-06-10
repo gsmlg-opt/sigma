@@ -15,6 +15,7 @@
     "@duskmoon-dev/el-markdown-input": "1.5.4",
     "@duskmoon-dev/el-menu": "1.5.4",
     "@duskmoon-dev/elements": "1.5.4",
+    "@xterm/xterm": "^6.0.0",
     "phoenix": "file:../../deps/phoenix",
     "phoenix_duskmoon": "file:../../deps/phoenix_duskmoon",
     "phoenix_html": "file:../../deps/phoenix_html",

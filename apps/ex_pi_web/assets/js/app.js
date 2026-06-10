@@ -3,6 +3,7 @@ import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import topbar from "topbar"
 import * as DuskmoonHooks from "phoenix_duskmoon/hooks"
+import { Terminal } from "@xterm/xterm"
 
 import "@duskmoon-dev/elements/register"
 import "@duskmoon-dev/el-chat/register"
@@ -350,11 +351,78 @@ const LocalTime = {
   }
 }
 
+const WebShellTerminal = {
+  mounted() {
+    this._lastSize = { cols: null, rows: null }
+    this._disposables = []
+    this.el.innerHTML = ''
+
+    this._terminal = new Terminal({
+      convertEol: true,
+      cursorBlink: true,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+      fontSize: 13,
+      lineHeight: 1.25,
+      scrollback: 5000,
+      theme: {
+        background: '#0b0f14',
+        cursor: '#f4d35e',
+        foreground: '#d8dee9',
+        selectionBackground: '#334155'
+      }
+    })
+
+    this._terminal.open(this.el)
+    this._terminal.write(`Shell ready: ${this.el.dataset.cwd || ''}\r\n`)
+    this._terminal.focus()
+    this._disposables.push(this._terminal.onData((data) => this.pushEvent('web_shell_input', { data })))
+
+    this.handleEvent('web_shell_output', ({ data }) => {
+      if (this._terminal && typeof data === 'string') this._terminal.write(data)
+    })
+    this.handleEvent('web_shell_focus', () => this._terminal?.focus())
+    this.handleEvent('web_shell_opened', ({ cwd }) => {
+      this._terminal?.focus()
+      if (cwd) this._terminal?.write(`\r\n${cwd}\r\n`)
+    })
+    this.handleEvent('web_shell_closed', () => {
+      this._terminal?.write('\r\n[terminal closed]\r\n')
+    })
+
+    this._resize = () => this._fit()
+    this._resizeObserver = new ResizeObserver(this._resize)
+    this._resizeObserver.observe(this.el)
+    window.addEventListener('resize', this._resize)
+    window.requestAnimationFrame(this._resize)
+  },
+  destroyed() {
+    this._resizeObserver?.disconnect()
+    window.removeEventListener('resize', this._resize)
+    this._disposables?.forEach((disposable) => disposable.dispose())
+    this._terminal?.dispose()
+  },
+  _fit() {
+    if (!this._terminal) return
+
+    const rect = this.el.getBoundingClientRect()
+    if (rect.width === 0 || rect.height === 0) return
+
+    const cols = Math.max(40, Math.floor(rect.width / 8.2))
+    const rows = Math.max(8, Math.floor(rect.height / 17.5))
+
+    if (cols === this._lastSize.cols && rows === this._lastSize.rows) return
+
+    this._terminal.resize(cols, rows)
+    this._lastSize = { cols, rows }
+    this.pushEvent('web_shell_resize', { cols, rows })
+  }
+}
+
 let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 
 let liveSocket = new LiveSocket("/live", Socket, {
   params: {_csrf_token: csrfToken},
-  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, AutocompleteHook, SessionMenuHook, ChatInputHook, MarkdownInputHook, LocalTime }
+  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, AutocompleteHook, SessionMenuHook, ChatInputHook, MarkdownInputHook, LocalTime, WebShellTerminal }
 })
 
 // Show progress bar on live navigation and form submits

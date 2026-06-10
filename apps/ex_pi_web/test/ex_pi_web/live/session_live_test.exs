@@ -34,8 +34,24 @@ defmodule PiWeb.SessionLiveTest do
     assert html =~ "Settings"
     assert html =~ "Skills"
     assert html =~ "New Session"
+    assert html =~ "Terminal"
+    assert html =~ ~s(id="web-shell-open-btn")
     assert html =~ ~s(href="/repository/#{@encoded_workdir}/skills")
     assert_session_sidebar_order(html)
+  end
+
+  test "opens a web shell panel from the session workspace", %{conn: conn} do
+    {:ok, view, _html} = live(conn, session_path(unique_session_id("terminal")))
+
+    html =
+      view
+      |> element("#web-shell-open-btn")
+      |> render_click()
+
+    assert html =~ ~s(id="web-shell-panel")
+    assert html =~ ~s(phx-hook="WebShellTerminal")
+    assert html =~ ~s(data-cwd="#{@workdir}")
+    assert html =~ "Shell ready"
   end
 
   @tag :tmp_dir

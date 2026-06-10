@@ -3,6 +3,7 @@
 @import "@duskmoon-dev/core/themes/sunshine";
 @import "@duskmoon-dev/core/themes/moonlight";
 @import "@duskmoon-dev/core/components";
+@import "@xterm/xterm/css/xterm.css";
 
 @theme {
 }
@@ -133,6 +134,22 @@ el-dm-dialog [slot="footer"] {
   font-size: 0.8125rem;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.web-shell-terminal {
+  height: min(36vh, 26rem);
+  min-height: 16rem;
+  overflow: hidden;
+  background: #0b0f14;
+  padding: 0.75rem;
+}
+
+.web-shell-terminal .xterm {
+  height: 100%;
+}
+
+.web-shell-terminal .xterm-viewport {
+  border-radius: 4px;
 }
 
 @media (prefers-reduced-motion: reduce) {
