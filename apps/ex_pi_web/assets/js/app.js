@@ -5,7 +5,7 @@ import topbar from "topbar"
 import * as DuskmoonHooks from "phoenix_duskmoon/hooks"
 import { Terminal } from "@xterm/xterm"
 
-import "@duskmoon-dev/elements/register"
+import "./duskmoon_elements.js"
 import "@duskmoon-dev/el-chat/register"
 import "@duskmoon-dev/el-markdown-input/register"
 

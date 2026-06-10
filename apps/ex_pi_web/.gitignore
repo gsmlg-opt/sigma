@@ -3,3 +3,8 @@
 
 # Local session data is ignored at the root, but including here for completeness
 /priv/sessions/
+
+# Generated static asset artifacts and digests
+/priv/static/cache_manifest.json
+/priv/static/favicon-*
+/priv/static/favicon.svg.gz

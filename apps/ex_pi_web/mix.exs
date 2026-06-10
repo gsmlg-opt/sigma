@@ -36,13 +36,12 @@ defmodule PiWeb.MixProject do
       {:jason, "~> 1.4"},
       {:plug_cowboy, "~> 2.7"},
       {:gettext, "~> 1.0"},
-      {:bun, "~> 2.0", runtime: Mix.env() == :dev},
-      {:tailwind, "~> 0.2", runtime: Mix.env() == :dev},
+      {:volt, "~> 0.14"},
       {:phoenix_duskmoon, "~> 9.0"},
       {:ex_pi_agent, in_umbrella: true},
       {:ex_pi_session, in_umbrella: true},
       {:ex_pi_logs, in_umbrella: true},
-      {:floki, ">= 0.30.0", only: :test},
+      {:floki, ">= 0.30.0"},
       {:lazy_html, ">= 0.1.0", only: :test}
     ]
   end

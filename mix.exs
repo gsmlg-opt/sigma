@@ -23,13 +23,17 @@ defmodule Pi.MixProject do
 
   defp aliases do
     [
-      setup: ["deps.get"],
-      "assets.setup": ["tailwind.install --if-missing", "bun.install --if-missing"],
-      "assets.build": ["tailwind ex_pi_web", "bun ex_pi_web"],
+      setup: ["deps.get", "deps.patch", "assets.setup", "assets.build"],
+      "assets.setup": [
+        "deps.patch",
+        "cmd --app ex_pi_web mix npm.install",
+        "duskmoon.bundle"
+      ],
+      "assets.build": ["volt.build --tailwind"],
       "assets.deploy": [
-        "phx.digest.clean --all",
-        "tailwind ex_pi_web --minify",
-        "bun ex_pi_web --minify",
+        "deps.patch",
+        "duskmoon.bundle",
+        "volt.build --tailwind",
         "phx.digest"
       ]
     ]

@@ -16,20 +16,13 @@ config :logger, :console,
 
 config :phoenix, :json_library, Jason
 
-config :bun,
-  version: "1.3.4",
-  ex_pi_web: [
-    args:
-      ~w(build assets/js/app.js --outdir=priv/static/assets --external /fonts/* --external /images/*),
-    cd: Path.expand("../apps/ex_pi_web", __DIR__)
-  ]
-
-config :tailwind,
-  version: "4.1.11",
-  ex_pi_web: [
-    args: ~w(--input=assets/css/app.css --output=priv/static/assets/app.css),
-    cd: Path.expand("../apps/ex_pi_web", __DIR__)
-  ]
+config :volt,
+  entry: Path.expand("../apps/ex_pi_web/assets/js/app.js", __DIR__),
+  root: Path.expand("../apps/ex_pi_web/assets", __DIR__),
+  outdir: Path.expand("../apps/ex_pi_web/priv/static/assets", __DIR__),
+  resolve_dirs: [Path.expand("../deps", __DIR__), Path.expand("../node_modules", __DIR__)],
+  target: :es2022,
+  tailwind: [css: Path.expand("../apps/ex_pi_web/assets/css/app.css", __DIR__)]
 
 config :ex_pi_logs, pubsub: PiWeb.PubSub
 

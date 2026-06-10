@@ -1,9 +1,24 @@
-@import "tailwindcss";
+@layer theme {}
+@layer base {}
+@layer components {}
+@layer utilities {}
+@import "tailwindcss/theme" layer(theme);
+@import "tailwindcss/preflight" layer(base);
+@import "@xterm/xterm/css/xterm.css" layer(base);
+
 @plugin "@duskmoon-dev/core/plugin";
 @import "@duskmoon-dev/core/themes/sunshine";
 @import "@duskmoon-dev/core/themes/moonlight";
 @import "@duskmoon-dev/core/components";
-@import "@xterm/xterm/css/xterm.css";
+@import "../../../../deps/phoenix_duskmoon/assets/css/element-theme-bridge.css" layer(components);
+
+@import "tailwindcss/utilities" layer(utilities);
+
+@source "../../lib/ex_pi_web.ex";
+@source "../../lib/ex_pi_web/**/*.ex";
+@source "../../lib/ex_pi_web/**/*.heex";
+@source "../js/**/*.js";
+@source "../../../../deps/phoenix_duskmoon/**/*.{ex,heex}";
 
 @theme {
 }

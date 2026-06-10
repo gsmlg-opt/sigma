@@ -15,11 +15,3 @@ if config_env() == :prod do
     ],
     secret_key_base: secret_key_base
 end
-
-if System.get_env("MIX_BUN_PATH") do
-  config :bun, path: System.get_env("MIX_BUN_PATH")
-end
-
-if System.get_env("MIX_TAILWIND_PATH") do
-  config :tailwind, path: System.get_env("MIX_TAILWIND_PATH")
-end
