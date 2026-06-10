@@ -57,7 +57,11 @@ defmodule PiAgent.ContextBuilderTest do
       assert policy =~ " - Model: mock-model (mock-provider)"
       assert system_prompt =~ identity
       assert system_prompt =~ policy
-      assert skills_reminder =~ "The following skills are available for use with the Skill tool"
+      assert skills_reminder =~
+               "The following skills provide specialized instructions for specific tasks"
+
+      assert skills_reminder =~ "Use the read tool to load a skill's file"
+      refute skills_reminder =~ "Skill tool"
       assert agents_reminder =~ "# agentsContext"
       assert agents_reminder =~ "global rules"
       assert agents_reminder =~ "# currentDate\nToday's date is 2026-05-25."

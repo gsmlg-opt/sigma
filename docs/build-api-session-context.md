@@ -94,18 +94,30 @@ Do not concatenate hooks, skills, and `agents_context` into one reminder block. 
 Today's date is 2026-05-25.
 ```
 
-The `:skills` bucket is special. It does not use the generic context preamble. It starts exactly like this and renders each skill as a markdown list item:
+The `:skills` bucket is special. It does not use the generic context preamble. It starts exactly like this and renders each skill with its file location:
 
 ```text
 <system-reminder>
-The following skills are available for use with the Skill tool:
+The following skills provide specialized instructions for specific tasks.
+Use the read tool to load a skill's file when the task matches its description.
+When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.
 
-- repo-skill: Repository scoped skill
-- global-skill: Global skill description
+<available_skills>
+  <skill>
+    <name>repo-skill</name>
+    <description>Repository scoped skill</description>
+    <location>/repo/.agents/skills/repo-skill/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>global-skill</name>
+    <description>Global skill description</description>
+    <location>/home/user/.agents/skills/global-skill/SKILL.md</location>
+  </skill>
+</available_skills>
 </system-reminder>
 ```
 
-The skills block is only a discovery summary. The full skill content should be loaded by the Skill tool when a skill is invoked.
+The skills block is only a discovery summary. The full skill content should be loaded with the `read` tool when a skill is invoked. `read` keeps the normal workspace fence for ordinary files, but allows `SKILL.md` files to be loaded by absolute path.
 
 Blank sources are dropped. A source can be passed as:
 

@@ -93,12 +93,18 @@ defmodule PiAgent.SessionContext do
   """
   @spec skills_context([map()]) :: String.t()
   def skills_context(skills) when is_list(skills) do
-    skills
-    |> Enum.reject(&(Map.get(&1, :enabled?, true) == false))
-    |> Enum.reject(&Map.get(&1, :disable_model_invocation?, false))
-    |> Enum.map(&skill_line/1)
-    |> Enum.reject(&(&1 == ""))
-    |> Enum.join("\n")
+    entries =
+      skills
+      |> Enum.reject(&(Map.get(&1, :enabled?, true) == false))
+      |> Enum.reject(&Map.get(&1, :disable_model_invocation?, false))
+      |> Enum.map(&skill_entry/1)
+      |> Enum.reject(&(&1 == ""))
+
+    if entries == [] do
+      ""
+    else
+      Enum.join(["<available_skills>" | entries] ++ ["</available_skills>"], "\n")
+    end
   end
 
   @doc """
@@ -280,15 +286,48 @@ defmodule PiAgent.SessionContext do
   defp title_for(type),
     do: Map.get(@titles, type, type |> to_string() |> String.replace("_", " "))
 
-  defp skill_line(%{name: name, description: description}) do
-    "- #{name}: #{description}"
+  defp skill_entry(skill) when is_map(skill) do
+    name = skill_value(skill, :name, "name")
+    description = skill_value(skill, :description, "description")
+    path = skill_value(skill, :path, "path")
+
+    if name == "" or description == "" do
+      ""
+    else
+      lines = [
+        "  <skill>",
+        "    <name>#{escape_xml(name)}</name>",
+        "    <description>#{escape_xml(description)}</description>"
+      ]
+
+      lines =
+        if path == "" do
+          lines
+        else
+          lines ++ ["    <location>#{escape_xml(path)}</location>"]
+        end
+
+      Enum.join(lines ++ ["  </skill>"], "\n")
+    end
   end
 
-  defp skill_line(%{"name" => name, "description" => description}) do
-    "- #{name}: #{description}"
+  defp skill_entry(_skill), do: ""
+
+  defp skill_value(skill, atom_key, string_key) do
+    skill
+    |> Map.get(atom_key, Map.get(skill, string_key, ""))
+    |> to_string()
+    |> String.trim()
   end
 
-  defp skill_line(_skill), do: ""
+  defp escape_xml(value) do
+    value
+    |> String.replace("&", "&amp;")
+    |> String.replace("<", "&lt;")
+    |> String.replace(">", "&gt;")
+    |> String.replace("\"", "&quot;")
+    |> String.replace("'", "&apos;")
+  end
 
   defp format_block(%{type: :skills, content: content}) do
     %{type: :text, text: skills_reminder_text(content)}
@@ -345,7 +384,9 @@ defmodule PiAgent.SessionContext do
   defp skills_reminder_text(skills_markdown) do
     """
     <system-reminder>
-    The following skills are available for use with the Skill tool:
+    The following skills provide specialized instructions for specific tasks.
+    Use the read tool to load a skill's file when the task matches its description.
+    When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.
 
     #{skills_markdown}
     </system-reminder>

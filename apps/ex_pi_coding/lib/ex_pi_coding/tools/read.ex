@@ -45,7 +45,7 @@ defmodule PiCoding.Tools.Read do
     limit = Map.get(params, "limit")
     cwd = Keyword.get(opts, :cwd, File.cwd!())
 
-    case PathUtils.safe_resolve(path, cwd) do
+    case PathUtils.safe_resolve(path, cwd, allow_skill_files?: true) do
       {:ok, absolute_path} ->
         do_read(absolute_path, offset, limit)
 

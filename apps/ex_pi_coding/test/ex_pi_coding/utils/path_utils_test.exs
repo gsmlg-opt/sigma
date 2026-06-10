@@ -21,6 +21,25 @@ defmodule PiCoding.Utils.PathUtilsTest do
       assert reason =~ "outside of the current working directory"
     end
 
+    test "allows skill files outside cwd only when explicitly enabled" do
+      tmp = System.tmp_dir!()
+      cwd = Path.join(tmp, "pi_test_cwd_#{System.unique_integer([:positive])}")
+      skill_dir = Path.join(tmp, "pi_test_skill_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(cwd)
+      File.mkdir_p!(skill_dir)
+      skill_path = Path.join(skill_dir, "SKILL.md")
+      File.write!(skill_path, "skill")
+
+      on_exit(fn ->
+        File.rm_rf!(cwd)
+        File.rm_rf!(skill_dir)
+      end)
+
+      assert {:error, reason} = PathUtils.safe_resolve(skill_path, cwd)
+      assert reason =~ "outside of the current working directory"
+      assert {:ok, ^skill_path} = PathUtils.safe_resolve(skill_path, cwd, allow_skill_files?: true)
+    end
+
     test "rejects relative path going out of cwd" do
       assert {:error, reason} = PathUtils.safe_resolve("../../../etc/passwd", @cwd)
       assert reason =~ "outside of the current working directory"

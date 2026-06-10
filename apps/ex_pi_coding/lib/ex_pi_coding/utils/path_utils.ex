@@ -9,19 +9,21 @@ defmodule PiCoding.Utils.PathUtils do
   ## Parameters
   - `path`: The path to resolve.
   - `cwd`: The current working directory.
+  - `opts`: Optional safety exceptions.
 
   ## Returns
-  - `{:ok, resolved_path}`: The path is within the cwd.
+  - `{:ok, resolved_path}`: The path is within the cwd, or matches an explicit exception.
   - `{:error, reason}`: The path is outside the cwd or invalid.
   """
-  def safe_resolve(path, cwd) do
+  def safe_resolve(path, cwd, opts \\ []) do
     expanded_cwd = Path.expand(cwd)
     resolved_path = Path.expand(path, expanded_cwd)
 
     # Resolve symlinks on both sides so a symlink within cwd cannot escape to outside.
     with {:ok, real_cwd} <- resolve_real_path(expanded_cwd),
          {:ok, real_path} <- resolve_real_path(resolved_path) do
-      if within_cwd?(real_path, real_cwd) do
+      if within_cwd?(real_path, real_cwd) or
+           allowed_external_path?(resolved_path, real_path, opts) do
         {:ok, resolved_path}
       else
         {:error,
@@ -72,5 +74,12 @@ defmodule PiCoding.Utils.PathUtils do
   defp within_cwd?(path, cwd) do
     cwd_prefix = if String.ends_with?(cwd, "/"), do: cwd, else: cwd <> "/"
     path == cwd or String.starts_with?(path, cwd_prefix)
+  end
+
+  defp allowed_external_path?(path, real_path, opts) do
+    Keyword.get(opts, :allow_skill_files?, false) and
+      Path.basename(path) == "SKILL.md" and
+      Path.basename(real_path) == "SKILL.md" and
+      File.regular?(real_path)
   end
 end

@@ -18,7 +18,9 @@ defmodule PiAgent.SessionContextTest do
 
       text = SessionContext.to_text(context)
 
-      assert text =~ "# Skills\n\n- repo-skill: Helps with repository work"
+      assert text =~ "# Skills\n\n<available_skills>"
+      assert text =~ "<name>repo-skill</name>"
+      assert text =~ "<description>Helps with repository work</description>"
       assert text =~ "# Hooks\n\nhook one"
       assert text =~ "# Commit Hook\n\nhook two"
       assert text =~ "# agentsContext\n\nCodebase and user instructions are shown below."
@@ -41,18 +43,40 @@ defmodule PiAgent.SessionContextTest do
   end
 
   describe "skills_context/1" do
-    test "renders skills as a markdown list and skips disabled model invocation" do
+    test "renders skills as an available-skills block and skips disabled model invocation" do
       assert SessionContext.skills_context([
-               %{name: "global-skill", description: "Global skill description"},
+               %{
+                 name: "global-skill",
+                 description: "Global skill description",
+                 path: "/skills/global/SKILL.md"
+               },
                %{name: "disabled-skill", description: "Disabled", enabled?: false},
                %{
                  name: "manual-skill",
                  description: "Manual only",
                  disable_model_invocation?: true
                },
-               %{"name" => "repo-skill", "description" => "Repository scoped skill"}
+               %{
+                 "name" => "repo-skill",
+                 "description" => "Repository scoped skill",
+                 "path" => "/repo/.agents/skills/repo-skill/SKILL.md"
+               }
              ]) ==
-               "- global-skill: Global skill description\n- repo-skill: Repository scoped skill"
+               """
+               <available_skills>
+                 <skill>
+                   <name>global-skill</name>
+                   <description>Global skill description</description>
+                   <location>/skills/global/SKILL.md</location>
+                 </skill>
+                 <skill>
+                   <name>repo-skill</name>
+                   <description>Repository scoped skill</description>
+                   <location>/repo/.agents/skills/repo-skill/SKILL.md</location>
+                 </skill>
+               </available_skills>
+               """
+               |> String.trim()
     end
   end
 
@@ -61,7 +85,13 @@ defmodule PiAgent.SessionContextTest do
       context =
         SessionContext.new(
           hooks: "SessionStart:startup hook success: Success",
-          skills: [%{name: "repo-skill", description: "Repository scoped skill"}],
+          skills: [
+            %{
+              name: "repo-skill",
+              description: "Repository scoped skill",
+              path: "/repo/.agents/skills/repo-skill/SKILL.md"
+            }
+          ],
           agents_context: ["# Context: /repo/AGENTS.md\n\nrules"],
           current_date: ~D[2026-05-25]
         )
@@ -76,9 +106,12 @@ defmodule PiAgent.SessionContextTest do
       assert hook_reminder =~ "# Hooks\n\nSessionStart:startup hook success: Success"
 
       assert skills_reminder =~
-               "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n"
+               "<system-reminder>\nThe following skills provide specialized instructions for specific tasks."
 
-      assert skills_reminder =~ "- repo-skill: Repository scoped skill"
+      assert skills_reminder =~ "Use the read tool to load a skill's file"
+      assert skills_reminder =~ "<name>repo-skill</name>"
+      assert skills_reminder =~ "<location>/repo/.agents/skills/repo-skill/SKILL.md</location>"
+      refute skills_reminder =~ "Skill tool"
       refute skills_reminder =~ "# Skills"
       assert agents_reminder =~ "# agentsContext"
       assert agents_reminder =~ "# Context: /repo/AGENTS.md\n\nrules"

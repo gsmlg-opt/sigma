@@ -229,10 +229,8 @@ defmodule PiAgentTest do
     assert system_prompt =~ system_identity
     assert system_prompt =~ system_policy
 
-    assert skills_reminder =~
-             "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n"
-
-    assert skills_reminder =~ "- repo-skill: Repository scoped skill"
+    assert skills_reminder =~ "<name>repo-skill</name>"
+    assert skills_reminder =~ "<description>Repository scoped skill</description>"
     assert agents_reminder =~ "<system-reminder>\nAs you answer the user's questions"
     assert agents_reminder =~ "# agentsContext"
     assert agents_reminder =~ "global rules"
