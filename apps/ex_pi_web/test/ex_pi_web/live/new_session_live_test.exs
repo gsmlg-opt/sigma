@@ -45,7 +45,8 @@ defmodule PiWeb.NewSessionLiveTest do
       {:ok, _session_view, session_html} =
         live(conn, "/repository/#{encoded_repository}/sessions/#{session_id}")
 
-      assert session_html =~ ~s(id="session-menu-btn-#{session_id}")
+      menu_token = Base.url_encode64(session_id, padding: false)
+      assert session_html =~ ~s(id="session-menu-btn-#{menu_token}")
     end)
   end
 

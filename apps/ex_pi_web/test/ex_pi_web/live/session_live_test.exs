@@ -40,6 +40,19 @@ defmodule PiWeb.SessionLiveTest do
     assert_session_sidebar_order(html)
   end
 
+  test "renders session menu anchors with selector-safe session ids", %{conn: conn} do
+    session_id = "PR#5"
+    sessions_dir = PiSession.ConfigManager.sessions_dir(@workdir)
+    File.mkdir_p!(sessions_dir)
+    File.write!(Path.join(sessions_dir, "#{session_id}.jsonl"), "")
+
+    {:ok, _view, html} = live(conn, session_path(session_id))
+
+    assert html =~ ~s(id="session-menu-btn-UFIjNQ")
+    assert html =~ ~s(anchor="#session-menu-btn-UFIjNQ")
+    refute html =~ ~s(anchor="#session-menu-btn-PR#5")
+  end
+
   test "opens a web shell panel from the session workspace", %{conn: conn} do
     {:ok, view, _html} = live(conn, session_path(unique_session_id("terminal")))
 
@@ -307,7 +320,7 @@ defmodule PiWeb.SessionLiveTest do
   end
 
   defp session_path(session_id) do
-    "/repository/#{@encoded_workdir}/sessions/#{session_id}"
+    "/repository/#{@encoded_workdir}/sessions/#{URI.encode(session_id, &URI.char_unreserved?/1)}"
   end
 
   defp stop_repository_supervisors(repo) do

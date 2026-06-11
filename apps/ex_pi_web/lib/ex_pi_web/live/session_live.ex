@@ -207,6 +207,8 @@ defmodule PiWeb.SessionLive do
           <ul class="px-2 flex flex-col gap-0.5">
             <li :for={s <- @sessions} class="group relative flex items-center rounded-xl">
               <% is_renaming = @renaming_session == s %>
+              <% menu_button_id = session_menu_button_id(s) %>
+              <% menu_id = session_menu_id(s) %>
               <form :if={is_renaming} phx-submit="rename_session" class="flex-1 flex items-center gap-1 px-2 py-1">
                 <input type="hidden" name="old_id" value={s} />
                 <input
@@ -228,7 +230,7 @@ defmodule PiWeb.SessionLive do
               </.dm_link>
               <.dm_btn
                 :if={not is_renaming}
-                id={"session-menu-btn-#{s}"}
+                id={menu_button_id}
                 type="button"
                 variant="ghost"
                 size="xs"
@@ -238,8 +240,8 @@ defmodule PiWeb.SessionLive do
               </.dm_btn>
               <.dm_menu
                 :if={not is_renaming}
-                id={"session-menu-#{s}"}
-                anchor={"#session-menu-btn-#{s}"}
+                id={menu_id}
+                anchor={"##{menu_button_id}"}
                 placement="bottom-end"
                 phx-hook="SessionMenuHook"
                 data-session={s}
@@ -1354,6 +1356,20 @@ defmodule PiWeb.SessionLive do
          {provider_mod, config["model"], config["id"], config["resolved_key"] || "",
           config["base_url"] || ""}}
     end
+  end
+
+  defp session_menu_button_id(session_id) do
+    "session-menu-btn-#{session_dom_token(session_id)}"
+  end
+
+  defp session_menu_id(session_id) do
+    "session-menu-#{session_dom_token(session_id)}"
+  end
+
+  defp session_dom_token(session_id) do
+    session_id
+    |> to_string()
+    |> Base.url_encode64(padding: false)
   end
 
   defp get_sessions_dir(workdir) do
