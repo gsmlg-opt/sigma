@@ -21,6 +21,7 @@ defmodule PiAgent do
     :cwd,
     :on_event,
     :dispatcher_opts,
+    :tool_state,
     :provider_options,
     :task_supervisor,
     :current_turn_task,
@@ -96,7 +97,8 @@ defmodule PiAgent do
     GenServer.cast(pid, {:set_model, model})
   end
 
-  def set_provider(pid, provider, model, options \\ []) when is_atom(provider) and is_map(model) do
+  def set_provider(pid, provider, model, options \\ [])
+      when is_atom(provider) and is_map(model) do
     GenServer.cast(pid, {:set_provider, provider, model, options})
   end
 
@@ -144,6 +146,14 @@ defmodule PiAgent do
       cwd: cwd,
       on_event: opts[:on_event],
       dispatcher_opts: opts[:dispatcher_opts] || [],
+      tool_state:
+        opts[:tool_state] ||
+          :ets.new(:pi_tools_state, [
+            :set,
+            :public,
+            read_concurrency: true,
+            write_concurrency: true
+          ]),
       provider_options: opts[:options] || [],
       hook_specs: hook_specs,
       resume_source: Keyword.get(opts, :resume_source, :startup)
@@ -493,6 +503,7 @@ defmodule PiAgent do
       |> Keyword.put(:session_id, state.session_id)
       |> Keyword.put(:transcript_path, transcript_path(state))
       |> Keyword.put(:hook_specs, state.hook_specs)
+      |> Keyword.put(:tool_state, state.tool_state)
 
     results = PiCoding.Dispatcher.dispatch_batch(tool_calls, state.tools, opts)
 

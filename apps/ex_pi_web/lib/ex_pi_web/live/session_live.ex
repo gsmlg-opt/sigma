@@ -34,17 +34,7 @@ defmodule PiWeb.SessionLive do
         "# Worktree Context\nYou are working in a git worktree for branch `#{session_branch}` at `#{effective_cwd}`. The project root is at `#{workdir}`."
       end
 
-    builtin_tools = [
-      PiCoding.Tools.AskUserQuestion,
-      PiCoding.Tools.Read,
-      PiCoding.Tools.Write,
-      PiCoding.Tools.Bash,
-      PiCoding.Tools.Edit,
-      PiCoding.Tools.Glob,
-      PiCoding.Tools.Grep,
-      PiCoding.Tools.LS,
-      PiCoding.Tools.UrlFetch
-    ]
+    builtin_tools = PiTools.default_tools()
 
     mcp_tools =
       mcp_server_ids
