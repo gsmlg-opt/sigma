@@ -108,7 +108,7 @@ defmodule PiCoding.MCP do
        name: client,
        transport_name: transport_via(session_id, server_id, ref),
        transport: transport_config(server, opts),
-       client_info: @client_info,
+       client_info: client_info(session_id, server_id, ref),
        capabilities: %{},
        protocol_version: @protocol_version}
 
@@ -183,6 +183,19 @@ defmodule PiCoding.MCP do
 
   defp transport_via(session_id, server_id, ref) do
     {:via, Registry, {@registry, {:transport, session_id, server_id, ref}}}
+  end
+
+  defp client_info(session_id, server_id, ref) do
+    Map.put(@client_info, "name", unique_client_name(session_id, server_id, ref))
+  end
+
+  defp unique_client_name(session_id, server_id, ref) do
+    hash =
+      :crypto.hash(:sha256, :erlang.term_to_binary({session_id, server_id, ref}))
+      |> Base.encode16(case: :lower)
+      |> String.slice(0, 16)
+
+    "ex_pi_#{hash}"
   end
 
   defp telemetry_error(server_id, reason) do
