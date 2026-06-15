@@ -573,7 +573,8 @@ defmodule PiAgent do
     })
   end
 
-  @compact_threshold 80_000
+  @default_compact_threshold 80_000
+  @compact_context_ratio 0.8
 
   defp maybe_compact(state) do
     input_tokens =
@@ -585,12 +586,54 @@ defmodule PiAgent do
         end
       end)
 
-    if input_tokens >= @compact_threshold do
+    if input_tokens >= compact_threshold(state.model) do
       run_compact(state)
     else
       state
     end
   end
+
+  defp compact_threshold(model) do
+    case model_context_window(model) do
+      nil -> @default_compact_threshold
+      context_window -> floor(context_window * @compact_context_ratio)
+    end
+  end
+
+  defp model_context_window(model) when is_map(model) do
+    [
+      :context_window,
+      "context_window",
+      :contextWindow,
+      "contextWindow",
+      :context_length,
+      "context_length",
+      :contextLength,
+      "contextLength",
+      :max_context_tokens,
+      "max_context_tokens",
+      :maxContextTokens,
+      "maxContextTokens",
+      :input_token_limit,
+      "input_token_limit",
+      :inputTokenLimit,
+      "inputTokenLimit"
+    ]
+    |> Enum.find_value(fn key -> positive_integer(Map.get(model, key)) end)
+  end
+
+  defp model_context_window(_model), do: nil
+
+  defp positive_integer(value) when is_integer(value) and value > 0, do: value
+
+  defp positive_integer(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {number, ""} when number > 0 -> number
+      _ -> nil
+    end
+  end
+
+  defp positive_integer(_value), do: nil
 
   defp run_compact(state) do
     {to_summarize, to_keep} = find_compact_boundary(state.messages, 20)

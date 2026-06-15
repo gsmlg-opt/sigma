@@ -39,7 +39,14 @@ defmodule PiSession.ConfigManager do
     # Providers from models.json
     providers =
       Enum.into(models_data["providers"] || %{}, %{}, fn {id, p} ->
-        model_ids = Enum.map(p["models"] || [], & &1["id"])
+        models =
+          p
+          |> Map.get("models", [])
+          |> List.wrap()
+          |> Enum.map(&normalize_model_entry/1)
+          |> Enum.reject(&(model_id(&1) == ""))
+
+        model_ids = Enum.map(models, &model_id/1)
 
         selected_model =
           if id == active_provider_id and default_model != "" do
@@ -62,7 +69,7 @@ defmodule PiSession.ConfigManager do
            # pi usually stores key under provider ID in auth.json
            "credential_id" => p["credential_id"] || id,
            "model" => selected_model,
-           "models" => model_ids,
+           "models" => models,
            "base_url" => p["baseUrl"] || ""
          }}
       end)
@@ -272,14 +279,34 @@ defmodule PiSession.ConfigManager do
   end
 
   defp provider_models(provider) do
-    models = provider |> Map.get("models", []) |> List.wrap()
+    models =
+      provider
+      |> Map.get("models", [])
+      |> List.wrap()
+      |> Enum.map(&normalize_model_entry/1)
+      |> Enum.reject(&(model_id(&1) == ""))
 
-    [provider["model"] | models]
-    |> Enum.map(&model_id/1)
-    |> Enum.reject(&(&1 == ""))
-    |> Enum.uniq()
-    |> Enum.map(&%{"id" => &1})
+    active_model_id = model_id(provider["model"])
+
+    active_model =
+      case {active_model_id, Enum.find(models, &(model_id(&1) == active_model_id))} do
+        {"", _} -> nil
+        {_id, nil} -> %{"id" => active_model_id}
+        {_id, model} -> model
+      end
+
+    [active_model | models]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq_by(&model_id/1)
   end
+
+  defp normalize_model_entry(model) when is_map(model) do
+    model
+    |> Enum.into(%{}, fn {key, value} -> {to_string(key), value} end)
+    |> Map.put("id", model_id(model))
+  end
+
+  defp normalize_model_entry(model), do: %{"id" => model_id(model)}
 
   defp model_id(%{"id" => id}) when is_binary(id), do: id
   defp model_id(%{id: id}) when is_binary(id), do: id

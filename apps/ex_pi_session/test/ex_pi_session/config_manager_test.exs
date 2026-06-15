@@ -37,7 +37,7 @@ defmodule PiSession.ConfigManagerTest do
             "api" => "openai-completions",
             "models" => [
               %{"id" => "fast"},
-              %{"id" => "smart"},
+              %{"id" => "smart", "contextWindow" => 1_000_000},
               %{"id" => "expert"}
             ]
           }
@@ -50,7 +50,11 @@ defmodule PiSession.ConfigManagerTest do
              "providers" => %{
                "openai" => %{
                  "model" => "smart",
-                 "models" => ["fast", "smart", "expert"]
+                 "models" => [
+                   %{"id" => "fast"},
+                   %{"id" => "smart", "contextWindow" => 1_000_000},
+                   %{"id" => "expert"}
+                 ]
                }
              }
            } = ConfigManager.get_config()
@@ -76,6 +80,9 @@ defmodule PiSession.ConfigManagerTest do
              "fast",
              "smart"
            ]
+
+    assert %{"contextWindow" => 1_000_000} =
+             Enum.find(saved_models["providers"]["openai"]["models"], &(&1["id"] == "smart"))
   end
 
   @tag :tmp_dir

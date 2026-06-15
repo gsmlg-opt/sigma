@@ -339,39 +339,11 @@ defmodule PiAgentTest do
   test "triggers compaction when input usage exceeds threshold" do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
-    # Pre-populate enough messages so find_compact_boundary has something to summarize
-    pre_messages =
-      Enum.flat_map(1..11, fn i ->
-        [
-          %Message{
-            id: "u#{i}",
-            role: :user,
-            content: "msg #{i}",
-            timestamp: i,
-            metadata: %{}
-          },
-          %Message{
-            id: "a#{i}",
-            role: :assistant,
-            content: [%{type: :text, text: "r#{i}"}],
-            timestamp: i,
-            usage: %{
-              input: 100,
-              output: 10,
-              cache_read: 0,
-              cache_write: 0,
-              total_tokens: 110,
-              cost: %{input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0, total: 0.0}
-            }
-          }
-        ]
-      end)
-
     {:ok, agent} =
       PiAgent.start_link(
         model: model,
         provider: CompactMockProvider,
-        messages: pre_messages
+        messages: compact_pre_messages()
       )
 
     PiAgent.subscribe(agent)
@@ -380,6 +352,29 @@ defmodule PiAgentTest do
     assert_receive {:compact, %Message{role: :compaction_summary}, _first_kept_id}, 3000
     assert_receive {:agent_end, messages}, 3000
     assert Enum.any?(messages, &(&1.role == :compaction_summary))
+  end
+
+  test "does not compact below a large model context window" do
+    model = %{
+      id: "mock-model",
+      api: "mock-api",
+      provider: "mock-provider",
+      context_window: 1_000_000
+    }
+
+    {:ok, agent} =
+      PiAgent.start_link(
+        model: model,
+        provider: CompactMockProvider,
+        messages: compact_pre_messages()
+      )
+
+    PiAgent.subscribe(agent)
+    PiAgent.prompt(agent, "Hi")
+
+    assert_receive {:agent_end, messages}, 3000
+    refute_receive {:compact, %Message{role: :compaction_summary}, _first_kept_id}, 200
+    refute Enum.any?(messages, &(&1.role == :compaction_summary))
   end
 
   test "keeps a user question pending until it is answered" do
@@ -431,5 +426,33 @@ defmodule PiAgentTest do
 
     assert :ok = PiAgent.answer_user_question(agent, question_id, {:ok, "yes"})
     assert {:ok, "yes"} = Task.await(task)
+  end
+
+  defp compact_pre_messages do
+    Enum.flat_map(1..11, fn i ->
+      [
+        %Message{
+          id: "u#{i}",
+          role: :user,
+          content: "msg #{i}",
+          timestamp: i,
+          metadata: %{}
+        },
+        %Message{
+          id: "a#{i}",
+          role: :assistant,
+          content: [%{type: :text, text: "r#{i}"}],
+          timestamp: i,
+          usage: %{
+            input: 100,
+            output: 10,
+            cache_read: 0,
+            cache_write: 0,
+            total_tokens: 110,
+            cost: %{input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0, total: 0.0}
+          }
+        }
+      ]
+    end)
   end
 end
