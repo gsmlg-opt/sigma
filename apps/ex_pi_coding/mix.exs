@@ -25,6 +25,7 @@ defmodule PiCoding.MixProject do
   defp deps do
     [
       {:ex_pi_ai, in_umbrella: true},
+      {:anubis_mcp, "~> 1.6"},
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.0"}
     ]

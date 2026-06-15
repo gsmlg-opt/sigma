@@ -51,17 +51,27 @@ defmodule PiCoding.MCPTest do
       }
     }
 
-    assert [
-             %PiCoding.MCP.Tool{
-               name: "mcp__fixture__echo",
-               description: "Echo text",
-               server_tool_name: "echo"
-             } = tool
-           ] = PiCoding.MCP.tools_for_servers(servers, timeout: 2_000)
+    session_id = "test-#{System.unique_integer([:positive])}"
+
+    assert {:ok, [tool], handles} =
+             PiCoding.MCP.start_session(session_id, servers, timeout: 5_000)
+
+    on_exit(fn -> PiCoding.MCP.stop(handles) end)
+
+    assert %PiCoding.MCP.Tool{
+             name: "mcp__fixture__echo",
+             description: "Echo text",
+             server_tool_name: "echo"
+           } = tool
 
     tool_call = %{id: "call_1", name: tool.name, arguments: %{"text" => "hello mcp"}}
 
     assert [{^tool_call, {:ok, %{content: [%{type: :text, text: "hello mcp"}]}}}] =
-             PiCoding.Dispatcher.dispatch_batch([tool_call], [tool], mode: :sequential, timeout: 2_000)
+             PiCoding.Dispatcher.dispatch_batch([tool_call], [tool],
+               mode: :sequential,
+               timeout: 5_000
+             )
+
+    assert :ok = PiCoding.MCP.stop(handles)
   end
 end

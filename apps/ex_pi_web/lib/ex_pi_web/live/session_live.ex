@@ -35,13 +35,7 @@ defmodule PiWeb.SessionLive do
       end
 
     builtin_tools = PiTools.default_tools()
-
-    mcp_tools =
-      mcp_server_ids
-      |> ConfigManager.mcp_servers_for()
-      |> PiCoding.MCP.tools_for_servers(cwd: effective_cwd)
-
-    tool_modules = builtin_tools ++ mcp_tools
+    mcp_servers = ConfigManager.mcp_servers_for(mcp_server_ids)
 
     session_context =
       SessionContext.new(
@@ -80,7 +74,8 @@ defmodule PiWeb.SessionLive do
             system_prompt: nil,
             session_context: session_context,
             on_event: on_event,
-            tools: tool_modules,
+            tools: builtin_tools,
+            mcp_servers: mcp_servers,
             messages: initial_messages,
             cwd: effective_cwd
           )
@@ -264,7 +259,16 @@ defmodule PiWeb.SessionLive do
           <div
             id="chat-input-area"
             phx-hook="ChatInputHook"
-            data-slash-commands={Jason.encode!([%{value: "/init", label: "/init", description: "Create or update AGENTS.md"}])}
+            data-slash-commands={
+              Jason.encode!([
+                %{value: "/init", label: "/init", description: "Create or update AGENTS.md"},
+                %{
+                  value: "/reload-tools",
+                  label: "/reload-tools",
+                  description: "Reconnect MCP servers and refresh their tools"
+                }
+              ])
+            }
             class="max-w-4xl mx-auto relative"
           >
             <.pending_user_questions questions={@pending_user_questions} />
@@ -1051,6 +1055,16 @@ defmodule PiWeb.SessionLive do
     else
       _ ->
         {:noreply, put_flash(socket, :error, "Unknown model selection.")}
+    end
+  end
+
+  defp handle_prompt(cmd, socket) when cmd in ["/reload-tools", "/reload_tools"] do
+    case PiAgent.reload_mcp_tools(socket.assigns.agent) do
+      {:ok, count} ->
+        {:noreply, put_flash(socket, :info, "Reloaded MCP tools (#{count} available).")}
+
+      _ ->
+        {:noreply, put_flash(socket, :error, "Failed to reload MCP tools.")}
     end
   end
 

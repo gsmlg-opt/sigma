@@ -18,6 +18,8 @@ defmodule PiAgent do
     :session_context,
     :tools,
     :provider,
+    :mcp_servers,
+    :base_tools,
     :cwd,
     :on_event,
     :dispatcher_opts,
@@ -32,7 +34,8 @@ defmodule PiAgent do
     pending_user_questions: %{},
     hook_specs: [],
     stop_hook_active: false,
-    resume_source: :startup
+    resume_source: :startup,
+    mcp_handles: []
   ]
 
   @default_user_question_timeout_ms 300_000
@@ -89,6 +92,15 @@ defmodule PiAgent do
   end
 
   @doc """
+  Restarts the session's MCP clients and re-discovers their tools.
+
+  Returns `{:ok, count}` with the number of MCP tools now available.
+  """
+  def reload_mcp_tools(pid) do
+    GenServer.call(pid, :reload_mcp_tools, 30_000)
+  end
+
+  @doc """
   Updates the model used by subsequent turns. Has no effect on the
   currently in-flight turn (the model is captured into the provider
   request at turn start).
@@ -141,6 +153,8 @@ defmodule PiAgent do
       system_prompt: opts[:system_prompt],
       session_context: opts[:session_context] || SessionContext.new(),
       tools: opts[:tools] || [],
+      base_tools: opts[:tools] || [],
+      mcp_servers: opts[:mcp_servers] || %{},
       provider: opts[:provider] || Anthropic,
       messages: opts[:messages] || [],
       cwd: cwd,
@@ -164,7 +178,7 @@ defmodule PiAgent do
 
   @impl true
   def handle_continue(:session_start, state) do
-    {:noreply, run_session_start_hook(state)}
+    {:noreply, state |> start_mcp_clients() |> run_session_start_hook()}
   end
 
   @impl true
@@ -182,12 +196,22 @@ defmodule PiAgent do
       end
     end
 
+    PiCoding.MCP.stop(state.mcp_handles)
+
     :ok
   end
 
   @impl true
   def handle_call({:subscribe, subscriber_pid}, _from, state) do
     {:reply, :ok, %{state | subscribers: [subscriber_pid | state.subscribers]}}
+  end
+
+  @impl true
+  def handle_call(:reload_mcp_tools, _from, state) do
+    PiCoding.MCP.stop(state.mcp_handles)
+    state = %{state | mcp_handles: []} |> start_mcp_clients()
+    mcp_count = length(state.tools) - length(state.base_tools)
+    {:reply, {:ok, mcp_count}, state}
   end
 
   @impl true
@@ -730,6 +754,17 @@ defmodule PiAgent do
       permission_mode: "default",
       model: state.model && Map.get(state.model, "id", "")
     }
+  end
+
+  defp start_mcp_clients(%{mcp_servers: servers} = state) when map_size(servers) == 0 do
+    %{state | tools: state.base_tools, mcp_handles: []}
+  end
+
+  defp start_mcp_clients(state) do
+    {:ok, mcp_tools, handles} =
+      PiCoding.MCP.start_session(state.session_id, state.mcp_servers, cwd: state.cwd)
+
+    %{state | tools: state.base_tools ++ mcp_tools, mcp_handles: handles}
   end
 
   defp run_session_start_hook(state) do
