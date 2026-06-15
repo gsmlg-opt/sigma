@@ -2,8 +2,49 @@ defmodule PiWeb.SessionLiveTest do
   use PiWeb.ConnCase, async: false
   import Phoenix.LiveViewTest
 
+  alias PiAgent.Message
+
   @workdir "/tmp/pi-test"
   @encoded_workdir Base.url_encode64(@workdir)
+
+  defmodule HighUsageProvider do
+    @behaviour PiAi.Provider
+
+    @impl true
+    def stream(_params) do
+      initial_msg = %{
+        role: :assistant,
+        content: [],
+        model: "mock-model",
+        provider: "mock-provider",
+        api: "mock-api",
+        usage: %{
+          input: 90_000,
+          output: 0,
+          cache_read: 0,
+          cache_write: 0,
+          total_tokens: 90_000,
+          cost: %{total: 0.0, input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0}
+        },
+        stop_reason: nil,
+        timestamp: System.system_time(:millisecond)
+      }
+
+      delta_msg = %{initial_msg | content: [%{type: :text, text: "High usage response"}]}
+
+      done_msg = %{
+        delta_msg
+        | stop_reason: :stop,
+          usage: %{delta_msg.usage | output: 1, total_tokens: 90_001}
+      }
+
+      [
+        {:start, initial_msg},
+        {:text_delta, 0, "High usage response", delta_msg},
+        {:done, :stop, done_msg}
+      ]
+    end
+  end
 
   setup do
     File.mkdir_p!(@workdir)
@@ -119,6 +160,34 @@ defmodule PiWeb.SessionLiveTest do
     end)
   end
 
+  @tag :tmp_dir
+  test "does not compact when usage fits configured model context window", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    with_agent_config(tmp_dir, fn ->
+      with_mock_provider(HighUsageProvider, fn ->
+        write_provider_configs("openai", "smart", %{
+          "openai" => [%{"id" => "smart", "contextWindow" => 1_000_000}]
+        })
+
+        session_id = unique_session_id("large-context")
+        storage_path = preload_compactable_history(session_id)
+        Phoenix.PubSub.subscribe(PiWeb.PubSub, "session:#{session_id}")
+
+        {:ok, view, _html} = live(conn, session_path(session_id))
+
+        render_submit(view, "send_prompt", %{"value" => "hello"})
+
+        assert_receive {:agent_end, _messages}, 3000
+        refute_receive {:compact, %Message{role: :compaction_summary}, _first_kept_id}, 200
+
+        assert {:ok, messages} = PiSession.Log.replay(storage_path)
+        refute Enum.any?(messages, &(&1.role == :compaction_summary))
+      end)
+    end)
+  end
+
   test "submits prompt", %{conn: conn} do
     session_id = unique_session_id("submit")
     Phoenix.PubSub.subscribe(PiWeb.PubSub, "session:#{session_id}")
@@ -196,6 +265,50 @@ defmodule PiWeb.SessionLiveTest do
     assert html =~ ~s(align="start")
     assert html =~ ~s(color="secondary")
     refute html =~ ~s(variant="filled")
+  end
+
+  test "renders message timestamps through the browser-local time hook", %{conn: conn} do
+    {:ok, view, _html} = live(conn, session_path(unique_session_id("local_time")))
+
+    message = %PiAgent.Message{
+      id: "msg_user_time",
+      role: :user,
+      content: "hello",
+      timestamp: 1_779_379_527_686
+    }
+
+    send(view.pid, {:message_start, message})
+
+    html = render(view)
+    assert html =~ ~s(id="msg_user_time-local-time")
+    assert html =~ ~s(phx-hook="LocalTime")
+    assert html =~ ~s(data-ts="1779379527686")
+  end
+
+  test "renders latest session context size below the chat box", %{conn: conn} do
+    {:ok, view, html} = live(conn, session_path(unique_session_id("context_size")))
+
+    assert html =~ ~s(id="session-context-size")
+    assert html =~ "Context: 0 tokens"
+
+    message = %PiAgent.Message{
+      id: "msg_context_size",
+      role: :assistant,
+      content: [%{type: :text, text: "done"}],
+      timestamp: 1_779_379_527_686,
+      usage: %{
+        input: 12_345,
+        output: 67,
+        cache_read: 0,
+        cache_write: 0,
+        total_tokens: 12_412,
+        cost: %{input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0, total: 0.0}
+      }
+    }
+
+    send(view.pid, {:message_end, message})
+
+    assert render(view) =~ "Context: 12,345 tokens"
   end
 
   test "renders and answers an AskUserQuestion request", %{conn: conn} do
@@ -378,6 +491,21 @@ defmodule PiWeb.SessionLiveTest do
     end
   end
 
+  defp with_mock_provider(provider_module, fun) do
+    previous = Application.get_env(:ex_pi_web, :mock_provider_module)
+    Application.put_env(:ex_pi_web, :mock_provider_module, provider_module)
+
+    try do
+      fun.()
+    after
+      if previous do
+        Application.put_env(:ex_pi_web, :mock_provider_module, previous)
+      else
+        Application.delete_env(:ex_pi_web, :mock_provider_module)
+      end
+    end
+  end
+
   defp write_provider_configs(default_provider_id, default_model, providers) do
     agent_dir = PiSession.ConfigManager.agent_dir()
     File.mkdir_p!(agent_dir)
@@ -396,11 +524,48 @@ defmodule PiWeb.SessionLiveTest do
              %{
                "name" => provider_id,
                "api" => "mock",
-               "models" => Enum.map(models, &%{"id" => &1})
+               "models" => Enum.map(models, &test_model_config/1)
              }}
           end)
       })
     )
+  end
+
+  defp test_model_config(model) when is_map(model), do: model
+  defp test_model_config(model), do: %{"id" => model}
+
+  defp preload_compactable_history(session_id) do
+    storage_path = session_storage_path(session_id)
+    File.mkdir_p!(Path.dirname(storage_path))
+
+    :ok = PiSession.Log.persist_event(storage_path, {:agent_start, @workdir})
+
+    Enum.each(1..11, fn i ->
+      :ok =
+        PiSession.Log.persist_event(
+          storage_path,
+          {:message_end, Message.user("u#{i}", "msg #{i}")}
+        )
+
+      :ok = PiSession.Log.persist_event(storage_path, {:message_end, assistant_message(i)})
+    end)
+
+    storage_path
+  end
+
+  defp session_storage_path(session_id) do
+    @workdir
+    |> PiSession.ConfigManager.sessions_dir()
+    |> Path.join("#{session_id}.jsonl")
+  end
+
+  defp assistant_message(i) do
+    %Message{
+      id: "a#{i}",
+      role: :assistant,
+      content: [%{type: :text, text: "r#{i}"}],
+      timestamp: i
+    }
   end
 
   defp option_text(option) do

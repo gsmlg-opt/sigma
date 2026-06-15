@@ -53,6 +53,8 @@ defmodule PiWeb.SessionLive do
         {:ok, socket |> put_flash(:error, reason) |> push_navigate(to: ~p"/settings")}
 
       {:ok, {provider_mod, model_id, provider_id, api_key, base_url}} ->
+        selected_agent_model = agent_model(config, provider_id, model_id)
+
         if connected?(socket) do
           Phoenix.PubSub.subscribe(PiWeb.PubSub, "session:#{session_id}")
           Phoenix.PubSub.subscribe(PiWeb.PubSub, "ex_pi:logs:#{session_id}")
@@ -68,7 +70,7 @@ defmodule PiWeb.SessionLive do
 
         {:ok, runtime_session} =
           PiAgent.Runtime.get_session(workdir, session_id,
-            model: %{id: model_id, api: provider_id, provider: provider_id},
+            model: selected_agent_model,
             provider: provider_mod,
             options: [api_key: api_key, base_url: base_url],
             system_prompt: nil,
@@ -113,6 +115,8 @@ defmodule PiWeb.SessionLive do
           |> assign(:current_model, model_id)
           |> assign(:current_model_value, current_model_value)
           |> assign(:model_options, ensure_model_option(model_options, provider_id, model_id))
+          |> assign(:context_token_count, latest_context_token_count(initial_messages))
+          |> assign(:context_window, model_context_window(selected_agent_model))
           |> assign(:pending_user_questions, pending_user_questions)
           |> assign(:logs_available, true)
           |> assign(:mcp_server_ids, mcp_server_ids)
@@ -316,6 +320,9 @@ defmodule PiWeb.SessionLive do
               <span :if={@active_provider_id != nil} class="opacity-40 font-mono">
                 Provider: {@active_provider_id}
               </span>
+              <span id="session-context-size" class="opacity-40 font-mono">
+                Context: {format_context_size(@context_token_count, @context_window)}
+              </span>
               <p class="opacity-60 text-right ml-auto">
                 π is an AI agent. Review its work carefully.
               </p>
@@ -501,9 +508,10 @@ defmodule PiWeb.SessionLive do
       color="secondary"
       avatar="You"
       author="You"
-      time={format_timestamp(@message.timestamp)}
       content={user_content(@message.content)}
-    />
+    >
+      <:header><.local_time id={@message.id} timestamp={@message.timestamp} /></:header>
+    </.dm_chat>
     """
   end
 
@@ -522,9 +530,10 @@ defmodule PiWeb.SessionLive do
       align="start"
       avatar="π"
       author="π"
-      time={format_timestamp(@message.timestamp)}
       streaming={@message.id == @streaming_message_id}
     >
+      <:header><.local_time id={@message.id} timestamp={@message.timestamp} /></:header>
+
       <%!-- Reasoning block; tool calls shown inside via the tools slot --%>
       <.dm_chat_reasoning :if={@thinking} summary="Reasoning">
         {@thinking.thinking}
@@ -590,13 +599,30 @@ defmodule PiWeb.SessionLive do
       align="start"
       avatar="∑"
       author="Summary"
-      time={format_timestamp(@message.timestamp)}
       content={@message.summary || "Context compacted."}
-    />
+    >
+      <:header><.local_time id={@message.id} timestamp={@message.timestamp} /></:header>
+    </.dm_chat>
     """
   end
 
   defp message_bubble(assigns), do: ~H""
+
+  defp local_time(assigns) do
+    assigns = assign(assigns, :dom_id, "#{assigns.id}-local-time")
+
+    ~H"""
+    <span
+      :if={is_integer(@timestamp)}
+      id={@dom_id}
+      phx-hook="LocalTime"
+      data-ts={@timestamp}
+      class="ml-2 font-mono text-[10px] opacity-50"
+    >
+      {format_timestamp(@timestamp)}
+    </span>
+    """
+  end
 
   defp user_content(content) when is_binary(content), do: content
 
@@ -677,6 +703,61 @@ defmodule PiWeb.SessionLive do
 
   defp format_timestamp(_), do: ""
 
+  defp latest_context_token_count(messages) do
+    messages
+    |> Enum.reverse()
+    |> Enum.find_value(0, &message_context_token_count/1)
+  end
+
+  defp message_context_token_count(%{role: :assistant, usage: usage}) when is_map(usage) do
+    non_negative_integer(Map.get(usage, :input) || Map.get(usage, "input"))
+  end
+
+  defp message_context_token_count(_message), do: nil
+
+  defp assign_context_token_count(socket, message) do
+    case message_context_token_count(message) do
+      nil -> socket
+      count -> assign(socket, :context_token_count, count)
+    end
+  end
+
+  defp format_context_size(count, nil),
+    do: "#{format_integer(non_negative_integer(count) || 0)} tokens"
+
+  defp format_context_size(count, context_window) do
+    "#{format_integer(non_negative_integer(count) || 0)} / #{format_integer(context_window)} tokens"
+  end
+
+  defp format_integer(value) when is_integer(value) do
+    value
+    |> Integer.to_string()
+    |> String.graphemes()
+    |> Enum.reverse()
+    |> Enum.chunk_every(3)
+    |> Enum.map(&Enum.reverse/1)
+    |> Enum.reverse()
+    |> Enum.map_join(",", &Enum.join/1)
+  end
+
+  defp non_negative_integer(value) when is_integer(value) and value >= 0, do: value
+
+  defp non_negative_integer(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {number, ""} when number >= 0 -> number
+      _ -> nil
+    end
+  end
+
+  defp non_negative_integer(_value), do: nil
+
+  defp positive_integer(value) do
+    case non_negative_integer(value) do
+      number when is_integer(number) and number > 0 -> number
+      _ -> nil
+    end
+  end
+
   defp model_options(system_config, active_provider_id) do
     system_config
     |> Map.get("providers", %{})
@@ -720,6 +801,46 @@ defmodule PiWeb.SessionLive do
   defp model_option_value(provider_id, model_id) do
     Jason.encode!(%{"provider_id" => provider_id, "model_id" => model_id})
   end
+
+  defp agent_model(provider_config, provider_id, model_id) do
+    metadata =
+      provider_config
+      |> Map.get("models", [])
+      |> List.wrap()
+      |> Enum.find(%{}, &(to_model_id(&1) == model_id))
+
+    metadata =
+      case metadata do
+        model when is_map(model) -> model
+        _ -> %{}
+      end
+
+    Map.merge(metadata, %{id: model_id, api: provider_id, provider: provider_id})
+  end
+
+  defp model_context_window(model) when is_map(model) do
+    [
+      :context_window,
+      "context_window",
+      :contextWindow,
+      "contextWindow",
+      :context_length,
+      "context_length",
+      :contextLength,
+      "contextLength",
+      :max_context_tokens,
+      "max_context_tokens",
+      :maxContextTokens,
+      "maxContextTokens",
+      :input_token_limit,
+      "input_token_limit",
+      :inputTokenLimit,
+      "inputTokenLimit"
+    ]
+    |> Enum.find_value(fn key -> positive_integer(Map.get(model, key)) end)
+  end
+
+  defp model_context_window(_model), do: nil
 
   defp parse_model_option_value(value) when is_binary(value) do
     case Jason.decode(value) do
@@ -1033,12 +1154,13 @@ defmodule PiWeb.SessionLive do
          provider_config when is_map(provider_config) <-
            get_in(config, ["providers", provider_id]),
          selected_config = Map.put(provider_config, "model", model_id),
+         selected_agent_model = agent_model(selected_config, provider_id, model_id),
          {:ok, {provider_mod, _model_id, _provider_id, api_key, base_url}} <-
            resolve_provider(selected_config) do
       PiAgent.set_provider(
         socket.assigns.agent,
         provider_mod,
-        %{id: model_id, api: provider_id, provider: provider_id},
+        selected_agent_model,
         api_key: api_key,
         base_url: base_url
       )
@@ -1050,7 +1172,8 @@ defmodule PiWeb.SessionLive do
        assign(socket,
          active_provider_id: provider_id,
          current_model: model_id,
-         current_model_value: selected
+         current_model_value: selected,
+         context_window: model_context_window(selected_agent_model)
        )}
     else
       _ ->
@@ -1240,6 +1363,17 @@ defmodule PiWeb.SessionLive do
       socket
       |> stream_insert(:messages, message)
       |> assign(:tool_call_to_msg, new_tc_map)
+      |> assign_context_token_count(message)
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_info({:message_end, %{role: :assistant} = message}, socket) do
+    socket =
+      socket
+      |> stream_insert(:messages, message)
+      |> assign_context_token_count(message)
 
     {:noreply, socket}
   end
