@@ -84,6 +84,14 @@ defmodule PiWeb.SessionLive do
 
         agent = runtime_session.agent
 
+        PiAgent.set_provider(
+          agent,
+          provider_mod,
+          selected_agent_model,
+          api_key: api_key,
+          base_url: base_url
+        )
+
         agent_ref = if connected?(socket), do: Process.monitor(agent), else: nil
 
         pending_user_questions = PiAgent.pending_user_questions(agent)

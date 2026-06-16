@@ -86,6 +86,44 @@ defmodule PiSession.ConfigManagerTest do
   end
 
   @tag :tmp_dir
+  test "enriches known bare model ids with output token metadata" do
+    File.mkdir_p!(ConfigManager.agent_dir())
+
+    File.write!(
+      Path.join(ConfigManager.agent_dir(), "settings.json"),
+      Jason.encode!(%{"defaultProvider" => "minimax", "defaultModel" => "MiniMax-M3"})
+    )
+
+    File.write!(
+      Path.join(ConfigManager.agent_dir(), "models.json"),
+      Jason.encode!(%{
+        "providers" => %{
+          "minimax" => %{
+            "name" => "MiniMax",
+            "api" => "anthropic-messages",
+            "models" => [
+              %{"id" => "MiniMax-M3"},
+              %{"id" => "MiniMax-M2.7", "maxTokens" => 64_000}
+            ]
+          }
+        }
+      })
+    )
+
+    %{
+      "providers" => %{
+        "minimax" => %{"models" => models}
+      }
+    } = ConfigManager.get_config()
+
+    assert %{"contextWindow" => 512_000, "maxTokens" => 128_000} =
+             Enum.find(models, &(&1["id"] == "MiniMax-M3"))
+
+    assert %{"contextWindow" => 204_800, "maxTokens" => 64_000} =
+             Enum.find(models, &(&1["id"] == "MiniMax-M2.7"))
+  end
+
+  @tag :tmp_dir
   test "persists inactive provider current model as first configured model" do
     File.mkdir_p!(ConfigManager.agent_dir())
 

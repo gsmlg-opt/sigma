@@ -14,6 +14,15 @@ defmodule PiSession.ConfigManager do
   @credential_ref_regex ~r/^\{\{credential:([^}]+)\}\}$/
 
   @default_system_prompt ""
+  @known_model_metadata %{
+    "MiniMax-M3" => %{"contextWindow" => 512_000, "maxTokens" => 128_000},
+    "MiniMax-M2.7" => %{"contextWindow" => 204_800, "maxTokens" => 131_072},
+    "deepseek-v4-flash" => %{"contextWindow" => 1_000_000, "maxTokens" => 384_000},
+    "deepseek-v4-pro" => %{"contextWindow" => 1_000_000, "maxTokens" => 384_000},
+    "GLM-5.1" => %{"contextWindow" => 202_752, "maxTokens" => 65_536},
+    "claude-3-5-sonnet-latest" => %{"contextWindow" => 200_000, "maxTokens" => 8_192},
+    "claude-3-5-sonnet-20241022" => %{"contextWindow" => 200_000, "maxTokens" => 8_192}
+  }
 
   def get_config do
     settings = load_json(@settings_file, %{})
@@ -301,12 +310,24 @@ defmodule PiSession.ConfigManager do
   end
 
   defp normalize_model_entry(model) when is_map(model) do
-    model
-    |> Enum.into(%{}, fn {key, value} -> {to_string(key), value} end)
-    |> Map.put("id", model_id(model))
+    string_model = Enum.into(model, %{}, fn {key, value} -> {to_string(key), value} end)
+    id = model_id(model)
+
+    id
+    |> known_model_metadata()
+    |> Map.merge(string_model)
+    |> Map.put("id", id)
   end
 
-  defp normalize_model_entry(model), do: %{"id" => model_id(model)}
+  defp normalize_model_entry(model) do
+    id = model_id(model)
+
+    id
+    |> known_model_metadata()
+    |> Map.put("id", id)
+  end
+
+  defp known_model_metadata(id), do: Map.get(@known_model_metadata, id, %{})
 
   defp model_id(%{"id" => id}) when is_binary(id), do: id
   defp model_id(%{id: id}) when is_binary(id), do: id
