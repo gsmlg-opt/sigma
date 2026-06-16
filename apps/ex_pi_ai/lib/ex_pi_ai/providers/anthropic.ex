@@ -21,7 +21,7 @@ defmodule PiAi.Providers.Anthropic do
       %{
         model: model.id,
         messages: transform_messages(context.messages),
-        max_tokens: options[:max_tokens] || 4096,
+        max_tokens: output_token_limit(model, options),
         stream: true
       }
       |> maybe_put(:system, system)
@@ -153,24 +153,11 @@ defmodule PiAi.Providers.Anthropic do
   defp handle_async_message(resp, req_message, message, buffer) do
     case Req.parse_message(resp, req_message) do
       {:ok, chunks} ->
-        Enum.reduce(chunks, {[], message, buffer, :streaming}, fn
-          {:data, chunk}, {acc_events, acc_message, acc_buffer, _status} ->
-            {events, new_buffer} = Stream.decode(acc_buffer, chunk)
-            {processed_events, new_message} = process_events(events, acc_message)
-
-            status =
-              if Enum.any?(processed_events, &match?({:done, _, _}, &1)),
-                do: :done,
-                else: :streaming
-
-            {acc_events ++ processed_events, new_message, new_buffer, status}
-
-          :done, {acc_events, acc_message, acc_buffer, _status} ->
-            {acc_events, acc_message, acc_buffer, :done}
-
-          _chunk, acc ->
-            acc
-        end)
+        if resp.status >= 400 do
+          handle_error_chunks(resp, chunks, message, buffer)
+        else
+          handle_stream_chunks(chunks, message, buffer)
+        end
 
       {:error, %{reason: reason}} ->
         raise transport_error_message(%{reason: reason})
@@ -178,6 +165,40 @@ defmodule PiAi.Providers.Anthropic do
       :unknown ->
         {[], message, buffer, :streaming}
     end
+  end
+
+  defp handle_stream_chunks(chunks, message, buffer) do
+    Enum.reduce(chunks, {[], message, buffer, :streaming}, fn
+      {:data, chunk}, {acc_events, acc_message, acc_buffer, _status} ->
+        {events, new_buffer} = Stream.decode(acc_buffer, chunk)
+        {processed_events, new_message} = process_events(events, acc_message)
+
+        status =
+          if Enum.any?(processed_events, &match?({:done, _, _}, &1)),
+            do: :done,
+            else: :streaming
+
+        {acc_events ++ processed_events, new_message, new_buffer, status}
+
+      :done, {acc_events, acc_message, acc_buffer, _status} ->
+        {acc_events, acc_message, acc_buffer, :done}
+
+      _chunk, acc ->
+        acc
+    end)
+  end
+
+  defp handle_error_chunks(resp, chunks, message, buffer) do
+    Enum.reduce(chunks, {[], message, buffer, :streaming}, fn
+      {:data, chunk}, {acc_events, acc_message, acc_buffer, _status} ->
+        {acc_events, acc_message, acc_buffer <> chunk, :streaming}
+
+      :done, {_acc_events, _acc_message, acc_buffer, _status} ->
+        raise http_error_message(resp.status, acc_buffer)
+
+      _chunk, acc ->
+        acc
+    end)
   end
 
   defp _initial_assistant_message(model) do
@@ -301,6 +322,44 @@ defmodule PiAi.Providers.Anthropic do
   end
 
   defp transform_cache_control(_cache_control), do: nil
+
+  defp output_token_limit(model, options) do
+    positive_integer(options[:max_tokens]) ||
+      positive_integer(options[:maxTokens]) ||
+      model_max_tokens(model) ||
+      4096
+  end
+
+  defp model_max_tokens(model) when is_map(model) do
+    [
+      :max_tokens,
+      "max_tokens",
+      :maxTokens,
+      "maxTokens",
+      :max_output_tokens,
+      "max_output_tokens",
+      :maxOutputTokens,
+      "maxOutputTokens",
+      :output_token_limit,
+      "output_token_limit",
+      :outputTokenLimit,
+      "outputTokenLimit"
+    ]
+    |> Enum.find_value(fn key -> positive_integer(Map.get(model, key)) end)
+  end
+
+  defp model_max_tokens(_model), do: nil
+
+  defp positive_integer(value) when is_integer(value) and value > 0, do: value
+
+  defp positive_integer(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {number, ""} when number > 0 -> number
+      _ -> nil
+    end
+  end
+
+  defp positive_integer(_value), do: nil
 
   defp transform_tools([]), do: []
 
@@ -521,4 +580,17 @@ defmodule PiAi.Providers.Anthropic do
   end
 
   defp provider_error_message(error), do: "AI provider error: #{inspect(error)}"
+
+  defp http_error_message(status, body) do
+    case Jason.decode(body) do
+      {:ok, %{"error" => error}} ->
+        provider_error_message(error)
+
+      {:ok, error} ->
+        provider_error_message(error)
+
+      {:error, _} ->
+        "AI provider HTTP #{status}: #{String.slice(String.trim(body), 0, 500)}"
+    end
+  end
 end
