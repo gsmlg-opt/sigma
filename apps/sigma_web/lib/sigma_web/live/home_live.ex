@@ -50,7 +50,7 @@ defmodule Sigma.Web.HomeLive do
         <.dm_mdi name="folder-open-outline" class="w-16 h-12 mx-auto text-on-surface-variant mb-4 opacity-40" />
         <h3 class="text-2xl font-semibold text-on-surface">No repositories added</h3>
         <p class="text-on-surface-variant mt-2 max-w-sm mx-auto">
-          Add your first project directory to begin collaborating with π.
+          Add your first project directory to begin collaborating with ∑.
         </p>
         <.dm_link navigate={~p"/repository/new"} class="btn btn-primary btn-lg mt-8" id="add-first-repo-btn">
           <.dm_mdi name="plus" class="w-5 h-5" />
@@ -169,7 +169,7 @@ defmodule Sigma.Web.HomeLive do
             <.dm_mdi name="lightbulb-outline" class="w-8 h-8 text-warning mb-4" />
             <h3 class="font-bold text-lg mb-2">Multi-Turn Reasoner</h3>
             <p class="text-on-surface-variant text-sm leading-relaxed">
-              π thinks in steps, explains its plan, and iterates until the task is complete.
+              ∑ thinks in steps, explains its plan, and iterates until the task is complete.
             </p>
           </div>
         </.dm_card>

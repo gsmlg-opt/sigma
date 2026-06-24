@@ -51,7 +51,7 @@ defmodule Sigma.Web.RepositoryLive do
             <.dm_mdi name="message-off-outline" class="w-12 h-12 mx-auto text-on-surface-variant mb-4 opacity-40" />
             <h3 class="text-xl font-semibold text-on-surface">No sessions yet</h3>
             <p class="text-on-surface-variant mt-2 max-w-sm mx-auto">
-              Start your first session to begin collaborating with π on this project.
+              Start your first session to begin collaborating with ∑ on this project.
             </p>
             <.dm_btn
               id="start-first-session-btn"

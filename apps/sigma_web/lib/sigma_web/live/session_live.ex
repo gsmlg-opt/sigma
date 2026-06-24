@@ -307,7 +307,7 @@ defmodule Sigma.Web.SessionLive do
               <.dm_chat_input
                 id="prompt-input"
                 phx-update="ignore"
-                placeholder="Ask π anything… (⌘/Ctrl+Enter to send)"
+                placeholder="Ask ∑ anything… (⌘/Ctrl+Enter to send)"
                 disabled={@turn_in_flight}
                 clear_on_send={true}
                 duskmoon-send-send="send_prompt"
@@ -337,7 +337,7 @@ defmodule Sigma.Web.SessionLive do
                 Context: {format_context_size(@context_token_count, @context_window)}
               </span>
               <p class="opacity-60 text-right ml-auto">
-                π is an AI agent. Review its work carefully.
+                ∑ is an AI agent. Review its work carefully.
               </p>
             </div>
           </div>
@@ -541,8 +541,8 @@ defmodule Sigma.Web.SessionLive do
     <.dm_chat
       id={@message.id}
       align="start"
-      avatar="π"
-      author="π"
+      avatar="∑"
+      author="∑"
       streaming={@message.id == @streaming_message_id}
     >
       <:header><.local_time id={@message.id} timestamp={@message.timestamp} /></:header>

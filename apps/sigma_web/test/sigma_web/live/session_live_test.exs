@@ -65,7 +65,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
   test "renders session page", %{conn: conn} do
     {:ok, _view, html} = live(conn, session_path(unique_session_id("render")))
-    assert html =~ "Ask π anything"
+    assert html =~ "Ask ∑ anything"
     assert html =~ "⌘/Ctrl+Enter to send"
     assert html =~ ~s(id="prompt-input")
     assert html =~ ~s(phx-hook="ChatInputHook")
