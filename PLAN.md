@@ -1,40 +1,40 @@
-# ex_pi Implementation Plan
+# sigma Implementation Plan
 
 ## Decision log
 
-### Stage 1 — ex_pi_ai
+### Stage 1 — sigma_ai
 
 - **How does Anthropic vs OpenAI differ in tool-call streaming? How did Compat absorb that?**
-  Anthropic uses a structured event stream with `message_start`, `content_block_start`, `content_block_delta`, etc. Tool calls are emitted as specific content blocks (`tool_use`). OpenAI uses a flatter stream of chunks where `tool_calls` appear as deltas in the `choices` list. The `PiAi.Stream` pure reducer absorbs these differences by providing raw JSON chunks to the provider implementation, which then maps them to a unified `StreamEvent` set.
+  Anthropic uses a structured event stream with `message_start`, `content_block_start`, `content_block_delta`, etc. Tool calls are emitted as specific content blocks (`tool_use`). OpenAI uses a flatter stream of chunks where `tool_calls` appear as deltas in the `choices` list. The `Sigma.Ai.Stream` pure reducer absorbs these differences by providing raw JSON chunks to the provider implementation, which then maps them to a unified `StreamEvent` set.
 
 - **Why is `Stream` pure rather than a process? What would break if it became a `GenStage`?**
-  Keeping the SSE decoder (`PiAi.Stream`) as a pure reducer makes it easier to test and reason about. It doesn't hold state beyond the buffer needed to complete SSE frames. If it were a `GenStage` or a separate process, it would introduce asynchronous boundaries and state management complexity (e.g. process monitoring, backpressure) that are not needed for simple protocol parsing. A pure function is also more portable across different execution contexts (e.g. testing with fixtures).
+  Keeping the SSE decoder (`Sigma.Ai.Stream`) as a pure reducer makes it easier to test and reason about. It doesn't hold state beyond the buffer needed to complete SSE frames. If it were a `GenStage` or a separate process, it would introduce asynchronous boundaries and state management complexity (e.g. process monitoring, backpressure) that are not needed for simple protocol parsing. A pure function is also more portable across different execution contexts (e.g. testing with fixtures).
 
-### Stage 2 — ex_pi_agent
+### Stage 2 — sigma_agent
 
 - **Why two message types? What would collapsing them break?**
-  We have `PiAi.Message` (wire format) and `PiAgent.Message` (rich domain format). Collapsing them would force the wire format to carry agent-specific state like UI metadata, internal thoughts, or redaction flags that the LLM shouldn't see. By keeping them separate, `PiAi` remains a clean wrapper around external APIs, while `PiAgent` can evolve to support complex UI requirements (like attachments or branch summaries) without cluttering the provider logic.
+  We have `Sigma.Ai.Message` (wire format) and `Sigma.Agent.Message` (rich domain format). Collapsing them would force the wire format to carry agent-specific state like UI metadata, internal thoughts, or redaction flags that the LLM shouldn't see. By keeping them separate, `Sigma.Ai` remains a clean wrapper around external APIs, while `Sigma.Agent` can evolve to support complex UI requirements (like attachments or branch summaries) without cluttering the provider logic.
 
 - **Where exactly does `transform_context` sit in the pipeline, and why there?**
-  `transform_context` sits at the very beginning of the per-turn pipeline, acting on `PiAgent.Message` structures before they are converted to the wire format (`convert_to_llm`). This placement is critical because it allows the agent to make high-level decisions about the conversation history—such as pruning old messages or injecting system prompts—using the rich domain types. Once converted to the wire format, this context is lost, so all architectural steering must happen at the Agent level.
+  `transform_context` sits at the very beginning of the per-turn pipeline, acting on `Sigma.Agent.Message` structures before they are converted to the wire format (`convert_to_llm`). This placement is critical because it allows the agent to make high-level decisions about the conversation history—such as pruning old messages or injecting system prompts—using the rich domain types. Once converted to the wire format, this context is lost, so all architectural steering must happen at the Agent level.
 
-### Stage 3 — ex_pi_session
+### Stage 3 — sigma_session
 
 - **Why is the log the source of truth, and the PubSub bus *derived*?**
-  The log represents the permanent, on-disk history of the session. By making it the source of truth, we ensure that any process (an agent, a UI, or a secondary analysis tool) can reconstruct the exact state of the conversation at any time, even after a total system crash. The PubSub bus (or direct messaging in our `PiAgent`) is a ephemeral mechanism for live updates. If we made the bus the source of truth, we would lose state as soon as processes exited or crashed. Replaying from the log is the only way to achieve durability and "time-travel" (branching).
+  The log represents the permanent, on-disk history of the session. By making it the source of truth, we ensure that any process (an agent, a UI, or a secondary analysis tool) can reconstruct the exact state of the conversation at any time, even after a total system crash. The PubSub bus (or direct messaging in our `Sigma.Agent`) is a ephemeral mechanism for live updates. If we made the bus the source of truth, we would lose state as soon as processes exited or crashed. Replaying from the log is the only way to achieve durability and "time-travel" (branching).
 
 - **What is the on-disk layout? What alternative was considered, and what made you reject it?**
   We used a JSONL (JSON Lines) layout where each session is a single file, organized by the project's working directory. Each line is a discrete entry (session header, message, compaction, etc.). We considered using a relational database (like SQLite), but rejected it because JSONL is human-readable, easily grep-able, and maps perfectly to an append-only event log. It also makes "forking" a session as simple as copying the file and updating the header, whereas a relational schema would require complex row-level copying and parent-link management.
 
-### Stage 4 — ex_pi_coding
+### Stage 4 — sigma_coding
 
 - **Where does the cwd escape check live, and why there rather than the dispatcher?**
-  The escape check lives in the tool itself (via `PiCoding.Utils.PathUtils`), following a "defense in depth" strategy. While a dispatcher could perform a global check, different tools might have different path resolution requirements (e.g., a tool that allowed reading from `/tmp` but not from the project root). By placing the check in the tool, we ensure that every tool is responsible for its own security boundary, making the system more robust against bypasses if new tools are added or the dispatcher is refactored.
+  The escape check lives in the tool itself (via `Sigma.Coding.Utils.PathUtils`), following a "defense in depth" strategy. While a dispatcher could perform a global check, different tools might have different path resolution requirements (e.g., a tool that allowed reading from `/tmp` but not from the project root). By placing the check in the tool, we ensure that every tool is responsible for its own security boundary, making the system more robust against bypasses if new tools are added or the dispatcher is refactored.
 
 - **What happens to a running tool when steering arrives? Why?**
-  In our current implementation, a steering message (new user prompt) doesn't automatically kill running tools, but the `PiAgent` loop can be extended to handle `signal` based cancellation. In the original `pi` design, steering allows the user to intervene while a long-running tool (like `bash`) is executing. By using Elixir's `Task` and `Port` for tools, we can easily send a signal to a specific tool process without crashing the entire agent, allowing for graceful termination or mid-execution steering.
+  In our current implementation, a steering message (new user prompt) doesn't automatically kill running tools, but the `Sigma.Agent` loop can be extended to handle `signal` based cancellation. In the original `pi` design, steering allows the user to intervene while a long-running tool (like `bash`) is executing. By using Elixir's `Task` and `Port` for tools, we can easily send a signal to a specific tool process without crashing the entire agent, allowing for graceful termination or mid-execution steering.
 
-### Stage 5 — ex_pi_web
+### Stage 5 — sigma_web
 
 - **What in the TUI did not translate, and what did the redesign teach you?**
   The TUI's synchronous prompt handling and manual layout management were replaced by Phoenix LiveView's event-driven updates and declarative HTML templates. The redesign taught me that many complex TUI behaviors (like real-time token streaming and modal dialogs) are much simpler to implement in Elixir/LiveView because the framework handles the process state synchronization and DOM diffing automatically. The transition from "rendering terminal cells" to "streaming content blocks" makes the code more resilient and easier to maintain.
@@ -56,7 +56,7 @@
   Picked `Task.Supervisor.async_nolink` (Option 1). The turn is effectively a one-shot computation that emits events via a captured closure and returns the final messages list. It has no stateful needs beyond what is captured at spawn time. A `DynamicSupervisor`-per-turn would be needed only if the turn itself had to supervise sub-processes with different restart strategies, or if we needed named access to a running turn from outside the agent — neither is the case. The switch trigger: if we ever need to restart a crashed sub-turn-step independently, or if the turn needs to store mutable intermediate state in a GenServer that other processes can query.
 
 - **A.1: What happens to in-flight tool results when cancel arrives mid-tool — discard, log, or keep?**
-  Discard. When the turn task is killed with `:brutal_kill`, the Dispatcher tasks (running under `PiCoding.Dispatcher.TaskSupervisor`) continue running briefly. The bash tool monitors the turn task PID (the `signal` in opts) and self-aborts via `Process.monitor` + `:DOWN` detection. Results from any Dispatcher tasks that complete after the kill are sent to the dead turn task's mailbox and silently dropped by the BEAM. The agent's `messages` field is never updated (the `handle_info({ref, _})` guard only matches the current task's ref, which was cleared by the kill). This means partial results from multi-tool turns are fully discarded, which is correct — they cannot be safely spliced into the conversation without the corresponding assistant message that requested them.
+  Discard. When the turn task is killed with `:brutal_kill`, the Dispatcher tasks (running under `Sigma.Coding.Dispatcher.TaskSupervisor`) continue running briefly. The bash tool monitors the turn task PID (the `signal` in opts) and self-aborts via `Process.monitor` + `:DOWN` detection. Results from any Dispatcher tasks that complete after the kill are sent to the dead turn task's mailbox and silently dropped by the BEAM. The agent's `messages` field is never updated (the `handle_info({ref, _})` guard only matches the current task's ref, which was cleared by the kill). This means partial results from multi-tool turns are fully discarded, which is correct — they cannot be safely spliced into the conversation without the corresponding assistant message that requested them.
 
 - **A.2: Where does crash isolation live — agent, supervisor, or LiveView?**
   All three layers play a role, but each owns a distinct failure mode. (1) The agent turn task uses `async_nolink` so any provider exception crashes only the task, never the GenServer. `run_stream/2` rescues `RuntimeError` and `Jason.DecodeError`, emits `{:turn_error}` with a human-readable message, and returns `{:error, state}` so the turn task exits cleanly — the agent immediately accepts new prompts. (2) The `DynamicSupervisor` holds agents with `:temporary` restart — a killed agent is not restarted, so `SessionManager` evicts it on `:DOWN` and lets the next `get_agent/2` call start a fresh one. No domino effect on sibling sessions. (3) The LiveView calls `Process.monitor(agent)` after getting the PID and handles the `:DOWN` message by showing a flash error (session history on disk is untouched). The LiveView itself never crashes.
@@ -65,10 +65,10 @@
   Letting the task crash works for isolation (the agent survives via `async_nolink`), but produces a raw exception reason in the `:DOWN` message that the agent's `handle_info` re-emits verbatim as `{:turn_error, reason}`. A rescue lets us convert the exception to a clean, user-readable string before emitting. It also allows the turn task to exit normally (`:normal` reason), which prevents the `:DOWN` handler from double-emitting `{:turn_error}`. The trade-off: we only rescue two known exception types; unexpected panics still propagate and are caught by the `:DOWN` path with their raw reason.
 
 - **A.4: Should agent processes restart on crash — and who owns the policy lifecycle?**
-  Agents use `restart: :temporary` (added via `child_spec/1` override on `PiAgent`). The `DynamicSupervisor` default is `:permanent`, which would restart a crashed agent with its original `init` opts — at that point the `on_event` closure points at a dead LiveView process and the `messages` list is frozen at session-start. Temporary restart means the agent stays dead, `SessionManager` evicts it on `:DOWN`, and the LiveView shows a crash banner with the history preserved on disk. The `PermissionPolicy` GenServer is started with `start_link` inside `PiAgent.init`, so OTP links them — the policy is automatically killed when the agent is killed and never outlives its session.
+  Agents use `restart: :temporary` (added via `child_spec/1` override on `Sigma.Agent`). The `DynamicSupervisor` default is `:permanent`, which would restart a crashed agent with its original `init` opts — at that point the `on_event` closure points at a dead LiveView process and the `messages` list is frozen at session-start. Temporary restart means the agent stays dead, `SessionManager` evicts it on `:DOWN`, and the LiveView shows a crash banner with the history preserved on disk. The `PermissionPolicy` GenServer is started with `start_link` inside `Sigma.Agent.init`, so OTP links them — the policy is automatically killed when the agent is killed and never outlives its session.
 
 - **A.3: Where should per-tool permission defaults live — code or config?**
-  Config. The hardcoded `default_permissions/0` in `PiAgent` was a temporary fallback that couldn't be changed without recompiling. Moving defaults to `settings.json` (via `ConfigManager.get_permissions/0`) lets non-technical users change the policy from the Settings UI without touching code. The rules map is loaded at mount time in `SessionLive` and passed as `permission_rules:` to the agent — each session gets a fresh `PermissionPolicy` GenServer initialized from the current saved defaults. The format on disk is string-valued (`"allow"`, `"ask"`, `"deny"`) to keep the JSON human-readable; conversion to atoms happens in `get_permissions/0` using `String.to_existing_atom/1`, which is safe because the allowed values are a closed set of known atoms.
+  Config. The hardcoded `default_permissions/0` in `Sigma.Agent` was a temporary fallback that couldn't be changed without recompiling. Moving defaults to `settings.json` (via `ConfigManager.get_permissions/0`) lets non-technical users change the policy from the Settings UI without touching code. The rules map is loaded at mount time in `SessionLive` and passed as `permission_rules:` to the agent — each session gets a fresh `PermissionPolicy` GenServer initialized from the current saved defaults. The format on disk is string-valued (`"allow"`, `"ask"`, `"deny"`) to keep the JSON human-readable; conversion to atoms happens in `get_permissions/0` using `String.to_existing_atom/1`, which is safe because the allowed values are a closed set of known atoms.
 
 - **A.5c: Does `Log.fork` count message entries or raw entry positions?**
   Message entries only. The original `Enum.take(entries, index + 1)` counted by raw position — correct only when the log contains no entries between messages (no compaction, no future entry types). The fix is `take_through_nth_message/2`, which walks the entries list accumulating all non-message entries unconditionally but stops after seeing `n` message entries. The companion `fork_at_message/5` accepts either a message ID or `:all`; it computes the count by scanning message entries before the target ID, adding 1 to include it. The per-message fork button in `SessionLive` calls `fork_at` with `phx-value-msg-id`, keeping the LiveView handler trivially thin. The "fork all" button now also routes through `fork_at_message(…, :all, …)` so both paths share the same counting logic.
@@ -112,7 +112,7 @@
 ### Phase H — URL fetch tool
 
 - **H.1: Should url_fetch have its own permission category in Settings, or inherit the unlisted-tool default?**
-  Inherit the default (`:allow`). Fetching a URL is read-only and reversible — the same risk profile as `read`. A "Network" permission category in Settings would need new UI tabs, new settings.json fields, and new `permission_rules` parsing keys. The simpler path is correct here, and it also surfaces a regression: the YOLO commit (`cf6b20f`) set `default: :allow` on the `PermissionPolicy` GenServer, but when policy creation moved from `SessionLive` into `PiAgent.init` the `default:` key was omitted, silently reverting unlisted tools (glob, grep, ls) to `:ask`. The fix is one word: pass `default: :allow` in `PermissionPolicy.start_link`. `url_fetch` uses `Req.get/2` (already a dependency) with a 30-second timeout and a 50K-character output cap. HTML is stripped in-process with a regex pass (style/script blocks first, then all tags) and entity-decoded; no new dependencies are needed. Truncation is signalled both in the returned text (`(truncated)` suffix) and in `details.truncated`.
+  Inherit the default (`:allow`). Fetching a URL is read-only and reversible — the same risk profile as `read`. A "Network" permission category in Settings would need new UI tabs, new settings.json fields, and new `permission_rules` parsing keys. The simpler path is correct here, and it also surfaces a regression: the YOLO commit (`cf6b20f`) set `default: :allow` on the `PermissionPolicy` GenServer, but when policy creation moved from `SessionLive` into `Sigma.Agent.init` the `default:` key was omitted, silently reverting unlisted tools (glob, grep, ls) to `:ask`. The fix is one word: pass `default: :allow` in `PermissionPolicy.start_link`. `url_fetch` uses `Req.get/2` (already a dependency) with a 30-second timeout and a 50K-character output cap. HTML is stripped in-process with a regex pass (style/script blocks first, then all tags) and entity-decoded; no new dependencies are needed. Truncation is signalled both in the returned text (`(truncated)` suffix) and in `details.truncated`.
 
 ### Phase G — Prompt caching
 
@@ -153,11 +153,11 @@
 
 ## Progress
 
-- [x] Stage 1 — `ex_pi_ai`
-- [x] Stage 2 — `ex_pi_agent`
-- [x] Stage 3 — `ex_pi_session`
-- [x] Stage 4 — `ex_pi_coding`
-- [x] Stage 5 — `ex_pi_web`
+- [x] Stage 1 — `sigma_ai`
+- [x] Stage 2 — `sigma_agent`
+- [x] Stage 3 — `sigma_session`
+- [x] Stage 4 — `sigma_coding`
+- [x] Stage 5 — `sigma_web`
 - [x] Phase A — Daily-use blockers (A.1–A.5c)
 - [x] Phase B — UI completeness and missing tools (B.1–B.4)
 - [x] Phase C — Streaming UX (C.1–C.3)
@@ -172,7 +172,7 @@
 
 ## Phase A Summary
 
-Seven commits landed across all five umbrella apps. The agent's turn execution now runs in a supervised task with `async_nolink`, so provider crashes cannot kill the GenServer — `run_stream/2` rescues `RuntimeError` and `Jason.DecodeError` and converts them to a clean `{:turn_error, reason}` event, while unexpected panics are caught by the `{:DOWN}` path. The `PiAgent` child spec overrides `restart: :temporary` so a crashed agent stays dead rather than reviving with a stale `on_event` closure; `SessionManager` evicts the dead entry on `:DOWN` and the LiveView shows a flash banner pointing the user to the preserved on-disk history. The `PermissionPolicy` GenServer is now started with `start_link` inside `PiAgent.init`, linking it to the agent so it dies automatically when the agent is killed.
+Seven commits landed across all five umbrella apps. The agent's turn execution now runs in a supervised task with `async_nolink`, so provider crashes cannot kill the GenServer — `run_stream/2` rescues `RuntimeError` and `Jason.DecodeError` and converts them to a clean `{:turn_error, reason}` event, while unexpected panics are caught by the `{:DOWN}` path. The `Sigma.Agent` child spec overrides `restart: :temporary` so a crashed agent stays dead rather than reviving with a stale `on_event` closure; `SessionManager` evicts the dead entry on `:DOWN` and the LiveView shows a flash banner pointing the user to the preserved on-disk history. The `PermissionPolicy` GenServer is now started with `start_link` inside `Sigma.Agent.init`, linking it to the agent so it dies automatically when the agent is killed.
 
 Permission defaults were moved out of hardcoded Elixir into `settings.json`. `ConfigManager.get_permissions/0` reads the `"permissions"` key, converts string values to atoms with `String.to_existing_atom/1` (safe because the valid values are a closed set), and returns the map for the mount-time rules. A Settings → Permissions page with radio groups lets users toggle read/edit/bash policies without touching code. Each new session gets a fresh `PermissionPolicy` initialized from those saved defaults.
 

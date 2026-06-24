@@ -1,0 +1,32 @@
+defmodule Sigma.Web.Router do
+  use Sigma.Web, :router
+
+  pipeline :browser do
+    plug(:accepts, ["html"])
+    plug(:fetch_session)
+    plug(:fetch_live_flash)
+    plug(:put_root_layout, html: {Sigma.Web.Layouts, :root})
+    plug(:protect_from_forgery)
+    plug(:put_secure_browser_headers)
+  end
+
+  scope "/", Sigma.Web do
+    pipe_through(:browser)
+
+    live("/", HomeLive, :index)
+    live("/settings/credentials", SettingsLive, :credentials)
+    live("/settings/hooks", SettingsLive, :hooks)
+    live("/settings/mcp", SettingsLive, :mcp)
+    live("/settings/providers", SettingsLive, :providers)
+    live("/settings/skills", SettingsLive, :skills)
+    live("/settings/system_prompt", SettingsLive, :system_prompt)
+    live("/settings", SettingsLive, :index)
+    live("/repository/new", HomeLive, :add)
+    live("/repository/:repository/hooks", ProjectHooksLive, :index)
+    live("/repository/:repository/settings", ProjectSettingsLive, :index)
+    live("/repository/:repository/skills", ProjectSkillsLive, :index)
+    live("/repository/:repository/sessions/new", NewSessionLive, :new)
+    live("/repository/:repository/sessions/:id", SessionLive, :show)
+    live("/repository/:repository", RepositoryLive, :index)
+  end
+end

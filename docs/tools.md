@@ -1,19 +1,19 @@
-# PRD: Build `pi_tools` as the Elixir Port of oh-my-pi Tools
+# PRD: Build `sigma_tools` as the Elixir Port of oh-my-pi Tools
 
 ## 1. Summary
 
-Create a new umbrella app, `apps/pi_tools`, as the home for **oh-my-pi-style built-in tools** in `ex_pi`.
+Create a new umbrella app, `apps/sigma_tools`, as the home for **oh-my-pi-style built-in tools** in `sigma`.
 
-This is not just a refactor of current `PiCoding.Tools`. The goal is to establish `pi_tools` as the migration target for the oh-my-pi tool surface:
+This is not just a refactor of current `Sigma.Coding.Tools`. The goal is to establish `sigma_tools` as the migration target for the oh-my-pi tool surface:
 
 ```text
 read, write, edit, search, find, bash, job, task, todo, ask,
 lsp, ast_grep, ast_edit, resolve, web_search, github, eval, ...
 ```
 
-`ex_pi_coding` remains the **tool runtime kernel**: behaviour, dispatcher, permissions, hooks, MCP bridge. `pi_tools` becomes the **first-party tool implementation layer**.
+`sigma_coding` remains the **tool runtime kernel**: behaviour, dispatcher, permissions, hooks, MCP bridge. `sigma_tools` becomes the **first-party tool implementation layer**.
 
-oh-my-pi groups tools into file/content, runtime, code intelligence, coordination, external, memory/state, and misc tools. The initial `pi_tools` PR should mirror this structure and expose only oh-my-pi canonical tool names. There is no legacy fallback mode in the active dashboard/session tool list.
+oh-my-pi groups tools into file/content, runtime, code intelligence, coordination, external, memory/state, and misc tools. The initial `sigma_tools` PR should mirror this structure and expose only oh-my-pi canonical tool names. There is no legacy fallback mode in the active dashboard/session tool list.
 
 ### Implementation Update
 
@@ -24,24 +24,24 @@ The first PR includes oh-my-pi hashline edit directly. `edit` is not a port of t
 1. Add new umbrella app:
 
    ```text
-   apps/pi_tools
+   apps/sigma_tools
    ```
 
    OTP app:
 
    ```elixir
-   :pi_tools
+   :sigma_tools
    ```
 
    Module prefix:
 
    ```elixir
-   PiTools
+   Sigma.Tools
    ```
 
-2. Establish `PiTools` as the canonical home for oh-my-pi-style tools.
+2. Establish `Sigma.Tools` as the canonical home for oh-my-pi-style tools.
 
-3. Create a `PiTools.Catalog` describing the target oh-my-pi tool surface, including status and gating.
+3. Create a `Sigma.Tools.Catalog` describing the target oh-my-pi tool surface, including status and gating.
 
 4. Implement an initial working subset with oh-my-pi canonical names:
 
@@ -55,9 +55,9 @@ The first PR includes oh-my-pi hashline edit directly. `edit` is not a port of t
    ask
    ```
 
-5. Keep current `PiCoding.Tools.*` modules in place for existing tests and internal callers, but do not expose legacy names in the default dashboard/session tool list.
+5. Keep current `Sigma.Coding.Tools.*` modules in place for existing tests and internal callers, but do not expose legacy names in the default dashboard/session tool list.
 
-6. Update `PiWeb.SessionLive` to load tools through `PiTools.default_tools/0`, not by hardcoding `PiCoding.Tools.*`.
+6. Update `Sigma.Web.SessionLive` to load tools through `Sigma.Tools.default_tools/0`, not by hardcoding `Sigma.Coding.Tools.*`.
 
 7. Do not expose planned tools until they work or are explicitly enabled.
 
@@ -69,62 +69,62 @@ This PR should create the **tool surface and migration structure**, implement th
 
 Do not break existing current tools for direct callers, but do not expose legacy tool names in the default model-facing list.
 
-Do not move dispatcher, permissions, hooks, MCP, provider logic, or agent turn loop into `pi_tools`.
+Do not move dispatcher, permissions, hooks, MCP, provider logic, or agent turn loop into `sigma_tools`.
 
 ## 4. Architecture Boundary
 
-### `ex_pi_coding`
+### `sigma_coding`
 
 Owns runtime mechanics:
 
 ```text
-PiCoding.Tool
-PiCoding.Dispatcher
-PiCoding.PermissionInterceptor
-PiCoding.PermissionPolicy
-PiCoding.Hooks.*
-PiCoding.MCP.*
-PiCoding.Utils.PathUtils
+Sigma.Coding.Tool
+Sigma.Coding.Dispatcher
+Sigma.Coding.PermissionInterceptor
+Sigma.Coding.PermissionPolicy
+Sigma.Coding.Hooks.*
+Sigma.Coding.MCP.*
+Sigma.Coding.Utils.PathUtils
 ```
 
-`PiCoding.Tool` already defines name, description, schema, and execute callbacks.
+`Sigma.Coding.Tool` already defines name, description, schema, and execute callbacks.
 
-`PiCoding.Dispatcher` already handles dispatch, permission checks, hook execution, telemetry, and tool lookup.
+`Sigma.Coding.Dispatcher` already handles dispatch, permission checks, hook execution, telemetry, and tool lookup.
 
-### `pi_tools`
+### `sigma_tools`
 
 Owns first-party implementations:
 
 ```text
-PiTools.Read
-PiTools.Write
-PiTools.Edit
-PiTools.Search
-PiTools.Find
-PiTools.Bash
-PiTools.Ask
-PiTools.Job
-PiTools.Resolve
-PiTools.Todo
-PiTools.LSP
-PiTools.ASTGrep
-PiTools.ASTEdit
-PiTools.WebSearch
-PiTools.GitHub
-PiTools.Eval
+Sigma.Tools.Read
+Sigma.Tools.Write
+Sigma.Tools.Edit
+Sigma.Tools.Search
+Sigma.Tools.Find
+Sigma.Tools.Bash
+Sigma.Tools.Ask
+Sigma.Tools.Job
+Sigma.Tools.Resolve
+Sigma.Tools.Todo
+Sigma.Tools.LSP
+Sigma.Tools.ASTGrep
+Sigma.Tools.ASTEdit
+Sigma.Tools.WebSearch
+Sigma.Tools.GitHub
+Sigma.Tools.Eval
 ```
 
 Also owns future shared implementation code:
 
 ```text
-PiTools.Output
-PiTools.Truncation
-PiTools.SnapshotStore
-PiTools.Hashline.*
-PiTools.Search.*
-PiTools.Find.*
-PiTools.InternalURL
-PiTools.Artifacts
+Sigma.Tools.Output
+Sigma.Tools.Truncation
+Sigma.Tools.SnapshotStore
+Sigma.Tools.Hashline.*
+Sigma.Tools.Search.*
+Sigma.Tools.Find.*
+Sigma.Tools.InternalURL
+Sigma.Tools.Artifacts
 ```
 
 ## 5. New App Layout
@@ -132,12 +132,12 @@ PiTools.Artifacts
 Create:
 
 ```text
-apps/pi_tools/
+apps/sigma_tools/
   mix.exs
   README.md
   lib/
-    pi_tools.ex
-    pi_tools/
+    sigma_tools.ex
+    sigma_tools/
       catalog.ex
 
       file/
@@ -179,28 +179,28 @@ apps/pi_tools/
 The actual modules exposed to the model should be flat aliases for now:
 
 ```elixir
-PiTools.Read
-PiTools.Write
-PiTools.Edit
-PiTools.Search
-PiTools.Find
-PiTools.Bash
-PiTools.Ask
+Sigma.Tools.Read
+Sigma.Tools.Write
+Sigma.Tools.Edit
+Sigma.Tools.Search
+Sigma.Tools.Find
+Sigma.Tools.Bash
+Sigma.Tools.Ask
 ```
 
 Implementation files may live under grouped directories.
 
-## 6. `apps/pi_tools/mix.exs`
+## 6. `apps/sigma_tools/mix.exs`
 
 Create:
 
 ```elixir
-defmodule PiTools.MixProject do
+defmodule Sigma.Tools.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :pi_tools,
+      app: :sigma_tools,
       version: "0.1.0",
       build_path: "../../_build",
       config_path: "../../config/config.exs",
@@ -220,7 +220,7 @@ defmodule PiTools.MixProject do
 
   defp deps do
     [
-      {:ex_pi_coding, in_umbrella: true},
+      {:sigma_coding, in_umbrella: true},
       {:req, "~> 0.5"}
     ]
   end
@@ -231,31 +231,31 @@ end
 
 ## 7. Tool Registry
 
-Create `PiTools`:
+Create `Sigma.Tools`:
 
 ```elixir
-defmodule PiTools do
+defmodule Sigma.Tools do
   @moduledoc """
-  oh-my-pi-style built-in tool registry for ex_pi.
+  oh-my-pi-style built-in tool registry for sigma.
 
-  `ex_pi_coding` owns the runtime contract.
-  `pi_tools` owns first-party tool implementations.
+  `sigma_coding` owns the runtime contract.
+  `sigma_tools` owns first-party tool implementations.
   """
 
   def default_tools do
     [
-      PiTools.Ask,
-      PiTools.Read,
-      PiTools.Write,
-      PiTools.Bash,
-      PiTools.Edit,
-      PiTools.Search,
-      PiTools.Find
+      Sigma.Tools.Ask,
+      Sigma.Tools.Read,
+      Sigma.Tools.Write,
+      Sigma.Tools.Bash,
+      Sigma.Tools.Edit,
+      Sigma.Tools.Search,
+      Sigma.Tools.Find
     ]
   end
 
   def planned_tools do
-    PiTools.Catalog.planned()
+    Sigma.Tools.Catalog.planned()
   end
 end
 ```
@@ -264,41 +264,41 @@ Default should be `:oh_my_pi` unless this breaks tests. If the current app needs
 
 ## 8. Tool Catalog
 
-Create `PiTools.Catalog`.
+Create `Sigma.Tools.Catalog`.
 
 Purpose: make the target oh-my-pi tool surface explicit even before every tool is implemented.
 
 Example shape:
 
 ```elixir
-defmodule PiTools.Catalog do
+defmodule Sigma.Tools.Catalog do
   @moduledoc """
   Catalog of the target oh-my-pi-compatible tool surface.
   """
 
   @tools [
-    %{name: "read", category: :file, module: PiTools.Read, status: :implemented},
-    %{name: "write", category: :file, module: PiTools.Write, status: :implemented},
-    %{name: "edit", category: :file, module: PiTools.Edit, status: :implemented},
-    %{name: "search", category: :file, module: PiTools.Search, status: :implemented},
-    %{name: "find", category: :file, module: PiTools.Find, status: :implemented},
+    %{name: "read", category: :file, module: Sigma.Tools.Read, status: :implemented},
+    %{name: "write", category: :file, module: Sigma.Tools.Write, status: :implemented},
+    %{name: "edit", category: :file, module: Sigma.Tools.Edit, status: :implemented},
+    %{name: "search", category: :file, module: Sigma.Tools.Search, status: :implemented},
+    %{name: "find", category: :file, module: Sigma.Tools.Find, status: :implemented},
 
-    %{name: "bash", category: :runtime, module: PiTools.Bash, status: :implemented},
-    %{name: "job", category: :runtime, module: PiTools.Job, status: :planned},
-    %{name: "eval", category: :runtime, module: PiTools.Eval, status: :planned},
+    %{name: "bash", category: :runtime, module: Sigma.Tools.Bash, status: :implemented},
+    %{name: "job", category: :runtime, module: Sigma.Tools.Job, status: :planned},
+    %{name: "eval", category: :runtime, module: Sigma.Tools.Eval, status: :planned},
 
-    %{name: "lsp", category: :code_intel, module: PiTools.LSP, status: :planned},
-    %{name: "ast_grep", category: :code_intel, module: PiTools.ASTGrep, status: :planned},
-    %{name: "ast_edit", category: :code_intel, module: PiTools.ASTEdit, status: :planned},
+    %{name: "lsp", category: :code_intel, module: Sigma.Tools.LSP, status: :planned},
+    %{name: "ast_grep", category: :code_intel, module: Sigma.Tools.ASTGrep, status: :planned},
+    %{name: "ast_edit", category: :code_intel, module: Sigma.Tools.ASTEdit, status: :planned},
 
-    %{name: "ask", category: :coordination, module: PiTools.Ask, status: :implemented},
-    %{name: "todo", category: :coordination, module: PiTools.Todo, status: :planned},
-    %{name: "task", category: :coordination, module: PiTools.Task, status: :planned},
+    %{name: "ask", category: :coordination, module: Sigma.Tools.Ask, status: :implemented},
+    %{name: "todo", category: :coordination, module: Sigma.Tools.Todo, status: :planned},
+    %{name: "task", category: :coordination, module: Sigma.Tools.Task, status: :planned},
 
-    %{name: "resolve", category: :state, module: PiTools.Resolve, status: :planned},
+    %{name: "resolve", category: :state, module: Sigma.Tools.Resolve, status: :planned},
 
-    %{name: "web_search", category: :external, module: PiTools.WebSearch, status: :planned},
-    %{name: "github", category: :external, module: PiTools.GitHub, status: :planned}
+    %{name: "web_search", category: :external, module: Sigma.Tools.WebSearch, status: :planned},
+    %{name: "github", category: :external, module: Sigma.Tools.GitHub, status: :planned}
   ]
 
   def all, do: @tools
@@ -311,9 +311,9 @@ Important: catalog entries with `status: :planned` must not be returned by `defa
 
 ## 9. Initial Implemented oh-my-pi Tools
 
-### 9.1 `PiTools.Read`
+### 9.1 `Sigma.Tools.Read`
 
-Port the existing `PiCoding.Tools.Read` implementation into `PiTools.Read`.
+Port the existing `Sigma.Coding.Tools.Read` implementation into `Sigma.Tools.Read`.
 
 Keep current schema for now:
 
@@ -327,9 +327,9 @@ But document that this is an MVP of oh-my-pi `read`.
 
 Future target: oh-my-pi `read` reads files, directories, archives, SQLite, documents, images, URLs, internal URLs, and supports selector suffixes such as `:raw`, `:A-B`, `:A+C`, and multi-ranges.
 
-### 9.2 `PiTools.Write`
+### 9.2 `Sigma.Tools.Write`
 
-Port existing `PiCoding.Tools.Write`.
+Port existing `Sigma.Coding.Tools.Write`.
 
 Keep behavior unchanged:
 
@@ -339,7 +339,7 @@ fail if file exists
 create parent directories
 ```
 
-### 9.3 `PiTools.Edit`
+### 9.3 `Sigma.Tools.Edit`
 
 Implement oh-my-pi hashline edit in the first PR.
 
@@ -364,7 +364,7 @@ insert tail:
 
 Body rows use `+TEXT`. The old `path/content/old_content` edit schema must fail clearly and must not silently fall back to legacy replacement behavior.
 
-### 9.4 `PiTools.Search`
+### 9.4 `Sigma.Tools.Search`
 
 Create an oh-my-pi-style content search tool.
 
@@ -418,7 +418,7 @@ MVP behavior:
 
 Future target: oh-my-pi `search` supports regex over files, directories, globs, archives, internal URLs, context lines, grouped output, pagination, and hashline anchors.
 
-### 9.5 `PiTools.Find`
+### 9.5 `Sigma.Tools.Find`
 
 Create an oh-my-pi-style path discovery tool.
 
@@ -473,9 +473,9 @@ MVP behavior:
 
 Future target: oh-my-pi `find` supports path discovery by glob, hidden/gitignore toggles, limits, timeout, grouped output, and mtime sorting.
 
-### 9.6 `PiTools.Bash`
+### 9.6 `Sigma.Tools.Bash`
 
-Port existing `PiCoding.Tools.Bash`.
+Port existing `Sigma.Coding.Tools.Bash`.
 
 Keep current behavior working.
 
@@ -492,7 +492,7 @@ Do not expose `pty` or `async` yet unless implemented.
 
 Future target: oh-my-pi `bash` supports cwd, env, timeout clamp, PTY, async/background jobs, auto-backgrounding, output truncation/artifacts, and shell-pattern interception.
 
-### 9.7 `PiTools.Ask`
+### 9.7 `Sigma.Tools.Ask`
 
 Create oh-my-pi-style `ask`.
 
@@ -504,64 +504,64 @@ def name, do: "ask"
 
 Implementation should delegate to current `AskUserQuestion` logic and the existing `ask_user_question_fn` callback.
 
-Keep `PiTools.Legacy.AskUserQuestion` with name `"AskUserQuestion"` for compatibility.
+Keep `Sigma.Tools.Legacy.AskUserQuestion` with name `"AskUserQuestion"` for compatibility.
 
 ## 10. Legacy Tools
 
-Keep these modules implemented under `PiTools.Legacy.*`:
+Keep these modules implemented under `Sigma.Tools.Legacy.*`:
 
 ```text
-PiTools.Legacy.Grep
-PiTools.Legacy.Glob
-PiTools.Legacy.LS
-PiTools.Legacy.UrlFetch
-PiTools.Legacy.AskUserQuestion
+Sigma.Tools.Legacy.Grep
+Sigma.Tools.Legacy.Glob
+Sigma.Tools.Legacy.LS
+Sigma.Tools.Legacy.UrlFetch
+Sigma.Tools.Legacy.AskUserQuestion
 ```
 
-Then make `PiCoding.Tools.*` wrappers delegate to them or to the canonical modules:
+Then make `Sigma.Coding.Tools.*` wrappers delegate to them or to the canonical modules:
 
 ```text
-PiCoding.Tools.Read            -> PiTools.Read
-PiCoding.Tools.Write           -> PiTools.Write
-PiCoding.Tools.Edit            -> PiTools.Edit
-PiCoding.Tools.Bash            -> PiTools.Bash
-PiCoding.Tools.Grep            -> PiTools.Legacy.Grep
-PiCoding.Tools.Glob            -> PiTools.Legacy.Glob
-PiCoding.Tools.LS              -> PiTools.Legacy.LS
-PiCoding.Tools.UrlFetch        -> PiTools.Legacy.UrlFetch
-PiCoding.Tools.AskUserQuestion -> PiTools.Legacy.AskUserQuestion
+Sigma.Coding.Tools.Read            -> Sigma.Tools.Read
+Sigma.Coding.Tools.Write           -> Sigma.Tools.Write
+Sigma.Coding.Tools.Edit            -> Sigma.Tools.Edit
+Sigma.Coding.Tools.Bash            -> Sigma.Tools.Bash
+Sigma.Coding.Tools.Grep            -> Sigma.Tools.Legacy.Grep
+Sigma.Coding.Tools.Glob            -> Sigma.Tools.Legacy.Glob
+Sigma.Coding.Tools.LS              -> Sigma.Tools.Legacy.LS
+Sigma.Coding.Tools.UrlFetch        -> Sigma.Tools.Legacy.UrlFetch
+Sigma.Coding.Tools.AskUserQuestion -> Sigma.Tools.Legacy.AskUserQuestion
 ```
 
 ## 11. Web Integration
 
-Update `apps/ex_pi_web/mix.exs`:
+Update `apps/sigma_web/mix.exs`:
 
 ```elixir
-{:pi_tools, in_umbrella: true}
+{:sigma_tools, in_umbrella: true}
 ```
 
-Update `PiWeb.SessionLive`.
+Update `Sigma.Web.SessionLive`.
 
 Current code hardcodes built-ins:
 
 ```elixir
 builtin_tools = [
-  PiCoding.Tools.AskUserQuestion,
-  PiCoding.Tools.Read,
-  PiCoding.Tools.Write,
-  PiCoding.Tools.Bash,
-  PiCoding.Tools.Edit,
-  PiCoding.Tools.Glob,
-  PiCoding.Tools.Grep,
-  PiCoding.Tools.LS,
-  PiCoding.Tools.UrlFetch
+  Sigma.Coding.Tools.AskUserQuestion,
+  Sigma.Coding.Tools.Read,
+  Sigma.Coding.Tools.Write,
+  Sigma.Coding.Tools.Bash,
+  Sigma.Coding.Tools.Edit,
+  Sigma.Coding.Tools.Glob,
+  Sigma.Coding.Tools.Grep,
+  Sigma.Coding.Tools.LS,
+  Sigma.Coding.Tools.UrlFetch
 ]
 ```
 
 Replace with:
 
 ```elixir
-builtin_tools = PiTools.default_tools()
+builtin_tools = Sigma.Tools.default_tools()
 ```
 
 MCP merging remains unchanged:
@@ -572,26 +572,26 @@ tool_modules = builtin_tools ++ mcp_tools
 
 ## 12. README
 
-Create `apps/pi_tools/README.md`.
+Create `apps/sigma_tools/README.md`.
 
 Suggested content:
 
 ```markdown
-# pi_tools
+# sigma_tools
 
 Elixir port target for oh-my-pi built-in tools.
 
 ## Boundary
 
-`ex_pi_coding` owns the runtime:
+`sigma_coding` owns the runtime:
 
-- `PiCoding.Tool`
+- `Sigma.Coding.Tool`
 - dispatcher
 - permission checks
 - hooks
 - MCP adapter
 
-`pi_tools` owns first-party tool implementations:
+`sigma_tools` owns first-party tool implementations:
 
 - file/content tools
 - runtime tools
@@ -643,17 +643,17 @@ Do not expose planned tools to the model until implemented or explicitly enabled
 Create:
 
 ```text
-apps/pi_tools/test/pi_tools_test.exs
+apps/sigma_tools/test/sigma_tools_test.exs
 ```
 
 Test:
 
 ```elixir
-defmodule PiToolsTest do
+defmodule Sigma.ToolsTest do
   use ExUnit.Case, async: true
 
   test "default tools expose canonical names" do
-    assert Enum.map(PiTools.default_tools(), &PiCoding.Tool.name/1) == [
+    assert Enum.map(Sigma.Tools.default_tools(), &Sigma.Coding.Tool.name/1) == [
              "ask",
              "read",
              "write",
@@ -665,7 +665,7 @@ defmodule PiToolsTest do
   end
 
   test "catalog includes planned oh-my-pi tool surface without exposing planned tools" do
-    planned_names = PiTools.Catalog.planned() |> Enum.map(& &1.name)
+    planned_names = Sigma.Tools.Catalog.planned() |> Enum.map(& &1.name)
 
     assert "job" in planned_names
     assert "resolve" in planned_names
@@ -677,7 +677,7 @@ defmodule PiToolsTest do
     assert "web_search" in planned_names
     assert "github" in planned_names
 
-    exposed_names = PiTools.default_tools() |> Enum.map(&PiCoding.Tool.name/1)
+    exposed_names = Sigma.Tools.default_tools() |> Enum.map(&Sigma.Coding.Tool.name/1)
 
     refute "job" in exposed_names
     refute "lsp" in exposed_names
@@ -691,18 +691,18 @@ end
 Create:
 
 ```text
-apps/ex_pi_coding/test/ex_pi_coding/tools/compat_test.exs
+apps/sigma_coding/test/sigma_coding/tools/compat_test.exs
 ```
 
-Test that existing `PiCoding.Tools.*` modules still expose expected names and schemas.
+Test that existing `Sigma.Coding.Tools.*` modules still expose expected names and schemas.
 
 ### 13.3 Search/find smoke tests
 
 Create:
 
 ```text
-apps/pi_tools/test/pi_tools/search_test.exs
-apps/pi_tools/test/pi_tools/find_test.exs
+apps/sigma_tools/test/sigma_tools/search_test.exs
+apps/sigma_tools/test/sigma_tools/find_test.exs
 ```
 
 Search smoke test:
@@ -714,7 +714,7 @@ test "search finds content in a local file" do
   File.write!(Path.join(tmp, "a.txt"), "hello\nworld\n")
 
   assert {:ok, result} =
-           PiTools.Search.execute("tc", %{"pattern" => "world", "paths" => "a.txt"}, cwd: tmp)
+           Sigma.Tools.Search.execute("tc", %{"pattern" => "world", "paths" => "a.txt"}, cwd: tmp)
 
   [text] = result.content
   assert text.text =~ "a.txt"
@@ -731,7 +731,7 @@ test "find returns matching paths" do
   File.write!(Path.join(tmp, "lib/a.ex"), "defmodule A do end")
 
   assert {:ok, result} =
-           PiTools.Find.execute("tc", %{"paths" => ["lib/**/*.ex"]}, cwd: tmp)
+           Sigma.Tools.Find.execute("tc", %{"paths" => ["lib/**/*.ex"]}, cwd: tmp)
 
   [text] = result.content
   assert text.text =~ "lib/a.ex"
@@ -742,23 +742,23 @@ end
 
 This PR is complete when:
 
-1. `apps/pi_tools` exists.
+1. `apps/sigma_tools` exists.
 
-2. `PiTools.default_tools()` exposes:
+2. `Sigma.Tools.default_tools()` exposes:
 
    ```text
    ask, read, write, bash, edit, search, find
    ```
 
-3. `PiTools.Edit` is hashline-only, input-only, and backed by the Rust NIF hashline core.
+3. `Sigma.Tools.Edit` is hashline-only, input-only, and backed by the Rust NIF hashline core.
 
-4. `PiTools.Catalog` lists the target oh-my-pi tool surface, including planned tools.
+4. `Sigma.Tools.Catalog` lists the target oh-my-pi tool surface, including planned tools.
 
 5. Planned tools are not exposed by default.
 
-6. Current `PiCoding.Tools.*` modules still work for direct callers.
+6. Current `Sigma.Coding.Tools.*` modules still work for direct callers.
 
-7. `PiWeb.SessionLive` loads built-ins through `PiTools.default_tools/1`.
+7. `Sigma.Web.SessionLive` loads built-ins through `Sigma.Tools.default_tools/1`.
 
 8. Existing tests pass.
 
@@ -769,20 +769,20 @@ This PR is complete when:
 ## 15. Suggested PR Title
 
 ```text
-feat(tools): introduce pi_tools as oh-my-pi tool surface
+feat(tools): introduce sigma_tools as oh-my-pi tool surface
 ```
 
 ## 16. Suggested Commit Message
 
 ```text
-feat(tools): introduce pi_tools as oh-my-pi tool surface
+feat(tools): introduce sigma_tools as oh-my-pi tool surface
 
 Add a dedicated umbrella app for first-party tool implementations and
 the target oh-my-pi-compatible tool catalog.
 
 Expose initial canonical tools: ask, read, write, bash, edit, search,
 and find. Preserve current tool names through legacy wrappers and keep
-PiCoding focused on the runtime contract, dispatcher, permissions,
+Sigma.Coding focused on the runtime contract, dispatcher, permissions,
 hooks, and MCP adapter.
 ```
 
@@ -793,10 +793,10 @@ After this lands, use separate PRs:
 1. **Hashline snapshot store**
 
    ```text
-   PiTools.SnapshotStore
-   PiTools.Hashline.Parser
-   PiTools.Hashline.Apply
-   PiTools.Hashline.Mismatch
+   Sigma.Tools.SnapshotStore
+   Sigma.Tools.Hashline.Parser
+   Sigma.Tools.Hashline.Apply
+   Sigma.Tools.Hashline.Mismatch
    ```
 
 2. **oh-my-pi read selectors**

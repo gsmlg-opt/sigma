@@ -1,6 +1,6 @@
 import Config
 
-config :ex_pi_web, PiWeb.Endpoint,
+config :sigma_web, Sigma.Web.Endpoint,
   http: [port: 4580],
   debug_errors: true,
   code_reloader: true,
@@ -10,12 +10,12 @@ config :ex_pi_web, PiWeb.Endpoint,
       {Mix.Tasks.Volt.Dev, :run,
        [
          ~w(--tailwind --tailwind-outdir) ++
-           [Path.expand("../apps/ex_pi_web/priv/static/assets/css", __DIR__)]
+           [Path.expand("../apps/sigma_web/priv/static/assets/css", __DIR__)]
        ]}
   ]
 
 config :volt, :server,
   prefix: "/assets",
-  watch_dirs: [Path.expand("../apps/ex_pi_web/lib/", __DIR__)]
+  watch_dirs: [Path.expand("../apps/sigma_web/lib/", __DIR__)]
 
 config :volt, sourcemap: :linked

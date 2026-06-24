@@ -1,6 +1,6 @@
 # Build API Session Context
 
-This document defines how `ex_pi` builds the per-session context sent to an LLM provider.
+This document defines how `sigma` builds the per-session context sent to an LLM provider.
 
 The target shape follows the request pattern observed from Claude Code: product identity and turn-start operating context stay in the provider `system` field, while session-scoped user/project context is prepended to the first user message as separate `<system-reminder>` text blocks. Tool schemas remain provider tools and must not be duplicated in message context.
 
@@ -10,13 +10,13 @@ Context building is split across these boundaries:
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Discovery | `PiSession.ContextFiles` | Walks from filesystem root to the active cwd and reads `AGENTS.md` or `CLAUDE.md` per directory. |
-| Assembly and injection | `PiAgent.SessionContext` | Normalizes context sources into ordered injections and renders separate reminder blocks. |
-| Provider context builder | `PiAgent.ContextBuilder` | Builds provider system blocks, injects session reminders, and assembles provider context for a turn. |
-| Session wiring | `PiWeb.SessionLive` | Collects runtime session sources and passes a `SessionContext` into `PiAgent`. |
-| Turn pipeline | `PiAgent` | Builds tool schemas and passes `ContextBuilder` output to the provider. |
+| Discovery | `Sigma.Session.ContextFiles` | Walks from filesystem root to the active cwd and reads `AGENTS.md` or `CLAUDE.md` per directory. |
+| Assembly and injection | `Sigma.Agent.SessionContext` | Normalizes context sources into ordered injections and renders separate reminder blocks. |
+| Provider context builder | `Sigma.Agent.ContextBuilder` | Builds provider system blocks, injects session reminders, and assembles provider context for a turn. |
+| Session wiring | `Sigma.Web.SessionLive` | Collects runtime session sources and passes a `SessionContext` into `Sigma.Agent`. |
+| Turn pipeline | `Sigma.Agent` | Builds tool schemas and passes `ContextBuilder` output to the provider. |
 
-`PiAgent.SessionContext` is intentionally a pure data module. It does not discover files, persist context, hold process state, or call providers.
+`Sigma.Agent.SessionContext` is intentionally a pure data module. It does not discover files, persist context, hold process state, or call providers.
 
 ## Request Shape
 
@@ -62,7 +62,7 @@ The persisted session log should still contain the user's original message conte
 | --- | --- | --- |
 | `:hooks` | Startup hooks, lifecycle hooks, or hook-provided context. | Reserved for hook integration. |
 | `:skills` | Available-skill summaries. | `SessionContext.skills_context/1`, fed by global and repository skills. |
-| `:agents_context` | User-global instructions, worktree context, repo-local instructions, and current date. | `ConfigManager.get_config()["system_prompt"]`, `SessionLive` session metadata, `PiSession.ContextFiles.assemble(nil, effective_cwd)`, and `Date.utc_today/0`. |
+| `:agents_context` | User-global instructions, worktree context, repo-local instructions, and current date. | `ConfigManager.get_config()["system_prompt"]`, `SessionLive` session metadata, `Sigma.Session.ContextFiles.assemble(nil, effective_cwd)`, and `Date.utc_today/0`. |
 
 The current ordering is:
 
@@ -172,7 +172,7 @@ The important split is:
 | Product identity | Stable identity for the agent product. | Ephemeral, `ttl: "1h"`. |
 | Operating context | Laws, memory build/recall rules, environment, MCP server instructions, git status, and recent commits. | Ephemeral, `ttl: "1h"`. |
 
-`PiAgent.ContextBuilder` emits Pi's stable product identity and operating context as provider system blocks when no explicit `system_prompt` is passed. Explicit binary system prompts are still accepted for backwards-compatible tests and direct callers.
+`Sigma.Agent.ContextBuilder` emits Pi's stable product identity and operating context as provider system blocks when no explicit `system_prompt` is passed. Explicit binary system prompts are still accepted for backwards-compatible tests and direct callers.
 
 The default operating context includes these sections:
 
@@ -189,7 +189,7 @@ Provider system blocks are reserved for stable product-level instructions. Sessi
 Use this checklist:
 
 1. Decide whether the source is discovery, assembly, or provider-specific.
-2. Put discovery in the owning app, not in `PiAgent.SessionContext`.
+2. Put discovery in the owning app, not in `Sigma.Agent.SessionContext`.
 3. Add the source to `SessionContext.new/1` only when it is a first-class bucket.
 4. Otherwise pass it through `:injections`.
 5. Add a focused test for `SessionContext.to_blocks/1` or `inject_messages/2`.
@@ -205,7 +205,7 @@ session_context =
     agents_context: [
       global_agents,
       {"Worktree Context", worktree_context},
-      PiSession.ContextFiles.assemble(nil, effective_cwd)
+      Sigma.Session.ContextFiles.assemble(nil, effective_cwd)
     ],
     current_date: Date.utc_today()
   )
@@ -229,10 +229,10 @@ Future token budgeting should be a separate pure transform that can drop, summar
 Relevant tests:
 
 ```sh
-mix test apps/ex_pi_agent/test/ex_pi_agent/session_context_test.exs
-mix test apps/ex_pi_agent/test/ex_pi_agent/context_builder_test.exs
-mix test apps/ex_pi_agent/test/ex_pi_agent_test.exs
-mix test apps/ex_pi_session/test/ex_pi_session/context_files_test.exs
+mix test apps/sigma_agent/test/sigma_agent/session_context_test.exs
+mix test apps/sigma_agent/test/sigma_agent/context_builder_test.exs
+mix test apps/sigma_agent/test/sigma_agent_test.exs
+mix test apps/sigma_session/test/sigma_session/context_files_test.exs
 ```
 
 Full validation:

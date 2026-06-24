@@ -1,4 +1,4 @@
-# ex_pi Hook System — Runtime & Observability Follow-up Plan
+# sigma Hook System — Runtime & Observability Follow-up Plan
 
 > Sequenced after `03-hooks-implementation-plan.md`. PR-sized, code-anchored.
 > Targets three gaps surfaced in review: payload env-vars + multi-agent fields,
@@ -14,22 +14,22 @@
 ## Placement summary
 
 ```
-apps/ex_pi_coding/lib/ex_pi_coding/hooks/
+apps/sigma_coding/lib/sigma_coding/hooks/
   payload.ex   # + agent_id, project_id, env-var derivation
   runner.ex    # + on_event emission, env-var injection
   spec.ex      # (unchanged)
   hooks.ex     # + dispatch/4 signature carries ctx.on_event
 
-apps/ex_pi_agent/lib/ex_pi_agent.ex
+apps/sigma_agent/lib/sigma_agent.ex
   # hook_ctx/1 carries on_event + agent_id
 
-apps/ex_pi_session/lib/ex_pi_session/log.ex
+apps/sigma_session/lib/sigma_session/log.ex
   # persist_event/2 accepts new event tags
 
-apps/ex_pi_web/lib/ex_pi_web/live/session_live.ex
+apps/sigma_web/lib/sigma_web/live/session_live.ex
   # handle_info for :hook_start/:hook_end/:hook_warning/:turn_blocked
 
-apps/ex_pi_web/lib/ex_pi_web/components/
+apps/sigma_web/lib/sigma_web/components/
   hook_run.ex  # new collapsible row component
 ```
 
@@ -40,9 +40,9 @@ apps/ex_pi_web/lib/ex_pi_web/components/
 Smallest, lowest-risk landing. Pure additions; existing hooks unaffected.
 
 - `Payload.build/3` adds `agent_id`, `project_id` (both optional) into the common fields block. Pulled from `ctx[:agent_id]` and `ctx[:project_id]`. Omitted via `maybe_put/3` when nil — never `""`.
-- New module `PiCoding.Hooks.Env` (pure). One function: `derive(ctx, event) :: [{charlist, charlist}]`. Produces canonical env entries: `PI_SESSION_ID`, `PI_PROJECT_DIR`, `PI_TRANSCRIPT_PATH`, `PI_HOOK_EVENT`, `PI_PERMISSION_MODE`, `PI_AGENT_ID` (if present), `PI_PROJECT_ID` (if present), `PI_TURN_ID` (if present), plus the Claude-compat aliases `CLAUDE_PROJECT_DIR`, `CLAUDE_HOOK_EVENT` for ecosystem hook scripts.
+- New module `Sigma.Coding.Hooks.Env` (pure). One function: `derive(ctx, event) :: [{charlist, charlist}]`. Produces canonical env entries: `PI_SESSION_ID`, `PI_PROJECT_DIR`, `PI_TRANSCRIPT_PATH`, `PI_HOOK_EVENT`, `PI_PERMISSION_MODE`, `PI_AGENT_ID` (if present), `PI_PROJECT_ID` (if present), `PI_TURN_ID` (if present), plus the Claude-compat aliases `CLAUDE_PROJECT_DIR`, `CLAUDE_HOOK_EVENT` for ecosystem hook scripts.
 - `Runner.build_env/1` now takes `ctx`, merges `Env.derive/2` over `System.get_env()` (user env wins for explicit overrides — but our `PI_*` keys override inherited values for correctness).
-- `hook_ctx/1` in `PiAgent` populates `agent_id` from `state.session_id`'s owning agent (use the GenServer's registered name or a stable id field — pick whichever you've already got; do **not** introduce new identity).
+- `hook_ctx/1` in `Sigma.Agent` populates `agent_id` from `state.session_id`'s owning agent (use the GenServer's registered name or a stable id field — pick whichever you've already got; do **not** introduce new identity).
 
 **Acceptance:**
 - Existing hook tests pass unchanged (additive).
@@ -59,8 +59,8 @@ Make hook execution observable. Single-direction additive change to `Runner` + t
 - `Hooks.dispatch/4` gains an optional 5th-arg-via-ctx convention: `ctx[:on_event]` is a 1-arity function (defaults to no-op). Keeping it inside `ctx` avoids changing the public signature again.
 - `Runner.run/4` calls `ctx.on_event.({:hook_start, event, spec_label, %{cmd: cmd, dialect: dialect, origin: origin}})` immediately before `Port.open/2`, and `{:hook_end, event, spec_label, outcome, %{duration_ms: d, exit: code, stdout_len: n}}` after decode. On crash/timeout: `{:hook_warning, event, spec_label, reason}`.
 - Spec-label format already exists (`spec_label/1`). Reuse — do not duplicate.
-- `apply_post_outcome` in `PiCoding.Dispatcher` propagates the same `on_event` from `opts` to `hook_ctx` so post-tool hooks emit too.
-- All three new event tags are documented in `PiAgent`'s moduledoc event vocabulary list.
+- `apply_post_outcome` in `Sigma.Coding.Dispatcher` propagates the same `on_event` from `opts` to `hook_ctx` so post-tool hooks emit too.
+- All three new event tags are documented in `Sigma.Agent`'s moduledoc event vocabulary list.
 
 **Acceptance:**
 - `runner_test.exs` with an in-memory collector function asserts emission order: `start → end` for success, `start → warning` for timeout, no events for filtered-out specs.
@@ -72,8 +72,8 @@ Make hook execution observable. Single-direction additive change to `Runner` + t
 
 Hook runs survive process restart and appear on session reload.
 
-- `PiSession.Log.persist_event/2` already accepts arbitrary event tuples; verify it round-trips the new tags. If the on-disk format is term-based, no change. If JSON, extend the serializer with `:hook_start`/`:hook_end`/`:hook_warning` cases.
-- `PiSession.Log.replay/1` — confirm replay surfaces hook events in original order interleaved with messages. Hook events should *not* be inserted into `state.messages` (they aren't messages); they re-emit through the same `on_event` channel that LiveView subscribes to.
+- `Sigma.Session.Log.persist_event/2` already accepts arbitrary event tuples; verify it round-trips the new tags. If the on-disk format is term-based, no change. If JSON, extend the serializer with `:hook_start`/`:hook_end`/`:hook_warning` cases.
+- `Sigma.Session.Log.replay/1` — confirm replay surfaces hook events in original order interleaved with messages. Hook events should *not* be inserted into `state.messages` (they aren't messages); they re-emit through the same `on_event` channel that LiveView subscribes to.
 - The `session_live` mount path that calls `replay/1` already routes events through PubSub broadcast — verify this still holds for the new tags.
 
 **Acceptance:**
@@ -86,7 +86,7 @@ Hook runs survive process restart and appear on session reload.
 
 The "see hooks in chat UI" deliverable. New component, new stream handlers.
 
-- New `PiWeb.Components.HookRun` functional component. Inputs: `event`, `spec_label`, `outcome` (atom/tuple), `duration_ms`, `expanded?`. Collapsed default shows a single muted line: `⚙ PreToolUse · check-bash.sh · proceed (12ms)`. Expanded reveals: cmd, dialect, origin (`global`/`project`/`local`), full reason/context text, raw stdout snippet (capped, same 10 K char limit as the runner).
+- New `Sigma.Web.Components.HookRun` functional component. Inputs: `event`, `spec_label`, `outcome` (atom/tuple), `duration_ms`, `expanded?`. Collapsed default shows a single muted line: `⚙ PreToolUse · check-bash.sh · proceed (12ms)`. Expanded reveals: cmd, dialect, origin (`global`/`project`/`local`), full reason/context text, raw stdout snippet (capped, same 10 K char limit as the runner).
 - Distinct visual tier from user/assistant/tool messages — `border-l` accent, smaller text, no avatar. This is operator chrome, not conversation.
 - `session_live.ex` gets new `handle_info/2` clauses:
   - `{:hook_start, event, label, meta}` — insert a `:running` row into the message stream.
@@ -105,7 +105,7 @@ The "see hooks in chat UI" deliverable. New component, new stream handlers.
 Closes the silent-drop bug.
 
 - Add `handle_info({:turn_blocked, reason}, socket)` in `session_live.ex`. Renders a distinct red `HookRun`-family row carrying the block reason; sets a `flash[:warning]` only if the user is at the bottom of the scroll (avoid intrusive popovers mid-scroll).
-- Hook warnings currently logged via `Logger.warning("[hooks] …")` now also flow through `on_event`. The `Logger.warning` call in `PiCoding.Dispatcher.surface_warning/1` is replaced by an `on_event.({:hook_warning, …})` call — Logger is still attached upstream via a telemetry handler if you want shell-level logs, but the canonical path is the event channel.
+- Hook warnings currently logged via `Logger.warning("[hooks] …")` now also flow through `on_event`. The `Logger.warning` call in `Sigma.Coding.Dispatcher.surface_warning/1` is replaced by an `on_event.({:hook_warning, …})` call — Logger is still attached upstream via a telemetry handler if you want shell-level logs, but the canonical path is the event channel.
 
 **Acceptance:**
 - A `UserPromptSubmit` hook returning exit 2 produces a visible `turn_blocked` row in the conversation, with the reason text shown.
@@ -117,7 +117,7 @@ Closes the silent-drop bug.
 
 Forcing function for the dead-bucket question. Two routes; pick one in design review before opening the PR.
 
-**Route A — populate.** `PiAgent.start_link/1` (or wherever `SessionContext.new/1` is constructed) calls `PiCoding.Hooks.Discovery.load/1` once, summarises specs into a redacted block (`event`, `matcher`, `origin`, *not* `cmd`) and feeds `hooks: summary` into `SessionContext.new/1`. The model gains visibility into "what this project's hooks enforce" without leaking command strings.
+**Route A — populate.** `Sigma.Agent.start_link/1` (or wherever `SessionContext.new/1` is constructed) calls `Sigma.Coding.Hooks.Discovery.load/1` once, summarises specs into a redacted block (`event`, `matcher`, `origin`, *not* `cmd`) and feeds `hooks: summary` into `SessionContext.new/1`. The model gains visibility into "what this project's hooks enforce" without leaking command strings.
 
 **Route B — remove.** Delete `:hooks` from `@ordered_sources`, `@titles`, and the `injection_type` union. Update docs and the `session_context_test.exs` golden.
 
@@ -139,7 +139,7 @@ Cleanup, can ship later or be skipped.
 
 **Acceptance:**
 - No behavior change in the default path.
-- Doc note in `PiCoding.Hooks.Runner` moduledoc clarifying the two channels.
+- Doc note in `Sigma.Coding.Hooks.Runner` moduledoc clarifying the two channels.
 
 ---
 

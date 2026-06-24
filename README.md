@@ -1,6 +1,6 @@
-# ex_pi
+# sigma
 
-`ex_pi` is an Elixir umbrella implementation of a `pi`-style AI coding agent. It combines a Phoenix LiveView chat UI, per-repository BEAM processes, streaming LLM providers, pi-compatible JSONL persistence, MCP and hook support, and a small coding-tool runtime.
+`sigma` is an Elixir umbrella implementation of a `pi`-style AI coding agent. It combines a Phoenix LiveView chat UI, per-repository BEAM processes, streaming LLM providers, pi-compatible JSONL persistence, MCP and hook support, and a small coding-tool runtime.
 
 The original TypeScript `pi` source is vendored at `./source` for behavior checks while porting.
 
@@ -8,13 +8,13 @@ The original TypeScript `pi` source is vendored at `./source` for behavior check
 
 | App | Module prefix | Role |
 | --- | --- | --- |
-| `ex_pi_ai` | `PiAi` | Provider behaviour plus Anthropic and OpenAI-compatible streaming parsers |
-| `ex_pi_protocol` | `PiAgent.Message` | Shared message structs and protocol types used across apps |
-| `ex_pi_agent` | `PiAgent` | Repository/session supervisors, turn loop, context building, compaction, and tool-call orchestration |
-| `ex_pi_session` | `PiSession` | pi-compatible config, repository list, context files, skills, slash commands, and JSONL replay/persistence |
-| `ex_pi_coding` | `PiCoding` | Tool behaviour, dispatcher, permissions, MCP, hooks, and read/write/edit/bash/search tools |
-| `ex_pi_logs` | `PiLogs` | Per-session in-memory debug log buffers for LLM, tool, and permission events |
-| `ex_pi_web` | `PiWeb` | Phoenix LiveView UI, routes, settings, and repository/session lifecycle |
+| `sigma_ai` | `Sigma.Ai` | Provider behaviour plus Anthropic and OpenAI-compatible streaming parsers |
+| `sigma_protocol` | `Sigma.Agent.Message` | Shared message structs and protocol types used across apps |
+| `sigma_agent` | `Sigma.Agent` | Repository/session supervisors, turn loop, context building, compaction, and tool-call orchestration |
+| `sigma_session` | `Sigma.Session` | pi-compatible config, repository list, context files, skills, slash commands, and JSONL replay/persistence |
+| `sigma_coding` | `Sigma.Coding` | Tool behaviour, dispatcher, permissions, MCP, hooks, and read/write/edit/bash/search tools |
+| `sigma_logs` | `Sigma.Logs` | Per-session in-memory debug log buffers for LLM, tool, and permission events |
+| `sigma_web` | `Sigma.Web` | Phoenix LiveView UI, routes, settings, and repository/session lifecycle |
 
 ## Features
 
@@ -31,7 +31,7 @@ The original TypeScript `pi` source is vendored at `./source` for behavior check
 
 - Elixir `~> 1.18`
 - Erlang/OTP 27 or compatible with the configured Elixir version
-- Node/npm for the web asset setup under `apps/ex_pi_web/package.json`
+- Node/npm for the web asset setup under `apps/sigma_web/package.json`
 - API credentials for Anthropic or an OpenAI-compatible provider
 
 ## Setup
@@ -72,7 +72,7 @@ Direct provider calls can also read environment fallbacks, but the LiveView flow
 4. Prompt the agent; tool calls stream back through LiveView and may request approval depending on policy.
 5. Fork a session when you want a new branch of the same conversation history.
 
-The session input supports `/init`, which expands into the built-in setup prompt for creating or updating project/user `AGENTS.md` files and related Pi Agent setup.
+The session input supports `/init`, which expands into the built-in setup prompt for creating or updating project/user `AGENTS.md` files and related Sigma Agent setup.
 
 Repository routes use a Base64 URL-encoded absolute path without padding:
 
@@ -103,14 +103,14 @@ Runtime state is stored locally in the pi-compatible agent directory:
 - Session logs: `~/.pi/agent/sessions/--<pi-safe-workdir>--/<session-id>.jsonl`
 - Session metadata: `~/.pi/agent/sessions/--<pi-safe-workdir>--/<session-id>.meta.json`
 
-`PiSession.ConfigManager.sessions_dir/1` derives the session directory by replacing path separators in the absolute workdir with dashes and wrapping the result in double dashes.
+`Sigma.Session.ConfigManager.sessions_dir/1` derives the session directory by replacing path separators in the absolute workdir with dashes and wrapping the result in double dashes.
 
 ## Development
 
 ```bash
 mix test
-mix test apps/ex_pi_agent/test/ex_pi_agent_test.exs
-mix test apps/ex_pi_agent/test/ex_pi_agent_test.exs:42
+mix test apps/sigma_agent/test/sigma_agent_test.exs
+mix test apps/sigma_agent/test/sigma_agent_test.exs:42
 mix format --check-formatted
 mix compile --warnings-as-errors
 mix assets.build
@@ -119,7 +119,7 @@ mix assets.build
 For focused LiveView or umbrella-app work, run the relevant app test path directly, for example:
 
 ```bash
-mix test apps/ex_pi_web/test/ex_pi_web/live/session_live_test.exs
+mix test apps/sigma_web/test/sigma_web/live/session_live_test.exs
 ```
 
 The web app uses DuskMoon UI. Keep UI work on `phoenix_duskmoon` components and the configured Tailwind/DuskMoon pipeline; do not add DaisyUI or Phoenix `core_components.ex`.

@@ -1,16 +1,16 @@
-# ex_pi Hook System — PRD
+# sigma Hook System — PRD
 
-> Product requirements for Claude Code + Codex–compatible hooks in `ex_pi`.
+> Product requirements for Claude Code + Codex–compatible hooks in `sigma`.
 > `hooks.json` is a **first-class config file**, not an internal format.
 > Revised after compatibility review against the Claude Code and Codex hook references.
 
 ## 0. Canonical requirement
 
-`ex_pi` must load and execute lifecycle hooks using the same three-level shape Claude Code and Codex share — `hooks → event → matcher group → handler list` — with `hooks.json` as a first-class discovery location. The system is a **compatibility adapter** around the Claude/Codex hook contract, not an `ex_pi`-invented DSL. Runtime default profile: **`portable_codex_first`** — accept both config shapes, normalize to one internal spec, execute the safe shared command-handler subset.
+`sigma` must load and execute lifecycle hooks using the same three-level shape Claude Code and Codex share — `hooks → event → matcher group → handler list` — with `hooks.json` as a first-class discovery location. The system is a **compatibility adapter** around the Claude/Codex hook contract, not an `sigma`-invented DSL. Runtime default profile: **`portable_codex_first`** — accept both config shapes, normalize to one internal spec, execute the safe shared command-handler subset.
 
 ## 1. Problem & motivation
 
-Teams already run workflows steered by `hooks.json` (Codex) and `settings.json` (Claude Code): policy gates on `Bash`, formatters on `PostToolUse`, context injection on `SessionStart`, continuation enforcement on `Stop`. `ex_pi` ignores these today, so migrating silently drops the guardrails users depend on. This makes those files run unchanged.
+Teams already run workflows steered by `hooks.json` (Codex) and `settings.json` (Claude Code): policy gates on `Bash`, formatters on `PostToolUse`, context injection on `SessionStart`, continuation enforcement on `Stop`. `sigma` ignores these today, so migrating silently drops the guardrails users depend on. This makes those files run unchanged.
 
 ## 2. Goals
 
@@ -30,7 +30,7 @@ Teams already run workflows steered by `hooks.json` (Codex) and `settings.json` 
 
 ## 4. Compatibility profile
 
-Canonical config inputs: Codex `hooks.json`; Claude `settings.json` `hooks` key; `ex_pi` `.pi/hooks.json` convenience files.
+Canonical config inputs: Codex `hooks.json`; Claude `settings.json` `hooks` key; `sigma` `.pi/hooks.json` convenience files.
 
 **v1 executes:** `command` handlers only.
 **v1 dispatches steering for:** SessionStart, UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse, Stop.
@@ -57,7 +57,7 @@ Compatibility is defined by: (1) discovery + additive merge, (2) matcher behavio
   - SessionStart: matcher filters `source` (`startup|resume|clear|compact`).
   - PreCompact: matcher filters trigger (`manual|auto`); else match-all.
   - UserPromptSubmit, Stop: **matcher ignored**; run on every occurrence.
-- **FR-M3** All real `ex_pi` tools are matchable; MCP tools keep `mcp__<server>__<tool>`.
+- **FR-M3** All real `sigma` tools are matchable; MCP tools keep `mcp__<server>__<tool>`.
 - **FR-M4 (tool-name aliasing — hard requirement)** Matcher and stdin `tool_name` use the external name; dispatcher executes by internal name. Mapping: `bash→Bash`, `read→Read`, `write→Write`, `edit→Edit`, `grep→Grep`, `glob→Glob`, `ls→LS`, `ask_user_question→AskUserQuestion`, `url_fetch→WebFetch` (canonical; `UrlFetch` accepted alias, documented and never changed).
 
 ### 5.3 Execution

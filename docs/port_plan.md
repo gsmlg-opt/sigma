@@ -1,8 +1,8 @@
-# ex_pi — Port Instructions for Claude Code
+# sigma — Port Instructions for Claude Code
 
 ## Context
 
-Port [earendil-works/pi](https://github.com/earendil-works/pi) (TypeScript) to Elixir. The umbrella `ex_pi` is already scaffolded with five apps and stub modules.
+Port [earendil-works/pi](https://github.com/earendil-works/pi) (TypeScript) to Elixir. The umbrella `sigma` is already scaffolded with five apps and stub modules.
 
 **This is a study port, not a product.** Goal is *understanding*, measured by ability to explain pi's design choices. [Synapsis](https://github.com/gsmlg-opt/Synapsis) already covers production agent management — do not duplicate it.
 
@@ -11,10 +11,10 @@ Port [earendil-works/pi](https://github.com/earendil-works/pi) (TypeScript) to E
 ## Setup
 
 ```sh
-# Clone pi separately as a reference. Do NOT vendor it into ex_pi.
+# Clone pi separately as a reference. Do NOT vendor it into sigma.
 git clone https://github.com/earendil-works/pi /tmp/pi-ref
 
-cd ex_pi
+cd sigma
 nix develop                  # elixir 1.18 / otp 27 / node 22
 mix compile                  # must pass against current stubs
 mix format --check-formatted
@@ -26,7 +26,7 @@ If `mix compile` fails on the scaffolded stubs, fix that first and record what w
 ## Operating rules
 
 1. **Read pi source before writing Elixir.** Every stage lists files in `/tmp/pi-ref` to read first. Skipping this is the primary failure mode.
-2. **One question per commit.** Subject line = the question. Body = pi's answer + ex_pi's answer + the trade-off.
+2. **One question per commit.** Subject line = the question. Body = pi's answer + sigma's answer + the trade-off.
 3. **Functional only.** `GenServer`s dispatch; pure modules compute. If a `handle_*` clause has more than ~10 lines of logic, extract.
 4. **Behaviours mark cross-app boundaries.** `Provider`, `Storage`, `Tool` are seeded. Add more only where a real boundary exists, not for "future flexibility".
 5. **No upward deps.** App DAG is strict: `ai → agent → session → coding → web`. A `mix deps.tree` violation is a design smell, not a packaging issue.
@@ -36,7 +36,7 @@ If `mix compile` fails on the scaffolded stubs, fix that first and record what w
 
 ## Anti-patterns — never, regardless of stage
 
-- Adding Phoenix to `ex_pi_web` before stage 5.
+- Adding Phoenix to `sigma_web` before stage 5.
 - Wrapping every module in a `GenServer`.
 - Branching on provider name inside provider code (use `Compat` data carried on the request).
 - Mutating any event after append to the session log.
@@ -48,13 +48,13 @@ If `mix compile` fails on the scaffolded stubs, fix that first and record what w
 
 ## Pi source map
 
-| pi package | path in `/tmp/pi-ref` | ex_pi app |
+| pi package | path in `/tmp/pi-ref` | sigma app |
 |---|---|---|
-| `pi-ai` | `packages/ai/src/` | `ex_pi_ai` |
-| `pi-agent-core` | `packages/agent/src/` | `ex_pi_agent` |
-| `pi-coding-agent` | `packages/coding-agent/src/` | `ex_pi_session`, `ex_pi_coding` |
-| `pi-tui` | `packages/tui/src/` | skip — `ex_pi_web` replaces |
-| `pi-web-ui` | `packages/web-ui/src/` | reference for `ex_pi_web` |
+| `pi-ai` | `packages/ai/src/` | `sigma_ai` |
+| `pi-agent-core` | `packages/agent/src/` | `sigma_agent` |
+| `pi-coding-agent` | `packages/coding-agent/src/` | `sigma_session`, `sigma_coding` |
+| `pi-tui` | `packages/tui/src/` | skip — `sigma_web` replaces |
+| `pi-web-ui` | `packages/web-ui/src/` | reference for `sigma_web` |
 
 ## How to work a stage
 
@@ -67,27 +67,27 @@ If `mix compile` fails on the scaffolded stubs, fix that first and record what w
 
 ---
 
-## Stage 1 — `ex_pi_ai`
+## Stage 1 — `sigma_ai`
 
 **Question:** what does an LLM call actually look like once you flatten providers?
 
 **Read first:** all of `packages/ai/src/` in `/tmp/pi-ref`. Specifically: provider implementations, message types, the streaming layer, the compat flags carried on models. Note *where providers diverge* — that's where the Compat concept earns its keep.
 
 **Tasks, in order:**
-1. Define wire types (`Message`, `ToolCall`, `StreamEvent`) in `lib/ex_pi_ai/message.ex`. Match pi's variants; do not invent new ones.
+1. Define wire types (`Message`, `ToolCall`, `StreamEvent`) in `lib/sigma_ai/message.ex`. Match pi's variants; do not invent new ones.
 2. Define the `Provider` behaviour. `stream/1` returns an `Enumerable` of `StreamEvent`.
-3. Implement `PiAi.Stream` as a pure SSE reducer: takes `(state, binary)`, returns `{events, state}`. No process, no IO. This is the central architectural piece.
+3. Implement `Sigma.Ai.Stream` as a pure SSE reducer: takes `(state, binary)`, returns `{events, state}`. No process, no IO. This is the central architectural piece.
 4. Implement one provider end-to-end. **Start with Anthropic** (simplest tool-call wire format). Use `Req` for HTTP.
-5. Capture a live trace to `apps/ex_pi_ai/test/fixtures/sse/anthropic_hello.txt`. Write a test that replays the fixture through `Stream` and asserts the event sequence.
+5. Capture a live trace to `apps/sigma_ai/test/fixtures/sse/anthropic_hello.txt`. Write a test that replays the fixture through `Stream` and asserts the event sequence.
 6. Add OpenAI as the second provider. **`StreamEvent` must not change.** If it must, stage 1 is not yet complete — investigate why.
 
 **Exit criteria:**
 - `mix test` passes including fixture replay.
 - A live Anthropic call streams tokens to stdout incrementally.
-- The OpenAI provider was added without modifying `PiAi.Stream` or `StreamEvent`.
+- The OpenAI provider was added without modifying `Sigma.Ai.Stream` or `StreamEvent`.
 
 **Forbidden this stage:**
-- Touching anything outside `apps/ex_pi_ai/`.
+- Touching anything outside `apps/sigma_ai/`.
 - Adding state-holding processes (no GenServers).
 - Provider code branching on anything other than `Compat` flags.
 
@@ -97,15 +97,15 @@ If `mix compile` fails on the scaffolded stubs, fix that first and record what w
 
 ---
 
-## Stage 2 — `ex_pi_agent`
+## Stage 2 — `sigma_agent`
 
 **Question:** what is the actual loop?
 
 **Read first:** `packages/agent/src/` in full. Focus on the `Agent` class, `AgentMessage` vs `Message`, `transformContext`, `convertToLlm`, the event emitter, and the steering/follow-up queue interaction with turn boundaries.
 
 **Tasks:**
-1. Define `PiAgent.Message` — the rich domain type. Identify carefully what it carries that wire `Message` does not.
-2. Define `PiAgent.Event` — agent-level event types. Distinguish from `PiAi.StreamEvent`.
+1. Define `Sigma.Agent.Message` — the rich domain type. Identify carefully what it carries that wire `Message` does not.
+2. Define `Sigma.Agent.Event` — agent-level event types. Distinguish from `Sigma.Ai.StreamEvent`.
 3. Implement `convert_to_llm/1` as a pure function. Test independently with edge cases (tool-call ID continuity, custom variants, redacted messages).
 4. Implement `transform_context` as a single composition slot in the per-turn pipeline.
 5. Build the loop as **one `GenServer` per session**. Exposes `subscribe/1`, `prompt/2`. Resist Supervisor-per-session — that is a stage-2-refactor question, not a stage-2 design question.
@@ -127,7 +127,7 @@ If `mix compile` fails on the scaffolded stubs, fix that first and record what w
 
 ---
 
-## Stage 3 — `ex_pi_session`
+## Stage 3 — `sigma_session`
 
 **Question:** how is history persisted, and how does branching actually work?
 
@@ -157,7 +157,7 @@ If `mix compile` fails on the scaffolded stubs, fix that first and record what w
 
 ---
 
-## Stage 4 — `ex_pi_coding`
+## Stage 4 — `sigma_coding`
 
 **Question:** how do tools plug in?
 
@@ -187,14 +187,14 @@ If `mix compile` fails on the scaffolded stubs, fix that first and record what w
 
 ---
 
-## Stage 5 — `ex_pi_web`
+## Stage 5 — `sigma_web`
 
 **Question:** what survives the TUI → web translation?
 
 **Read first:** `packages/tui/src/` and `packages/web-ui/src/`. Reference only — note what the TUI exposes that should be **redesigned**, not transliterated. Branching navigation especially.
 
 **Tasks:**
-1. Manually add Phoenix to `apps/ex_pi_web`. Do **not** run `mix phx.new` over the umbrella. Add deps, create endpoint + router + supervision tree by hand.
+1. Manually add Phoenix to `apps/sigma_web`. Do **not** run `mix phx.new` over the umbrella. Add deps, create endpoint + router + supervision tree by hand.
 2. PubSub topic per session. LiveView subscribes; agent publishes.
 3. One LiveView per session. Use `Phoenix.LiveView.stream/4` for token deltas. **Do not re-render full message bodies on each chunk** — that path will not perform.
 4. Permission modal: interceptor pauses execution → broadcast → LiveView renders modal → user answer flows back via PubSub. The modal blocks the *agent*, not the LiveView.

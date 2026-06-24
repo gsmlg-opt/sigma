@@ -1,4 +1,4 @@
-# ex_pi Session Lifecycle — Correctness Plan
+# sigma Session Lifecycle — Correctness Plan
 
 > Sequenced after `04-hooks-runtime-and-observability-plan.md`.
 > Fixes two firing-frequency bugs in `SessionStart` / `Stop` hooks and
@@ -12,17 +12,17 @@
 | `SessionStart` | Fires inside `execute_turn/2` — **every turn** | Once, when the agent process is first started for a `session_id` |
 | `Stop` | Fires when the LLM emits an assistant message with no tool calls — **every model-turn end** | Once, when the *session* ends: explicit close or idle-timeout |
 
-Root cause: `PiAgent.init/1` does not own session lifecycle. `execute_turn/2` and `run_turn_loop/1` conflate "agent loop iteration" with "session lifecycle event". The terminology in `01-hooks-design.md` line 33 reinforces the confusion by mapping `SessionStart` to `emit({:agent_start, cwd})`, which is itself per-turn.
+Root cause: `Sigma.Agent.init/1` does not own session lifecycle. `execute_turn/2` and `run_turn_loop/1` conflate "agent loop iteration" with "session lifecycle event". The terminology in `01-hooks-design.md` line 33 reinforces the confusion by mapping `SessionStart` to `emit({:agent_start, cwd})`, which is itself per-turn.
 
 Missing concepts:
 - No persistent session-state machine (`:active | :idle | :stopped`).
 - No idle detector.
 - No explicit "close session" command.
-- No reopen path — reusing a `session_id` silently restarts from disk via `PiSession.Log.replay/1`, but `SessionStart` then fires with `source: :startup` instead of `:resume`, and the user has no choice of resume mode.
+- No reopen path — reusing a `session_id` silently restarts from disk via `Sigma.Session.Log.replay/1`, but `SessionStart` then fires with `source: :startup` instead of `:resume`, and the user has no choice of resume mode.
 
 ## Guiding principles
 
-- **Lifecycle is owned by the supervisor tree, not the turn loop.** `PiAgent` reacts to lifecycle messages from `PiWeb.SessionManager`; the turn loop has no opinion on session boundaries.
+- **Lifecycle is owned by the supervisor tree, not the turn loop.** `Sigma.Agent` reacts to lifecycle messages from `Sigma.Web.SessionManager`; the turn loop has no opinion on session boundaries.
 - **State machine is explicit, persisted, and observable.** A `session.meta.json` sidecar holds `state`, `opened_at`, `closed_at`, `closed_reason`, `last_activity_at`. Crash recovery reads it; `SessionManager` writes it.
 - **Diverge cleanly from Claude Code on Stop semantics.** Repurposing `:stop` silently would break ecosystem hooks; instead introduce `:session_end` for the new semantics and decide whether to keep `:stop` for upstream parity (recommended: drop it, document the divergence).
 - **Reopen modes are first-class.** `:full_history` and `:summary` are two distinct user-visible flows, not internal optimizations.
@@ -30,7 +30,7 @@ Missing concepts:
 ## Placement summary
 
 ```
-apps/ex_pi_agent/lib/ex_pi_agent.ex
+apps/sigma_agent/lib/sigma_agent.ex
   # init/1 fires SessionStart with source from opts[:resume_source]
   # remove run_session_start_hook call from execute_turn/2
   # remove run_stop_hook call from run_turn_loop/1
@@ -38,17 +38,17 @@ apps/ex_pi_agent/lib/ex_pi_agent.ex
   # add handle_call(:close, ...) and handle_info(:idle_timeout, ...)
   # add :last_activity_at tracking on every user-facing turn
 
-apps/ex_pi_coding/lib/ex_pi_coding/hooks/
+apps/sigma_coding/lib/sigma_coding/hooks/
   spec.ex      # add :session_end event atom
   payload.ex   # add event_specific(:session_end, ...) - reason field
   discovery.ex # parse "SessionEnd" → :session_end
   outcome.ex   # decode_decision(:session_end, ...) - observe-only
 
-apps/ex_pi_session/lib/ex_pi_session/
+apps/sigma_session/lib/sigma_session/
   session_meta.ex   # NEW. read/write session.meta.json sidecar.
   log.ex            # add summarize/2 for reopen-with-summary mode
 
-apps/ex_pi_web/lib/ex_pi_web/
+apps/sigma_web/lib/sigma_web/
   session_manager.ex   # close_session/1, reopen_session/2, idle scan
   live/session_live.ex # handle close button + reopen mode prompt
 ```
@@ -59,7 +59,7 @@ apps/ex_pi_web/lib/ex_pi_web/
 
 Smallest correctness fix. No new events.
 
-- `PiAgent.init/1` receives `opts[:resume_source]` (`:startup | :resume | :compact | :clear`, default `:startup`).
+- `Sigma.Agent.init/1` receives `opts[:resume_source]` (`:startup | :resume | :compact | :clear`, default `:startup`).
 - After `state` is built, `init/1` returns `{:ok, state, {:continue, :session_start}}`.
 - New `handle_continue(:session_start, state)` invokes `run_session_start_hook(state)` exactly once. Effects (developer context prepend) are applied to `state.messages` before any user message arrives.
 - **Remove** the call from `execute_turn/2` at line 307. The reset of `stop_hook_active` stays.
@@ -78,7 +78,7 @@ New event, no behavior change to existing `:stop` yet (deprecated in PR 4).
 - Add `:session_end` to `Spec.event()` union, `Discovery.event_name_map` (`"SessionEnd"` / `"session_end"`), and `Payload.event_name(:session_end) → "SessionEnd"`.
 - `Payload.event_specific(:session_end, _ctx, data) → %{"reason" => to_string(Map.get(data, :reason, "user_close")), "last_activity_at" => Map.get(data, :last_activity_at, "")}`.
 - `Outcome.decode_decision(:session_end, ...)` is observe-only — returns `:proceed`. Hooks can still populate `additionalContext` (logged / persisted) but cannot block; the session is already ending.
-- `PiAgent.terminate/2` invokes `run_session_end_hook(state, reason)` synchronously with a short, hard timeout (e.g., 2 s, separate from per-hook timeouts) so OTP shutdown isn't blocked.
+- `Sigma.Agent.terminate/2` invokes `run_session_end_hook(state, reason)` synchronously with a short, hard timeout (e.g., 2 s, separate from per-hook timeouts) so OTP shutdown isn't blocked.
 - Hooks that crash or time out during `terminate/2` are logged via `Logger.warning`, never re-raised.
 
 **Acceptance:**
@@ -91,7 +91,7 @@ New event, no behavior change to existing `:stop` yet (deprecated in PR 4).
 
 Make session state explicit and persisted across restarts.
 
-- New module `PiSession.SessionMeta`. Functions: `load/1`, `write/2`, `touch_activity/1`, `mark_idle/1`, `mark_stopped/2` (reason). On-disk format: JSON sidecar `<storage_path>/session.meta.json` alongside the existing log.
+- New module `Sigma.Session.SessionMeta`. Functions: `load/1`, `write/2`, `touch_activity/1`, `mark_idle/1`, `mark_stopped/2` (reason). On-disk format: JSON sidecar `<storage_path>/session.meta.json` alongside the existing log.
 - Schema:
   ```
   %{
@@ -103,7 +103,7 @@ Make session state explicit and persisted across restarts.
     "schema_version" => 1
   }
   ```
-- `PiAgent.init/1` calls `SessionMeta.write` with state `:active`. `terminate/2` calls `mark_stopped` with the reason from the shutdown trigger.
+- `Sigma.Agent.init/1` calls `SessionMeta.write` with state `:active`. `terminate/2` calls `mark_stopped` with the reason from the shutdown trigger.
 - Every user message and tool completion calls `SessionMeta.touch_activity/1` (debounced — write at most once per 10 s to avoid disk churn).
 - `SessionMeta` is pure-ish: state transitions are functions returning the new struct; the only impure ops are `read_file!`/`write_file!`. Keep it that way for testability.
 
@@ -117,12 +117,12 @@ Make session state explicit and persisted across restarts.
 
 Wire the two triggers that lead to `:session_end`.
 
-- `PiAgent` state gains `idle_timeout_ms` (default `3_600_000` = 1 h, configurable per-session via `opts[:idle_timeout_ms]`).
+- `Sigma.Agent` state gains `idle_timeout_ms` (default `3_600_000` = 1 h, configurable per-session via `opts[:idle_timeout_ms]`).
 - After every activity (touch in PR 3), `Process.send_after(self(), :check_idle, idle_timeout_ms)` schedules an idle check. The ref is stored in state; subsequent activity cancels the previous timer with `Process.cancel_timer/1` before scheduling a new one.
 - `handle_info(:check_idle, state)`: if `now - state.last_activity_at >= idle_timeout_ms`, mark meta as `:idle`, run `session_end` hook with `reason: :idle`, then `{:stop, :normal, state}`.
 - `handle_call(:close, _from, state)`: same path with `reason: :user_close`. Returns `:ok` to caller before the stop so the LiveView can acknowledge.
-- `PiWeb.SessionManager` gains `close_session/1` that calls `GenServer.call(agent, :close)` and waits for the supervisor `:DOWN` monitor message before returning.
-- `session_live.ex` adds a "Close session" menu item (the `SessionMenuHook` JS hook already exists per line 227) that triggers `PiWeb.SessionManager.close_session/1`.
+- `Sigma.Web.SessionManager` gains `close_session/1` that calls `GenServer.call(agent, :close)` and waits for the supervisor `:DOWN` monitor message before returning.
+- `session_live.ex` adds a "Close session" menu item (the `SessionMenuHook` JS hook already exists per line 227) that triggers `Sigma.Web.SessionManager.close_session/1`.
 - **Deprecate `:stop`**: keep parsing it (`Discovery` still maps `"Stop"` to `:stop`) but log a one-line warning on load: "Stop hook is deprecated; use SessionEnd for end-of-session or PostToolUse for end-of-turn behavior." The execution path stays so legacy hooks continue working — but it's no longer documented or recommended.
 
 **Acceptance:**
@@ -134,13 +134,13 @@ Wire the two triggers that lead to `:session_end`.
 
 ## PR 5 — Reopen with full history  (M-LC-5)
 
-The simpler of the two reopen modes; uses the existing `PiSession.Log.replay/1` path.
+The simpler of the two reopen modes; uses the existing `Sigma.Session.Log.replay/1` path.
 
-- `PiWeb.SessionManager.reopen_session/2` with signature `(session_id, opts)` where `opts[:mode]` is `:full_history`.
+- `Sigma.Web.SessionManager.reopen_session/2` with signature `(session_id, opts)` where `opts[:mode]` is `:full_history`.
 - Flow:
   1. Read `session.meta.json`; assert `state == "stopped"` (else return `{:error, :not_stopped}`).
-  2. `PiSession.Log.replay/1` → message list.
-  3. Start a new `PiAgent` via the same `start_session/3` path used today, with `messages: replayed`, `resume_source: :resume`.
+  2. `Sigma.Session.Log.replay/1` → message list.
+  3. Start a new `Sigma.Agent` via the same `start_session/3` path used today, with `messages: replayed`, `resume_source: :resume`.
   4. Mark meta `state: "active"`, clear `closed_at` / `closed_reason`.
 - `init/1`'s `handle_continue(:session_start, state)` (PR 1) passes `source: :resume` into the payload — hooks see the right source.
 - On crash-recovery (meta says `"stopped"`, `closed_reason: "crash"`), the user is prompted: "This session ended unexpectedly. Reopen?" rather than silently resuming.
@@ -155,9 +155,9 @@ The simpler of the two reopen modes; uses the existing `PiSession.Log.replay/1` 
 
 The harder mode. Reuses the existing PreCompact path conceptually but at session-resume time.
 
-- New function `PiSession.Log.summarize/2` with signature `(storage_path, opts) :: {:ok, summary_msg} | {:error, term}`. Pure-ish: takes the persisted log, calls a configurable summarizer (default: the same provider/model used by `PiAgent.maybe_compact/1`), returns a single synthetic `Message.user` containing the summary, tagged with `meta.kind: :resume_summary`.
-- Summarization runs **outside** the new `PiAgent` process — it's a one-shot call from `SessionManager.reopen_session/2` when `opts[:mode] == :summary`. This avoids dragging the live agent into a long-running summarization before its first turn.
-- The new `PiAgent` starts with `messages: [summary_msg]`, `resume_source: :compact`. The model sees a single context-laden user-role turn explaining where the conversation left off.
+- New function `Sigma.Session.Log.summarize/2` with signature `(storage_path, opts) :: {:ok, summary_msg} | {:error, term}`. Pure-ish: takes the persisted log, calls a configurable summarizer (default: the same provider/model used by `Sigma.Agent.maybe_compact/1`), returns a single synthetic `Message.user` containing the summary, tagged with `meta.kind: :resume_summary`.
+- Summarization runs **outside** the new `Sigma.Agent` process — it's a one-shot call from `SessionManager.reopen_session/2` when `opts[:mode] == :summary`. This avoids dragging the live agent into a long-running summarization before its first turn.
+- The new `Sigma.Agent` starts with `messages: [summary_msg]`, `resume_source: :compact`. The model sees a single context-laden user-role turn explaining where the conversation left off.
 - LiveView UI for reopen: a modal asking "How do you want to resume? [Full history] [Summary]" — wired to the two `mode` values.
 - If summarization fails, surface the error to the user with a retry option; do **not** silently fall back to `:full_history` (the user may have requested summary for context-window reasons).
 

@@ -1,6 +1,6 @@
 # Issue tracker: GitHub
 
-Issues and PRDs for this repo live in GitHub Issues for `gsmlg-dev/ex_pi`.
+Issues and PRDs for this repo live in GitHub Issues for `gsmlg-dev/sigma`.
 Use the `gh` CLI for all operations.
 
 ## Conventions

@@ -1,12 +1,12 @@
 import Config
 
-config :ex_pi_web, PiWeb.Endpoint,
+config :sigma_web, Sigma.Web.Endpoint,
   http: [port: 4002],
   server: false
 
 config :logger, level: :warning
 
-config :ex_pi_web,
+config :sigma_web,
   test_provider_config: %{
     "id" => "test",
     "name" => "Test",
@@ -15,4 +15,4 @@ config :ex_pi_web,
     "resolved_key" => "",
     "base_url" => ""
   },
-  mock_provider_module: PiWeb.MockProvider
+  mock_provider_module: Sigma.Web.MockProvider

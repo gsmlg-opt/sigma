@@ -27,6 +27,7 @@ erl_crash.dump
 
 # Local session data and temporary files
 /apps/*/tmp/
+/apps/*/_build/
 /apps/*/priv/native/
 /apps/*/native/*/target/
 /apps/*/priv/sessions/
@@ -50,4 +51,3 @@ yarn-error.log*
 
 # Agent temporary files
 /.antigravitycli/
-

@@ -1,4 +1,4 @@
-# ex_pi Hook System — Implementation Plan
+# sigma Hook System — Implementation Plan
 
 > Sequenced, code-anchored, PR-sized. Targets the current umbrella.
 > Trust lands **before** tool wiring so project hooks can never execute untrusted.
@@ -7,7 +7,7 @@
 ## Placement
 
 ```
-apps/ex_pi_coding/lib/ex_pi_coding/hooks/
+apps/sigma_coding/lib/sigma_coding/hooks/
   hooks.ex            # facade: dispatch/3
   spec.ex             # %HookSpec{}, %Command{}, %Http{}, outcome type
   discovery.ex        # parse/2 (pure) + load/1 (impure, trust-aware)
@@ -18,7 +18,7 @@ apps/ex_pi_coding/lib/ex_pi_coding/hooks/
   runner.ex           # Task.async_stream → Port (+ Req in M5)                (impure)
 ```
 
-Lifecycle wiring touches `apps/ex_pi_agent`. Discovery reuses `ex_pi_session/config_manager.ex` path helpers and `repo_manager.ex` trust state. Specs ride the existing `PiAgent.dispatcher_opts` channel into the dispatcher.
+Lifecycle wiring touches `apps/sigma_agent`. Discovery reuses `sigma_session/config_manager.ex` path helpers and `repo_manager.ex` trust state. Specs ride the existing `Sigma.Agent.dispatcher_opts` channel into the dispatcher.
 
 ---
 
@@ -76,7 +76,7 @@ Command execution with JSON stdin, `cwd`=session cwd, timeout-seconds, stdout/st
 - `Runner.run/3` via `Task.async_stream` (reuse `Dispatcher.TaskSupervisor` pattern), `on_timeout: :kill_task`, per-spec timeout; dedup identical command+args.
 - `Port` spawn; write JSON stdin; capture exit/stdout/stderr. Crash/timeout → `{:error, …}` → non-blocking.
 - `Hooks.dispatch/3` facade = filter by matcher → `Runner.run` → map `Outcome.decode` → `Outcome.fold`.
-- Telemetry spans `[:ex_pi, :hook, :run, :start|:stop]`.
+- Telemetry spans `[:sigma, :hook, :run, :start|:stop]`.
 
 **Acceptance:** multiple matching hooks run concurrently; default timeout 600s, UserPromptSubmit 30s, explicit `timeout` overrides; raw results only, no loop steering yet. (AC-9)
 
@@ -84,7 +84,7 @@ Command execution with JSON stdin, `cwd`=session cwd, timeout-seconds, stdout/st
 
 ## PR 6 — Wire PreToolUse, PermissionRequest, PostToolUse  (M3)
 
-Into `PiCoding.Dispatcher` + `PiCoding.PermissionInterceptor`, no change to no-hook behavior.
+Into `Sigma.Coding.Dispatcher` + `Sigma.Coding.PermissionInterceptor`, no change to no-hook behavior.
 
 - **PreToolUse** in `do_check` after policy `:allow`: collapse `{:block|:halt} → {:deny,r}`; `{:ask,r} → request_fn`; `{:defer,r} → :ask` unless headless; `{:modify,patch} → {:allow, patched_args}`; else `:allow`. Thread patched args into `Tool.execute` (extend `check/2` return or add `check_with_hooks/3`).
 - **PermissionRequest** at the `:ask` branch: `deny → {:deny,msg}`; `allow → :allow` (apply `updatedInput`/`updatedPermissions`); none → existing approval flow. Deny dominates.
@@ -96,7 +96,7 @@ Into `PiCoding.Dispatcher` + `PiCoding.PermissionInterceptor`, no change to no-h
 
 ## PR 7 — Wire UserPromptSubmit & SessionStart  (M4)
 
-Into `PiAgent`. `on_event` stays observational; add a **separate synchronous** `Hooks.dispatch` whose folded result the loop branches on. Specs resolved once at agent init, stored in state.
+Into `Sigma.Agent`. `on_event` stays observational; add a **separate synchronous** `Hooks.dispatch` whose folded result the loop branches on. Specs resolved once at agent init, stored in state.
 
 - **SessionStart** (~ag:295, `{:agent_start, cwd}`): `{:context,t}` → prepend developer message before first turn; no control branch.
 - **UserPromptSubmit** (~ag:301): `{:block,r}` → skip turn, emit notice; `{:context,t}` → append to user message.
@@ -107,7 +107,7 @@ Into `PiAgent`. `on_event` stays observational; add a **separate synchronous** `
 
 ## PR 8 — Wire Stop continuation  (M4)
 
-Stop dispatch before `agent_end` (~ag:261/344). Add `stop_hook_active` to `PiAgent` state + payload.
+Stop dispatch before `agent_end` (~ag:261/344). Add `stop_hook_active` to `Sigma.Agent` state + payload.
 
 - `{:halt,_}` → force `agent_end` (wins).
 - `{:block,r}` with `stop_hook_active==false` → enqueue `r` as synthetic user message, set flag, re-enter loop.
@@ -131,7 +131,7 @@ Corpus golden tests (real Codex + Claude configs); inline `[hooks]` TOML; option
 | golden/pure | Discovery.parse, Payload | AC-1(½), AC-4, AC-5, NFR-1 |
 | unit/impure | Runner, Trust | AC-9, AC-10 |
 | integration | Dispatcher, PermissionInterceptor | AC-1, AC-2, AC-3, AC-6 |
-| integration | PiAgent lifecycle | AC-4, AC-5, AC-7 |
+| integration | Sigma.Agent lifecycle | AC-4, AC-5, AC-7 |
 | diagnostic | Discovery | AC-11 |
 
 ## Sequencing & risk
@@ -142,7 +142,7 @@ Corpus golden tests (real Codex + Claude configs); inline `[hooks]` TOML; option
 
 ## Open items to confirm against `main`
 
-- The exact `PiAgent.Message` constructor at the `UserPromptSubmit` site, to splice `additionalContext`.
+- The exact `Sigma.Agent.Message` constructor at the `UserPromptSubmit` site, to splice `additionalContext`.
 - Whether `PermissionInterceptor.check/2` can carry patched args without breaking callers (else `check_with_hooks/3`).
-- `transcript_path` source — map to `ex_pi_session` JSONL storage for the active session.
-- `permission_mode` value source in `ex_pi`'s permission model, for the stdin payload.
+- `transcript_path` source — map to `sigma_session` JSONL storage for the active session.
+- `permission_mode` value source in `sigma`'s permission model, for the stdin payload.

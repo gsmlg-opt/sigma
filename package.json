@@ -1,6 +1,6 @@
 {
   "private": true,
   "workspaces": [
-    "apps/ex_pi_web"
+    "apps/sigma_web"
   ]
 }

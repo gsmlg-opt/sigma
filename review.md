@@ -1,4 +1,4 @@
-# ex_pi — Port Review
+# sigma — Port Review
 
 **Date:** 2026-05-19
 **Reviewer's lens:** state-of-the-port snapshot, comparing `apps/` against `source/packages/` to identify the next porting increments. Continues the Phase A–H workflow already established in `PLAN.md`.
@@ -29,9 +29,9 @@ Phases A–H landed cleanly and the daily-use loop is solid: streaming, caching,
 
 These do not need rework — listed only so the next phases can lean on them.
 
-- **`PiAi.Stream`** is genuinely pure. SSE → `StreamEvent` separation is the right place to grow more providers without touching the agent.
-- **`PiAgent` turn loop** uses `Task.Supervisor.async_nolink` with a clean abort path and a `restart: :temporary` child spec. Provider crashes don't kill the GenServer, and `SessionManager` evicts dead agents on `:DOWN`.
-- **`PiCoding.PermissionInterceptor`** correctly blocks per-tool via `receive`, so the agent stays responsive while one tool waits — same shape as pi's preflight hook.
+- **`Sigma.Ai.Stream`** is genuinely pure. SSE → `StreamEvent` separation is the right place to grow more providers without touching the agent.
+- **`Sigma.Agent` turn loop** uses `Task.Supervisor.async_nolink` with a clean abort path and a `restart: :temporary` child spec. Provider crashes don't kill the GenServer, and `SessionManager` evicts dead agents on `:DOWN`.
+- **`Sigma.Coding.PermissionInterceptor`** correctly blocks per-tool via `receive`, so the agent stays responsive while one tool waits — same shape as pi's preflight hook.
 - **Symlink-safe `PathUtils.safe_resolve/2`** (Phase A.5a) closes the `tmp → /private/tmp` style escape; this is stronger than pi's plain `path.resolve`.
 - **JSONL log replay** with compaction handling round-trips correctly, and `Log.fork_at_message/5` counts message entries (not raw rows), so compaction markers don't shift the cut point.
 - **Anthropic prompt caching + extended thinking** (Phases F/G) are wired through the same provider without leaking model-specific branches into the agent.
@@ -46,22 +46,22 @@ Organized by impact, not by upstream package layout.
 
 Pi's editor is built around the message queue, and most users notice it immediately:
 
-| Behavior | Pi | ex_pi |
+| Behavior | Pi | sigma |
 |---|---|---|
 | Submit while tool running | `Enter` → steering, delivered after current turn | input disabled until turn ends |
 | Submit while idle but queued | `Alt+Enter` → follow-up, delivered after agent stops | n/a |
 | Abort | `Esc` (also brings queue back to editor) | red cancel button — full kill, no queue restore |
 | `beforeToolCall` / `afterToolCall` hooks | yes, configurable | not implemented |
 
-The steering/follow-up split lives on `Agent` in `source/packages/agent/src/agent.ts` and is read at each `agentLoop` iteration boundary. Porting it cleanly means adding a queue to `PiAgent` state and draining it inside `run_turn_loop/1` between iterations — not a heavy lift, but it changes the LiveView submit handler shape.
+The steering/follow-up split lives on `Agent` in `source/packages/agent/src/agent.ts` and is read at each `agentLoop` iteration boundary. Porting it cleanly means adding a queue to `Sigma.Agent` state and draining it inside `run_turn_loop/1` between iterations — not a heavy lift, but it changes the LiveView submit handler shape.
 
 ### 2. Session format — a design decision is still open
 
-Pi uses **one JSONL file per session** with entries linked by `id`/`parentId`. Forking, cloning, and tree navigation are all reads against the same file. ex_pi uses **one file per fork** and copies the prefix on branch (`Log.fork/4` at `apps/ex_pi_session/lib/ex_pi_session/log.ex`).
+Pi uses **one JSONL file per session** with entries linked by `id`/`parentId`. Forking, cloning, and tree navigation are all reads against the same file. sigma uses **one file per fork** and copies the prefix on branch (`Log.fork/4` at `apps/sigma_session/lib/sigma_session/log.ex`).
 
 Trade-offs:
 
-- **ex_pi's copy-on-fork** is simpler to reason about: each session is self-contained, no parent-link integrity, no entry-id assignment. Replay is linear.
+- **sigma's copy-on-fork** is simpler to reason about: each session is self-contained, no parent-link integrity, no entry-id assignment. Replay is linear.
 - **Pi's tree-in-file** gives `/tree` an in-place navigator that scales to dozens of branches without filesystem clutter, and `/clone` is essentially free.
 
 Until a clear `/tree` requirement lands, the copy-on-fork shape is defensible. The decision worth recording is *not which is better* but *under what trigger we'd migrate*. Suggested trigger: when a single project's session directory exceeds ~50 files and the user starts using fork as a "save point" rather than a branch.
@@ -78,7 +78,7 @@ openai-codex               mistral
 azure-openai
 ```
 
-Each shares the `PiAi.Stream` reducer, so additions are tractable. Priority depends on which provider the user actually uses; for a study port, **OpenAI-Responses next** (it's the new default OpenAI API and tests the "responses-style" branch of the StreamEvent contract).
+Each shares the `Sigma.Ai.Stream` reducer, so additions are tractable. Priority depends on which provider the user actually uses; for a study port, **OpenAI-Responses next** (it's the new default OpenAI API and tests the "responses-style" branch of the StreamEvent contract).
 
 ### 4. OAuth
 
@@ -91,7 +91,7 @@ For Anthropic, OAuth uses PKCE and a redirect to a local callback. In a LiveView
 
 ### 5. Image input
 
-`PiAi.Message` defines `image_content` but nothing produces or transmits it:
+`Sigma.Ai.Message` defines `image_content` but nothing produces or transmits it:
 
 - Providers don't pack image blocks into the wire format.
 - LiveView has no upload affordance.
@@ -101,7 +101,7 @@ Smallest end-to-end slice: paste/upload in LiveView → store as part of message
 
 ### 6. Slash commands and editor UX
 
-The LiveView has buttons for "New Session", "Fork", and "Cancel" — that is the *entire* command surface. Pi's `/`-menu (full list in `source/packages/coding-agent/src/core/slash-commands.ts`) is the primary UI for everything except prompting. The minimum useful set for ex_pi is:
+The LiveView has buttons for "New Session", "Fork", and "Cancel" — that is the *entire* command surface. Pi's `/`-menu (full list in `source/packages/coding-agent/src/core/slash-commands.ts`) is the primary UI for everything except prompting. The minimum useful set for sigma is:
 
 | Command | Justification |
 |---|---|
@@ -121,17 +121,17 @@ Phoenix is the only entrypoint. Pi exposes:
 - `pi --mode rpc` — JSONL framing on stdin/stdout, used by external integrations
 - `pi --export session.jsonl session.html` — offline HTML render
 
-A Mix task `mix ex_pi.run -p "prompt"` plus `mix ex_pi.export <session> <out>` would cover the realistic study-port slice. RPC mode is overkill for a study port unless the goal is to drive ex_pi from an external supervisor.
+A Mix task `mix sigma.run -p "prompt"` plus `mix sigma.export <session> <out>` would cover the realistic study-port slice. RPC mode is overkill for a study port unless the goal is to drive sigma from an external supervisor.
 
 ### 8. Context-file walking
 
 `ConfigManager` reads exactly one file: `~/.pi/agent/AGENTS.md`. Pi walks **from `cwd` up to `/`** *and* `~/.pi/agent/`, concatenating every `AGENTS.md` / `CLAUDE.md` it finds. For a coding agent that's the difference between "knows about the current repo's conventions" and "doesn't."
 
-This is the single highest-leverage missing feature for actual coding tasks. ~30 LoC in `PiSession.ConfigManager`. No design questions.
+This is the single highest-leverage missing feature for actual coding tasks. ~30 LoC in `Sigma.Session.ConfigManager`. No design questions.
 
 ### 9. Customization layer (skills / prompts / extensions / themes / packages)
 
-Pi's extensibility surface is enormous: TS extensions, agent skills, prompt templates, themes, npm/git packages. For a study port the explicit guidance in `docs/port_plan.md` is *do not port these*. The recommendation is to leave this gap intact unless the goal of `ex_pi` changes.
+Pi's extensibility surface is enormous: TS extensions, agent skills, prompt templates, themes, npm/git packages. For a study port the explicit guidance in `docs/port_plan.md` is *do not port these*. The recommendation is to leave this gap intact unless the goal of `sigma` changes.
 
 The narrow exception is **prompt templates** (just Markdown files with `$ARGUMENTS` substitution). That's ~50 LoC and gives users a way to keep frequently-used prompts without an extensions framework. Worth its place.
 
@@ -150,7 +150,7 @@ Each phase is a single commit-worthy increment, framed as a question the way Pha
 **Question:** what does it cost to mirror pi's `Enter` (steering) vs `Alt+Enter` (follow-up) semantics inside a single `GenServer`-per-session?
 
 **Tasks:**
-1. Add `:steering_queue` and `:followup_queue` to `PiAgent` state.
+1. Add `:steering_queue` and `:followup_queue` to `Sigma.Agent` state.
 2. Add `steer/2` and `follow_up/2` public API.
 3. In `run_turn_loop/1`, drain the steering queue between turn iterations (after `message_end`, before `convert_to_llm`); drain the follow-up queue once a turn finishes with no tool calls.
 4. LiveView: `Enter` submits steering when `turn_in_flight`; otherwise submits a normal prompt.
@@ -165,9 +165,9 @@ Each phase is a single commit-worthy increment, framed as a question the way Pha
 **Question:** does the system prompt come from one file or every file the user has placed between `/` and `cwd`?
 
 **Tasks:**
-1. `PiSession.ConfigManager.context_files_for_cwd/1` — walk from cwd up; collect every `AGENTS.md` and `CLAUDE.md`; also include `~/.pi/agent/AGENTS.md` if present.
+1. `Sigma.Session.ConfigManager.context_files_for_cwd/1` — walk from cwd up; collect every `AGENTS.md` and `CLAUDE.md`; also include `~/.pi/agent/AGENTS.md` if present.
 2. Concatenate with file-path delimiters.
-3. Wire the concatenated string into `PiAgent.init/1` as the system prompt (replacing the current single-file read).
+3. Wire the concatenated string into `Sigma.Agent.init/1` as the system prompt (replacing the current single-file read).
 4. Add `--no-context-files` semantics later if needed.
 
 **Estimated size:** ~30 LoC + one test fixture (nested `AGENTS.md` files).
@@ -218,18 +218,18 @@ Each adds a `providers/<name>.ex` and a fixture-based decode test. No agent chan
 **Tasks:**
 1. Phoenix route: `GET /oauth/anthropic/start` (PKCE init → redirect) and `/oauth/anthropic/callback` (token exchange).
 2. Persist to `auth.json` in the existing format.
-3. Add a token-refresh probe inside `PiAi.Providers.Anthropic` before each request.
+3. Add a token-refresh probe inside `Sigma.Ai.Providers.Anthropic` before each request.
 
 **Estimated size:** ~150 LoC. Token refresh is the subtle part — pi handles it inside the provider request path.
 
 ### Phase O — Headless modes (print, JSON, export)
 
-**Question:** how much of `PiAgent` can be reused for a Mix task without dragging in `Phoenix.PubSub`?
+**Question:** how much of `Sigma.Agent` can be reused for a Mix task without dragging in `Phoenix.PubSub`?
 
 **Tasks:**
-1. `mix ex_pi.run -p "prompt" [--session id]` — runs an agent, prints text, exits.
-2. `mix ex_pi.json -p "prompt"` — emits each `Event` as a JSON line on stdout.
-3. `mix ex_pi.export <session-file> [out.html]` — pure offline conversion.
+1. `mix sigma.run -p "prompt" [--session id]` — runs an agent, prints text, exits.
+2. `mix sigma.json -p "prompt"` — emits each `Event` as a JSON line on stdout.
+3. `mix sigma.export <session-file> [out.html]` — pure offline conversion.
 
 **Open question:** session persistence in `--print` mode — pi defaults to ephemeral but flags exist (`--no-session`). Decide once before implementing.
 
@@ -257,7 +257,7 @@ For each, reason given. Pulled out so future-you doesn't have to re-derive these
 - **Extensions framework** — would require either NIFs (forbidden per `port_plan.md`) or Lua/Elixir-script execution. Heavy infrastructure for low study value.
 - **Skills, themes, packages** — same justification. Each lives behind a manifest format and a discovery layer that pi maintains as part of its product surface, not its study surface.
 - **`/share` (GitHub Gist upload)** — networked output, no study value, security surface.
-- **MCP support** — pi explicitly skips it; ex_pi should too.
+- **MCP support** — pi explicitly skips it; sigma should too.
 
 ---
 
@@ -271,7 +271,7 @@ These are decisions that the next phase will need to confirm or reject. Capture 
 
 3. **System prompt composition order.** When `AGENTS.md` walks the directory tree (Phase J), is global-first or cwd-first? Pi is global-first (so cwd overrides via being later); record the choice in code as a comment so it's not lost.
 
-4. **Multimodal in the agent type.** Image content blocks are already in `PiAi.Message` but not anywhere else. When wiring Phase K, decide whether `PiAgent.Message` mirrors the wire shape or adds a richer "attachment" abstraction. Pi just mirrors.
+4. **Multimodal in the agent type.** Image content blocks are already in `Sigma.Ai.Message` but not anywhere else. When wiring Phase K, decide whether `Sigma.Agent.Message` mirrors the wire shape or adds a richer "attachment" abstraction. Pi just mirrors.
 
 5. **OAuth token storage.** `auth.json` currently holds plaintext API keys. Adding refresh tokens means deciding whether storage at rest needs to change (e.g., file mode 0600, or OS keychain). Pi uses 0600 plaintext.
 
@@ -281,10 +281,10 @@ These are decisions that the next phase will need to confirm or reject. Capture 
 
 ## Suggested order
 
-If "make ex_pi useful for everyday coding tasks on Anthropic" is the goal, the optimal cadence is:
+If "make sigma useful for everyday coding tasks on Anthropic" is the goal, the optimal cadence is:
 
 1. **Phase J** (context files) — biggest UX win per LoC; nothing depends on it.
-2. **Phase I** (steering/follow-up) — second biggest UX win; touches `PiAgent` core.
+2. **Phase I** (steering/follow-up) — second biggest UX win; touches `Sigma.Agent` core.
 3. **Phase L** (slash commands) — multiplies the value of Phases I and J.
 4. **Phase N** (Anthropic OAuth) — removes the API-key onboarding cliff.
 5. **Phase K** (image input) — enables debugging from screenshots.
@@ -298,4 +298,4 @@ If instead the goal is "complete the port surface for study purposes", swap the 
 
 ## Closing
 
-Phases A–H are a complete daily-use loop on Anthropic, and the architectural decisions made along the way are documented well enough that this review could be assembled in an afternoon. The remaining work is mostly **above the agent loop** — editor UX, multi-file context, multi-provider, CLI modes — rather than inside it. None of the recommended phases requires touching `PiAi.Stream`, `PiAgent.run_turn_loop/1`, or the JSONL schema, which is a healthy sign that the lower stages of the port are stable.
+Phases A–H are a complete daily-use loop on Anthropic, and the architectural decisions made along the way are documented well enough that this review could be assembled in an afternoon. The remaining work is mostly **above the agent loop** — editor UX, multi-file context, multi-provider, CLI modes — rather than inside it. None of the recommended phases requires touching `Sigma.Ai.Stream`, `Sigma.Agent.run_turn_loop/1`, or the JSONL schema, which is a healthy sign that the lower stages of the port are stable.

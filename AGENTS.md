@@ -2,18 +2,18 @@
 
 ## Project Shape
 
-- `ex_pi` is an Elixir umbrella project: a Phoenix LiveView AI coding agent inspired by `earendil-works/pi`.
+- `sigma` is an Elixir umbrella project: a Phoenix LiveView AI coding agent inspired by `earendil-works/pi`.
 - The upstream TypeScript implementation is checked out at `./source`; cross-reference it when porting behavior.
 - The dev server runs on port `4580`.
-- OTP app names use `ex_pi_*`; runtime modules use `Pi*` prefixes.
+- OTP app names use `sigma_*`; runtime modules use `Sigma*` prefixes.
 
 | App | Module prefix | Responsibility |
 | --- | --- | --- |
-| `ex_pi_ai` | `PiAi` | Provider behaviour, Anthropic/OpenAI SSE streaming, event reducers |
-| `ex_pi_agent` | `PiAgent` | Per-session GenServer turn loop, message transforms, tool execution flow |
-| `ex_pi_session` | `PiSession` | JSONL replay/persistence, config, repo list, context files |
-| `ex_pi_coding` | `PiCoding` | Tool behaviour, dispatcher, permissions, read/write/edit/bash/search tools |
-| `ex_pi_web` | `PiWeb` | Phoenix LiveView UI, routing, session process lifecycle |
+| `sigma_ai` | `Sigma.Ai` | Provider behaviour, Anthropic/OpenAI SSE streaming, event reducers |
+| `sigma_agent` | `Sigma.Agent` | Per-session GenServer turn loop, message transforms, tool execution flow |
+| `sigma_session` | `Sigma.Session` | JSONL replay/persistence, config, repo list, context files |
+| `sigma_coding` | `Sigma.Coding` | Tool behaviour, dispatcher, permissions, read/write/edit/bash/search tools |
+| `sigma_web` | `Sigma.Web` | Phoenix LiveView UI, routing, session process lifecycle |
 
 ## Commands
 
@@ -23,8 +23,8 @@ mix assets.setup
 mix phx.server
 mix assets.build
 mix test
-mix test apps/ex_pi_agent/test/ex_pi_agent_test.exs
-mix test apps/ex_pi_agent/test/ex_pi_agent_test.exs:42
+mix test apps/sigma_agent/test/sigma_agent_test.exs
+mix test apps/sigma_agent/test/sigma_agent_test.exs:42
 mix format --check-formatted
 mix compile --warnings-as-errors
 ```
@@ -38,29 +38,29 @@ mix compile --warnings-as-errors
 
 ## Architecture Notes
 
-- User prompts enter through `PiWeb.SessionLive`, call `PiAgent.prompt/2`, stream through a `PiAi.Provider`, then persist/broadcast `PiAgent` events.
-- Providers implement `PiAi.Provider.stream/1` and return lazy streams of tagged events such as `{:start, msg}`, `{:text_delta, idx, text, msg}`, `{:toolcall_*, ...}`, and `{:done, reason, msg}`.
-- Tool calls are dispatched by `PiCoding.Dispatcher`; batch execution uses `Task.Supervisor` when one is supplied.
-- Permission checks go through `PiCoding.PermissionInterceptor` and `PiCoding.PermissionPolicy`; LiveView approval waits must stay aligned with the interceptor timeout.
-- Session JSONL files are stored per repository/workdir. In dev, sessions live under `apps/ex_pi_web/priv/sessions/<base64-url-workdir>/`.
-- Known repositories are stored in dev at `apps/ex_pi_session/priv/repos.jsonl`.
+- User prompts enter through `Sigma.Web.SessionLive`, call `Sigma.Agent.prompt/2`, stream through a `Sigma.Ai.Provider`, then persist/broadcast `Sigma.Agent` events.
+- Providers implement `Sigma.Ai.Provider.stream/1` and return lazy streams of tagged events such as `{:start, msg}`, `{:text_delta, idx, text, msg}`, `{:toolcall_*, ...}`, and `{:done, reason, msg}`.
+- Tool calls are dispatched by `Sigma.Coding.Dispatcher`; batch execution uses `Task.Supervisor` when one is supplied.
+- Permission checks go through `Sigma.Coding.PermissionInterceptor` and `Sigma.Coding.PermissionPolicy`; LiveView approval waits must stay aligned with the interceptor timeout.
+- Session JSONL files are stored per repository/workdir. In dev, sessions live under `apps/sigma_web/priv/sessions/<base64-url-workdir>/`.
+- Known repositories are stored in dev at `apps/sigma_session/priv/repos.jsonl`.
 - Agent/provider/MCP config is pi-compatible and stored at `~/.pi/agent/`: `settings.json`, `auth.json`, `models.json`, `mcp.json`, and `AGENTS.md`.
 - Context assembly prefers `AGENTS.md` over `CLAUDE.md` in each ancestor directory, ordered root-to-workdir so deeper project instructions have later precedence.
 
 ## Routes
 
 ```text
-/                                      -> PiWeb.HomeLive
-/repository/new                       -> PiWeb.HomeLive, add mode
-/repository/:repository               -> PiWeb.RepositoryLive
-/repository/:repository/settings      -> PiWeb.ProjectSettingsLive
-/repository/:repository/sessions/:id  -> PiWeb.SessionLive
+/                                      -> Sigma.Web.HomeLive
+/repository/new                       -> Sigma.Web.HomeLive, add mode
+/repository/:repository               -> Sigma.Web.RepositoryLive
+/repository/:repository/settings      -> Sigma.Web.ProjectSettingsLive
+/repository/:repository/sessions/:id  -> Sigma.Web.SessionLive
 /settings                             -> redirects to providers settings
-/settings/providers                   -> PiWeb.SettingsLive
-/settings/credentials                 -> PiWeb.SettingsLive
-/settings/mcp                         -> PiWeb.SettingsLive
-/settings/skills                      -> PiWeb.SettingsLive
-/settings/system_prompt               -> PiWeb.SettingsLive
+/settings/providers                   -> Sigma.Web.SettingsLive
+/settings/credentials                 -> Sigma.Web.SettingsLive
+/settings/mcp                         -> Sigma.Web.SettingsLive
+/settings/skills                      -> Sigma.Web.SettingsLive
+/settings/system_prompt               -> Sigma.Web.SettingsLive
 ```
 
 The `:repository` param is a Base64 URL-encoded absolute path with no padding.
@@ -85,7 +85,7 @@ The `:repository` param is a Base64 URL-encoded absolute path with no padding.
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **ex_pi** (726 symbols, 910 relationships, 24 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **sigma** (726 symbols, 910 relationships, 24 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -108,10 +108,10 @@ This project is indexed by GitNexus as **ex_pi** (726 symbols, 910 relationships
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/ex_pi/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/ex_pi/clusters` | All functional areas |
-| `gitnexus://repo/ex_pi/processes` | All execution flows |
-| `gitnexus://repo/ex_pi/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/sigma/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/sigma/clusters` | All functional areas |
+| `gitnexus://repo/sigma/processes` | All execution flows |
+| `gitnexus://repo/sigma/process/{name}` | Step-by-step execution trace |
 
 ## CLI
 

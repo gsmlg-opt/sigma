@@ -8,7 +8,7 @@ if config_env() == :prod do
       You can generate one by running: mix phx.gen.secret
       """
 
-  config :ex_pi_web, PiWeb.Endpoint,
+  config :sigma_web, Sigma.Web.Endpoint,
     http: [
       port: String.to_integer(System.get_env("PORT") || "4580"),
       transport_options: [socket_opts: [:inet6]]
