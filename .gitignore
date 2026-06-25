@@ -51,3 +51,7 @@ yarn-error.log*
 
 # Agent temporary files
 /.antigravitycli/
+
+# devenv
+.devenv/
+.devenv.*
