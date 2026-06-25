@@ -1,7 +1,7 @@
 defmodule Sigma.Ai.Providers.Anthropic do
   @behaviour Sigma.Ai.Provider
 
-  alias Sigma.Ai.Stream
+  alias Sigma.Ai.{ProviderAuth, Stream}
 
   @impl true
   def stream(params) do
@@ -45,12 +45,14 @@ defmodule Sigma.Ai.Providers.Anthropic do
 
     beta_value = (["prompt-caching-2024-07-31"] ++ extra_betas) |> Enum.join(",")
 
-    headers = [
-      {"x-api-key", api_key},
-      {"anthropic-version", "2023-06-01"},
-      {"content-type", "application/json"},
-      {"anthropic-beta", beta_value}
-    ]
+    headers =
+      [
+        ProviderAuth.headers(api_key, options, "x-api-key"),
+        {"anthropic-version", "2023-06-01"},
+        {"content-type", "application/json"},
+        {"anthropic-beta", beta_value}
+      ]
+      |> List.flatten()
 
     inner = build_inner_stream(model, body, headers, base_url, options)
 
@@ -336,10 +338,6 @@ defmodule Sigma.Ai.Providers.Anthropic do
       "max_tokens",
       :maxTokens,
       "maxTokens",
-      :max_output_tokens,
-      "max_output_tokens",
-      :maxOutputTokens,
-      "maxOutputTokens",
       :output_token_limit,
       "output_token_limit",
       :outputTokenLimit,

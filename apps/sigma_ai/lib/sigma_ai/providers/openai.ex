@@ -1,13 +1,14 @@
 defmodule Sigma.Ai.Providers.OpenAI do
   @behaviour Sigma.Ai.Provider
 
-  alias Sigma.Ai.Stream
+  alias Sigma.Ai.{ProviderAuth, Stream}
 
   @impl true
   def stream(params) do
     model = params.model
     context = params.context
     options = params.options
+    session_id = Map.get(params, :session_id)
 
     api_key =
       options[:api_key] || System.get_env("OPENAI_API_KEY") ||
@@ -22,22 +23,72 @@ defmodule Sigma.Ai.Providers.OpenAI do
         context.messages
         |> transform_messages()
         |> prepend_system_message(context[:system] || context[:system_prompt]),
-      max_tokens: output_token_limit(model, options),
       stream: true,
       stream_options: %{include_usage: true}
     }
+
+    body =
+      case output_token_limit(model, options) do
+        nil -> body
+        limit -> Map.put(body, :max_tokens, limit)
+      end
 
     # Add tools if present
     body =
       if context[:tools], do: Map.put(body, :tools, transform_tools(context.tools)), else: body
 
-    headers = [
-      {"Authorization", "Bearer #{api_key}"},
-      {"Content-Type", "application/json"}
-    ]
+    headers =
+      [
+        ProviderAuth.headers(api_key, options, "bearer"),
+        {"Content-Type", "application/json"}
+      ]
+      |> List.flatten()
 
+    inner = build_inner_stream(model, body, headers, base_url, options, session_id)
+
+    Elixir.Stream.transform(
+      inner,
+      fn ->
+        System.monotonic_time()
+      end,
+      fn event, start_time ->
+        case event do
+          {:done, _stop_reason, ai_msg} ->
+            :telemetry.execute(
+              [:sigma, :llm, :request, :stop],
+              %{duration: System.monotonic_time() - start_time},
+              %{
+                session_id: session_id,
+                model: model.id,
+                usage: ai_msg.usage,
+                response_content: ai_msg.content
+              }
+            )
+
+            {[event], start_time}
+
+          _ ->
+            {[event], start_time}
+        end
+      end,
+      fn _start_time -> :ok end
+    )
+  end
+
+  defp build_inner_stream(model, body, headers, base_url, options, session_id) do
     Elixir.Stream.resource(
       fn ->
+        :telemetry.execute(
+          [:sigma, :llm, :request, :start],
+          %{system_time: System.system_time()},
+          %{
+            session_id: session_id,
+            model: model.id,
+            provider: "openai",
+            request_body: body
+          }
+        )
+
         resp =
           try do
             Req.post!(base_url <> "/chat/completions",
@@ -110,6 +161,9 @@ defmodule Sigma.Ai.Providers.OpenAI do
 
   defp handle_stream_chunks(chunks, message, buffer) do
     Enum.reduce(chunks, {[], message, buffer, :streaming}, fn
+      {:data, _chunk}, {acc_events, acc_message, acc_buffer, :done} ->
+        {acc_events, acc_message, acc_buffer, :done}
+
       {:data, chunk}, {acc_events, acc_message, acc_buffer, _status} ->
         {events, new_buffer} = Stream.decode(acc_buffer, chunk)
         {processed_events, new_message} = process_events(events, acc_message)
@@ -121,8 +175,12 @@ defmodule Sigma.Ai.Providers.OpenAI do
 
         {acc_events ++ processed_events, new_message, new_buffer, status}
 
-      :done, {acc_events, acc_message, acc_buffer, _status} ->
+      :done, {acc_events, acc_message, acc_buffer, :done} ->
         {acc_events, acc_message, acc_buffer, :done}
+
+      :done, {acc_events, acc_message, acc_buffer, _status} ->
+        {processed_events, new_message} = process_events([:done], acc_message)
+        {acc_events ++ processed_events, new_message, acc_buffer, :done}
 
       _chunk, acc ->
         acc
@@ -169,7 +227,7 @@ defmodule Sigma.Ai.Providers.OpenAI do
         %{role: "user", content: content}
 
       %{role: :assistant, content: content} ->
-        %{role: "assistant", content: transform_content(content)}
+        transform_assistant_message(content)
 
       %{role: :tool_result, tool_call_id: id, content: content} ->
         %{
@@ -189,6 +247,29 @@ defmodule Sigma.Ai.Providers.OpenAI do
 
   defp transform_tool_result_content(content), do: content
 
+  defp transform_assistant_message(content) when is_list(content) do
+    tool_calls = content |> Enum.filter(&tool_call_block?/1) |> Enum.map(&transform_tool_call/1)
+
+    if tool_calls == [] do
+      %{role: "assistant", content: transform_content(content)}
+    else
+      %{
+        role: "assistant",
+        content: transform_assistant_content_without_tools(content),
+        tool_calls: tool_calls
+      }
+    end
+  end
+
+  defp transform_assistant_message(content), do: %{role: "assistant", content: content}
+
+  defp transform_assistant_content_without_tools(content) do
+    case Enum.reject(content, &tool_call_block?/1) do
+      [] -> nil
+      blocks -> transform_content(blocks)
+    end
+  end
+
   defp transform_content(content) do
     Enum.map(content, fn
       %{type: :text, text: text} ->
@@ -198,12 +279,19 @@ defmodule Sigma.Ai.Providers.OpenAI do
         %{type: "thinking", thinking: thinking}
 
       %{type: :tool_call} = tc ->
-        %{
-          type: "tool",
-          id: tc.id,
-          function: %{name: tc.name, arguments: Jason.encode!(tc.arguments)}
-        }
+        transform_tool_call(tc)
     end)
+  end
+
+  defp tool_call_block?(%{type: :tool_call, arguments: args}) when is_map(args), do: true
+  defp tool_call_block?(_block), do: false
+
+  defp transform_tool_call(tc) do
+    %{
+      id: tc.id,
+      type: "function",
+      function: %{name: tc.name, arguments: Jason.encode!(tc.arguments)}
+    }
   end
 
   defp transform_tools(tools) do
@@ -252,8 +340,7 @@ defmodule Sigma.Ai.Providers.OpenAI do
   defp output_token_limit(model, options) do
     positive_integer(options[:max_tokens]) ||
       positive_integer(options[:maxTokens]) ||
-      model_max_tokens(model) ||
-      4096
+      model_max_tokens(model)
   end
 
   defp model_max_tokens(model) when is_map(model) do
@@ -262,10 +349,6 @@ defmodule Sigma.Ai.Providers.OpenAI do
       "max_tokens",
       :maxTokens,
       "maxTokens",
-      :max_output_tokens,
-      "max_output_tokens",
-      :maxOutputTokens,
-      "maxOutputTokens",
       :output_token_limit,
       "output_token_limit",
       :outputTokenLimit,
@@ -294,7 +377,11 @@ defmodule Sigma.Ai.Providers.OpenAI do
           raise provider_error_message(error)
 
         :done ->
-          {{:done, acc.stop_reason || :stop, acc}, acc}
+          {tool_call_events, acc} = finalize_pending_tool_call_events(acc)
+          stop_reason = if tool_call_events == [], do: acc.stop_reason || :stop, else: :tool_use
+          acc = %{acc | stop_reason: stop_reason}
+
+          {tool_call_events ++ [{:done, stop_reason, acc}], acc}
 
         %{"choices" => choices} when choices != [] ->
           choice = Enum.at(choices, 0)
@@ -307,36 +394,21 @@ defmodule Sigma.Ai.Providers.OpenAI do
               do: %{acc | stop_reason: transform_stop_reason(finish_reason)},
               else: acc
 
-          cond do
-            Map.has_key?(delta, "content") ->
-              text = delta["content"]
-              # Check if we need to start a text block
-              {acc, event_to_emit} =
-                if Enum.at(acc.content, index) == nil do
-                  new_content = List.insert_at(acc.content, index, %{type: :text, text: ""})
-                  new_acc = %{acc | content: new_content}
-                  {new_acc, {:text_start, index, new_acc}}
-                else
-                  {acc, nil}
-                end
+          {events, acc} =
+            cond do
+              is_binary(delta["content"]) ->
+                process_text_delta(acc, index, delta["content"])
 
-              new_content =
-                update_content(acc.content, index, fn block ->
-                  %{block | text: (block[:text] || "") <> text}
-                end)
+              is_list(delta["tool_calls"]) ->
+                process_tool_call_deltas(acc, delta["tool_calls"])
 
-              new_acc = %{acc | content: new_content}
-              delta_event = {:text_delta, index, text, new_acc}
+              true ->
+                {[], acc}
+            end
 
-              events = if event_to_emit, do: [event_to_emit, delta_event], else: [delta_event]
-              {events, new_acc}
-
-            Map.has_key?(delta, "tool_calls") ->
-              # Handle tool calls... simplified
-              {[], acc}
-
-            true ->
-              {[], acc}
+          case finish_reason do
+            "tool_calls" -> append_final_tool_call_events(events, acc)
+            _ -> {events, acc}
           end
 
         %{"usage" => usage} ->
@@ -353,6 +425,135 @@ defmodule Sigma.Ai.Providers.OpenAI do
   defp update_content(content, idx, fun) do
     List.replace_at(content, idx, fun.(Enum.at(content, idx)))
   end
+
+  defp process_text_delta(acc, index, text) do
+    # Check if we need to start a text block
+    {acc, event_to_emit} =
+      if Enum.at(acc.content, index) == nil do
+        new_content = List.insert_at(acc.content, index, %{type: :text, text: ""})
+        new_acc = %{acc | content: new_content}
+        {new_acc, {:text_start, index, new_acc}}
+      else
+        {acc, nil}
+      end
+
+    new_content =
+      update_content(acc.content, index, fn block ->
+        %{block | text: (block[:text] || "") <> text}
+      end)
+
+    new_acc = %{acc | content: new_content}
+    delta_event = {:text_delta, index, text, new_acc}
+
+    events = if event_to_emit, do: [event_to_emit, delta_event], else: [delta_event]
+    {events, new_acc}
+  end
+
+  defp process_tool_call_deltas(acc, tool_call_deltas) do
+    Enum.map_reduce(tool_call_deltas, acc, &process_tool_call_delta/2)
+    |> then(fn {events, acc} -> {List.flatten(events), acc} end)
+  end
+
+  defp process_tool_call_delta(delta, acc) do
+    provider_index = delta["index"] || 0
+    function = delta["function"] || %{}
+
+    {index, acc, start_event} = ensure_tool_call_block(acc, provider_index, delta, function)
+
+    new_content =
+      update_content(acc.content, index, fn block ->
+        block
+        |> maybe_put_present(:id, delta["id"])
+        |> maybe_put_present(:name, function["name"])
+        |> Map.update(
+          :partial_json,
+          function["arguments"] || "",
+          &(&1 <> (function["arguments"] || ""))
+        )
+      end)
+
+    new_acc = %{acc | content: new_content}
+
+    delta_event =
+      case function["arguments"] do
+        arguments when is_binary(arguments) -> {:toolcall_delta, index, arguments, new_acc}
+        _ -> nil
+      end
+
+    {[start_event, delta_event] |> Enum.reject(&is_nil/1), new_acc}
+  end
+
+  defp ensure_tool_call_block(acc, provider_index, delta, function) do
+    case tool_call_content_index(acc.content, provider_index) do
+      nil ->
+        index = length(acc.content)
+
+        block = %{
+          type: :tool_call,
+          id: delta["id"],
+          name: function["name"],
+          partial_json: "",
+          provider_index: provider_index
+        }
+
+        new_content = acc.content ++ [block]
+        new_acc = %{acc | content: new_content}
+        {index, new_acc, {:toolcall_start, index, new_acc}}
+
+      index ->
+        {index, acc, nil}
+    end
+  end
+
+  defp tool_call_content_index(content, provider_index) do
+    Enum.find_index(content, fn
+      %{type: :tool_call, provider_index: ^provider_index} -> true
+      _ -> false
+    end)
+  end
+
+  defp append_final_tool_call_events(events, acc) do
+    {end_events, acc} = finalize_pending_tool_call_events(acc)
+    {events ++ end_events, acc}
+  end
+
+  defp finalize_pending_tool_call_events(acc) do
+    acc.content
+    |> Enum.with_index()
+    |> Enum.map_reduce(acc, fn {block, index}, current_acc ->
+      finalize_tool_call_block(current_acc, block, index)
+    end)
+    |> then(fn {events, acc} -> {Enum.reject(events, &is_nil/1), acc} end)
+  end
+
+  defp finalize_tool_call_block(
+         acc,
+         %{type: :tool_call, partial_json: partial_json} = block,
+         index
+       ) do
+    args =
+      case Jason.decode(partial_json || "") do
+        {:ok, decoded} when is_map(decoded) -> decoded
+        _ -> %{}
+      end
+
+    tool_call = %{
+      type: :tool_call,
+      id: block.id,
+      name: block.name,
+      arguments: args
+    }
+
+    new_content = List.replace_at(acc.content, index, tool_call)
+    new_acc = %{acc | content: new_content}
+    {{:toolcall_end, index, tool_call, new_acc}, new_acc}
+  end
+
+  defp finalize_tool_call_block(acc, _block, _index), do: {nil, acc}
+
+  defp maybe_put_present(map, _key, nil), do: map
+  defp maybe_put_present(map, _key, ""), do: map
+  defp maybe_put_present(map, key, value), do: Map.put(map, key, value)
 
   defp transform_stop_reason("stop"), do: :stop
   defp transform_stop_reason("length"), do: :length

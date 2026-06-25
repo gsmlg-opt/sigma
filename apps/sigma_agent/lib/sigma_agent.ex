@@ -508,12 +508,18 @@ defmodule Sigma.Agent do
   defp extract_tool_calls(msg) do
     case msg && msg.content do
       content when is_list(content) ->
-        Enum.filter(content, fn block -> block.type == :tool_call end)
+        Enum.filter(content, &executable_tool_call?/1)
 
       _ ->
         []
     end
   end
+
+  defp executable_tool_call?(%{type: :tool_call, id: id, name: name, arguments: args})
+       when is_binary(id) and is_binary(name) and is_map(args),
+       do: true
+
+  defp executable_tool_call?(_block), do: false
 
   defp execute_tools(state, tool_calls) do
     Enum.each(tool_calls, fn tc ->

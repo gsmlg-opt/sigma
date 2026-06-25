@@ -99,6 +99,54 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
     end)
   end
 
+  test "ignores max_output_tokens model metadata for Anthropic requests" do
+    sse = [
+      ~s(data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1,"output_tokens":0}}}\n\n),
+      ~s(data: {"type":"message_stop"}\n\n)
+    ]
+
+    with_capture_server(sse, fn base_url, captured ->
+      Anthropic.stream(%{
+        model: %{
+          "max_output_tokens" => 128_000,
+          id: "claude-test",
+          api: "anthropic-messages",
+          provider: "anthropic"
+        },
+        context: %{messages: [], system_prompt: nil, tools: []},
+        options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+      })
+      |> Enum.to_list()
+
+      assert %{"max_tokens" => 4096} = Agent.get(captured, & &1)
+    end)
+  end
+
+  test "uses configured bearer token auth header" do
+    sse = [
+      ~s(data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1,"output_tokens":0}}}\n\n),
+      ~s(data: {"type":"message_stop"}\n\n)
+    ]
+
+    with_request_capture_server(sse, fn base_url, captured ->
+      Anthropic.stream(%{
+        model: %{id: "claude-test", api: "anthropic-messages", provider: "anthropic"},
+        context: %{messages: [], system_prompt: nil, tools: []},
+        options: [
+          api_key: "test-key",
+          base_url: base_url,
+          receive_timeout: 1_000,
+          auth_type: "bearer"
+        ]
+      })
+      |> Enum.to_list()
+
+      assert %{headers: headers} = Agent.get(captured, & &1)
+      assert headers["authorization"] == "Bearer test-key"
+      refute Map.has_key?(headers, "x-api-key")
+    end)
+  end
+
   test "raises provider error details for non-streaming error responses" do
     body =
       Jason.encode!(%{
@@ -199,6 +247,50 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
     end
   end
 
+  defp with_request_capture_server(chunks, fun) do
+    {:ok, listen_socket} =
+      :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
+
+    {:ok, port} = :inet.port(listen_socket)
+    {:ok, captured} = Agent.start_link(fn -> %{} end)
+
+    task =
+      Task.async(fn ->
+        {:ok, socket} = :gen_tcp.accept(listen_socket)
+        request = recv_request(socket, "")
+
+        Agent.update(captured, fn _ ->
+          %{
+            headers: request_headers(request),
+            body: request |> request_body() |> Jason.decode!()
+          }
+        end)
+
+        body = IO.iodata_to_binary(chunks)
+
+        response = [
+          "HTTP/1.1 200 OK\r\n",
+          "content-type: text/event-stream\r\n",
+          "content-length: #{byte_size(body)}\r\n",
+          "connection: close\r\n",
+          "\r\n",
+          body
+        ]
+
+        :ok = :gen_tcp.send(socket, response)
+        :gen_tcp.close(socket)
+        :gen_tcp.close(listen_socket)
+      end)
+
+    try do
+      fun.("http://127.0.0.1:#{port}", captured)
+    after
+      Agent.stop(captured)
+      Task.shutdown(task, 1_000)
+      :gen_tcp.close(listen_socket)
+    end
+  end
+
   defp recv_request(socket, acc) do
     {:ok, chunk} = :gen_tcp.recv(socket, 0, 1_000)
     acc = acc <> chunk
@@ -234,5 +326,19 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
   defp request_body(request) do
     [_headers, body] = String.split(request, "\r\n\r\n", parts: 2)
     body
+  end
+
+  defp request_headers(request) do
+    [headers, _body] = String.split(request, "\r\n\r\n", parts: 2)
+
+    headers
+    |> String.split("\r\n")
+    |> Enum.drop(1)
+    |> Enum.reduce(%{}, fn line, acc ->
+      case String.split(line, ":", parts: 2) do
+        [name, value] -> Map.put(acc, String.downcase(name), String.trim(value))
+        _ -> acc
+      end
+    end)
   end
 end

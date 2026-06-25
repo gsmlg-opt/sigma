@@ -58,6 +58,40 @@ defmodule Sigma.AgentTest do
     def stream(_params), do: []
   end
 
+  defmodule PartialToolCallProvider do
+    @behaviour Sigma.Ai.Provider
+
+    @impl true
+    def stream(_params) do
+      msg = %{
+        role: :assistant,
+        content: [
+          %{
+            type: :tool_call,
+            id: "partial_tool_call",
+            name: "capture_prompt_opts",
+            partial_json: "{}"
+          }
+        ],
+        model: "mock-model",
+        provider: "mock-provider",
+        api: "mock-api",
+        usage: %{
+          input: 0,
+          output: 0,
+          cache_read: 0,
+          cache_write: 0,
+          total_tokens: 0,
+          cost: %{input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0, total: 0.0}
+        },
+        stop_reason: :tool_use,
+        timestamp: System.system_time(:millisecond)
+      }
+
+      [{:start, msg}, {:done, :tool_use, msg}]
+    end
+  end
+
   defmodule PromptDispatcherProvider do
     @behaviour Sigma.Ai.Provider
 
@@ -289,6 +323,39 @@ defmodule Sigma.AgentTest do
              messages,
              &(&1.role == :tool_result and &1.tool_name == "capture_prompt_opts")
            )
+  end
+
+  test "agent does not dispatch partial tool call blocks" do
+    model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
+
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        model: model,
+        provider: PartialToolCallProvider,
+        tools: [PromptDispatcherTool],
+        dispatcher_opts: [test_pid: self()]
+      )
+
+    Sigma.Agent.subscribe(agent)
+    Sigma.Agent.prompt(agent, "Hi")
+
+    assert_receive {:agent_end, messages}, 1000
+    refute_received {:dispatcher_opts_seen, _}
+    refute_received {:turn_error, _}
+
+    assert [
+             %Message{role: :user, content: "Hi"},
+             %Message{
+               role: :assistant,
+               content: [
+                 %{
+                   type: :tool_call,
+                   id: "partial_tool_call",
+                   partial_json: "{}"
+                 }
+               ]
+             }
+           ] = messages
   end
 
   defmodule CompactMockProvider do
