@@ -1,14 +1,14 @@
 defmodule Mix.Tasks.Duskmoon.Bundle do
   @moduledoc """
-  Pre-bundle @duskmoon-dev/elements for Volt dev server.
+  Pre-bundle @duskmoon-dev/elements for DuskmoonBundler dev server.
 
-  Volt's vendor prebundler cannot bundle @duskmoon-dev elements in umbrella
+  DuskmoonBundler's vendor prebundler cannot bundle @duskmoon-dev elements in umbrella
   projects because OXC sets the bundle cwd to the package's parent directory,
   which prevents resolving sibling scoped packages (@duskmoon-dev/el-base,
   @duskmoon-dev/core, etc.).
 
   This task uses OXC directly with the project root as cwd, then writes the
-  bundled output to assets/js/ where Volt can serve it as a regular source file.
+  bundled output to assets/js/ where DuskmoonBundler can serve it as a regular source file.
 
   ## Usage
 
@@ -18,9 +18,9 @@ defmodule Mix.Tasks.Duskmoon.Bundle do
 
   use Mix.Task
 
-  @shortdoc "Pre-bundle @duskmoon-dev/elements for Volt"
+  @shortdoc "Pre-bundle @duskmoon-dev/elements for DuskmoonBundler"
 
-  # Keep this list to custom elements rendered by sigma_web. Volt/OXC can get
+  # Keep this list to custom elements rendered by sigma_web. DuskmoonBundler/OXC can get
   # killed by the full DuskMoon element graph, while Bun previously tolerated it.
   # Elements with dynamic imports (el-markdown-input, el-chat) or large markdown
   # dependency graphs are prebundled separately with Bun.

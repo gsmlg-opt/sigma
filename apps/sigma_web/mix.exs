@@ -36,7 +36,7 @@ defmodule Sigma.Web.MixProject do
       {:jason, "~> 1.4"},
       {:plug_cowboy, "~> 2.7"},
       {:gettext, "~> 1.0"},
-      {:volt, "~> 0.14"},
+      {:duskmoon_bundler, "~> 9.5"},
       {:phoenix_duskmoon, "~> 9.0"},
       {:sigma_agent, in_umbrella: true},
       {:sigma_session, in_umbrella: true},

@@ -31,17 +31,18 @@ defmodule Sigma.MixProject do
         "cmd --app sigma_web mix npm.install",
         "duskmoon.bundle"
       ],
-      "assets.build": ["duskmoon.bundle", "volt.build --tailwind"],
+      # TODO(upstream): duskmoon-dev/phoenix-duskmoon-ui#48
+      "assets.build": ["duskmoon.bundle", "duskmoon_bundler.build --tailwind"],
       "assets.deploy": [
         "deps.patch",
         "duskmoon.bundle",
-        "volt.build --tailwind",
+        "duskmoon_bundler.build --tailwind",
         "phx.digest"
       ]
     ]
   end
 
-  # QuickBEAM (pulled in via :volt) ships precompiled NIFs only for
+  # QuickBEAM (pulled in via :duskmoon_bundler) ships precompiled NIFs only for
   # x86_64-linux-gnu, aarch64-linux-gnu, and aarch64-macos-none. On Intel macOS
   # there is no precompiled artifact, so the NIF must be built from source with
   # Zigler. Zigler 0.15.x requires Zig 0.15.2, which we invoke through mise

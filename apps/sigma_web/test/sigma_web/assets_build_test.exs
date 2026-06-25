@@ -8,10 +8,10 @@ defmodule Sigma.Web.AssetsBuildTest do
     File.rm_rf!(temp_outdir)
 
     # Reenable task in case it was already run in this VM instance
-    Mix.Task.reenable("volt.build")
+    Mix.Task.reenable("duskmoon_bundler.build")
 
-    # Run the volt.build Mix task directly in-process
-    Mix.Task.run("volt.build", ["--tailwind", "--outdir", temp_outdir])
+    # Run the duskmoon_bundler.build Mix task directly in-process
+    Mix.Task.run("duskmoon_bundler.build", ["--tailwind", "--outdir", temp_outdir])
 
     css_files = Path.wildcard(Path.join(temp_outdir, "css/app*.css"))
     assert length(css_files) > 0, "No CSS files found in #{temp_outdir}/css/"

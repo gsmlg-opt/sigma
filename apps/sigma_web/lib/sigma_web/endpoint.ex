@@ -22,7 +22,7 @@ defmodule Sigma.Web.Endpoint do
     socket "/phoenix/live_reload/socket", Phoenix.LiveReloader.Socket
     plug Phoenix.LiveReloader
     plug Phoenix.CodeReloader
-    plug Volt.DevServer
+    plug DuskmoonBundler.DevServer
   end
 
   plug Plug.RequestId

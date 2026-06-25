@@ -16,13 +16,20 @@ config :logger, :console,
 
 config :phoenix, :json_library, Jason
 
-config :volt,
+config :duskmoon_bundler,
   entry: Path.expand("../apps/sigma_web/assets/js/app.js", __DIR__),
   root: Path.expand("../apps/sigma_web/assets", __DIR__),
   outdir: Path.expand("../apps/sigma_web/priv/static/assets", __DIR__),
   resolve_dirs: [Path.expand("../deps", __DIR__), Path.expand("../node_modules", __DIR__)],
   target: :es2022,
-  tailwind: [css: Path.expand("../apps/sigma_web/assets/css/app.css", __DIR__)]
+  tailwind: [
+    css: Path.expand("../apps/sigma_web/assets/css/app.css", __DIR__),
+    sources: [
+      %{base: Path.expand("../apps/sigma_web/lib", __DIR__), pattern: "**/*.{ex,heex}"},
+      %{base: Path.expand("../apps/sigma_web/assets", __DIR__), pattern: "**/*.{js,ts,jsx,tsx}"},
+      %{base: Path.expand("../deps/phoenix_duskmoon", __DIR__), pattern: "**/*.{ex,heex}"}
+    ]
+  ]
 
 config :sigma_logs, pubsub: Sigma.Web.PubSub
 

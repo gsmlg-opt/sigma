@@ -6,16 +6,16 @@ config :sigma_web, Sigma.Web.Endpoint,
   code_reloader: true,
   check_origin: false,
   watchers: [
-    volt:
-      {Mix.Tasks.Volt.Dev, :run,
+    duskmoon_bundler:
+      {Mix.Tasks.DuskmoonBundler.Dev, :run,
        [
          ~w(--tailwind --tailwind-outdir) ++
            [Path.expand("../apps/sigma_web/priv/static/assets/css", __DIR__)]
        ]}
   ]
 
-config :volt, :server,
+config :duskmoon_bundler, :server,
   prefix: "/assets",
   watch_dirs: [Path.expand("../apps/sigma_web/lib/", __DIR__)]
 
-config :volt, sourcemap: :linked
+config :duskmoon_bundler, sourcemap: :linked
