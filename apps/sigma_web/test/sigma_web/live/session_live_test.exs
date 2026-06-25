@@ -59,7 +59,10 @@ defmodule Sigma.Web.SessionLiveTest do
 
   setup do
     previous_agent_dir = Application.get_env(:sigma_session, :agent_dir)
-    agent_dir = Path.join(System.tmp_dir!(), "sigma-session-live-#{System.unique_integer([:positive])}")
+
+    agent_dir =
+      Path.join(System.tmp_dir!(), "sigma-session-live-#{System.unique_integer([:positive])}")
+
     Application.put_env(:sigma_session, :agent_dir, agent_dir)
 
     on_exit(fn ->
@@ -89,14 +92,12 @@ defmodule Sigma.Web.SessionLiveTest do
     path = System.tmp_dir!()
     encoded = Base.url_encode64(path, padding: false)
 
-    assert {:error,
-            {:redirect, %{to: "/", flash: %{"error" => "Repository is not registered."}}}} =
+    assert {:error, {:redirect, %{to: "/", flash: %{"error" => "Repository is not registered."}}}} =
              live(conn, "/repository/#{encoded}/sessions/#{unique_session_id("unregistered")}")
   end
 
   test "rejects invalid repository route", %{conn: conn} do
-    assert {:error,
-            {:redirect, %{to: "/", flash: %{"error" => "Repository is not registered."}}}} =
+    assert {:error, {:redirect, %{to: "/", flash: %{"error" => "Repository is not registered."}}}} =
              live(conn, "/repository/not-base64!/sessions/#{unique_session_id("invalid")}")
   end
 
@@ -119,6 +120,20 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   test "renders session menu anchors with selector-safe session ids", %{conn: conn} do
+    session_id = unique_session_id("selector-safe")
+    listed_session_id = "PR#5"
+    sessions_dir = Sigma.Session.ConfigManager.sessions_dir(@workdir)
+    File.mkdir_p!(sessions_dir)
+    File.write!(Path.join(sessions_dir, "#{listed_session_id}.jsonl"), "")
+
+    {:ok, _view, html} = live(conn, session_path(session_id))
+
+    assert html =~ ~s(id="session-menu-btn-UFIjNQ")
+    assert html =~ ~s(anchor="#session-menu-btn-UFIjNQ")
+    refute html =~ ~s(anchor="#session-menu-btn-PR#5")
+  end
+
+  test "renders basename session id with hash", %{conn: conn} do
     session_id = "PR#5"
     sessions_dir = Sigma.Session.ConfigManager.sessions_dir(@workdir)
     File.mkdir_p!(sessions_dir)
@@ -126,9 +141,104 @@ defmodule Sigma.Web.SessionLiveTest do
 
     {:ok, _view, html} = live(conn, session_path(session_id))
 
+    assert html =~ "Ask ∑ anything"
     assert html =~ ~s(id="session-menu-btn-UFIjNQ")
-    assert html =~ ~s(anchor="#session-menu-btn-UFIjNQ")
-    refute html =~ ~s(anchor="#session-menu-btn-PR#5")
+  end
+
+  test "rejects traversal session id route without touching escaped paths", %{conn: conn} do
+    sessions_dir = Sigma.Session.ConfigManager.sessions_dir(@workdir)
+    outside_path = Path.expand("../escape.jsonl", sessions_dir)
+
+    File.mkdir_p!(sessions_dir)
+    File.write!(outside_path, "outside\n")
+
+    assert {:error,
+            {:redirect,
+             %{
+               to: "/repository/#{@encoded_workdir}",
+               flash: %{"error" => "Invalid session id."}
+             }}} =
+             live(conn, session_path("../escape"))
+
+    assert File.read!(outside_path) == "outside\n"
+  end
+
+  test "rejects slash-containing session id route", %{conn: conn} do
+    assert {:error,
+            {:redirect,
+             %{
+               to: "/repository/#{@encoded_workdir}",
+               flash: %{"error" => "Invalid session id."}
+             }}} =
+             live(conn, session_path("a/b"))
+  end
+
+  test "delete menu action rejects traversal session ids", %{conn: conn} do
+    session_id = unique_session_id("delete-safe")
+    sessions_dir = Sigma.Session.ConfigManager.sessions_dir(@workdir)
+    outside_path = Path.expand("../escape.jsonl", sessions_dir)
+
+    File.mkdir_p!(sessions_dir)
+    File.write!(outside_path, "outside\n")
+
+    {:ok, view, _html} = live(conn, session_path(session_id))
+
+    assert render_hook(view, "session_menu_action", %{
+             "value" => "delete",
+             "session" => "../escape"
+           }) =~ "Invalid session id"
+
+    assert File.read!(outside_path) == "outside\n"
+  end
+
+  test "rename session rejects traversal target names", %{conn: conn} do
+    session_id = unique_session_id("rename-safe")
+    sessions_dir = Sigma.Session.ConfigManager.sessions_dir(@workdir)
+    source_path = Path.join(sessions_dir, "#{session_id}.jsonl")
+    outside_path = Path.expand("../escape.jsonl", sessions_dir)
+
+    File.mkdir_p!(sessions_dir)
+    File.write!(source_path, "source\n")
+
+    {:ok, view, _html} = live(conn, session_path(session_id))
+
+    assert render_submit(view, "rename_session", %{
+             "old_id" => session_id,
+             "new_name" => "../escape"
+           }) =~ "Invalid session id"
+
+    assert File.read!(source_path) == "source\n"
+    refute File.exists?(outside_path)
+  end
+
+  test "fork retries colliding generated ids before navigating", %{conn: conn} do
+    session_id = unique_session_id("fork-source")
+    sessions_dir = Sigma.Session.ConfigManager.sessions_dir(@workdir)
+    File.mkdir_p!(sessions_dir)
+
+    source_path = Path.join(sessions_dir, "#{session_id}.jsonl")
+    :ok = Sigma.Session.Log.persist_event(source_path, {:agent_start, @workdir})
+
+    :ok =
+      Sigma.Session.Log.persist_event(source_path, {:message_end, Message.user("m1", "hello")})
+
+    File.write!(Path.join(sessions_dir, "fork_collision_1.jsonl"), "existing 1\n")
+    File.write!(Path.join(sessions_dir, "fork_collision_2.jsonl"), "existing 2\n")
+
+    with_fork_id_generator(~w(fork_collision_1 fork_collision_2 fork_success), fn ->
+      {:ok, view, _html} = live(conn, session_path(session_id))
+
+      assert {:error,
+              {:live_redirect, %{to: "/repository/#{@encoded_workdir}/sessions/fork_success"}}} =
+               render_hook(view, "session_menu_action", %{
+                 "value" => "fork",
+                 "session" => session_id
+               })
+    end)
+
+    assert File.read!(Path.join(sessions_dir, "fork_collision_1.jsonl")) == "existing 1\n"
+    assert File.read!(Path.join(sessions_dir, "fork_collision_2.jsonl")) == "existing 2\n"
+    assert File.regular?(Path.join(sessions_dir, "fork_success.jsonl"))
   end
 
   test "same raw session id in different repositories does not receive each other's events", %{
@@ -564,6 +674,30 @@ defmodule Sigma.Web.SessionLiveTest do
     Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive, :monotonic])}")
   end
 
+  defp with_fork_id_generator(ids, fun) do
+    previous = Application.get_env(:sigma_web, :session_live_fork_id_generator)
+    {:ok, agent} = Agent.start_link(fn -> ids end)
+
+    Application.put_env(:sigma_web, :session_live_fork_id_generator, fn ->
+      Agent.get_and_update(agent, fn
+        [id | rest] -> {id, rest}
+        [] -> {"fork_exhausted", []}
+      end)
+    end)
+
+    try do
+      fun.()
+    after
+      Agent.stop(agent)
+
+      if previous do
+        Application.put_env(:sigma_web, :session_live_fork_id_generator, previous)
+      else
+        Application.delete_env(:sigma_web, :session_live_fork_id_generator)
+      end
+    end
+  end
+
   defp register_repo!(workdir, name) do
     File.mkdir_p!(workdir)
     {:ok, _repo} = RepoManager.add_repo(workdir, name: name)
@@ -583,7 +717,8 @@ defmodule Sigma.Web.SessionLiveTest do
     "session:#{repo_key}:#{session_id}"
   end
 
-  defp assert_eventually(fun), do: assert_eventually(fun, System.monotonic_time(:millisecond) + 2_000)
+  defp assert_eventually(fun),
+    do: assert_eventually(fun, System.monotonic_time(:millisecond) + 2_000)
 
   defp assert_eventually(fun, deadline) do
     if fun.() do
@@ -598,7 +733,8 @@ defmodule Sigma.Web.SessionLiveTest do
     end
   end
 
-  defp refute_eventually(fun), do: refute_eventually(fun, System.monotonic_time(:millisecond) + 300)
+  defp refute_eventually(fun),
+    do: refute_eventually(fun, System.monotonic_time(:millisecond) + 300)
 
   defp refute_eventually(fun, deadline) do
     if fun.() do

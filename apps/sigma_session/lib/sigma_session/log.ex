@@ -114,18 +114,92 @@ defmodule Sigma.Session.Log do
           "parentSession" => parent_id
         }
 
-        # Write prefix + new header to target
-        File.rm(target_storage_id)
-
-        Enum.each(prefix, fn entry ->
-          storage_mod.append(target_storage_id, entry)
-        end)
-
-        storage_mod.append(target_storage_id, new_header)
-        {:ok, new_session_id}
+        case write_fork_entries(target_storage_id, prefix ++ [new_header], storage_mod) do
+          :ok -> {:ok, new_session_id}
+          {:error, _reason} = error -> error
+        end
 
       _ ->
         {:error, "Could not fork session"}
+    end
+  end
+
+  defp write_fork_entries(target_storage_id, entries, storage_mod) do
+    with :ok <- ensure_absent(target_storage_id),
+         {:ok, temp_storage_id} <- unused_temp_storage_id(target_storage_id) do
+      case append_entries(temp_storage_id, entries, storage_mod) do
+        :ok ->
+          publish_temp_storage(temp_storage_id, target_storage_id)
+
+        {:error, _reason} = error ->
+          rm_optional(temp_storage_id)
+          error
+      end
+    end
+  end
+
+  defp append_entries(temp_storage_id, entries, storage_mod) do
+    Enum.reduce_while(entries, :ok, fn entry, :ok ->
+      case storage_mod.append(temp_storage_id, entry) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+        other -> {:halt, {:error, other}}
+      end
+    end)
+  end
+
+  defp publish_temp_storage(temp_storage_id, target_storage_id) do
+    case File.ln(temp_storage_id, target_storage_id) do
+      :ok ->
+        rm_optional(temp_storage_id)
+        :ok
+
+      {:error, :eexist} ->
+        rm_optional(temp_storage_id)
+        {:error, :already_exists}
+
+      {:error, reason} ->
+        rm_optional(temp_storage_id)
+        {:error, reason}
+    end
+  end
+
+  defp unused_temp_storage_id(target_storage_id, attempts \\ 8)
+
+  defp unused_temp_storage_id(_target_storage_id, 0), do: {:error, :eexist}
+
+  defp unused_temp_storage_id(target_storage_id, attempts) do
+    temp_storage_id = temp_storage_id(target_storage_id)
+
+    case ensure_absent(temp_storage_id) do
+      :ok -> {:ok, temp_storage_id}
+      {:error, :already_exists} -> unused_temp_storage_id(target_storage_id, attempts - 1)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp temp_storage_id(target_storage_id) do
+    suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+
+    Path.join(
+      Path.dirname(target_storage_id),
+      ".#{Path.basename(target_storage_id)}.#{suffix}.tmp"
+    )
+  end
+
+  defp ensure_absent(path) do
+    case File.lstat(path) do
+      {:ok, _stat} -> {:error, :already_exists}
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp rm_optional(path) do
+    case File.rm(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, _reason} = error -> error
     end
   end
 

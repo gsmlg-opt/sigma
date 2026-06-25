@@ -4,6 +4,25 @@ defmodule Sigma.Session.BranchingTest do
   alias Sigma.Session.Log
   alias Sigma.Agent.Message
 
+  defmodule FailingAppendStorage do
+    def read(path), do: Sigma.Session.Storage.JsonlFile.read(path)
+    def append(_path, _entry), do: {:error, :forced_failure}
+  end
+
+  defmodule RacingAppendStorage do
+    def read(path), do: Sigma.Session.Storage.JsonlFile.read(path)
+
+    def append(path, entry) do
+      unless Process.get({__MODULE__, :raced?}) do
+        Process.put({__MODULE__, :raced?}, true)
+        target = Process.get({__MODULE__, :target}) || raise "target path not configured"
+        File.write!(target, "raced\n")
+      end
+
+      Sigma.Session.Storage.JsonlFile.append(path, entry)
+    end
+  end
+
   @test_storage "test_session_source.jsonl"
   @target_storage "test_session_target.jsonl"
 
@@ -64,5 +83,53 @@ defmodule Sigma.Session.BranchingTest do
     {:ok, messages} = Log.replay(@target_storage)
     assert Enum.count(messages) == 1
     assert Enum.at(messages, 0).id == "m1"
+  end
+
+  @tag :tmp_dir
+  test "fork refuses an existing target without overwriting it", %{tmp_dir: tmp_dir} do
+    source = Path.join(tmp_dir, "source.jsonl")
+    target = Path.join(tmp_dir, "target.jsonl")
+
+    Log.persist_event(source, {:agent_start, "/tmp"})
+    Log.persist_event(source, {:message_end, Message.user("m1", "hello")})
+    File.write!(target, "existing\n")
+
+    assert {:error, :already_exists} = Log.fork(source, target, 1, "/tmp")
+    assert File.read!(target) == "existing\n"
+  end
+
+  @tag :tmp_dir
+  test "fork removes the temp file when append fails", %{tmp_dir: tmp_dir} do
+    source = Path.join(tmp_dir, "source.jsonl")
+    target = Path.join(tmp_dir, "target.jsonl")
+
+    Log.persist_event(source, {:agent_start, "/tmp"})
+    Log.persist_event(source, {:message_end, Message.user("m1", "hello")})
+
+    assert {:error, :forced_failure} =
+             Log.fork(source, target, 1, "/tmp", FailingAppendStorage)
+
+    refute File.exists?(target)
+    assert File.ls!(tmp_dir) == ["source.jsonl"]
+  end
+
+  @tag :tmp_dir
+  test "fork refuses a target created during the write without overwriting it", %{
+    tmp_dir: tmp_dir
+  } do
+    source = Path.join(tmp_dir, "source.jsonl")
+    target = Path.join(tmp_dir, "target.jsonl")
+
+    Process.put({RacingAppendStorage, :target}, target)
+    Process.delete({RacingAppendStorage, :raced?})
+
+    Log.persist_event(source, {:agent_start, "/tmp"})
+    Log.persist_event(source, {:message_end, Message.user("m1", "hello")})
+
+    assert {:error, :already_exists} =
+             Log.fork(source, target, 1, "/tmp", RacingAppendStorage)
+
+    assert File.read!(target) == "raced\n"
+    assert File.ls!(tmp_dir) |> Enum.sort() == ["source.jsonl", "target.jsonl"]
   end
 end

@@ -4,8 +4,11 @@ defmodule Sigma.Web.SessionLive do
   alias Sigma.Agent.SessionContext
   alias Sigma.Session.ConfigManager
   alias Sigma.Session.RepoManager
+  alias Sigma.Session.SessionFiles
   alias Sigma.Session.Skills
   alias Sigma.Session.SlashCommands
+
+  @fork_id_attempts 5
 
   @impl true
   def mount(%{"id" => session_id, "repository" => encoded_repository}, _session, socket) do
@@ -19,12 +22,36 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp mount_registered_session(session_id, encoded_repository, workdir, socket) do
+    sessions_dir = get_sessions_dir(workdir)
+
+    with {:ok, storage_path} <- SessionFiles.jsonl_path(sessions_dir, session_id),
+         {:ok, meta_path} <- SessionFiles.meta_path(sessions_dir, session_id) do
+      mount_valid_session(
+        session_id,
+        encoded_repository,
+        workdir,
+        sessions_dir,
+        storage_path,
+        meta_path,
+        socket
+      )
+    else
+      {:error, :invalid_session_id} ->
+        {:ok, redirect_invalid_session(socket, encoded_repository)}
+    end
+  end
+
+  defp mount_valid_session(
+         session_id,
+         encoded_repository,
+         workdir,
+         sessions_dir,
+         storage_path,
+         meta_path,
+         socket
+       ) do
     repo_key = ConfigManager.repository_key(workdir)
     log_session_id = Sigma.Logs.session_key(repo_key, session_id)
-    sessions_dir = get_sessions_dir(workdir)
-    storage_path = Path.join(sessions_dir, "#{session_id}.jsonl")
-
-    meta_path = Path.join(sessions_dir, "#{session_id}.meta.json")
     session_meta = read_session_meta(meta_path)
     effective_cwd = Map.get(session_meta, "cwd", workdir)
     session_branch = Map.get(session_meta, "branch")
@@ -1037,29 +1064,29 @@ defmodule Sigma.Web.SessionLive do
         {:noreply, assign(socket, :renaming_session, s)}
 
       "fork" ->
-        new_id = "fork_#{System.unique_integer([:positive])}"
-        source_path = Path.join(socket.assigns.sessions_dir, "#{s}.jsonl")
-        target_path = Path.join(socket.assigns.sessions_dir, "#{new_id}.jsonl")
-        Sigma.Session.Log.fork_at_message(source_path, target_path, :all, socket.assigns.workdir)
-
-        {:noreply,
-         push_navigate(socket,
-           to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{new_id}"
-         )}
+        {:noreply, handle_fork_result(socket, fork_with_new_id(socket, s, :all))}
 
       "archive" ->
         {:noreply, put_flash(socket, :info, "Archive not yet implemented")}
 
       "delete" ->
-        File.rm(Path.join(socket.assigns.sessions_dir, "#{s}.jsonl"))
-        {:ok, sessions} = Sigma.Session.Log.list_sessions(socket.assigns.sessions_dir)
-        socket = assign(socket, :sessions, sessions)
+        case SessionFiles.delete(socket.assigns.sessions_dir, s) do
+          :ok ->
+            {:ok, sessions} = Sigma.Session.Log.list_sessions(socket.assigns.sessions_dir)
+            socket = assign(socket, :sessions, sessions)
 
-        if s == socket.assigns.session_id do
-          {:noreply,
-           push_navigate(socket, to: ~p"/repository/#{socket.assigns.encoded_repository}")}
-        else
-          {:noreply, socket}
+            if s == socket.assigns.session_id do
+              {:noreply,
+               push_navigate(socket, to: ~p"/repository/#{socket.assigns.encoded_repository}")}
+            else
+              {:noreply, socket}
+            end
+
+          {:error, :invalid_session_id} ->
+            {:noreply, put_flash(socket, :error, "Invalid session id")}
+
+          {:error, _reason} ->
+            {:noreply, put_flash(socket, :error, "Unable to delete session")}
         end
 
       _ ->
@@ -1075,19 +1102,25 @@ defmodule Sigma.Web.SessionLive do
     if new_name == "" or new_name == old_id do
       {:noreply, socket}
     else
-      old_path = Path.join(socket.assigns.sessions_dir, "#{old_id}.jsonl")
-      new_path = Path.join(socket.assigns.sessions_dir, "#{new_name}.jsonl")
-      File.rename(old_path, new_path)
-      {:ok, sessions} = Sigma.Session.Log.list_sessions(socket.assigns.sessions_dir)
-      socket = assign(socket, :sessions, sessions)
+      case SessionFiles.rename(socket.assigns.sessions_dir, old_id, new_name) do
+        :ok ->
+          {:ok, sessions} = Sigma.Session.Log.list_sessions(socket.assigns.sessions_dir)
+          socket = assign(socket, :sessions, sessions)
 
-      if old_id == socket.assigns.session_id do
-        {:noreply,
-         push_navigate(socket,
-           to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{new_name}"
-         )}
-      else
-        {:noreply, socket}
+          if old_id == socket.assigns.session_id do
+            {:noreply,
+             push_navigate(socket,
+               to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{new_name}"
+             )}
+          else
+            {:noreply, socket}
+          end
+
+        {:error, :invalid_session_id} ->
+          {:noreply, put_flash(socket, :error, "Invalid session id")}
+
+        {:error, _reason} ->
+          {:noreply, put_flash(socket, :error, "Unable to rename session")}
       end
     end
   end
@@ -1193,7 +1226,10 @@ defmodule Sigma.Web.SessionLive do
   @impl true
   def handle_event("set_log_search", %{"value" => q}, socket) do
     entries =
-      Sigma.Logs.search(socket.assigns.log_session_id, category: socket.assigns.log_filter, text: q)
+      Sigma.Logs.search(socket.assigns.log_session_id,
+        category: socket.assigns.log_filter,
+        text: q
+      )
       |> Enum.reverse()
 
     {:noreply, socket |> assign(:log_search, q) |> assign(:log_entries, entries)}
@@ -1497,23 +1533,65 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp do_fork(socket, mode) do
-    new_id = "fork_#{System.unique_integer([:positive])}"
-    source_path = Path.join(socket.assigns.sessions_dir, "#{socket.assigns.session_id}.jsonl")
-    target_path = Path.join(socket.assigns.sessions_dir, "#{new_id}.jsonl")
-    workdir = socket.assigns.workdir
-
-    case mode do
-      :all ->
-        Sigma.Session.Log.fork_at_message(source_path, target_path, :all, workdir)
-
-      {:at, msg_id} ->
-        Sigma.Session.Log.fork_at_message(source_path, target_path, msg_id, workdir)
-    end
+    message_id =
+      case mode do
+        :all -> :all
+        {:at, msg_id} -> msg_id
+      end
 
     {:noreply,
-     push_navigate(socket,
-       to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{new_id}"
-     )}
+     handle_fork_result(socket, fork_with_new_id(socket, socket.assigns.session_id, message_id))}
+  end
+
+  defp fork_with_new_id(socket, source_id, message_id) do
+    fork_with_new_id(socket, source_id, message_id, @fork_id_attempts)
+  end
+
+  defp fork_with_new_id(_socket, _source_id, _message_id, 0), do: {:error, :already_exists}
+
+  defp fork_with_new_id(socket, source_id, message_id, attempts_left) do
+    new_id = new_fork_id()
+
+    case SessionFiles.fork(
+           socket.assigns.sessions_dir,
+           source_id,
+           new_id,
+           message_id,
+           fallback_cwd: socket.assigns.workdir
+         ) do
+      {:ok, _new_log_session_id} ->
+        {:ok, new_id}
+
+      {:error, :already_exists} ->
+        fork_with_new_id(socket, source_id, message_id, attempts_left - 1)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp new_fork_id do
+    case Application.get_env(:sigma_web, :session_live_fork_id_generator) do
+      generator when is_function(generator, 0) ->
+        generator.()
+
+      _ ->
+        "fork_#{Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)}"
+    end
+  end
+
+  defp handle_fork_result(socket, {:ok, new_id}) do
+    push_navigate(socket,
+      to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{new_id}"
+    )
+  end
+
+  defp handle_fork_result(socket, {:error, :invalid_session_id}) do
+    put_flash(socket, :error, "Invalid session id")
+  end
+
+  defp handle_fork_result(socket, {:error, _reason}) do
+    put_flash(socket, :error, "Unable to fork session")
   end
 
   defp resolve_provider(nil) do
@@ -1589,6 +1667,12 @@ defmodule Sigma.Web.SessionLive do
     socket
     |> put_flash(:error, "Repository is not registered.")
     |> redirect(to: ~p"/")
+  end
+
+  defp redirect_invalid_session(socket, encoded_repository) do
+    socket
+    |> put_flash(:error, "Invalid session id.")
+    |> redirect(to: ~p"/repository/#{encoded_repository}")
   end
 
   defp session_topic(repo_key, session_id), do: "session:#{repo_key}:#{session_id}"
