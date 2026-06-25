@@ -9,6 +9,7 @@ if config_env() == :prod do
       """
 
   config :sigma_web, Sigma.Web.Endpoint,
+    server: System.get_env("PHX_SERVER", "true") in ["1", "true", "TRUE"],
     http: [
       port: String.to_integer(System.get_env("PORT") || "4580"),
       transport_options: [socket_opts: [:inet6]]
