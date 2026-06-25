@@ -6,6 +6,29 @@ defmodule Sigma.Web.ProjectSettingsLiveTest do
   alias Sigma.Session.{ConfigManager, RepoManager}
 
   @tag :tmp_dir
+  test "rejects invalid repository route", %{conn: conn, tmp_dir: tmp_dir} do
+    with_agent_dir(tmp_dir, fn ->
+      assert {:error,
+              {:redirect, %{to: "/", flash: %{"error" => "Repository is not registered."}}}} =
+               live(conn, "/repository/not-base64!/settings")
+    end)
+  end
+
+  @tag :tmp_dir
+  test "rejects unregistered repository route", %{conn: conn, tmp_dir: tmp_dir} do
+    with_agent_dir(tmp_dir, fn ->
+      workdir = Path.join(tmp_dir, "unregistered")
+      File.mkdir_p!(workdir)
+
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+
+      assert {:error,
+              {:redirect, %{to: "/", flash: %{"error" => "Repository is not registered."}}}} =
+               live(conn, "/repository/#{encoded_repository}/settings")
+    end)
+  end
+
+  @tag :tmp_dir
   test "saves project MCP server defaults", %{conn: conn, tmp_dir: tmp_dir} do
     with_agent_dir(tmp_dir, fn ->
       ConfigManager.put_mcp_server("github", %{
@@ -41,7 +64,10 @@ defmodule Sigma.Web.ProjectSettingsLiveTest do
   end
 
   @tag :tmp_dir
-  test "path update relocates a legacy pi-safe sessions directory", %{conn: conn, tmp_dir: tmp_dir} do
+  test "path update relocates a legacy pi-safe sessions directory", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
     unique = System.unique_integer([:positive])
     old_path = Path.join(System.tmp_dir!(), "sigma-settings-old-#{unique}")
     new_path = Path.join(System.tmp_dir!(), "sigma-settings-new-#{unique}")

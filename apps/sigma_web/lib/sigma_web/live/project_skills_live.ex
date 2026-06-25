@@ -1,22 +1,27 @@
 defmodule Sigma.Web.ProjectSkillsLive do
   use Sigma.Web, :live_view
 
-  alias Sigma.Session.Skills
+  alias Sigma.Session.{RepoManager, Skills}
   import Sigma.Web.ProjectSidebar
 
   @impl true
   def mount(%{"repository" => encoded_repository}, _session, socket) do
-    workdir = Base.url_decode64!(encoded_repository, padding: false)
-    skills_result = Skills.list_repository(workdir)
+    case fetch_registered_repo(encoded_repository) do
+      {:ok, workdir, _repo} ->
+        skills_result = Skills.list_repository(workdir)
 
-    socket =
-      socket
-      |> assign(:active_tab, :repository)
-      |> assign(:workdir, workdir)
-      |> assign(:encoded_repository, encoded_repository)
-      |> assign(:skills_result, skills_result)
+        socket =
+          socket
+          |> assign(:active_tab, :repository)
+          |> assign(:workdir, workdir)
+          |> assign(:encoded_repository, encoded_repository)
+          |> assign(:skills_result, skills_result)
 
-    {:ok, socket}
+        {:ok, socket}
+
+      {:error, :unknown_repository} ->
+        {:ok, redirect_unknown_repository(socket)}
+    end
   end
 
   @impl true
@@ -95,5 +100,20 @@ defmodule Sigma.Web.ProjectSkillsLive do
       </main>
     </div>
     """
+  end
+
+  defp fetch_registered_repo(encoded_repository) do
+    with {:ok, workdir} <- Base.url_decode64(encoded_repository, padding: false),
+         %{} = repo <- RepoManager.get_repo(workdir) do
+      {:ok, Path.expand(repo["path"]), repo}
+    else
+      _ -> {:error, :unknown_repository}
+    end
+  end
+
+  defp redirect_unknown_repository(socket) do
+    socket
+    |> put_flash(:error, "Repository is not registered.")
+    |> redirect(to: ~p"/")
   end
 end

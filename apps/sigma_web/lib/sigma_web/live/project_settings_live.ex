@@ -6,23 +6,27 @@ defmodule Sigma.Web.ProjectSettingsLive do
 
   @impl true
   def mount(%{"repository" => encoded_repository}, _session, socket) do
-    workdir = Base.url_decode64!(encoded_repository, padding: false)
-    repo = RepoManager.get_repo(workdir)
-    mcp_servers = ConfigManager.list_mcp_servers()
+    case fetch_registered_repo(encoded_repository) do
+      {:ok, workdir, repo} ->
+        mcp_servers = ConfigManager.list_mcp_servers()
 
-    socket =
-      socket
-      |> assign(:active_tab, :repository)
-      |> assign(:encoded_repository, encoded_repository)
-      |> assign(:workdir, workdir)
-      |> assign(:repo, repo)
-      |> assign(:name_input, (repo && repo["name"]) || Path.basename(workdir))
-      |> assign(:path_input, workdir)
-      |> assign(:mcp_servers, mcp_servers)
-      |> assign(:selected_mcp_server_ids, repo_mcp_server_ids(repo, mcp_servers))
-      |> assign(:error, nil)
+        socket =
+          socket
+          |> assign(:active_tab, :repository)
+          |> assign(:encoded_repository, encoded_repository)
+          |> assign(:workdir, workdir)
+          |> assign(:repo, repo)
+          |> assign(:name_input, repo["name"] || Path.basename(workdir))
+          |> assign(:path_input, workdir)
+          |> assign(:mcp_servers, mcp_servers)
+          |> assign(:selected_mcp_server_ids, repo_mcp_server_ids(repo, mcp_servers))
+          |> assign(:error, nil)
 
-    {:ok, socket}
+        {:ok, socket}
+
+      {:error, :unknown_repository} ->
+        {:ok, redirect_unknown_repository(socket)}
+    end
   end
 
   @impl true
@@ -329,4 +333,19 @@ defmodule Sigma.Web.ProjectSettingsLive do
 
   defp mcp_server_summary(%{"type" => type, "url" => url}), do: "#{type}: #{url}"
   defp mcp_server_summary(server), do: inspect(server)
+
+  defp fetch_registered_repo(encoded_repository) do
+    with {:ok, workdir} <- Base.url_decode64(encoded_repository, padding: false),
+         %{} = repo <- RepoManager.get_repo(workdir) do
+      {:ok, Path.expand(repo["path"]), repo}
+    else
+      _ -> {:error, :unknown_repository}
+    end
+  end
+
+  defp redirect_unknown_repository(socket) do
+    socket
+    |> put_flash(:error, "Repository is not registered.")
+    |> redirect(to: ~p"/")
+  end
 end
