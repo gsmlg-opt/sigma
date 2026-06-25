@@ -8,7 +8,6 @@ defmodule Sigma.Web.NewSessionLive do
   def mount(%{"repository" => encoded_repository}, _session, socket) do
     workdir = Base.url_decode64!(encoded_repository, padding: false)
     sessions_dir = get_sessions_dir(workdir)
-    File.mkdir_p!(sessions_dir)
 
     branches = list_git_branches(workdir)
     worktrees = list_existing_worktrees(workdir)
@@ -407,7 +406,7 @@ defmodule Sigma.Web.NewSessionLive do
   end
 
   defp get_sessions_dir(workdir) do
-    Sigma.Session.ConfigManager.sessions_dir(workdir)
+    Sigma.Session.ConfigManager.ensure_sessions_dir(workdir)
   end
 
   defp list_git_branches(workdir) do

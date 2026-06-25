@@ -11,7 +11,6 @@ defmodule Sigma.Web.SessionLive do
   def mount(%{"id" => session_id, "repository" => encoded_repository}, _session, socket) do
     workdir = Base.url_decode64!(encoded_repository, padding: false)
     sessions_dir = get_sessions_dir(workdir)
-    File.mkdir_p!(sessions_dir)
     storage_path = Path.join(sessions_dir, "#{session_id}.jsonl")
 
     meta_path = Path.join(sessions_dir, "#{session_id}.meta.json")
@@ -79,7 +78,8 @@ defmodule Sigma.Web.SessionLive do
             tools: builtin_tools,
             mcp_servers: mcp_servers,
             messages: initial_messages,
-            cwd: effective_cwd
+            cwd: effective_cwd,
+            transcript_path: storage_path
           )
 
         agent = runtime_session.agent
@@ -1560,7 +1560,7 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp get_sessions_dir(workdir) do
-    Sigma.Session.ConfigManager.sessions_dir(workdir)
+    Sigma.Session.ConfigManager.ensure_sessions_dir(workdir)
   end
 
   defp session_skills_context(effective_cwd) do

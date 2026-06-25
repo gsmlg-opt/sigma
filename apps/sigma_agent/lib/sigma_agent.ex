@@ -13,6 +13,7 @@ defmodule Sigma.Agent do
 
   defstruct [
     :session_id,
+    :transcript_path,
     :model,
     :system_prompt,
     :session_context,
@@ -149,6 +150,7 @@ defmodule Sigma.Agent do
       task_supervisor: task_supervisor,
       policy: policy,
       session_id: opts[:session_id],
+      transcript_path: opts[:transcript_path],
       model: opts[:model],
       system_prompt: opts[:system_prompt],
       session_context: opts[:session_context] || SessionContext.new(),
@@ -773,23 +775,10 @@ defmodule Sigma.Agent do
   defp resolve_policy(policy) when is_atom(policy), do: policy
   defp resolve_policy(policy), do: GenServer.whereis(policy)
 
-  defp transcript_path(state) do
-    if state.session_id do
-      agent_dir =
-        Application.get_env(:sigma_session, :agent_dir) ||
-          Path.join([System.user_home!(), ".pi", "agent"])
+  defp transcript_path(%{transcript_path: transcript_path}) when is_binary(transcript_path),
+    do: transcript_path
 
-      cwd_safe =
-        state.cwd
-        |> String.replace_leading("/", "")
-        |> String.replace(~r|[/:\\]|, "-")
-
-      sessions_dir = Path.join([agent_dir, "sessions", "--#{cwd_safe}--"])
-      Path.join(sessions_dir, "#{state.session_id}.jsonl")
-    else
-      ""
-    end
-  end
+  defp transcript_path(_state), do: ""
 
   # ---------------------------------------------------------------------------
   # Hook helpers

@@ -12,6 +12,7 @@ defmodule Sigma.Session.ConfigManager do
   @mcp_file "mcp.json"
   @agents_file "AGENTS.md"
   @embedded_credential_ref_regex ~r/\{\{credential:([^}]+)\}\}/
+  @max_session_key_component_bytes 255
 
   @default_system_prompt ""
   @known_model_metadata %{
@@ -554,15 +555,51 @@ defmodule Sigma.Session.ConfigManager do
     Path.join(agent_dir(), "sessions")
   end
 
-  @doc """
-  Returns the session directory for a working directory, using pi's path encoding.
+  @doc "Returns the collision-safe repository key for a working directory."
+  def repository_key(cwd) when is_binary(cwd) do
+    cwd
+    |> Path.expand()
+    |> Base.url_encode64(padding: false)
+  end
 
-  Sigma encodes the cwd as `--Users-gao-Workspace-example--` (slashes → dashes,
-  wrapped in double dashes). This matches the original pi TypeScript agent so
-  sessions are shared between the two tools.
-  """
+  @doc "Returns the session directory for a working directory."
   def sessions_dir(cwd) do
+    Path.join(sessions_root(), repository_key(cwd))
+  end
+
+  @doc "Validates that a working directory can be used as a session repository key."
+  def validate_repository_key(cwd) when is_binary(cwd) do
+    repository_key = repository_key(cwd)
+    validate_repository_key_component(cwd, repository_key)
+  end
+
+  @doc "Returns the legacy pi-compatible session directory for a working directory."
+  def legacy_sessions_dir(cwd) do
     Path.join(sessions_root(), pi_safe_path(cwd))
+  end
+
+  @doc "Ensures the session directory exists, migrating a legacy directory when present."
+  def ensure_sessions_dir(cwd) do
+    repository_key = repository_key(cwd)
+    ensure_repository_key_component!(cwd, repository_key)
+
+    new_dir = Path.join(sessions_root(), repository_key)
+    old_dir = legacy_sessions_dir(cwd)
+
+    cond do
+      File.dir?(new_dir) ->
+        File.mkdir_p!(new_dir)
+        new_dir
+
+      File.dir?(old_dir) ->
+        File.mkdir_p!(Path.dirname(new_dir))
+        rename_legacy_sessions_dir!(old_dir, new_dir)
+        new_dir
+
+      true ->
+        File.mkdir_p!(new_dir)
+        new_dir
+    end
   end
 
   @doc "Returns the path to repos.jsonl."
@@ -577,6 +614,54 @@ defmodule Sigma.Session.ConfigManager do
       |> String.replace(~r|[/:\\]|, "-")
 
     "--#{safe}--"
+  end
+
+  defp ensure_repository_key_component!(cwd, repository_key) do
+    case validate_repository_key_component(cwd, repository_key) do
+      :ok ->
+        :ok
+
+      {:error, {:repository_key_too_long, message}} ->
+        raise ArgumentError, message
+    end
+  end
+
+  defp validate_repository_key_component(cwd, repository_key) do
+    if byte_size(repository_key) <= @max_session_key_component_bytes do
+      :ok
+    else
+      {:error, {:repository_key_too_long, repository_key_too_long_message(cwd, repository_key)}}
+    end
+  end
+
+  defp repository_key_too_long_message(cwd, repository_key) do
+    "repository session key is too long for a single filesystem path component " <>
+      "(#{byte_size(repository_key)} bytes; max #{@max_session_key_component_bytes}) " <>
+      "for #{inspect(Path.expand(cwd))}; move the repository to a shorter path before initializing session storage"
+  end
+
+  defp rename_legacy_sessions_dir!(old_dir, new_dir) do
+    case File.rename(old_dir, new_dir) do
+      :ok ->
+        :ok
+
+      {:error, :enoent} ->
+        if File.dir?(new_dir) do
+          :ok
+        else
+          raise_legacy_sessions_rename_error(old_dir, new_dir, :enoent)
+        end
+
+      {:error, reason} ->
+        raise_legacy_sessions_rename_error(old_dir, new_dir, reason)
+    end
+  end
+
+  defp raise_legacy_sessions_rename_error(old_dir, new_dir, reason) do
+    raise File.Error,
+      reason: reason,
+      action: "rename legacy sessions directory from #{old_dir} to #{new_dir}",
+      path: old_dir
   end
 
   def get_active_provider_config do

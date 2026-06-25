@@ -196,6 +196,9 @@ defmodule Sigma.Web.ProjectSettingsLive do
           {:error, :not_found} ->
             {:noreply, assign(socket, :error, "This repository is no longer in the list.")}
 
+          {:error, {:repository_key_too_long, message}} ->
+            {:noreply, assign(socket, :error, "Could not save: #{message}")}
+
           {:error, reason} ->
             {:noreply, assign(socket, :error, "Could not save: #{inspect(reason)}")}
         end
@@ -209,27 +212,108 @@ defmodule Sigma.Web.ProjectSettingsLive do
   end
 
   defp apply_changes(old_path, new_path, new_name, mcp_server_ids) do
-    with :ok <- rename_sessions_dir(old_path, new_path),
-         {:ok, _entry} <-
-           RepoManager.update_repo(old_path, %{
-             "name" => new_name,
-             "path" => new_path,
-             "mcp_server_ids" => Enum.uniq(mcp_server_ids)
-           }) do
+    updates = %{
+      "name" => new_name,
+      "path" => new_path,
+      "mcp_server_ids" => Enum.uniq(mcp_server_ids)
+    }
+
+    with :ok <- ConfigManager.validate_repository_key(new_path),
+         :ok <- preflight_repo_update(old_path, new_path),
+         {:ok, rename_result} <- rename_sessions_dir(old_path, new_path),
+         {:ok, _entry} <- update_repo_after_sessions_move(old_path, updates, rename_result) do
       {:ok, Base.url_encode64(new_path, padding: false)}
     end
   end
 
-  defp rename_sessions_dir(same, same), do: :ok
-
-  defp rename_sessions_dir(old_path, new_path) do
-    old_dir = Sigma.Session.ConfigManager.sessions_dir(old_path)
-    new_dir = Sigma.Session.ConfigManager.sessions_dir(new_path)
+  defp preflight_repo_update(old_path, new_path) do
+    old_path = Path.expand(old_path)
+    new_path = Path.expand(new_path)
 
     cond do
-      not File.dir?(old_dir) -> :ok
-      File.exists?(new_dir) -> {:error, :sessions_dir_conflict}
-      true -> File.rename(old_dir, new_dir)
+      is_nil(RepoManager.get_repo(old_path)) ->
+        {:error, :not_found}
+
+      new_path != old_path and RepoManager.get_repo(new_path) ->
+        {:error, :path_conflict}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp rename_sessions_dir(same, same), do: {:ok, :not_moved}
+
+  defp rename_sessions_dir(old_path, new_path) do
+    with {:ok, old_dir} <- existing_sessions_dir(old_path) do
+      new_dir = ConfigManager.sessions_dir(new_path)
+      new_legacy_dir = ConfigManager.legacy_sessions_dir(new_path)
+
+      cond do
+        is_nil(old_dir) ->
+          {:ok, :not_moved}
+
+        target_sessions_dir_exists?(new_dir, old_dir) ->
+          {:error, :sessions_dir_conflict}
+
+        target_sessions_dir_exists?(new_legacy_dir, old_dir) ->
+          {:error, :sessions_dir_conflict}
+
+        true ->
+          rename_sessions_dir_path(old_dir, new_dir)
+      end
+    end
+  end
+
+  defp rename_sessions_dir_path(old_dir, new_dir) do
+    case File.rename(old_dir, new_dir) do
+      :ok ->
+        {:ok, {:moved_sessions_dir, old_dir, new_dir}}
+
+      {:error, reason} ->
+        {:error, {:sessions_dir_rename_failed, old_dir, new_dir, reason}}
+    end
+  end
+
+  defp update_repo_after_sessions_move(old_path, updates, rename_result) do
+    case RepoManager.update_repo(old_path, updates) do
+      {:ok, _entry} = result ->
+        result
+
+      {:error, reason} ->
+        {:error, repo_update_failed_after_sessions_move_reason(reason, rename_result)}
+    end
+  end
+
+  defp repo_update_failed_after_sessions_move_reason(reason, :not_moved), do: reason
+
+  defp repo_update_failed_after_sessions_move_reason(
+         reason,
+         {:moved_sessions_dir, old_dir, new_dir}
+       ) do
+    {:repo_update_failed_after_sessions_move, reason, old_dir, new_dir}
+  end
+
+  defp target_sessions_dir_exists?(target_dir, source_dir) do
+    target_dir != source_dir and File.exists?(target_dir)
+  end
+
+  defp existing_sessions_dir(path) do
+    sessions_dir = ConfigManager.sessions_dir(path)
+    legacy_sessions_dir = ConfigManager.legacy_sessions_dir(path)
+
+    case {File.dir?(sessions_dir), File.dir?(legacy_sessions_dir)} do
+      {true, true} ->
+        {:error, :multiple_source_sessions_dirs}
+
+      {true, false} ->
+        {:ok, sessions_dir}
+
+      {false, true} ->
+        {:ok, legacy_sessions_dir}
+
+      {false, false} ->
+        {:ok, nil}
     end
   end
 

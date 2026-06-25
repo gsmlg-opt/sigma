@@ -155,7 +155,14 @@ defmodule Sigma.AgentTest do
 
     @impl true
     def execute(_tool_call_id, _params, opts) do
-      send(Keyword.fetch!(opts, :test_pid), {:dispatcher_opts_seen, opts[:per_prompt_value]})
+      test_pid = Keyword.fetch!(opts, :test_pid)
+
+      send(test_pid, {:dispatcher_opts_seen, opts[:per_prompt_value]})
+
+      if Keyword.get(opts, :capture_transcript_path) do
+        send(test_pid, {:transcript_path_seen, opts[:transcript_path]})
+      end
+
       {:ok, %{content: [%{type: :text, text: "captured"}]}}
     end
   end
@@ -323,6 +330,16 @@ defmodule Sigma.AgentTest do
              messages,
              &(&1.role == :tool_result and &1.tool_name == "capture_prompt_opts")
            )
+  end
+
+  test "tool transcript path uses the provided transcript path" do
+    session_id = "shared-session"
+    transcript_path = Path.join(System.tmp_dir!(), "provided-transcript.jsonl")
+    cwd = File.cwd!()
+
+    captured_path = captured_transcript_path(cwd, session_id, transcript_path)
+
+    assert captured_path == transcript_path
   end
 
   test "agent does not dispatch partial tool call blocks" do
@@ -521,5 +538,28 @@ defmodule Sigma.AgentTest do
         }
       ]
     end)
+  end
+
+  defp captured_transcript_path(cwd, session_id, transcript_path) do
+    model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
+
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        model: model,
+        provider: PromptDispatcherProvider,
+        tools: [PromptDispatcherTool],
+        cwd: cwd,
+        session_id: session_id,
+        transcript_path: transcript_path,
+        dispatcher_opts: [test_pid: self(), capture_transcript_path: true]
+      )
+
+    Sigma.Agent.subscribe(agent)
+    Sigma.Agent.prompt(agent, "Hi")
+
+    assert_receive {:transcript_path_seen, transcript_path}, 1_000
+    assert_receive {:agent_end, _messages}, 1_000
+
+    transcript_path
   end
 end

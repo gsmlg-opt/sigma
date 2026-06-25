@@ -347,4 +347,95 @@ defmodule Sigma.Session.ConfigManagerTest do
              }
            } = ConfigManager.mcp_servers_for(["secure"])
   end
+
+  @tag :tmp_dir
+  test "repository_key returns a URL-safe Base64 key for the expanded path" do
+    key = ConfigManager.repository_key("relative/workdir")
+
+    assert key == Path.expand("relative/workdir") |> Base.url_encode64(padding: false)
+    refute String.contains?(key, ["+", "/", "="])
+  end
+
+  @tag :tmp_dir
+  test "sessions_dir uses a collision-safe repository key" do
+    first = ConfigManager.sessions_dir("/tmp/a-b")
+    second = ConfigManager.sessions_dir("/tmp/a/b")
+
+    assert first != second
+
+    cwd = "/tmp/#{String.duplicate("repository", 20)}"
+
+    assert ConfigManager.sessions_dir(cwd) ==
+             Path.join(ConfigManager.sessions_root(), ConfigManager.repository_key(cwd))
+  end
+
+  @tag :tmp_dir
+  test "ensure_sessions_dir migrates a legacy pi-safe directory" do
+    old_dir = ConfigManager.legacy_sessions_dir("/tmp/a-b")
+    File.mkdir_p!(old_dir)
+    File.write!(Path.join(old_dir, "session.jsonl"), "legacy")
+
+    new_dir = ConfigManager.ensure_sessions_dir("/tmp/a-b")
+
+    assert new_dir == ConfigManager.sessions_dir("/tmp/a-b")
+    assert File.read!(Path.join(new_dir, "session.jsonl")) == "legacy"
+    refute File.exists?(old_dir)
+  end
+
+  @tag :tmp_dir
+  test "ensure_sessions_dir keeps an existing new directory when a legacy directory also exists" do
+    new_dir = ConfigManager.sessions_dir("/tmp/a-b")
+    old_dir = ConfigManager.legacy_sessions_dir("/tmp/a-b")
+
+    File.mkdir_p!(new_dir)
+    File.write!(Path.join(new_dir, "session.jsonl"), "new")
+
+    File.mkdir_p!(old_dir)
+    File.write!(Path.join(old_dir, "session.jsonl"), "legacy")
+
+    assert ConfigManager.ensure_sessions_dir("/tmp/a-b") == new_dir
+    assert File.read!(Path.join(new_dir, "session.jsonl")) == "new"
+    assert File.read!(Path.join(old_dir, "session.jsonl")) == "legacy"
+  end
+
+  @tag :tmp_dir
+  test "ensure_sessions_dir raises clearly when legacy migration rename fails" do
+    new_dir = ConfigManager.sessions_dir("/tmp/a-b")
+    old_dir = ConfigManager.legacy_sessions_dir("/tmp/a-b")
+
+    File.mkdir_p!(Path.dirname(new_dir))
+    File.write!(new_dir, "occupied")
+    File.mkdir_p!(old_dir)
+
+    error =
+      assert_raise File.Error, fn ->
+        ConfigManager.ensure_sessions_dir("/tmp/a-b")
+      end
+
+    message = Exception.message(error)
+
+    assert message =~ "rename legacy sessions directory"
+    assert message =~ old_dir
+    assert message =~ new_dir
+  end
+
+  @tag :tmp_dir
+  test "ensure_sessions_dir raises clearly when the repository key is too long" do
+    cwd = "/tmp/#{String.duplicate("repository", 30)}"
+
+    assert_raise ArgumentError, ~r/repository session key is too long/, fn ->
+      ConfigManager.ensure_sessions_dir(cwd)
+    end
+  end
+
+  @tag :tmp_dir
+  test "validate_repository_key rejects overlong keys without creating a session directory" do
+    cwd = "/tmp/#{String.duplicate("repository", 30)}"
+
+    assert {:error, {:repository_key_too_long, message}} =
+             ConfigManager.validate_repository_key(cwd)
+
+    assert message =~ "repository session key is too long"
+    refute File.exists?(ConfigManager.sessions_dir(cwd))
+  end
 end

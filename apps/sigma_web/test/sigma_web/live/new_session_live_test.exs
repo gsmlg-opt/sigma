@@ -11,12 +11,17 @@ defmodule Sigma.Web.NewSessionLiveTest do
     conn: conn,
     tmp_dir: tmp_dir
   } do
+    workdir = Path.join(System.tmp_dir!(), "sigma-new-session-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(workdir)
+
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
     with_agent_dir(tmp_dir, fn ->
       ConfigManager.put_mcp_server("github", %{"type" => "stdio", "command" => "npx"})
-      {:ok, _repo} = RepoManager.add_repo(tmp_dir, name: "Repo")
-      {:ok, _repo} = RepoManager.set_mcp_server_ids(tmp_dir, ["github"])
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      {:ok, _repo} = RepoManager.set_mcp_server_ids(workdir, ["github"])
 
-      encoded_repository = Base.url_encode64(tmp_dir, padding: false)
+      encoded_repository = Base.url_encode64(workdir, padding: false)
       {:ok, view, html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
 
       assert html =~ "New Session"
@@ -35,12 +40,12 @@ defmodule Sigma.Web.NewSessionLiveTest do
       render_change(view, "select_mcp_servers", %{})
       render_click(view, "create_session")
 
-      [meta_path] = Path.wildcard(Path.join(ConfigManager.sessions_dir(tmp_dir), "*.meta.json"))
+      [meta_path] = Path.wildcard(Path.join(ConfigManager.sessions_dir(workdir), "*.meta.json"))
       session_id = Path.basename(meta_path, ".meta.json")
-      log_path = Path.join(ConfigManager.sessions_dir(tmp_dir), "#{session_id}.jsonl")
+      log_path = Path.join(ConfigManager.sessions_dir(workdir), "#{session_id}.jsonl")
 
       assert %{"mcp_server_ids" => []} = meta_path |> File.read!() |> Jason.decode!()
-      assert {:ok, [%{"type" => "session", "cwd" => ^tmp_dir}]} = JsonlFile.read(log_path)
+      assert {:ok, [%{"type" => "session", "cwd" => ^workdir}]} = JsonlFile.read(log_path)
 
       {:ok, _session_view, session_html} =
         live(conn, "/repository/#{encoded_repository}/sessions/#{session_id}")

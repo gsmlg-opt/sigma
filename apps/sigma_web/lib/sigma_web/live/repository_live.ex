@@ -7,7 +7,6 @@ defmodule Sigma.Web.RepositoryLive do
   def mount(%{"repository" => encoded_repository}, _session, socket) do
     workdir = Base.url_decode64!(encoded_repository, padding: false)
     sessions_dir = get_sessions_dir(workdir)
-    File.mkdir_p!(sessions_dir)
 
     {:ok, sessions} = Sigma.Session.Log.list_sessions(sessions_dir)
 
@@ -205,6 +204,6 @@ defmodule Sigma.Web.RepositoryLive do
   end
 
   defp get_sessions_dir(workdir) do
-    Sigma.Session.ConfigManager.sessions_dir(workdir)
+    Sigma.Session.ConfigManager.ensure_sessions_dir(workdir)
   end
 end
