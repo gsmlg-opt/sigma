@@ -4,23 +4,23 @@ defmodule Sigma.Logs.Buffer do
   @cap 500
 
   def start_link(opts) do
-    session_id = Keyword.fetch!(opts, :session_id)
-    GenServer.start_link(__MODULE__, session_id, name: via(session_id))
+    qualified_session_id = Keyword.fetch!(opts, :session_id)
+    GenServer.start_link(__MODULE__, qualified_session_id, name: via(qualified_session_id))
   end
 
-  def push(session_id, entry) do
-    GenServer.cast(via(session_id), {:push, entry})
+  def push(qualified_session_id, entry) do
+    GenServer.cast(via(qualified_session_id), {:push, entry})
   end
 
-  def all(session_id) do
-    case GenServer.whereis(via(session_id)) do
+  def all(qualified_session_id) do
+    case GenServer.whereis(via(qualified_session_id)) do
       nil -> []
       pid -> GenServer.call(pid, :all)
     end
   end
 
-  def search(session_id, opts \\ []) do
-    all(session_id)
+  def search(qualified_session_id, opts \\ []) do
+    all(qualified_session_id)
     |> filter_category(Keyword.get(opts, :category))
     |> filter_text(Keyword.get(opts, :text))
   end
@@ -28,7 +28,7 @@ defmodule Sigma.Logs.Buffer do
   # Server
 
   @impl true
-  def init(_session_id) do
+  def init(_qualified_session_id) do
     table = :ets.new(:pi_logs_buffer, [:ordered_set, :private])
     {:ok, %{table: table, count: 0}}
   end
@@ -59,7 +59,7 @@ defmodule Sigma.Logs.Buffer do
     {:reply, entries, state}
   end
 
-  defp via(session_id), do: {:via, Registry, {Sigma.Logs.Registry, session_id}}
+  defp via(qualified_session_id), do: {:via, Registry, {Sigma.Logs.Registry, qualified_session_id}}
 
   defp filter_category(entries, nil), do: entries
   defp filter_category(entries, cat), do: Enum.filter(entries, &(&1.category == cat))

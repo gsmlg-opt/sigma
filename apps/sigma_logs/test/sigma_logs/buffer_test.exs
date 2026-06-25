@@ -1,5 +1,5 @@
 defmodule Sigma.Logs.BufferTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   setup do
     session_id = "test_session_#{System.unique_integer([:positive])}"
@@ -73,5 +73,71 @@ defmodule Sigma.Logs.BufferTest do
 
     results = Sigma.Logs.Buffer.search(sid, text: "")
     assert length(results) == 2
+  end
+
+  test "telemetry logs for same raw session id route to the qualified buffer and topic" do
+    pubsub = start_log_pubsub!()
+    session_id = "shared_logs_#{System.unique_integer([:positive])}"
+    repo_one_session = qualified_session_id("/tmp/sigma-repo-one", session_id)
+    repo_two_session = qualified_session_id("/tmp/sigma-repo-two", session_id)
+
+    {:ok, _repo_one_buffer} = Sigma.Logs.start_session(repo_one_session)
+    {:ok, _repo_two_buffer} = Sigma.Logs.start_session(repo_two_session)
+
+    on_exit(fn ->
+      Sigma.Logs.stop_session(repo_one_session)
+      Sigma.Logs.stop_session(repo_two_session)
+    end)
+
+    Phoenix.PubSub.subscribe(pubsub, "sigma:logs:#{repo_one_session}")
+    Phoenix.PubSub.subscribe(pubsub, "sigma:logs:#{repo_two_session}")
+
+    Sigma.Logs.Handler.handle_event(
+      [:sigma, :llm, :request, :start],
+      %{system_time: System.system_time()},
+      %{
+        session_id: session_id,
+        log_session_id: repo_one_session,
+        model: "claude-3",
+        request_body: %{}
+      },
+      nil
+    )
+
+    assert_receive {:log_entry, %{session_id: ^repo_one_session, metadata: metadata}}, 500
+    assert metadata[:session_id] == session_id
+    assert metadata[:log_session_id] == repo_one_session
+    refute_receive {:log_entry, %{session_id: ^repo_two_session}}, 100
+
+    assert [%{session_id: ^repo_one_session}] = Sigma.Logs.all(repo_one_session)
+    assert [] = Sigma.Logs.all(repo_two_session)
+    assert [] = Sigma.Logs.all(session_id)
+  end
+
+  defp start_log_pubsub! do
+    previous_pubsub = Application.get_env(:sigma_logs, :pubsub)
+    pubsub = Module.concat(__MODULE__, "PubSub#{System.unique_integer([:positive])}")
+
+    start_supervised!({Phoenix.PubSub, name: pubsub})
+    Application.put_env(:sigma_logs, :pubsub, pubsub)
+
+    on_exit(fn ->
+      if previous_pubsub do
+        Application.put_env(:sigma_logs, :pubsub, previous_pubsub)
+      else
+        Application.delete_env(:sigma_logs, :pubsub)
+      end
+    end)
+
+    pubsub
+  end
+
+  defp qualified_session_id(workdir, session_id) do
+    repo_key =
+      workdir
+      |> Path.expand()
+      |> Base.url_encode64(padding: false)
+
+    Sigma.Logs.session_key(repo_key, session_id)
   end
 end

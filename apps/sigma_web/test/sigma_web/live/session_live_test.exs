@@ -131,6 +131,27 @@ defmodule Sigma.Web.SessionLiveTest do
     refute html =~ ~s(anchor="#session-menu-btn-PR#5")
   end
 
+  test "same raw session id in different repositories does not receive each other's events", %{
+    conn: conn
+  } do
+    session_id = unique_session_id("shared")
+    other_workdir = unique_workdir("session-live-shared")
+    register_repo!(other_workdir, "Other Repo")
+
+    on_exit(fn ->
+      stop_repository_supervisors(other_workdir)
+      File.rm_rf!(other_workdir)
+    end)
+
+    {:ok, view, _html} = live(conn, session_path(session_id))
+    {:ok, other_view, _html} = live(conn, session_path(other_workdir, session_id))
+
+    render_submit(view, "send_prompt", %{"value" => "from repo one"})
+
+    assert_eventually(fn -> render(view) =~ "from repo one" end)
+    refute_eventually(fn -> render(other_view) =~ "from repo one" end)
+  end
+
   test "opens a web shell panel from the session workspace", %{conn: conn} do
     {:ok, view, _html} = live(conn, session_path(unique_session_id("terminal")))
 
@@ -243,7 +264,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
         session_id = unique_session_id("large-context")
         storage_path = preload_compactable_history(session_id)
-        Phoenix.PubSub.subscribe(Sigma.Web.PubSub, "session:#{session_id}")
+        Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
 
         {:ok, view, _html} = live(conn, session_path(session_id))
 
@@ -260,7 +281,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
   test "submits prompt", %{conn: conn} do
     session_id = unique_session_id("submit")
-    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, "session:#{session_id}")
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
     {:ok, view, _html} = live(conn, session_path(session_id))
 
     render_submit(view, "send_prompt", %{"value" => "hello"})
@@ -273,7 +294,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
   test "expands init slash command before submitting to the agent", %{conn: conn} do
     session_id = unique_session_id("init")
-    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, "session:#{session_id}")
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
     {:ok, view, _html} = live(conn, session_path(session_id))
 
     render_submit(view, "send_prompt", %{"value" => "/init"})
@@ -286,7 +307,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
   test "rejects unknown slash commands", %{conn: conn} do
     session_id = unique_session_id("unknown")
-    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, "session:#{session_id}")
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
     {:ok, view, _html} = live(conn, session_path(session_id))
 
     assert render_submit(view, "send_prompt", %{"value" => "/compact"}) =~
@@ -539,8 +560,55 @@ defmodule Sigma.Web.SessionLiveTest do
     "#{prefix}_#{System.unique_integer([:positive, :monotonic])}"
   end
 
+  defp unique_workdir(prefix) do
+    Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive, :monotonic])}")
+  end
+
+  defp register_repo!(workdir, name) do
+    File.mkdir_p!(workdir)
+    {:ok, _repo} = RepoManager.add_repo(workdir, name: name)
+  end
+
   defp session_path(session_id) do
-    "/repository/#{@encoded_workdir}/sessions/#{URI.encode(session_id, &URI.char_unreserved?/1)}"
+    session_path(@workdir, session_id)
+  end
+
+  defp session_path(workdir, session_id) do
+    encoded_workdir = ConfigManager.repository_key(workdir)
+    "/repository/#{encoded_workdir}/sessions/#{URI.encode(session_id, &URI.char_unreserved?/1)}"
+  end
+
+  defp session_topic(workdir, session_id) do
+    repo_key = ConfigManager.repository_key(workdir)
+    "session:#{repo_key}:#{session_id}"
+  end
+
+  defp assert_eventually(fun), do: assert_eventually(fun, System.monotonic_time(:millisecond) + 2_000)
+
+  defp assert_eventually(fun, deadline) do
+    if fun.() do
+      :ok
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        flunk("condition was not met before timeout")
+      end
+
+      Process.sleep(20)
+      assert_eventually(fun, deadline)
+    end
+  end
+
+  defp refute_eventually(fun), do: refute_eventually(fun, System.monotonic_time(:millisecond) + 300)
+
+  defp refute_eventually(fun, deadline) do
+    if fun.() do
+      flunk("condition unexpectedly became true")
+    else
+      if System.monotonic_time(:millisecond) < deadline do
+        Process.sleep(20)
+        refute_eventually(fun, deadline)
+      end
+    end
   end
 
   defp stop_repository_supervisors(repo) do

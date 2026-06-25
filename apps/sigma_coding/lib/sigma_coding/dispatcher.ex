@@ -77,30 +77,36 @@ defmodule Sigma.Coding.Dispatcher do
 
   defp do_dispatch(tool_call, tools, opts) do
     session_id = Keyword.get(opts, :session_id)
+    log_session_id = Keyword.get(opts, :log_session_id, session_id)
     hook_specs = Keyword.get(opts, :hook_specs, [])
     hook_ctx = build_hook_ctx(opts)
 
     case Sigma.Coding.PermissionInterceptor.check(tool_call, opts) do
       :allow ->
-        execute_with_hooks(tool_call, tools, opts, hook_specs, hook_ctx, session_id)
+        execute_with_hooks(tool_call, tools, opts, hook_specs, hook_ctx, session_id, log_session_id)
 
       {:allow, patched_args} when is_map(patched_args) ->
         patched_call = %{tool_call | arguments: Map.merge(tool_call.arguments, patched_args)}
-        execute_with_hooks(patched_call, tools, opts, hook_specs, hook_ctx, session_id)
+        execute_with_hooks(patched_call, tools, opts, hook_specs, hook_ctx, session_id, log_session_id)
 
       {:deny, reason} ->
         {:error, reason}
     end
   end
 
-  defp execute_with_hooks(tool_call, tools, opts, hook_specs, hook_ctx, session_id) do
+  defp execute_with_hooks(tool_call, tools, opts, hook_specs, hook_ctx, session_id, log_session_id) do
     tool = Enum.find(tools, fn t -> Sigma.Coding.Tool.name(t) == tool_call.name end)
 
     if tool do
       :telemetry.execute(
         [:sigma, :tool, :call, :start],
         %{system_time: System.system_time()},
-        %{session_id: session_id, tool_name: tool_call.name, arguments: tool_call.arguments}
+        %{
+          session_id: session_id,
+          log_session_id: log_session_id,
+          tool_name: tool_call.name,
+          arguments: tool_call.arguments
+        }
       )
 
       start = System.monotonic_time()
@@ -117,7 +123,12 @@ defmodule Sigma.Coding.Dispatcher do
       :telemetry.execute(
         [:sigma, :tool, :call, :stop],
         %{duration: System.monotonic_time() - start},
-        %{session_id: session_id, tool_name: tool_call.name, result: inspect(result)}
+        %{
+          session_id: session_id,
+          log_session_id: log_session_id,
+          tool_name: tool_call.name,
+          result: inspect(result)
+        }
       )
 
       apply_post_tool_use_hooks(result, tool_call, hook_specs, hook_ctx)

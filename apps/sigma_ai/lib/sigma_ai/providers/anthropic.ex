@@ -9,6 +9,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
     context = params.context
     options = params.options
     session_id = Map.get(params, :session_id)
+    log_session_id = Map.get(params, :log_session_id, session_id)
 
     api_key = options[:api_key] || System.get_env("ANTHROPIC_AUTH_TOKEN")
 
@@ -64,6 +65,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
           %{system_time: System.system_time()},
           %{
             session_id: session_id,
+            log_session_id: log_session_id,
             model: model.id,
             provider: "anthropic",
             request_body: body
@@ -80,6 +82,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
               %{duration: System.monotonic_time() - start_time},
               %{
                 session_id: session_id,
+                log_session_id: log_session_id,
                 model: model.id,
                 usage: ai_msg.usage,
                 response_content: ai_msg.content

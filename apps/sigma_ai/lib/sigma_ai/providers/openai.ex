@@ -9,6 +9,7 @@ defmodule Sigma.Ai.Providers.OpenAI do
     context = params.context
     options = params.options
     session_id = Map.get(params, :session_id)
+    log_session_id = Map.get(params, :log_session_id, session_id)
 
     api_key =
       options[:api_key] || System.get_env("OPENAI_API_KEY") ||
@@ -44,7 +45,7 @@ defmodule Sigma.Ai.Providers.OpenAI do
       ]
       |> List.flatten()
 
-    inner = build_inner_stream(model, body, headers, base_url, options, session_id)
+    inner = build_inner_stream(model, body, headers, base_url, options, session_id, log_session_id)
 
     Elixir.Stream.transform(
       inner,
@@ -59,6 +60,7 @@ defmodule Sigma.Ai.Providers.OpenAI do
               %{duration: System.monotonic_time() - start_time},
               %{
                 session_id: session_id,
+                log_session_id: log_session_id,
                 model: model.id,
                 usage: ai_msg.usage,
                 response_content: ai_msg.content
@@ -75,7 +77,7 @@ defmodule Sigma.Ai.Providers.OpenAI do
     )
   end
 
-  defp build_inner_stream(model, body, headers, base_url, options, session_id) do
+  defp build_inner_stream(model, body, headers, base_url, options, session_id, log_session_id) do
     Elixir.Stream.resource(
       fn ->
         :telemetry.execute(
@@ -83,6 +85,7 @@ defmodule Sigma.Ai.Providers.OpenAI do
           %{system_time: System.system_time()},
           %{
             session_id: session_id,
+            log_session_id: log_session_id,
             model: model.id,
             provider: "openai",
             request_body: body

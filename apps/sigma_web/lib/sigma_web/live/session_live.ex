@@ -19,6 +19,8 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp mount_registered_session(session_id, encoded_repository, workdir, socket) do
+    repo_key = ConfigManager.repository_key(workdir)
+    log_session_id = Sigma.Logs.session_key(repo_key, session_id)
     sessions_dir = get_sessions_dir(workdir)
     storage_path = Path.join(sessions_dir, "#{session_id}.jsonl")
 
@@ -64,16 +66,16 @@ defmodule Sigma.Web.SessionLive do
         selected_agent_model = agent_model(config, provider_id, model_id)
 
         if connected?(socket) do
-          Phoenix.PubSub.subscribe(Sigma.Web.PubSub, "session:#{session_id}")
-          Phoenix.PubSub.subscribe(Sigma.Web.PubSub, "sigma:logs:#{session_id}")
-          Sigma.Logs.start_session(session_id)
+          Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(repo_key, session_id))
+          Phoenix.PubSub.subscribe(Sigma.Web.PubSub, logs_topic(repo_key, session_id))
+          Sigma.Logs.start_session(log_session_id)
         end
 
         {:ok, initial_messages} = Sigma.Session.Log.replay(storage_path)
 
         on_event = fn event ->
           Sigma.Session.Log.persist_event(storage_path, event)
-          Phoenix.PubSub.broadcast(Sigma.Web.PubSub, "session:#{session_id}", event)
+          Phoenix.PubSub.broadcast(Sigma.Web.PubSub, session_topic(repo_key, session_id), event)
         end
 
         {:ok, runtime_session} =
@@ -88,7 +90,8 @@ defmodule Sigma.Web.SessionLive do
             mcp_servers: mcp_servers,
             messages: initial_messages,
             cwd: effective_cwd,
-            transcript_path: storage_path
+            transcript_path: storage_path,
+            log_session_id: log_session_id
           )
 
         agent = runtime_session.agent
@@ -115,6 +118,7 @@ defmodule Sigma.Web.SessionLive do
           socket
           |> assign(:active_tab, :repository)
           |> assign(:session_id, session_id)
+          |> assign(:log_session_id, log_session_id)
           |> assign(:workdir, workdir)
           |> assign(:effective_cwd, effective_cwd)
           |> assign(:encoded_repository, encoded_repository)
@@ -1177,7 +1181,7 @@ defmodule Sigma.Web.SessionLive do
       end
 
     entries =
-      Sigma.Logs.search(socket.assigns.session_id,
+      Sigma.Logs.search(socket.assigns.log_session_id,
         category: category,
         text: socket.assigns.log_search
       )
@@ -1189,7 +1193,7 @@ defmodule Sigma.Web.SessionLive do
   @impl true
   def handle_event("set_log_search", %{"value" => q}, socket) do
     entries =
-      Sigma.Logs.search(socket.assigns.session_id, category: socket.assigns.log_filter, text: q)
+      Sigma.Logs.search(socket.assigns.log_session_id, category: socket.assigns.log_filter, text: q)
       |> Enum.reverse()
 
     {:noreply, socket |> assign(:log_search, q) |> assign(:log_entries, entries)}
@@ -1587,6 +1591,9 @@ defmodule Sigma.Web.SessionLive do
     |> redirect(to: ~p"/")
   end
 
+  defp session_topic(repo_key, session_id), do: "session:#{repo_key}:#{session_id}"
+  defp logs_topic(repo_key, session_id), do: "sigma:logs:#{repo_key}:#{session_id}"
+
   defp session_skills_context(effective_cwd) do
     [Skills.list_global().skills, Skills.list_repository(effective_cwd).skills]
     |> List.flatten()
@@ -1617,8 +1624,8 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def terminate(_reason, socket) do
-    if socket.assigns[:session_id] do
-      Sigma.Logs.stop_session(socket.assigns.session_id)
+    if socket.assigns[:log_session_id] do
+      Sigma.Logs.stop_session(socket.assigns.log_session_id)
     end
 
     :ok

@@ -13,6 +13,7 @@ defmodule Sigma.Agent do
 
   defstruct [
     :session_id,
+    :log_session_id,
     :transcript_path,
     :model,
     :system_prompt,
@@ -150,6 +151,7 @@ defmodule Sigma.Agent do
       task_supervisor: task_supervisor,
       policy: policy,
       session_id: opts[:session_id],
+      log_session_id: opts[:log_session_id] || opts[:session_id],
       transcript_path: opts[:transcript_path],
       model: opts[:model],
       system_prompt: opts[:system_prompt],
@@ -417,6 +419,7 @@ defmodule Sigma.Agent do
     params = %{
       model: state.model,
       session_id: state.session_id,
+      log_session_id: state.log_session_id,
       context: context,
       options: state.provider_options
     }
@@ -533,6 +536,7 @@ defmodule Sigma.Agent do
       |> Keyword.put(:cwd, state.cwd)
       |> Keyword.put(:permission_policy, resolve_policy(state.policy))
       |> Keyword.put(:session_id, state.session_id)
+      |> Keyword.put(:log_session_id, state.log_session_id)
       |> Keyword.put(:transcript_path, transcript_path(state))
       |> Keyword.put(:hook_specs, state.hook_specs)
       |> Keyword.put(:tool_state, state.tool_state)
@@ -734,6 +738,7 @@ defmodule Sigma.Agent do
     params = %{
       model: state.model,
       session_id: state.session_id,
+      log_session_id: state.log_session_id,
       context: %{
         messages: [%{role: :user, content: [%{type: :text, text: prompt}]}],
         system_prompt: nil,

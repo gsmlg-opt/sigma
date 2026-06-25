@@ -16,11 +16,12 @@ defmodule Sigma.Coding.PermissionInterceptor do
   """
   def check(tool_call, opts) do
     session_id = Keyword.get(opts, :session_id)
+    log_session_id = Keyword.get(opts, :log_session_id, session_id)
 
     :telemetry.execute(
       [:sigma, :permission, :check, :start],
       %{system_time: System.system_time()},
-      %{session_id: session_id, tool_name: tool_call.name}
+      %{session_id: session_id, log_session_id: log_session_id, tool_name: tool_call.name}
     )
 
     result = do_check(tool_call, opts)
@@ -28,7 +29,12 @@ defmodule Sigma.Coding.PermissionInterceptor do
     :telemetry.execute(
       [:sigma, :permission, :check, :stop],
       %{},
-      %{session_id: session_id, tool_name: tool_call.name, result: inspect(result)}
+      %{
+        session_id: session_id,
+        log_session_id: log_session_id,
+        tool_name: tool_call.name,
+        result: inspect(result)
+      }
     )
 
     result

@@ -16,22 +16,22 @@ defmodule Sigma.Logs.Handler do
   end
 
   def handle_event(event_name, measurements, metadata, _config) do
-    session_id = metadata[:session_id]
+    log_session_id = metadata[:log_session_id] || metadata[:session_id]
 
-    if session_id do
+    if log_session_id do
       {category, event} = parse_event(event_name)
       full_metadata = Map.merge(metadata, measurements)
-      entry = Sigma.Logs.Entry.new(session_id, category, event, full_metadata)
-      Sigma.Logs.Buffer.push(session_id, entry)
-      broadcast(session_id, entry)
+      entry = Sigma.Logs.Entry.new(log_session_id, category, event, full_metadata)
+      Sigma.Logs.Buffer.push(log_session_id, entry)
+      broadcast(log_session_id, entry)
     end
   end
 
-  defp broadcast(session_id, entry) do
+  defp broadcast(log_session_id, entry) do
     pubsub = Application.get_env(:sigma_logs, :pubsub)
 
     if pubsub do
-      Phoenix.PubSub.broadcast(pubsub, "sigma:logs:#{session_id}", {:log_entry, entry})
+      Phoenix.PubSub.broadcast(pubsub, "sigma:logs:#{log_session_id}", {:log_entry, entry})
     end
   end
 
