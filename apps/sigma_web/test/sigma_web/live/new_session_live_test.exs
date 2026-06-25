@@ -7,6 +7,29 @@ defmodule Sigma.Web.NewSessionLiveTest do
   alias Sigma.Session.Storage.JsonlFile
 
   @tag :tmp_dir
+  test "rejects unregistered repository route", %{conn: conn, tmp_dir: tmp_dir} do
+    with_agent_dir(tmp_dir, fn ->
+      path = System.tmp_dir!()
+      encoded = Base.url_encode64(path, padding: false)
+
+      assert {:error,
+              {:redirect,
+               %{to: "/", flash: %{"error" => "Repository is not registered."}}}} =
+               live(conn, "/repository/#{encoded}/sessions/new")
+    end)
+  end
+
+  @tag :tmp_dir
+  test "rejects invalid repository route", %{conn: conn, tmp_dir: tmp_dir} do
+    with_agent_dir(tmp_dir, fn ->
+      assert {:error,
+              {:redirect,
+               %{to: "/", flash: %{"error" => "Repository is not registered."}}}} =
+               live(conn, "/repository/not-base64!/sessions/new")
+    end)
+  end
+
+  @tag :tmp_dir
   test "defaults new sessions to project MCP servers and allows disabling", %{
     conn: conn,
     tmp_dir: tmp_dir

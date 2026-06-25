@@ -3,23 +3,30 @@ defmodule Sigma.Web.RepositoryLive do
 
   import Sigma.Web.ProjectSidebar
 
+  alias Sigma.Session.{ConfigManager, RepoManager}
+
   @impl true
   def mount(%{"repository" => encoded_repository}, _session, socket) do
-    workdir = Base.url_decode64!(encoded_repository, padding: false)
-    sessions_dir = get_sessions_dir(workdir)
+    case fetch_registered_repo(encoded_repository) do
+      {:ok, workdir, _repo} ->
+        sessions_dir = get_sessions_dir(workdir)
 
-    {:ok, sessions} = Sigma.Session.Log.list_sessions(sessions_dir)
+        {:ok, sessions} = Sigma.Session.Log.list_sessions(sessions_dir)
 
-    socket =
-      socket
-      |> assign(:active_tab, :repository)
-      |> assign(:workdir, workdir)
-      |> assign(:encoded_repository, encoded_repository)
-      |> assign(:sessions_dir, sessions_dir)
-      |> assign(:sessions, sessions)
-      |> assign(:deleting_session, nil)
+        socket =
+          socket
+          |> assign(:active_tab, :repository)
+          |> assign(:workdir, workdir)
+          |> assign(:encoded_repository, encoded_repository)
+          |> assign(:sessions_dir, sessions_dir)
+          |> assign(:sessions, sessions)
+          |> assign(:deleting_session, nil)
 
-    {:ok, socket}
+        {:ok, socket}
+
+      {:error, :unknown_repository} ->
+        {:ok, redirect_unknown_repository(socket)}
+    end
   end
 
   @impl true
@@ -204,6 +211,21 @@ defmodule Sigma.Web.RepositoryLive do
   end
 
   defp get_sessions_dir(workdir) do
-    Sigma.Session.ConfigManager.ensure_sessions_dir(workdir)
+    ConfigManager.ensure_sessions_dir(workdir)
+  end
+
+  defp fetch_registered_repo(encoded_repository) do
+    with {:ok, workdir} <- Base.url_decode64(encoded_repository, padding: false),
+         %{} = repo <- RepoManager.get_repo(workdir) do
+      {:ok, Path.expand(repo["path"]), repo}
+    else
+      _ -> {:error, :unknown_repository}
+    end
+  end
+
+  defp redirect_unknown_repository(socket) do
+    socket
+    |> put_flash(:error, "Repository is not registered.")
+    |> redirect(to: ~p"/")
   end
 end

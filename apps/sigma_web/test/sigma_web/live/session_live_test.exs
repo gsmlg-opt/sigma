@@ -3,9 +3,10 @@ defmodule Sigma.Web.SessionLiveTest do
   import Phoenix.LiveViewTest
 
   alias Sigma.Agent.Message
+  alias Sigma.Session.{ConfigManager, RepoManager}
 
   @workdir "/tmp/pi-test"
-  @encoded_workdir Base.url_encode64(@workdir)
+  @encoded_workdir Base.url_encode64(@workdir, padding: false)
 
   defmodule HighUsageProvider do
     @behaviour Sigma.Ai.Provider
@@ -57,20 +58,46 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   setup do
-    File.mkdir_p!(@workdir)
-
-    sessions_dir =
-      Path.join(Sigma.Web.get_sessions_root(), Base.url_encode64(@workdir, padding: false))
-
-    File.rm_rf!(sessions_dir)
+    previous_agent_dir = Application.get_env(:sigma_session, :agent_dir)
+    agent_dir = Path.join(System.tmp_dir!(), "sigma-session-live-#{System.unique_integer([:positive])}")
+    Application.put_env(:sigma_session, :agent_dir, agent_dir)
 
     on_exit(fn ->
       stop_repository_supervisors(@workdir)
       Process.sleep(50)
       File.rm_rf!(@workdir)
+      File.rm_rf!(agent_dir)
+
+      if previous_agent_dir do
+        Application.put_env(:sigma_session, :agent_dir, previous_agent_dir)
+      else
+        Application.delete_env(:sigma_session, :agent_dir)
+      end
     end)
 
+    File.mkdir_p!(@workdir)
+
+    sessions_dir = ConfigManager.sessions_dir(@workdir)
+
+    File.rm_rf!(sessions_dir)
+    {:ok, _repo} = RepoManager.add_repo(@workdir, name: "Repo")
+
     :ok
+  end
+
+  test "rejects unregistered repository route", %{conn: conn} do
+    path = System.tmp_dir!()
+    encoded = Base.url_encode64(path, padding: false)
+
+    assert {:error,
+            {:redirect, %{to: "/", flash: %{"error" => "Repository is not registered."}}}} =
+             live(conn, "/repository/#{encoded}/sessions/#{unique_session_id("unregistered")}")
+  end
+
+  test "rejects invalid repository route", %{conn: conn} do
+    assert {:error,
+            {:redirect, %{to: "/", flash: %{"error" => "Repository is not registered."}}}} =
+             live(conn, "/repository/not-base64!/sessions/#{unique_session_id("invalid")}")
   end
 
   test "renders session page", %{conn: conn} do
@@ -556,6 +583,7 @@ defmodule Sigma.Web.SessionLiveTest do
     Application.delete_env(:sigma_web, :test_provider_config)
 
     try do
+      {:ok, _repo} = RepoManager.add_repo(@workdir, name: "Repo")
       fun.()
     after
       if previous_agent_dir do

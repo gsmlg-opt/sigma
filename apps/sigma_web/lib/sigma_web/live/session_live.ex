@@ -9,7 +9,16 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def mount(%{"id" => session_id, "repository" => encoded_repository}, _session, socket) do
-    workdir = Base.url_decode64!(encoded_repository, padding: false)
+    case fetch_registered_repo(encoded_repository) do
+      {:ok, workdir, _repo} ->
+        mount_registered_session(session_id, encoded_repository, workdir, socket)
+
+      {:error, :unknown_repository} ->
+        {:ok, redirect_unknown_repository(socket)}
+    end
+  end
+
+  defp mount_registered_session(session_id, encoded_repository, workdir, socket) do
     sessions_dir = get_sessions_dir(workdir)
     storage_path = Path.join(sessions_dir, "#{session_id}.jsonl")
 
@@ -1560,7 +1569,22 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp get_sessions_dir(workdir) do
-    Sigma.Session.ConfigManager.ensure_sessions_dir(workdir)
+    ConfigManager.ensure_sessions_dir(workdir)
+  end
+
+  defp fetch_registered_repo(encoded_repository) do
+    with {:ok, workdir} <- Base.url_decode64(encoded_repository, padding: false),
+         %{} = repo <- RepoManager.get_repo(workdir) do
+      {:ok, Path.expand(repo["path"]), repo}
+    else
+      _ -> {:error, :unknown_repository}
+    end
+  end
+
+  defp redirect_unknown_repository(socket) do
+    socket
+    |> put_flash(:error, "Repository is not registered.")
+    |> redirect(to: ~p"/")
   end
 
   defp session_skills_context(effective_cwd) do

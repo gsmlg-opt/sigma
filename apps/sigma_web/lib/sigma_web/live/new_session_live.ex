@@ -6,32 +6,37 @@ defmodule Sigma.Web.NewSessionLive do
 
   @impl true
   def mount(%{"repository" => encoded_repository}, _session, socket) do
-    workdir = Base.url_decode64!(encoded_repository, padding: false)
-    sessions_dir = get_sessions_dir(workdir)
+    case fetch_registered_repo(encoded_repository) do
+      {:ok, workdir, _repo} ->
+        sessions_dir = get_sessions_dir(workdir)
 
-    branches = list_git_branches(workdir)
-    worktrees = list_existing_worktrees(workdir)
-    mcp_servers = ConfigManager.list_mcp_servers()
+        branches = list_git_branches(workdir)
+        worktrees = list_existing_worktrees(workdir)
+        mcp_servers = ConfigManager.list_mcp_servers()
 
-    selected_mcp_server_ids =
-      RepoManager.mcp_server_ids(workdir) |> filter_mcp_server_ids(mcp_servers)
+        selected_mcp_server_ids =
+          RepoManager.mcp_server_ids(workdir) |> filter_mcp_server_ids(mcp_servers)
 
-    socket =
-      socket
-      |> assign(:active_tab, :repository)
-      |> assign(:workdir, workdir)
-      |> assign(:encoded_repository, encoded_repository)
-      |> assign(:sessions_dir, sessions_dir)
-      |> assign(:branches, branches)
-      |> assign(:worktrees, worktrees)
-      |> assign(:selected_branch, List.first(branches))
-      |> assign(:mode, :project_dir)
-      |> assign(:selected_worktree, List.first(worktrees))
-      |> assign(:worktree_name, "")
-      |> assign(:mcp_servers, mcp_servers)
-      |> assign(:selected_mcp_server_ids, selected_mcp_server_ids)
+        socket =
+          socket
+          |> assign(:active_tab, :repository)
+          |> assign(:workdir, workdir)
+          |> assign(:encoded_repository, encoded_repository)
+          |> assign(:sessions_dir, sessions_dir)
+          |> assign(:branches, branches)
+          |> assign(:worktrees, worktrees)
+          |> assign(:selected_branch, List.first(branches))
+          |> assign(:mode, :project_dir)
+          |> assign(:selected_worktree, List.first(worktrees))
+          |> assign(:worktree_name, "")
+          |> assign(:mcp_servers, mcp_servers)
+          |> assign(:selected_mcp_server_ids, selected_mcp_server_ids)
 
-    {:ok, socket}
+        {:ok, socket}
+
+      {:error, :unknown_repository} ->
+        {:ok, redirect_unknown_repository(socket)}
+    end
   end
 
   @impl true
@@ -407,6 +412,21 @@ defmodule Sigma.Web.NewSessionLive do
 
   defp get_sessions_dir(workdir) do
     Sigma.Session.ConfigManager.ensure_sessions_dir(workdir)
+  end
+
+  defp fetch_registered_repo(encoded_repository) do
+    with {:ok, workdir} <- Base.url_decode64(encoded_repository, padding: false),
+         %{} = repo <- RepoManager.get_repo(workdir) do
+      {:ok, Path.expand(repo["path"]), repo}
+    else
+      _ -> {:error, :unknown_repository}
+    end
+  end
+
+  defp redirect_unknown_repository(socket) do
+    socket
+    |> put_flash(:error, "Repository is not registered.")
+    |> redirect(to: ~p"/")
   end
 
   defp list_git_branches(workdir) do
