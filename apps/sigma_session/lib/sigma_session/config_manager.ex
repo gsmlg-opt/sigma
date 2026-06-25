@@ -11,7 +11,7 @@ defmodule Sigma.Session.ConfigManager do
   @models_file "models.json"
   @mcp_file "mcp.json"
   @agents_file "AGENTS.md"
-  @credential_ref_regex ~r/^\{\{credential:([^}]+)\}\}$/
+  @embedded_credential_ref_regex ~r/\{\{credential:([^}]+)\}\}/
 
   @default_system_prompt ""
   @known_model_metadata %{
@@ -64,22 +64,36 @@ defmodule Sigma.Session.ConfigManager do
             List.first(model_ids) || ""
           end
 
+        api_type =
+          case p["api"] do
+            "anthropic-messages" -> "anthropic"
+            "openai-completions" -> "openai"
+            _ -> p["api"] || "anthropic"
+          end
+
+        auth_type =
+          normalize_provider_auth_type(
+            p["authType"] || p["auth_type"],
+            default_auth_type(api_type)
+          )
+
         {id,
          %{
            "id" => id,
            # pi uses provider ID as name in many places
            "name" => p["name"] || id,
-           "api_type" =>
-             case p["api"] do
-               "anthropic-messages" -> "anthropic"
-               "openai-completions" -> "openai"
-               _ -> p["api"] || "anthropic"
-             end,
+           "api_type" => api_type,
            # pi usually stores key under provider ID in auth.json
            "credential_id" => p["credential_id"] || id,
            "model" => selected_model,
            "models" => models,
-           "base_url" => p["baseUrl"] || ""
+           "base_url" => p["baseUrl"] || "",
+           "auth_type" => auth_type,
+           "auth_header_name" =>
+             normalize_provider_auth_header_name(
+               auth_type,
+               p["authHeaderName"] || p["auth_header_name"]
+             )
          }}
       end)
 
@@ -131,6 +145,9 @@ defmodule Sigma.Session.ConfigManager do
 
     new_providers =
       Enum.into(config["providers"], %{}, fn {id, p} ->
+        auth_type =
+          normalize_provider_auth_type(p["auth_type"], default_auth_type(p["api_type"]))
+
         {id,
          %{
            "name" => p["name"],
@@ -142,6 +159,9 @@ defmodule Sigma.Session.ConfigManager do
                "openai" -> "openai-completions"
                _ -> p["api_type"]
              end,
+           "authType" => auth_type,
+           "authHeaderName" =>
+             normalize_provider_auth_header_name(auth_type, p["auth_header_name"]),
            "models" => provider_models(p)
          }}
       end)
@@ -239,6 +259,42 @@ defmodule Sigma.Session.ConfigManager do
     |> Map.put("active_provider_id", id)
     |> save_config()
   end
+
+  defp default_auth_type("openai"), do: "bearer"
+  defp default_auth_type(_api_type), do: "x-api-key"
+
+  defp normalize_provider_auth_type(value, fallback) do
+    normalize_provider_auth_type_value(value) || normalize_provider_auth_type_value(fallback) ||
+      "x-api-key"
+  end
+
+  defp normalize_provider_auth_type_value(value) when is_atom(value) do
+    value
+    |> Atom.to_string()
+    |> normalize_provider_auth_type_value()
+  end
+
+  defp normalize_provider_auth_type_value(value) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      "x-api-key" -> "x-api-key"
+      "x_api_key" -> "x-api-key"
+      "bearer" -> "bearer"
+      "bearer_token" -> "bearer"
+      "bearer token" -> "bearer"
+      "custom" -> "custom_header"
+      "custom_header" -> "custom_header"
+      "custom header" -> "custom_header"
+      _ -> nil
+    end
+  end
+
+  defp normalize_provider_auth_type_value(_value), do: nil
+
+  defp normalize_provider_auth_header_name("custom_header", value), do: trim_config_value(value)
+  defp normalize_provider_auth_header_name(_auth_type, _value), do: ""
+
+  defp trim_config_value(value) when is_binary(value), do: String.trim(value)
+  defp trim_config_value(_value), do: ""
 
   def disabled_global_skills do
     @settings_file
@@ -526,18 +582,24 @@ defmodule Sigma.Session.ConfigManager do
   def get_active_provider_config do
     config = get_config()
     provider_id = config["active_provider_id"]
-    provider = config["providers"][provider_id]
+    resolve_provider_config(config, provider_id)
+  end
+
+  def get_provider_config(provider_id) when is_binary(provider_id) do
+    get_config()
+    |> resolve_provider_config(provider_id)
+  end
+
+  def get_provider_config(_provider_id), do: nil
+
+  defp resolve_provider_config(config, provider_id) do
+    provider = get_in(config, ["providers", provider_id])
 
     if provider do
-      # Resolve credential from auth.json
-      # In pi, auth keys usually match the provider ID or specific auth keys
-      # Our transform_messages already put keys into credentials map
       credential =
         config["credentials"][provider["credential_id"]] || config["credentials"][provider_id]
 
       Map.put(provider, "resolved_key", (credential && credential["key"]) || "")
-    else
-      nil
     end
   end
 
@@ -627,7 +689,7 @@ defmodule Sigma.Session.ConfigManager do
 
   defp normalize_mcp_server_fields(server, "stdio") do
     server
-    |> Map.drop(["url", "headers"])
+    |> Map.drop(["url", "headers", "authType", "authHeaderName"])
     |> Map.put("command", server["command"] || "")
     |> Map.put("args", normalize_list(server["args"]))
     |> Map.put("env", normalize_map(server["env"]))
@@ -683,16 +745,12 @@ defmodule Sigma.Session.ConfigManager do
   defp resolve_credential_map(_values, _credentials), do: %{}
 
   defp resolve_credential_ref(value, credentials) when is_binary(value) do
-    case Regex.run(@credential_ref_regex, value) do
-      [_, credential_id] ->
-        case credentials[credential_id] do
-          %{"key" => key} -> key
-          _ -> value
-        end
-
-      _ ->
-        value
-    end
+    Regex.replace(@embedded_credential_ref_regex, value, fn match, credential_id ->
+      case credentials[credential_id] do
+        %{"key" => key} -> key
+        _ -> match
+      end
+    end)
   end
 
   defp resolve_credential_ref(value, _credentials), do: value

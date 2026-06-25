@@ -79,6 +79,59 @@ defmodule Sigma.Web.SettingsLiveTest do
       assert new_provider_html =~ "New Provider"
       assert new_provider_html =~ ~s(id="provider-settings-modal")
       assert new_provider_html =~ ~s(id="provider-settings-form")
+      assert new_provider_html =~ "Auth Type"
+      assert new_provider_html =~ ~s(name="provider[auth_type]")
+      refute new_provider_html =~ ~s(name="provider[auth_header_name]")
+
+      render_change(view, "change_provider_form", %{
+        "provider" => %{
+          "mode" => "new",
+          "id" => "",
+          "name" => "Default OpenAI",
+          "api_type" => "openai",
+          "credential_id" => credential_id,
+          "auth_type" => "x-api-key",
+          "auth_header_name" => "",
+          "model" => "gpt-4.1-mini",
+          "base_url" => "https://api.openai.com/v1"
+        }
+      })
+
+      render_submit(view, "save_provider", %{
+        "provider" => %{
+          "mode" => "new",
+          "id" => "",
+          "name" => "Default OpenAI",
+          "api_type" => "openai",
+          "credential_id" => credential_id,
+          "model" => "gpt-4.1-mini",
+          "base_url" => "https://api.openai.com/v1"
+        }
+      })
+
+      config = Sigma.Session.ConfigManager.get_config()
+      default_provider_id = provider_id_by_name(config["providers"], "Default OpenAI")
+      assert config["providers"][default_provider_id]["auth_type"] == "bearer"
+
+      render_click(view, "add_provider")
+
+      custom_auth_html =
+        render_change(view, "change_provider_form", %{
+          "provider" => %{
+            "mode" => "new",
+            "id" => "",
+            "name" => "Modal OpenAI",
+            "api_type" => "openai",
+            "credential_id" => credential_id,
+            "auth_type" => "custom_header",
+            "auth_header_name" => "X-API-Key",
+            "model" => "gpt-4.1-mini",
+            "base_url" => "https://api.openai.com/v1"
+          }
+        })
+
+      assert custom_auth_html =~ "Header Name"
+      assert custom_auth_html =~ ~s(name="provider[auth_header_name]")
 
       render_submit(view, "save_provider", %{
         "provider" => %{
@@ -87,6 +140,8 @@ defmodule Sigma.Web.SettingsLiveTest do
           "name" => "Modal OpenAI",
           "api_type" => "openai",
           "credential_id" => credential_id,
+          "auth_type" => "custom_header",
+          "auth_header_name" => "X-API-Key",
           "model" => "gpt-4.1-mini",
           "base_url" => "https://api.openai.com/v1"
         }
@@ -99,6 +154,8 @@ defmodule Sigma.Web.SettingsLiveTest do
 
       config = Sigma.Session.ConfigManager.get_config()
       provider_id = provider_id_by_name(config["providers"], "Modal OpenAI")
+      assert config["providers"][provider_id]["auth_type"] == "custom_header"
+      assert config["providers"][provider_id]["auth_header_name"] == "X-API-Key"
 
       view
       |> element("el-dm-button[phx-click='edit_provider'][phx-value-id='#{provider_id}']")
@@ -116,6 +173,8 @@ defmodule Sigma.Web.SettingsLiveTest do
           "name" => "Modal Anthropic",
           "api_type" => "anthropic",
           "credential_id" => credential_id,
+          "auth_type" => "bearer",
+          "auth_header_name" => "X-Ignored",
           "model" => "claude-3-5-sonnet-latest",
           "base_url" => "https://api.anthropic.com"
         }
@@ -125,6 +184,9 @@ defmodule Sigma.Web.SettingsLiveTest do
 
       assert html =~ "Modal Anthropic"
       refute html =~ "Modal OpenAI"
+      config = Sigma.Session.ConfigManager.get_config()
+      assert config["providers"][provider_id]["auth_type"] == "bearer"
+      assert config["providers"][provider_id]["auth_header_name"] == ""
 
       view
       |> element(
@@ -437,6 +499,8 @@ defmodule Sigma.Web.SettingsLiveTest do
       http_form_html = render(view)
 
       assert http_form_html =~ "Headers"
+      assert http_form_html =~ "Auth Type"
+      assert http_form_html =~ ~s(name="mcp[auth_type]")
       refute http_form_html =~ "Args"
       assert http_form_html =~ "Using credential"
 
@@ -463,10 +527,14 @@ defmodule Sigma.Web.SettingsLiveTest do
           "id" => "github",
           "type" => "http",
           "url" => "https://api.githubcopilot.com/mcp",
+          "auth_type" => "custom_header",
+          "auth_header_name" => "X-API-Key",
+          "auth_value" => "",
+          "auth_credential_id" => credential_id,
           "headers" => %{
-            "key" => ["Authorization"],
-            "value" => [""],
-            "credential_id" => [credential_id]
+            "key" => ["X-Trace"],
+            "value" => ["trace-id"],
+            "credential_id" => [""]
           }
         }
       })
@@ -478,7 +546,12 @@ defmodule Sigma.Web.SettingsLiveTest do
                  "github" => %{
                    "type" => "http",
                    "url" => "https://api.githubcopilot.com/mcp",
-                   "headers" => %{"Authorization" => ^credential_ref}
+                   "authType" => "custom_header",
+                   "authHeaderName" => "X-API-Key",
+                   "headers" => %{
+                     "X-API-Key" => ^credential_ref,
+                     "X-Trace" => "trace-id"
+                   }
                  }
                }
              } = saved

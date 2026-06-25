@@ -46,6 +46,16 @@ defmodule Sigma.Web.SessionLiveTest do
     end
   end
 
+  defmodule CaptureProvider do
+    @behaviour Sigma.Ai.Provider
+
+    @impl true
+    def stream(params) do
+      send(Application.fetch_env!(:sigma_web, :capture_provider_pid), {:provider_params, params})
+      Sigma.Web.MockProvider.stream(params)
+    end
+  end
+
   setup do
     File.mkdir_p!(@workdir)
 
@@ -157,6 +167,39 @@ defmodule Sigma.Web.SessionLiveTest do
 
       assert settings["defaultProvider"] == "anthropic"
       assert settings["defaultModel"] == "opus"
+    end)
+  end
+
+  @tag :tmp_dir
+  test "model selector passes selected provider credential to the agent", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    with_agent_config(tmp_dir, fn ->
+      with_mock_provider(CaptureProvider, fn ->
+        with_capture_provider_pid(self(), fn ->
+          write_selectable_provider_configs()
+
+          {:ok, view, html} = live(conn, session_path(unique_session_id("model-credential")))
+
+          minimax_value =
+            html
+            |> Floki.parse_document!()
+            |> Floki.find("#model-select option")
+            |> Enum.find(&(option_text(&1) == "MiniMax: MiniMax-M3"))
+            |> Floki.attribute("value")
+            |> List.first()
+
+          render_change(view, "select_model", %{"model" => minimax_value})
+          render_submit(view, "send_prompt", %{"value" => "hello"})
+
+          assert_receive {:provider_params, %{model: %{id: "MiniMax-M3"}, options: options}},
+                         3000
+
+          assert Keyword.get(options, :api_key) == "secret-key"
+          assert Keyword.get(options, :auth_type) == "x-api-key"
+        end)
+      end)
     end)
   end
 
@@ -542,6 +585,58 @@ defmodule Sigma.Web.SessionLiveTest do
         Application.delete_env(:sigma_web, :mock_provider_module)
       end
     end
+  end
+
+  defp with_capture_provider_pid(pid, fun) do
+    previous = Application.get_env(:sigma_web, :capture_provider_pid)
+    Application.put_env(:sigma_web, :capture_provider_pid, pid)
+
+    try do
+      fun.()
+    after
+      if previous do
+        Application.put_env(:sigma_web, :capture_provider_pid, previous)
+      else
+        Application.delete_env(:sigma_web, :capture_provider_pid)
+      end
+    end
+  end
+
+  defp write_selectable_provider_configs do
+    agent_dir = Sigma.Session.ConfigManager.agent_dir()
+    File.mkdir_p!(agent_dir)
+
+    File.write!(
+      Path.join(agent_dir, "settings.json"),
+      Jason.encode!(%{"defaultProvider" => "openai", "defaultModel" => "smart"})
+    )
+
+    File.write!(
+      Path.join(agent_dir, "auth.json"),
+      Jason.encode!(%{
+        "minimax-cred" => %{"type" => "api_key", "key" => "secret-key", "name" => "MiniMax"}
+      })
+    )
+
+    File.write!(
+      Path.join(agent_dir, "models.json"),
+      Jason.encode!(%{
+        "providers" => %{
+          "openai" => %{
+            "name" => "openai",
+            "api" => "mock",
+            "models" => [%{"id" => "smart"}]
+          },
+          "minimax" => %{
+            "name" => "MiniMax",
+            "api" => "mock",
+            "credential_id" => "minimax-cred",
+            "authType" => "x-api-key",
+            "models" => [%{"id" => "MiniMax-M3"}]
+          }
+        }
+      })
+    )
   end
 
   defp write_provider_configs(default_provider_id, default_model, providers) do

@@ -52,7 +52,7 @@ defmodule Sigma.Web.SessionLive do
       {:error, reason} ->
         {:ok, socket |> put_flash(:error, reason) |> push_navigate(to: ~p"/settings")}
 
-      {:ok, {provider_mod, model_id, provider_id, api_key, base_url}} ->
+      {:ok, {provider_mod, model_id, provider_id, provider_options}} ->
         selected_agent_model = agent_model(config, provider_id, model_id)
 
         if connected?(socket) do
@@ -72,7 +72,7 @@ defmodule Sigma.Web.SessionLive do
           Sigma.Agent.Runtime.get_session(workdir, session_id,
             model: selected_agent_model,
             provider: provider_mod,
-            options: [api_key: api_key, base_url: base_url],
+            options: provider_options,
             system_prompt: nil,
             session_context: session_context,
             on_event: on_event,
@@ -88,8 +88,7 @@ defmodule Sigma.Web.SessionLive do
           agent,
           provider_mod,
           selected_agent_model,
-          api_key: api_key,
-          base_url: base_url
+          provider_options
         )
 
         agent_ref = if connected?(socket), do: Process.monitor(agent), else: nil
@@ -1190,19 +1189,17 @@ defmodule Sigma.Web.SessionLive do
   @impl true
   def handle_event("select_model", %{"model" => selected}, socket) do
     with {:ok, provider_id, model_id} <- parse_model_option_value(selected),
-         config when is_map(config) <- ConfigManager.get_config(),
          provider_config when is_map(provider_config) <-
-           get_in(config, ["providers", provider_id]),
+           ConfigManager.get_provider_config(provider_id),
          selected_config = Map.put(provider_config, "model", model_id),
          selected_agent_model = agent_model(selected_config, provider_id, model_id),
-         {:ok, {provider_mod, _model_id, _provider_id, api_key, base_url}} <-
+         {:ok, {provider_mod, _model_id, _provider_id, provider_options}} <-
            resolve_provider(selected_config) do
       Sigma.Agent.set_provider(
         socket.assigns.agent,
         provider_mod,
         selected_agent_model,
-        api_key: api_key,
-        base_url: base_url
+        provider_options
       )
 
       ConfigManager.set_active_provider(provider_id)
@@ -1530,11 +1527,23 @@ defmodule Sigma.Web.SessionLive do
          "No model configured for provider #{config["name"]}. Go to Settings to configure one."}
 
       true ->
-        {:ok,
-         {provider_mod, config["model"], config["id"], config["resolved_key"] || "",
-          config["base_url"] || ""}}
+        {:ok, {provider_mod, config["model"], config["id"], provider_options(config)}}
     end
   end
+
+  defp provider_options(config) do
+    api_type = config["api_type"] || "anthropic"
+
+    [
+      api_key: config["resolved_key"] || "",
+      base_url: config["base_url"] || "",
+      auth_type: config["auth_type"] || default_auth_type(api_type),
+      auth_header_name: config["auth_header_name"] || ""
+    ]
+  end
+
+  defp default_auth_type("openai"), do: "bearer"
+  defp default_auth_type(_api_type), do: "x-api-key"
 
   defp session_menu_button_id(session_id) do
     "session-menu-btn-#{session_dom_token(session_id)}"

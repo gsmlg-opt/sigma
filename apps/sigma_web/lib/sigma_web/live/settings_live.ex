@@ -305,7 +305,7 @@ defmodule Sigma.Web.SettingsLive do
           </div>
         </:title>
         <:body>
-          <form id="provider-settings-form" phx-submit="save_provider" class="space-y-5">
+          <form id="provider-settings-form" phx-change="change_provider_form" phx-submit="save_provider" class="space-y-5">
             <input type="hidden" name="provider[mode]" value={@form["mode"]} />
             <input type="hidden" name="provider[id]" value={@form["id"] || ""} />
 
@@ -332,6 +332,23 @@ defmodule Sigma.Web.SettingsLive do
               options={credential_select_options(@credentials)}
               size="sm"
               class="w-full"
+            />
+            <.dm_select
+              name="provider[auth_type]"
+              value={@form["auth_type"]}
+              label="Auth Type"
+              options={provider_auth_type_options()}
+              size="sm"
+              class="w-full"
+            />
+            <.dm_input
+              :if={@form["auth_type"] == "custom_header"}
+              name="provider[auth_header_name]"
+              value={@form["auth_header_name"]}
+              label="Header Name"
+              placeholder="X-API-Key"
+              class="w-full"
+              size="sm"
             />
             <.dm_input
               name="provider[model]"
@@ -1012,6 +1029,74 @@ defmodule Sigma.Web.SettingsLive do
                 <.dm_input name="mcp[url]" value={@form["url"] || ""} placeholder="https://example.com/mcp" class="w-full" size="sm" />
               </div>
 
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <.dm_select
+                  name="mcp[auth_type]"
+                  value={@form["auth_type"] || ""}
+                  label="Auth Type"
+                  size="sm"
+                  class="w-full"
+                >
+                  <option
+                    :for={{value, label} <- mcp_auth_type_options()}
+                    value={value}
+                    selected={(@form["auth_type"] || "") == value}
+                  >
+                    {label}
+                  </option>
+                </.dm_select>
+
+                <.dm_input
+                  :if={@form["auth_type"] == "custom_header"}
+                  name="mcp[auth_header_name]"
+                  value={@form["auth_header_name"] || ""}
+                  label="Header Name"
+                  placeholder="X-API-Key"
+                  class="w-full"
+                  size="sm"
+                />
+              </div>
+
+              <div
+                :if={mcp_auth_enabled?(@form)}
+                class="grid grid-cols-1 md:grid-cols-2 gap-4 items-end"
+              >
+                <% auth_credential_selected? = mcp_auth_credential_selected?(@form) %>
+                <input
+                  :if={auth_credential_selected?}
+                  type="hidden"
+                  name="mcp[auth_value]"
+                  value=""
+                />
+                <.dm_input
+                  name="mcp[auth_value]"
+                  value={if auth_credential_selected?, do: "", else: @form["auth_value"] || ""}
+                  label="Value"
+                  placeholder={if auth_credential_selected?, do: "Using credential", else: "Token value"}
+                  class="w-full"
+                  size="sm"
+                  disabled={auth_credential_selected?}
+                />
+                <.dm_select
+                  name="mcp[auth_credential_id]"
+                  value={@form["auth_credential_id"] || ""}
+                  label="Credential"
+                  size="sm"
+                  class="w-full"
+                >
+                  <option value="" selected={(@form["auth_credential_id"] || "") == ""}>
+                    Input value
+                  </option>
+                  <option
+                    :for={{credential_id, credential} <- @credentials}
+                    value={credential_id}
+                    selected={@form["auth_credential_id"] == credential_id}
+                  >
+                    {credential["name"]}
+                  </option>
+                </.dm_select>
+              </div>
+
               <.mcp_pair_rows
                 field="headers"
                 label="Headers"
@@ -1293,11 +1378,25 @@ defmodule Sigma.Web.SettingsLive do
   end
 
   @impl true
+  def handle_event("change_provider_form", %{"provider" => params}, socket) do
+    current_form = socket.assigns.provider_form || blank_provider_form()
+    params = maybe_update_default_auth_type(current_form, params)
+
+    form =
+      current_form
+      |> Map.merge(params)
+      |> normalize_provider_form()
+
+    {:noreply, assign(socket, :provider_form, form)}
+  end
+
+  @impl true
   def handle_event("save_provider", %{"provider" => params}, socket) do
     form =
       socket.assigns.provider_form
       |> Kernel.||(blank_provider_form())
       |> Map.merge(params)
+      |> normalize_provider_form()
 
     {:ok, _} = save_provider_form(form)
 
@@ -1844,6 +1943,14 @@ defmodule Sigma.Web.SettingsLive do
     [{"anthropic", "Anthropic"}, {"openai", "OpenAI"}]
   end
 
+  defp provider_auth_type_options do
+    [
+      {"x-api-key", "x-api-key"},
+      {"bearer", "Bearer Token"},
+      {"custom_header", "Custom Header"}
+    ]
+  end
+
   defp format_api_type("anthropic"), do: "Anthropic"
   defp format_api_type("openai"), do: "OpenAI"
   defp format_api_type(value), do: blank_fallback(value, "-")
@@ -1876,19 +1983,27 @@ defmodule Sigma.Web.SettingsLive do
       "name" => "New Provider",
       "api_type" => "anthropic",
       "credential_id" => "",
+      "auth_type" => "x-api-key",
+      "auth_header_name" => "",
       "model" => "claude-3-5-sonnet-latest",
       "base_url" => "https://api.anthropic.com"
     }
   end
 
   defp provider_form_from_config(id, provider) do
+    api_type = provider["api_type"] || "anthropic"
+    auth_type = normalize_provider_auth_type(provider["auth_type"], default_auth_type(api_type))
+
     blank_provider_form()
     |> Map.merge(%{
       "mode" => "edit",
       "id" => id,
       "name" => provider["name"] || "",
-      "api_type" => provider["api_type"] || "anthropic",
+      "api_type" => api_type,
       "credential_id" => provider["credential_id"] || "",
+      "auth_type" => auth_type,
+      "auth_header_name" =>
+        normalize_provider_auth_header_name(auth_type, provider["auth_header_name"]),
       "model" => provider["model"] || "",
       "base_url" => provider["base_url"] || ""
     })
@@ -1904,10 +2019,16 @@ defmodule Sigma.Web.SettingsLive do
   end
 
   defp provider_form_updates(form) do
+    auth_type =
+      normalize_provider_auth_type(form["auth_type"], default_auth_type(form["api_type"]))
+
     %{
       "name" => trim_form_value(form["name"]),
       "api_type" => normalize_provider_api_type(form["api_type"]),
       "credential_id" => form["credential_id"] || "",
+      "auth_type" => auth_type,
+      "auth_header_name" =>
+        normalize_provider_auth_header_name(auth_type, form["auth_header_name"]),
       "model" => trim_form_value(form["model"]),
       "base_url" => trim_form_value(form["base_url"])
     }
@@ -1915,6 +2036,72 @@ defmodule Sigma.Web.SettingsLive do
 
   defp normalize_provider_api_type("openai"), do: "openai"
   defp normalize_provider_api_type(_api_type), do: "anthropic"
+
+  defp normalize_provider_form(form) do
+    api_type = normalize_provider_api_type(form["api_type"])
+    auth_type = normalize_provider_auth_type(form["auth_type"], default_auth_type(api_type))
+
+    form
+    |> Map.put("api_type", api_type)
+    |> Map.put("auth_type", auth_type)
+    |> Map.put(
+      "auth_header_name",
+      normalize_provider_auth_header_name(auth_type, form["auth_header_name"])
+    )
+  end
+
+  defp default_auth_type("openai"), do: "bearer"
+  defp default_auth_type(_api_type), do: "x-api-key"
+
+  defp maybe_update_default_auth_type(current_form, params) do
+    current_api_type = normalize_provider_api_type(current_form["api_type"])
+    next_api_type = normalize_provider_api_type(params["api_type"] || current_api_type)
+
+    current_auth_type =
+      normalize_provider_auth_type(current_form["auth_type"], default_auth_type(current_api_type))
+
+    submitted_auth_type =
+      normalize_provider_auth_type(params["auth_type"], current_auth_type)
+
+    current_default? = current_auth_type == default_auth_type(current_api_type)
+    submitted_current? = submitted_auth_type == current_auth_type
+
+    if current_api_type != next_api_type and current_default? and submitted_current? do
+      Map.put(params, "auth_type", default_auth_type(next_api_type))
+    else
+      params
+    end
+  end
+
+  defp normalize_provider_auth_type(value, fallback) do
+    normalize_provider_auth_type_value(value) || normalize_provider_auth_type_value(fallback) ||
+      "x-api-key"
+  end
+
+  defp normalize_provider_auth_type_value(value) when is_atom(value) do
+    value
+    |> Atom.to_string()
+    |> normalize_provider_auth_type_value()
+  end
+
+  defp normalize_provider_auth_type_value(value) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      "x-api-key" -> "x-api-key"
+      "x_api_key" -> "x-api-key"
+      "bearer" -> "bearer"
+      "bearer_token" -> "bearer"
+      "bearer token" -> "bearer"
+      "custom" -> "custom_header"
+      "custom_header" -> "custom_header"
+      "custom header" -> "custom_header"
+      _ -> nil
+    end
+  end
+
+  defp normalize_provider_auth_type_value(_value), do: nil
+
+  defp normalize_provider_auth_header_name("custom_header", value), do: trim_form_value(value)
+  defp normalize_provider_auth_header_name(_auth_type, _value), do: ""
 
   defp provider_saved_message(%{"mode" => "new"}), do: "Provider created"
   defp provider_saved_message(_form), do: "Provider updated"
@@ -1969,6 +2156,10 @@ defmodule Sigma.Web.SettingsLive do
       "type" => "stdio",
       "command" => "",
       "url" => "",
+      "auth_type" => "",
+      "auth_header_name" => "",
+      "auth_value" => "",
+      "auth_credential_id" => "",
       "args" => [blank_pair_row()],
       "env" => [blank_pair_row()],
       "headers" => [blank_pair_row()]
@@ -1977,6 +2168,17 @@ defmodule Sigma.Web.SettingsLive do
 
   defp mcp_form_from_server(id, server) do
     type = normalize_mcp_type(server["type"])
+    headers = server["headers"] || %{}
+    auth_type = normalize_mcp_auth_type(server["authType"] || infer_mcp_auth_type(headers))
+    auth_header_name = mcp_auth_header_name(auth_type, server["authHeaderName"])
+
+    {auth_header_key, auth_header_value} =
+      mcp_auth_header_entry(headers, auth_type, auth_header_name)
+
+    auth_row = mcp_auth_row_from_header_value(auth_type, auth_header_value)
+
+    visible_headers =
+      if auth_header_key == "", do: headers, else: Map.delete(headers, auth_header_key)
 
     %{
       "mode" => "edit",
@@ -1985,19 +2187,36 @@ defmodule Sigma.Web.SettingsLive do
       "type" => type,
       "command" => server["command"] || "",
       "url" => server["url"] || "",
+      "auth_type" => auth_type,
+      "auth_header_name" => auth_header_name,
+      "auth_value" => auth_row["value"],
+      "auth_credential_id" => auth_row["credential_id"],
       "args" => args_to_pair_rows(server["args"] || []),
       "env" => map_to_pair_rows(server["env"] || %{}),
-      "headers" => map_to_pair_rows(server["headers"] || %{})
+      "headers" => map_to_pair_rows(visible_headers)
     }
   end
 
   defp merge_mcp_form_params(form, params) do
     form
-    |> Map.merge(Map.take(params, ["mode", "original_id", "id", "command", "url"]))
+    |> Map.merge(
+      Map.take(params, [
+        "mode",
+        "original_id",
+        "id",
+        "command",
+        "url",
+        "auth_type",
+        "auth_header_name",
+        "auth_value",
+        "auth_credential_id"
+      ])
+    )
     |> Map.put("type", normalize_mcp_type(params["type"] || form["type"]))
     |> merge_pair_rows(params, "args")
     |> merge_pair_rows(params, "env")
     |> merge_pair_rows(params, "headers")
+    |> normalize_mcp_auth_form()
   end
 
   defp merge_pair_rows(form, params, field) do
@@ -2038,12 +2257,18 @@ defmodule Sigma.Web.SettingsLive do
   end
 
   defp mcp_server_updates_for_type(id, "http", form) do
+    headers =
+      form["headers"]
+      |> map_from_pair_rows()
+      |> put_mcp_auth_header(form)
+
     %{
       "id" => id,
       "type" => "http",
       "url" => String.trim(form["url"] || ""),
-      "headers" => map_from_pair_rows(form["headers"])
+      "headers" => headers
     }
+    |> put_mcp_auth_metadata(form)
   end
 
   defp mcp_server_updates_for_type(id, "stdio", form) do
@@ -2175,6 +2400,130 @@ defmodule Sigma.Web.SettingsLive do
       String.trim(row["value"] || "")
     else
       "{{credential:#{credential_id}}}"
+    end
+  end
+
+  defp mcp_auth_type_options do
+    [
+      {"", "None"},
+      {"x-api-key", "x-api-key"},
+      {"bearer", "Bearer Token"},
+      {"custom_header", "Custom Header"}
+    ]
+  end
+
+  defp mcp_auth_enabled?(form) do
+    normalize_mcp_auth_type(form["auth_type"]) != ""
+  end
+
+  defp mcp_auth_credential_selected?(form) do
+    String.trim(form["auth_credential_id"] || "") != ""
+  end
+
+  defp normalize_mcp_auth_form(form) do
+    auth_type = normalize_mcp_auth_type(form["auth_type"])
+
+    form
+    |> Map.put("auth_type", auth_type)
+    |> Map.put("auth_header_name", mcp_auth_header_name(auth_type, form["auth_header_name"]))
+    |> Map.put("auth_value", String.trim(form["auth_value"] || ""))
+    |> Map.put("auth_credential_id", String.trim(form["auth_credential_id"] || ""))
+  end
+
+  defp normalize_mcp_auth_type(value) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      "x-api-key" -> "x-api-key"
+      "x_api_key" -> "x-api-key"
+      "bearer" -> "bearer"
+      "bearer_token" -> "bearer"
+      "bearer token" -> "bearer"
+      "custom" -> "custom_header"
+      "custom_header" -> "custom_header"
+      "custom header" -> "custom_header"
+      _ -> ""
+    end
+  end
+
+  defp normalize_mcp_auth_type(_value), do: ""
+
+  defp mcp_auth_header_name("x-api-key", _header_name), do: "x-api-key"
+  defp mcp_auth_header_name("bearer", _header_name), do: "Authorization"
+  defp mcp_auth_header_name("custom_header", header_name), do: String.trim(header_name || "")
+  defp mcp_auth_header_name(_auth_type, _header_name), do: ""
+
+  defp mcp_auth_header_entry(headers, auth_type, auth_header_name) do
+    case mcp_header_entry(headers, mcp_auth_header_name(auth_type, auth_header_name)) do
+      nil -> {"", ""}
+      entry -> entry
+    end
+  end
+
+  defp mcp_header_entry(_headers, ""), do: nil
+
+  defp mcp_header_entry(headers, header_name) do
+    header_name = String.downcase(header_name)
+
+    Enum.find(headers, fn {key, _value} ->
+      key |> to_string() |> String.downcase() == header_name
+    end)
+  end
+
+  defp infer_mcp_auth_type(headers) do
+    cond do
+      match?({_key, "Bearer " <> _token}, mcp_header_entry(headers, "Authorization")) ->
+        "bearer"
+
+      mcp_header_entry(headers, "x-api-key") != nil ->
+        "x-api-key"
+
+      true ->
+        ""
+    end
+  end
+
+  defp mcp_auth_row_from_header_value("bearer", "Bearer " <> value) do
+    pair_row_from_value("", value)
+  end
+
+  defp mcp_auth_row_from_header_value(_auth_type, value), do: pair_row_from_value("", value)
+
+  defp put_mcp_auth_header(headers, form) do
+    auth_type = normalize_mcp_auth_type(form["auth_type"])
+    header_name = mcp_auth_header_name(auth_type, form["auth_header_name"])
+    value = mcp_auth_header_value(auth_type, form)
+
+    cond do
+      auth_type == "" -> headers
+      header_name == "" -> headers
+      value == "" -> headers
+      true -> Map.put(headers, header_name, value)
+    end
+  end
+
+  defp mcp_auth_header_value(auth_type, form) do
+    value =
+      case String.trim(form["auth_credential_id"] || "") do
+        "" -> String.trim(form["auth_value"] || "")
+        credential_id -> "{{credential:#{credential_id}}}"
+      end
+
+    case {auth_type, value} do
+      {_auth_type, ""} -> ""
+      {"bearer", value} -> "Bearer #{value}"
+      {_auth_type, value} -> value
+    end
+  end
+
+  defp put_mcp_auth_metadata(updates, form) do
+    auth_type = normalize_mcp_auth_type(form["auth_type"])
+    header_name = mcp_auth_header_name(auth_type, form["auth_header_name"])
+
+    if auth_type == "" do
+      updates
+    else
+      updates
+      |> Map.put("authType", auth_type)
+      |> Map.put("authHeaderName", header_name)
     end
   end
 

@@ -176,6 +176,89 @@ defmodule Sigma.Session.ConfigManagerTest do
   end
 
   @tag :tmp_dir
+  test "loads and persists provider auth header configuration" do
+    File.mkdir_p!(ConfigManager.agent_dir())
+
+    File.write!(
+      Path.join(ConfigManager.agent_dir(), "settings.json"),
+      Jason.encode!(%{"defaultProvider" => "openai", "defaultModel" => "smart"})
+    )
+
+    File.write!(
+      Path.join(ConfigManager.agent_dir(), "models.json"),
+      Jason.encode!(%{
+        "providers" => %{
+          "openai" => %{
+            "name" => "OpenAI",
+            "api" => "openai-completions",
+            "authType" => "custom_header",
+            "authHeaderName" => "X-API-Key",
+            "models" => [%{"id" => "smart"}]
+          }
+        }
+      })
+    )
+
+    assert %{
+             "providers" => %{
+               "openai" => %{
+                 "auth_type" => "custom_header",
+                 "auth_header_name" => "X-API-Key"
+               }
+             }
+           } = ConfigManager.get_config()
+
+    assert {:ok, _} =
+             ConfigManager.update_provider("openai", %{
+               "auth_type" => "bearer",
+               "auth_header_name" => "X-Ignored"
+             })
+
+    saved_models =
+      ConfigManager.agent_dir()
+      |> Path.join("models.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert saved_models["providers"]["openai"]["authType"] == "bearer"
+    assert saved_models["providers"]["openai"]["authHeaderName"] == ""
+  end
+
+  @tag :tmp_dir
+  test "resolves provider credential by provider id" do
+    File.mkdir_p!(ConfigManager.agent_dir())
+
+    File.write!(
+      Path.join(ConfigManager.agent_dir(), "auth.json"),
+      Jason.encode!(%{
+        "minimax-cred" => %{"type" => "api_key", "key" => "secret-key", "name" => "MiniMax"}
+      })
+    )
+
+    File.write!(
+      Path.join(ConfigManager.agent_dir(), "models.json"),
+      Jason.encode!(%{
+        "providers" => %{
+          "minimax" => %{
+            "name" => "MiniMax",
+            "api" => "anthropic-messages",
+            "credential_id" => "minimax-cred",
+            "models" => [%{"id" => "MiniMax-M3"}]
+          }
+        }
+      })
+    )
+
+    assert %{
+             "id" => "minimax",
+             "credential_id" => "minimax-cred",
+             "resolved_key" => "secret-key"
+           } = ConfigManager.get_provider_config("minimax")
+
+    assert ConfigManager.get_provider_config("missing") == nil
+  end
+
+  @tag :tmp_dir
   test "defaults global skills to enabled and persists disabled global skills" do
     assert ConfigManager.disabled_global_skills() == []
     assert ConfigManager.get_config()["disabled_global_skills"] == []
@@ -247,16 +330,20 @@ defmodule Sigma.Session.ConfigManagerTest do
 
     assert {:ok, _} =
              ConfigManager.put_mcp_server("secure", %{
-               "type" => "stdio",
-               "command" => "npx",
-               "args" => ["--token", "{{credential:#{credential_id}}}"],
-               "env" => %{"GITHUB_PERSONAL_ACCESS_TOKEN" => "{{credential:#{credential_id}}}"}
+               "type" => "http",
+               "url" => "https://example.com/mcp",
+               "headers" => %{
+                 "Authorization" => "Bearer {{credential:#{credential_id}}}",
+                 "X-API-Key" => "{{credential:#{credential_id}}}"
+               }
              })
 
     assert %{
              "secure" => %{
-               "args" => ["--token", "secret-token"],
-               "env" => %{"GITHUB_PERSONAL_ACCESS_TOKEN" => "secret-token"}
+               "headers" => %{
+                 "Authorization" => "Bearer secret-token",
+                 "X-API-Key" => "secret-token"
+               }
              }
            } = ConfigManager.mcp_servers_for(["secure"])
   end
