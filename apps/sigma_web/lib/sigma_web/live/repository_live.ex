@@ -3,7 +3,7 @@ defmodule Sigma.Web.RepositoryLive do
 
   import Sigma.Web.ProjectSidebar
 
-  alias Sigma.Session.{ConfigManager, RepoManager}
+  alias Sigma.Session.{ConfigManager, RepoManager, SessionFiles}
 
   @impl true
   def mount(%{"repository" => encoded_repository}, _session, socket) do
@@ -175,9 +175,8 @@ defmodule Sigma.Web.RepositoryLive do
   @impl true
   def handle_event("confirm_delete", _, socket) do
     session_id = socket.assigns.deleting_session
-    file_path = Path.join(socket.assigns.sessions_dir, "#{session_id}.jsonl")
 
-    case File.rm(file_path) do
+    case SessionFiles.delete(socket.assigns.sessions_dir, session_id) do
       :ok ->
         {:ok, sessions} = Sigma.Session.Log.list_sessions(socket.assigns.sessions_dir)
 
