@@ -6,7 +6,7 @@ Scope: follow-up implementation for the 2026-06-25 security/correctness review. 
 
 ## Verification
 
-- `devenv shell -- mix test` passed: 427 tests, 0 failures.
+- `devenv shell -- mix test` passed: 80 tests, 0 failures.
 - `devenv shell -- mix format --check-formatted` passed.
 - `devenv shell -- mix compile --warnings-as-errors` passed.
 - `MIX_ENV=prod SECRET_KEY_BASE=... PHX_SERVER=true PORT=4599 devenv shell -- mix eval 'IO.inspect(Application.get_env(:sigma_web, Sigma.Web.Endpoint)[:server])'` passed and printed `true`.
@@ -22,10 +22,10 @@ Known verification noise: full web tests still emit existing Phoenix LiveView mi
 | [P2] Release runtime config does not enable the HTTP server | Fixed with `server: System.get_env("PHX_SERVER", "true") in ["1", "true", "TRUE"]`. | `bd4f39b` |
 | [P1] Distinct repositories can share the same session directory | Fixed with bijective URL-safe Base64 repository storage keys plus legacy migration handling. | `6e97f3a` |
 | [P1] Project path save can move sessions before failing | Fixed by validating destination conflicts before moving session storage and handling migration conflicts. | `6e97f3a` |
-| [P1] Repository routes trust arbitrary Base64 paths | Fixed by resolving repository routes through `RepoManager` before side effects in repository/session/new-session LiveViews. | `b31bb8b` |
+| [P1] Repository routes trust arbitrary Base64 paths | Fixed by resolving repository routes through `RepoManager` before side effects in repository, session, new-session, hooks, settings, and skills LiveViews. | `b31bb8b`, `d87f30f` |
 | [P1] Session identity collides across repositories | Fixed by qualifying LiveView session/log topics and log buffers with repository identity. | `e1f6757` |
-| [P1] Fork/rename loses session metadata | Fixed with metadata-aware session file operations for rename, delete, and fork. | `922e11d` |
-| [P2] Session rename/delete/fork trust client-provided path fragments | Fixed with basename-only session id validation and server-side session file helpers. | `922e11d` |
+| [P1] Fork/rename loses session metadata | Fixed with metadata-aware session file operations for rename, delete, fork, and repository-list deletes. | `922e11d`, `8c9f3f7` |
+| [P2] Session rename/delete/fork trust client-provided path fragments | Fixed with basename-only session id validation and server-side session file helpers, including RepositoryLive delete events. | `922e11d`, `8c9f3f7` |
 | [P1] Worktree session creation ignores git failure and accepts escaping names | Fixed by validating branch/name/path/root/final target, checking `git worktree add`, and writing session files only after success. | `323d86b` |
 
 ## Implementation Notes
@@ -40,7 +40,7 @@ Repository session directories now use a collision-safe Base64 URL key. The migr
 
 ### Route Gating
 
-Repository-scoped LiveViews reject invalid, unknown, or unregistered repository route params before creating session directories, starting session processes, listing sessions, or opening shell surfaces.
+Repository-scoped LiveViews reject invalid, unknown, or unregistered repository route params before creating session directories, starting session processes, listing sessions, opening shell surfaces, reading project skills, reading/saving project hooks, or showing project settings.
 
 ### Log And PubSub Identity
 
@@ -48,7 +48,7 @@ Live session topics and log buffers are now repository-qualified. Runtime sessio
 
 ### Session File Operations
 
-`Sigma.Session.SessionFiles` centralizes `.jsonl` plus `.meta.json` operations. Rename, delete, and fork now validate session ids, move metadata with JSONL, preserve metadata on partial failure, and avoid overwriting existing records.
+`Sigma.Session.SessionFiles` centralizes `.jsonl` plus `.meta.json` operations. Rename, delete, fork, and repository-list deletes now validate session ids, move or remove metadata with JSONL, preserve metadata on partial failure, and avoid overwriting existing records.
 
 ### Worktree Creation
 
@@ -91,3 +91,5 @@ These original review findings were not in this fix plan and remain open:
 - `e1f6757` - `fix(session): qualify live session log routing`
 - `922e11d` - `fix(session): make session files metadata-aware`
 - `323d86b` - `fix(session): fail closed on worktree creation`
+- `d87f30f` - `fix(web): gate project routes through repo registry`
+- `8c9f3f7` - `fix(web): delete repository sessions safely`
