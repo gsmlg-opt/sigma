@@ -5,7 +5,7 @@
  *
  * DO NOT EDIT — regenerate with: mix duskmoon.bundle el-autocomplete el-button el-card el-chip el-dialog el-menu el-popover
  */
-//#region node_modules/@duskmoon-dev/el-base/dist/esm/index.js
+//#region apps/sigma_web/node_modules/@duskmoon-dev/el-base/dist/esm/index.js
 var styleSheetCache = /* @__PURE__ */ new WeakMap();
 function css$7(strings, ...values) {
 	const cached = styleSheetCache.get(strings);
@@ -336,7 +336,7 @@ var animationStyles = css$7`
   }
 `;
 //#endregion
-//#region node_modules/@duskmoon-dev/core/dist/esm/components/autocomplete.js
+//#region apps/sigma_web/node_modules/@duskmoon-dev/core/dist/esm/components/autocomplete.js
 const css$6 = `/**
  * Autocomplete Component Styles
  * DuskMoonUI - Material Design 3 inspired autocomplete system
@@ -1113,7 +1113,7 @@ function register$6() {
 }
 register$6();
 //#endregion
-//#region node_modules/@duskmoon-dev/core/dist/esm/components/button.js
+//#region apps/sigma_web/node_modules/@duskmoon-dev/core/dist/esm/components/button.js
 const css$5 = `/**
  * Button Component Styles
  * DuskMoonUI - Material Design 3 inspired button system
@@ -1644,7 +1644,7 @@ const css$5 = `/**
 `;
 new CSSStyleSheet().replaceSync(css$5);
 //#endregion
-//#region node_modules/@duskmoon-dev/el-button/dist/esm/register.js
+//#region apps/sigma_web/node_modules/@duskmoon-dev/el-button/dist/esm/register.js
 var VARIANT_CLASSES$2 = {
 	primary: "btn-primary",
 	secondary: "btn-secondary",
@@ -1777,7 +1777,7 @@ function register$5() {
 }
 register$5();
 //#endregion
-//#region node_modules/@duskmoon-dev/core/dist/esm/components/card.js
+//#region apps/sigma_web/node_modules/@duskmoon-dev/core/dist/esm/components/card.js
 const css$4 = `/**
  * Card Component Styles
  * DuskMoonUI - Material Design 3 inspired card system
@@ -2044,7 +2044,7 @@ const css$4 = `/**
 `;
 new CSSStyleSheet().replaceSync(css$4);
 //#endregion
-//#region node_modules/@duskmoon-dev/el-card/dist/esm/register.js
+//#region apps/sigma_web/node_modules/@duskmoon-dev/el-card/dist/esm/register.js
 var VARIANT_CLASSES$1 = {
 	elevated: "card-elevated",
 	outlined: "card-bordered",
@@ -2193,7 +2193,7 @@ function register$4() {
 }
 register$4();
 //#endregion
-//#region node_modules/@duskmoon-dev/core/dist/esm/components/chip.js
+//#region apps/sigma_web/node_modules/@duskmoon-dev/core/dist/esm/components/chip.js
 const css$3 = `/**
  * Chip Component Styles
  * DuskMoonUI - Material Design 3 inspired chip system
@@ -2530,7 +2530,7 @@ const css$3 = `/**
 `;
 new CSSStyleSheet().replaceSync(css$3);
 //#endregion
-//#region node_modules/@duskmoon-dev/el-chip/dist/esm/register.js
+//#region apps/sigma_web/node_modules/@duskmoon-dev/el-chip/dist/esm/register.js
 var VARIANT_CLASSES = {
 	filled: "",
 	outlined: "chip-outlined",
@@ -2747,7 +2747,7 @@ function register$3() {
 }
 register$3();
 //#endregion
-//#region node_modules/@duskmoon-dev/core/dist/esm/components/dialog.js
+//#region apps/sigma_web/node_modules/@duskmoon-dev/core/dist/esm/components/dialog.js
 const css$2 = `/**
  * Dialog Component Styles
  * DuskMoonUI - Material Design 3 inspired dialog system
@@ -2924,7 +2924,7 @@ const css$2 = `/**
 `;
 new CSSStyleSheet().replaceSync(css$2);
 //#endregion
-//#region node_modules/@duskmoon-dev/el-dialog/dist/esm/register.js
+//#region apps/sigma_web/node_modules/@duskmoon-dev/el-dialog/dist/esm/register.js
 var SIZE_CLASSES = {
 	sm: "dialog-sm",
 	md: "",
@@ -3145,7 +3145,7 @@ function register$2() {
 }
 register$2();
 //#endregion
-//#region node_modules/@duskmoon-dev/core/dist/esm/components/navigation.js
+//#region apps/sigma_web/node_modules/@duskmoon-dev/core/dist/esm/components/navigation.js
 const css$1 = `/**
  * Navigation Component Styles
  * DuskMoonUI - Material Design 3 inspired navigation system
@@ -4337,7 +4337,7 @@ function register$1() {
 }
 register$1();
 //#endregion
-//#region node_modules/@duskmoon-dev/core/dist/esm/components/popover.js
+//#region apps/sigma_web/node_modules/@duskmoon-dev/core/dist/esm/components/popover.js
 const css = `/**
  * Popover Component Styles
  * DuskMoonUI - Material Design 3 inspired popover system

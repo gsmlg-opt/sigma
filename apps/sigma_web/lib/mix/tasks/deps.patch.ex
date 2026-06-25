@@ -67,6 +67,10 @@ defmodule Mix.Tasks.Deps.Patch do
   defp patch_npm do
     resolver_path = Path.expand("deps/npm/lib/npm/resolver.ex")
     npm_path = Path.expand("deps/npm/lib/npm.ex")
+    linker_path = Path.expand("deps/npm/lib/npm/install/linker.ex")
+    registry_path = Path.expand("deps/npm/lib/npm/registry.ex")
+    tarball_path = Path.expand("deps/npm/lib/npm/tarball.ex")
+    proxy_path = Path.expand("deps/npm/lib/npm/proxy.ex")
 
     patched_resolver =
       if File.exists?(resolver_path) do
@@ -104,8 +108,24 @@ defmodule Mix.Tasks.Deps.Patch do
             content1
           end
 
-        # 3. Patch extract_conflict_package/1 to extract_conflict_package/2
-        if String.contains?(content2, "defp extract_conflict_package(message) do") do
+        # 3. Patch resolver prefetches so slow registry fetches do not exit callers
+        content3 =
+          content2
+          |> String.replace(
+            "      max_concurrency: @prefetch_concurrency,\n      timeout: @fetch_timeout\n    )",
+            "      max_concurrency: @prefetch_concurrency,\n      timeout: @fetch_timeout,\n      on_timeout: :kill_task\n    )"
+          )
+          |> String.replace(
+            "        max_concurrency: @prefetch_concurrency,\n        timeout: @fetch_timeout\n      )",
+            "        max_concurrency: @prefetch_concurrency,\n        timeout: @fetch_timeout,\n        on_timeout: :kill_task\n      )"
+          )
+
+        if content3 != content2 do
+          Mix.shell().info("Patched #{resolver_path} (prefetch timeout handling)")
+        end
+
+        # 4. Patch extract_conflict_package/1 to extract_conflict_package/2
+        if String.contains?(content3, "defp extract_conflict_package(message) do") do
           target = """
             defp extract_conflict_package(message) do
               # Look for patterns like: "ms 2.0.0" and "ms 2.1.3" in the error
@@ -172,7 +192,7 @@ defmodule Mix.Tasks.Deps.Patch do
           """
 
           # Normalize newlines for match safety
-          normalized_content = String.replace(content2, "\r\n", "\n")
+          normalized_content = String.replace(content3, "\r\n", "\n")
           normalized_target = String.replace(target, "\r\n", "\n")
           normalized_replacement = String.replace(replacement, "\r\n", "\n")
 
@@ -183,8 +203,8 @@ defmodule Mix.Tasks.Deps.Patch do
           Mix.shell().info("Patched #{resolver_path} (extract_conflict_package)")
           true
         else
-          if content2 != content do
-            File.write!(resolver_path, content2)
+          if content3 != content do
+            File.write!(resolver_path, content3)
             true
           else
             false
@@ -238,7 +258,271 @@ defmodule Mix.Tasks.Deps.Patch do
         false
       end
 
-    patched_resolver or patched_npm_core
+    patched_registry = patch_npm_registry(registry_path)
+    patched_tarball = patch_npm_tarball(tarball_path)
+    patched_proxy = patch_npm_proxy(proxy_path)
+    patched_linker = patch_npm_linker(linker_path)
+
+    patched_resolver or patched_npm_core or patched_registry or patched_tarball or patched_proxy or
+      patched_linker
+  end
+
+  defp patch_npm_linker(file_path) do
+    if File.exists?(file_path) do
+      content = File.read!(file_path)
+
+      if String.contains?(
+           content,
+           "defp install_nested_dependencies(info, package_dir, strategy, seen)"
+         ) do
+        false
+      else
+        target = """
+          defp install_single_nested(_pkg, nil, _parent, _nm_dir, _strategy), do: :ok
+
+          defp install_single_nested(pkg, version, parent, nm_dir, strategy) do
+            with {:ok, packument} <- NPM.Registry.get_packument(pkg),
+                 %{} = info <- Map.get(packument.versions, version),
+                 {:ok, cache_result} <-
+                   NPM.Cache.ensure(pkg, version, info.dist.tarball, info.dist.integrity) do
+              if cache_result != :missing_optional do
+                cache_path = NPM.Cache.package_dir(pkg, version)
+                target = Path.join([nm_dir, parent, "node_modules", pkg])
+                link_package(cache_path, target, strategy)
+              end
+            end
+
+            :ok
+          end\
+        """
+
+        replacement = """
+          defp install_single_nested(_pkg, nil, _parent, _nm_dir, _strategy), do: :ok
+
+          defp install_single_nested(pkg, version, parent, nm_dir, strategy) do
+            with {:ok, packument} <- NPM.Registry.get_packument(pkg),
+                 %{} = info <- Map.get(packument.versions, version),
+                 {:ok, cache_result} <-
+                   NPM.Cache.ensure(pkg, version, info.dist.tarball, info.dist.integrity) do
+              if cache_result != :missing_optional do
+                cache_path = NPM.Cache.package_dir(pkg, version)
+                target = Path.join([nm_dir, parent, "node_modules", pkg])
+                link_package(cache_path, target, strategy)
+                install_nested_dependencies(info, target, strategy, MapSet.new([{pkg, version}]))
+              end
+            end
+
+            :ok
+          end
+
+          defp install_nested_dependencies(info, package_dir, strategy, seen) do
+            deps =
+              info.dependencies
+              |> Map.merge(NPM.PlatformOptional.select(info.optional_dependencies))
+
+            Enum.each(deps, fn {dep, range} ->
+              version = resolve_nested_version(dep, range)
+              install_nested_dependency(dep, version, package_dir, strategy, seen)
+            end)
+          end
+
+          defp install_nested_dependency(_dep, nil, _package_dir, _strategy, _seen), do: :ok
+
+          defp install_nested_dependency(dep, version, package_dir, strategy, seen) do
+            key = {dep, version}
+
+            unless MapSet.member?(seen, key) do
+              with {:ok, packument} <- NPM.Registry.get_packument(dep),
+                   %{} = info <- Map.get(packument.versions, version),
+                   {:ok, cache_result} <-
+                     NPM.Cache.ensure(dep, version, info.dist.tarball, info.dist.integrity) do
+                if cache_result != :missing_optional do
+                  cache_path = NPM.Cache.package_dir(dep, version)
+                  target = Path.join([package_dir, "node_modules", dep])
+                  link_package(cache_path, target, strategy)
+                  install_nested_dependencies(info, target, strategy, MapSet.put(seen, key))
+                end
+              end
+            end
+
+            :ok
+          end\
+        """
+
+        normalized_content = String.replace(content, "\r\n", "\n")
+        normalized_target = String.replace(target, "\r\n", "\n")
+        normalized_replacement = String.replace(replacement, "\r\n", "\n")
+
+        new_content =
+          String.replace(normalized_content, normalized_target, normalized_replacement)
+
+        if new_content != normalized_content do
+          File.write!(file_path, new_content)
+          Mix.shell().info("Patched #{file_path} (nested dependency linking)")
+          true
+        else
+          false
+        end
+      end
+    else
+      Mix.shell().error("npm linker.ex not found at #{file_path}")
+      false
+    end
+  end
+
+  defp patch_npm_registry(file_path) do
+    if File.exists?(file_path) do
+      content = File.read!(file_path)
+
+      if String.contains?(content, "connect_options: NPM.Proxy.connect_options(url)") do
+        false
+      else
+        target = """
+              Req.get(url,
+                headers: headers,
+                decode_body: false,
+                redirect: NPM.Config.allow_registry_redirects?()
+              )\
+        """
+
+        replacement = """
+              Req.get(url,
+                headers: headers,
+                decode_body: false,
+                redirect: NPM.Config.allow_registry_redirects?(),
+                connect_options: NPM.Proxy.connect_options(url)
+              )\
+        """
+
+        new_content =
+          content
+          |> String.replace("\r\n", "\n")
+          |> String.replace(
+            String.replace(target, "\r\n", "\n"),
+            String.replace(replacement, "\r\n", "\n")
+          )
+
+        if new_content != content do
+          File.write!(file_path, new_content)
+          Mix.shell().info("Patched #{file_path} (proxy connect options)")
+          true
+        else
+          false
+        end
+      end
+    else
+      Mix.shell().error("npm registry.ex not found at #{file_path}")
+      false
+    end
+  end
+
+  defp patch_npm_tarball(file_path) do
+    if File.exists?(file_path) do
+      content = File.read!(file_path)
+
+      if String.contains?(content, "connect_options: NPM.Proxy.connect_options(tarball_url)") do
+        false
+      else
+        new_content =
+          String.replace(
+            content,
+            "case Req.get(tarball_url, decode_body: false) do",
+            """
+            case Req.get(tarball_url,
+                   decode_body: false,
+                   connect_options: NPM.Proxy.connect_options(tarball_url)
+                 ) do\
+            """
+          )
+
+        if new_content != content do
+          File.write!(file_path, new_content)
+          Mix.shell().info("Patched #{file_path} (proxy connect options)")
+          true
+        else
+          false
+        end
+      end
+    else
+      Mix.shell().error("npm tarball.ex not found at #{file_path}")
+      false
+    end
+  end
+
+  defp patch_npm_proxy(file_path) do
+    content = """
+    defmodule NPM.Proxy do
+      @moduledoc false
+
+      def connect_options(url) do
+        uri = URI.parse(url)
+        proxy = proxy_env(uri.scheme)
+
+        if proxy && not no_proxy?(uri.host) do
+          proxy_connect_options(proxy)
+        else
+          []
+        end
+      end
+
+      defp proxy_connect_options(proxy) do
+        uri = URI.parse(proxy)
+
+        with scheme when scheme in [:http, :https] <- proxy_scheme(uri.scheme),
+             host when is_binary(host) <- uri.host do
+          [proxy: {scheme, host, uri.port || default_proxy_port(scheme), []}]
+        else
+          _ -> []
+        end
+      end
+
+      defp proxy_env("https") do
+        System.get_env("https_proxy") ||
+          System.get_env("HTTPS_PROXY") ||
+          System.get_env("all_proxy") ||
+          System.get_env("ALL_PROXY")
+      end
+
+      defp proxy_env("http") do
+        System.get_env("http_proxy") ||
+          System.get_env("HTTP_PROXY") ||
+          System.get_env("all_proxy") ||
+          System.get_env("ALL_PROXY")
+      end
+
+      defp proxy_env(_), do: nil
+
+      defp no_proxy?(host) when host in [nil, ""], do: false
+
+      defp no_proxy?(host) do
+        host = String.downcase(host)
+
+        (System.get_env("no_proxy") || System.get_env("NO_PROXY") || "")
+        |> String.split(",", trim: true)
+        |> Enum.map(&String.trim/1)
+        |> Enum.any?(fn
+          "*" -> true
+          "." <> suffix -> String.ends_with?(host, String.downcase(suffix))
+          entry -> host == String.downcase(entry)
+        end)
+      end
+
+      defp proxy_scheme("http"), do: :http
+      defp proxy_scheme("https"), do: :https
+      defp proxy_scheme(_), do: nil
+
+      defp default_proxy_port(:https), do: 443
+      defp default_proxy_port(_), do: 80
+    end
+    """
+
+    if File.exists?(file_path) and File.read!(file_path) == content do
+      false
+    else
+      File.write!(file_path, content)
+      Mix.shell().info("Patched #{file_path} (environment proxy support)")
+      true
+    end
   end
 
   defp patch_volt do

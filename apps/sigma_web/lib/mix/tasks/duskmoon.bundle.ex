@@ -32,10 +32,24 @@ defmodule Mix.Tasks.Duskmoon.Bundle do
 
   @impl Mix.Task
   def run(args) do
+    paths = paths()
+
+    try do
+      do_run(args, paths)
+    after
+      File.rm_rf(paths.tmp_dir)
+    end
+  end
+
+  defp do_run(args, paths) do
     elements = if args == [], do: @all_elements, else: args
 
-    %{node_modules: node_modules_path, output: output_path, rich_output: rich_output_path} =
-      paths()
+    %{
+      node_modules: node_modules_path,
+      output: output_path,
+      rich_output: rich_output_path,
+      tmp_dir: tmp_dir
+    } = paths
 
     Mix.shell().info("Bundling #{length(elements)} @duskmoon-dev element(s)...")
 
@@ -45,7 +59,6 @@ defmodule Mix.Tasks.Duskmoon.Bundle do
       end)
 
     # OXC requires the entry file to live inside cwd
-    tmp_dir = Path.join(File.cwd!(), "_build/duskmoon_bundle")
     File.mkdir_p!(tmp_dir)
     entry = Path.join(tmp_dir, "entry.js")
     File.write!(entry, imports)
@@ -64,29 +77,20 @@ defmodule Mix.Tasks.Duskmoon.Bundle do
     end
 
     bundle_rich_elements(tmp_dir, rich_output_path)
-  after
-    File.rm_rf(Path.join(File.cwd!(), "_build/duskmoon_bundle"))
   end
 
   defp paths do
     cwd = File.cwd!()
 
-    if String.ends_with?(cwd, "apps/sigma_web") do
-      root = Path.expand("../..", cwd)
+    web_root =
+      if String.ends_with?(cwd, "apps/sigma_web"), do: cwd, else: Path.join(cwd, "apps/sigma_web")
 
-      %{
-        node_modules: Path.join(root, "node_modules"),
-        output: Path.join(cwd, "assets/js/duskmoon_elements.js"),
-        rich_output: Path.join(cwd, "priv/static/assets/js/duskmoon_rich_elements.js")
-      }
-    else
-      %{
-        node_modules: Path.join(cwd, "node_modules"),
-        output: Path.join([cwd, "apps/sigma_web", "assets/js/duskmoon_elements.js"]),
-        rich_output:
-          Path.join([cwd, "apps/sigma_web", "priv/static/assets/js/duskmoon_rich_elements.js"])
-      }
-    end
+    %{
+      node_modules: Path.join(web_root, "node_modules"),
+      output: Path.join(web_root, "assets/js/duskmoon_elements.js"),
+      rich_output: Path.join(web_root, "priv/static/assets/js/duskmoon_rich_elements.js"),
+      tmp_dir: Path.join(web_root, "_build/duskmoon_bundle")
+    }
   end
 
   defp write_output(output_path, code, elements) do
