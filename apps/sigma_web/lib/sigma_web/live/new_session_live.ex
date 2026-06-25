@@ -128,7 +128,7 @@ defmodule Sigma.Web.NewSessionLive do
                     <label class="text-sm font-medium mb-2 block text-on-surface">
                       Worktree directory name
                     </label>
-                    <form phx-change="update_worktree_name">
+                    <form id="worktree-name-form" phx-change="update_worktree_name">
                       <input
                         type="text"
                         name="worktree_name"
@@ -368,46 +368,140 @@ defmodule Sigma.Web.NewSessionLive do
     meta_path = Path.join(sessions_dir, "#{session_id}.meta.json")
     log_path = Path.join(sessions_dir, "#{session_id}.jsonl")
 
-    {cwd, is_worktree} =
-      case mode do
-        :create_worktree when is_binary(branch) ->
-          dir_name =
-            if socket.assigns.worktree_name != "",
-              do: socket.assigns.worktree_name,
-              else: "worktree-#{:crypto.strong_rand_bytes(3) |> Base.encode16(case: :lower)}"
+    case session_workdir(socket, workdir, branch, mode) do
+      {:ok, cwd, is_worktree} ->
+        meta = %{
+          cwd: cwd,
+          branch: branch,
+          worktree: is_worktree,
+          mcp_server_ids: socket.assigns.selected_mcp_server_ids
+        }
 
-          worktree_path = Path.join([workdir, ".trees", dir_name])
+        File.write!(meta_path, Jason.encode!(meta))
+        :ok = Log.persist_event(log_path, {:agent_start, cwd})
 
-          System.cmd("git", ["-C", workdir, "worktree", "add", worktree_path, branch],
-            stderr_to_stdout: true
-          )
+        {:noreply,
+         push_navigate(socket,
+           to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{session_id}"
+         )}
 
-          {worktree_path, true}
+      {:error, message} ->
+        {:noreply, put_flash(socket, :error, message)}
+    end
+  end
 
-        :existing_worktree ->
-          case socket.assigns.selected_worktree do
-            %{path: path} -> {path, true}
-            _ -> {workdir, false}
-          end
+  defp session_workdir(socket, workdir, branch, :create_worktree) do
+    dir_name =
+      if socket.assigns.worktree_name != "",
+        do: socket.assigns.worktree_name,
+        else: "worktree-#{:crypto.strong_rand_bytes(3) |> Base.encode16(case: :lower)}"
 
-        _ ->
-          {workdir, false}
+    with :ok <- validate_worktree_branch(socket, workdir, branch),
+         true <- valid_worktree_name?(dir_name),
+         {:ok, worktree_path} <- resolve_worktree_path(workdir, dir_name),
+         {:ok, worktree_path} <- reserve_worktree_path(worktree_path),
+         {:ok, worktree_path} <- create_worktree(workdir, worktree_path, branch) do
+      {:ok, worktree_path, true}
+    else
+      false -> {:error, "Invalid worktree name"}
+      {:error, message} -> {:error, message}
+    end
+  end
+
+  defp session_workdir(socket, workdir, _branch, :existing_worktree) do
+    case socket.assigns.selected_worktree do
+      %{path: path} -> {:ok, path, true}
+      _ -> {:ok, workdir, false}
+    end
+  end
+
+  defp session_workdir(_socket, workdir, _branch, _mode), do: {:ok, workdir, false}
+
+  defp validate_worktree_branch(_socket, _workdir, branch)
+       when not is_binary(branch) or branch == "" do
+    {:error, "Select a branch before creating a worktree"}
+  end
+
+  defp validate_worktree_branch(socket, workdir, branch) do
+    if branch in socket.assigns.branches and current_git_branch?(workdir, branch) do
+      :ok
+    else
+      {:error, "Select a valid branch before creating a worktree"}
+    end
+  end
+
+  defp current_git_branch?(workdir, branch) do
+    case System.cmd(
+           "git",
+           ["-C", workdir, "show-ref", "--verify", "--quiet", "refs/heads/#{branch}"],
+           stderr_to_stdout: true
+         ) do
+      {_output, 0} -> true
+      _ -> false
+    end
+  end
+
+  defp valid_worktree_name?(name) when is_binary(name) do
+    name not in [".", ".."] and
+      Path.basename(name) == name and
+      String.match?(name, ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/)
+  end
+
+  defp valid_worktree_name?(_name), do: false
+
+  defp resolve_worktree_path(workdir, dir_name) do
+    trees_root = Path.expand(Path.join(workdir, ".trees"))
+
+    with :ok <- ensure_worktree_root(trees_root) do
+      worktree_path = Path.expand(Path.join(trees_root, dir_name))
+
+      if String.starts_with?(worktree_path <> "/", trees_root <> "/") do
+        {:ok, worktree_path}
+      else
+        {:error, "Invalid worktree name"}
       end
+    end
+  end
 
-    meta = %{
-      cwd: cwd,
-      branch: branch,
-      worktree: is_worktree,
-      mcp_server_ids: socket.assigns.selected_mcp_server_ids
-    }
+  defp reserve_worktree_path(worktree_path) do
+    case File.mkdir(worktree_path) do
+      :ok -> {:ok, worktree_path}
+      {:error, _reason} -> {:error, "Invalid worktree path"}
+    end
+  end
 
-    File.write!(meta_path, Jason.encode!(meta))
-    :ok = Log.persist_event(log_path, {:agent_start, cwd})
+  defp ensure_worktree_root(trees_root) do
+    case File.lstat(trees_root) do
+      {:ok, %File.Stat{type: :directory}} ->
+        :ok
 
-    {:noreply,
-     push_navigate(socket,
-       to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{session_id}"
-     )}
+      {:ok, _stat} ->
+        {:error, "Invalid worktree root"}
+
+      {:error, :enoent} ->
+        with :ok <- File.mkdir_p(trees_root),
+             {:ok, %File.Stat{type: :directory}} <- File.lstat(trees_root) do
+          :ok
+        else
+          _ -> {:error, "Invalid worktree root"}
+        end
+
+      {:error, _reason} ->
+        {:error, "Invalid worktree root"}
+    end
+  end
+
+  defp create_worktree(workdir, worktree_path, branch) do
+    case System.cmd("git", ["-C", workdir, "worktree", "add", worktree_path, branch],
+           stderr_to_stdout: true
+         ) do
+      {_output, 0} ->
+        {:ok, worktree_path}
+
+      {output, _status} ->
+        File.rmdir(worktree_path)
+        {:error, "Failed to create worktree: #{String.trim(output)}"}
+    end
   end
 
   defp get_sessions_dir(workdir) do

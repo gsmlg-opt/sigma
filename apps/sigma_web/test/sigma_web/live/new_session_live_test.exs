@@ -13,8 +13,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       encoded = Base.url_encode64(path, padding: false)
 
       assert {:error,
-              {:redirect,
-               %{to: "/", flash: %{"error" => "Repository is not registered."}}}} =
+              {:redirect, %{to: "/", flash: %{"error" => "Repository is not registered."}}}} =
                live(conn, "/repository/#{encoded}/sessions/new")
     end)
   end
@@ -23,8 +22,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
   test "rejects invalid repository route", %{conn: conn, tmp_dir: tmp_dir} do
     with_agent_dir(tmp_dir, fn ->
       assert {:error,
-              {:redirect,
-               %{to: "/", flash: %{"error" => "Repository is not registered."}}}} =
+              {:redirect, %{to: "/", flash: %{"error" => "Repository is not registered."}}}} =
                live(conn, "/repository/not-base64!/sessions/new")
     end)
   end
@@ -34,7 +32,9 @@ defmodule Sigma.Web.NewSessionLiveTest do
     conn: conn,
     tmp_dir: tmp_dir
   } do
-    workdir = Path.join(System.tmp_dir!(), "sigma-new-session-#{System.unique_integer([:positive])}")
+    workdir =
+      Path.join(System.tmp_dir!(), "sigma-new-session-#{System.unique_integer([:positive])}")
+
     File.mkdir_p!(workdir)
 
     on_exit(fn -> File.rm_rf!(workdir) end)
@@ -78,6 +78,279 @@ defmodule Sigma.Web.NewSessionLiveTest do
     end)
   end
 
+  @tag :tmp_dir
+  test "rejects invalid worktree names", %{conn: conn, tmp_dir: tmp_dir} do
+    workdir =
+      Path.join(System.tmp_dir!(), "sigma-new-session-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workdir)
+    init_git_repo!(workdir)
+
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+
+      render_click(view, "set_mode", %{"mode" => "create_worktree"})
+      render_change(view, "update_worktree_name", %{"worktree_name" => "../escape"})
+
+      rendered = render_click(view, "create_session")
+      assert is_binary(rendered)
+      assert rendered =~ "Invalid worktree name"
+      assert [] = Path.wildcard(Path.join(sessions_dir, "*.meta.json"))
+      assert [] = Path.wildcard(Path.join(sessions_dir, "*.jsonl"))
+    end)
+  end
+
+  @tag :tmp_dir
+  test "rejects worktree creation without a selected branch", %{conn: conn, tmp_dir: tmp_dir} do
+    workdir =
+      Path.join(System.tmp_dir!(), "sigma-new-session-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workdir)
+
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+
+      render_click(view, "set_mode", %{"mode" => "create_worktree"})
+      render_change(view, "update_worktree_name", %{"worktree_name" => "feature-worktree"})
+
+      rendered = render_click(view, "create_session")
+      assert is_binary(rendered)
+      assert rendered =~ "Select a branch before creating a worktree"
+      assert [] = Path.wildcard(Path.join(sessions_dir, "*.meta.json"))
+      assert [] = Path.wildcard(Path.join(sessions_dir, "*.jsonl"))
+    end)
+  end
+
+  @tag :tmp_dir
+  test "rejects forged worktree branches", %{conn: conn, tmp_dir: tmp_dir} do
+    workdir =
+      Path.join(System.tmp_dir!(), "sigma-new-session-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workdir)
+    init_git_repo!(workdir)
+
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+
+      render_change(view, "select_branch", %{"branch" => "forged-branch"})
+      render_click(view, "set_mode", %{"mode" => "create_worktree"})
+      render_change(view, "update_worktree_name", %{"worktree_name" => "feature-worktree"})
+
+      rendered = render_click(view, "create_session")
+      assert is_binary(rendered)
+      assert rendered =~ "Select a valid branch before creating a worktree"
+      assert [] = Path.wildcard(Path.join(sessions_dir, "*.meta.json"))
+      assert [] = Path.wildcard(Path.join(sessions_dir, "*.jsonl"))
+      refute File.exists?(Path.join([workdir, ".trees", "feature-worktree"]))
+    end)
+  end
+
+  @tag :tmp_dir
+  test "rejects stale worktree branches before creating the worktree root", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    workdir =
+      Path.join(System.tmp_dir!(), "sigma-new-session-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workdir)
+    init_git_repo!(workdir)
+    run_git!(workdir, ["branch", "stale-branch"])
+
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+      worktree_path = Path.join([workdir, ".trees", "stale-worktree"])
+
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+
+      render_change(view, "select_branch", %{"branch" => "stale-branch"})
+      render_click(view, "set_mode", %{"mode" => "create_worktree"})
+      render_change(view, "update_worktree_name", %{"worktree_name" => "stale-worktree"})
+
+      run_git!(workdir, ["branch", "-D", "stale-branch"])
+
+      rendered = render_click(view, "create_session")
+      assert is_binary(rendered)
+      assert rendered =~ "Select a valid branch before creating a worktree"
+      assert [] = Path.wildcard(Path.join(sessions_dir, "*.meta.json"))
+      assert [] = Path.wildcard(Path.join(sessions_dir, "*.jsonl"))
+      refute File.exists?(Path.join(workdir, ".trees"))
+      refute File.exists?(worktree_path)
+    end)
+  end
+
+  @tag :tmp_dir
+  test "failed git worktree creation does not write session files", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    workdir =
+      Path.join(System.tmp_dir!(), "sigma-new-session-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workdir)
+    init_git_repo!(workdir)
+
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+
+      render_click(view, "set_mode", %{"mode" => "create_worktree"})
+      render_change(view, "update_worktree_name", %{"worktree_name" => "feature-worktree"})
+
+      rendered = render_click(view, "create_session")
+      assert is_binary(rendered)
+      assert rendered =~ "Failed to create worktree"
+      assert [] = Path.wildcard(Path.join(sessions_dir, "*.meta.json"))
+      assert [] = Path.wildcard(Path.join(sessions_dir, "*.jsonl"))
+    end)
+  end
+
+  @tag :tmp_dir
+  test "creates worktree sessions with metadata and log cwd", %{conn: conn, tmp_dir: tmp_dir} do
+    workdir =
+      Path.join(System.tmp_dir!(), "sigma-new-session-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workdir)
+    init_git_repo!(workdir)
+    run_git!(workdir, ["branch", "feature-success"])
+
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+      worktree_path = Path.join([workdir, ".trees", "feature-success-worktree"])
+
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+
+      render_change(view, "select_branch", %{"branch" => "feature-success"})
+      html = render_click(view, "set_mode", %{"mode" => "create_worktree"})
+      assert html =~ ~s(id="worktree-name-form")
+
+      render_change(view, "update_worktree_name", %{"worktree_name" => "feature-success-worktree"})
+
+      assert {:error, {:live_redirect, %{kind: :push}}} = render_click(view, "create_session")
+      assert File.dir?(worktree_path)
+
+      [meta_path] = Path.wildcard(Path.join(sessions_dir, "*.meta.json"))
+      session_id = Path.basename(meta_path, ".meta.json")
+      log_path = Path.join(sessions_dir, "#{session_id}.jsonl")
+
+      assert %{"cwd" => ^worktree_path, "worktree" => true} =
+               meta_path |> File.read!() |> Jason.decode!()
+
+      assert {:ok, [%{"type" => "session", "cwd" => ^worktree_path}]} = JsonlFile.read(log_path)
+    end)
+  end
+
+  @tag :tmp_dir
+  test "rejects symlinked worktree roots", %{conn: conn, tmp_dir: tmp_dir} do
+    workdir =
+      Path.join(System.tmp_dir!(), "sigma-new-session-#{System.unique_integer([:positive])}")
+
+    target_dir =
+      Path.join(System.tmp_dir!(), "sigma-worktree-target-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workdir)
+    File.mkdir_p!(target_dir)
+    init_git_repo!(workdir)
+    run_git!(workdir, ["branch", "feature-symlink"])
+    File.ln_s!(target_dir, Path.join(workdir, ".trees"))
+
+    on_exit(fn ->
+      File.rm_rf!(workdir)
+      File.rm_rf!(target_dir)
+    end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+
+      render_change(view, "select_branch", %{"branch" => "feature-symlink"})
+      render_click(view, "set_mode", %{"mode" => "create_worktree"})
+      render_change(view, "update_worktree_name", %{"worktree_name" => "symlink-worktree"})
+
+      rendered = render_click(view, "create_session")
+      assert is_binary(rendered)
+      assert rendered =~ "Invalid worktree root"
+      assert [] = Path.wildcard(Path.join(sessions_dir, "*.meta.json"))
+      assert [] = Path.wildcard(Path.join(sessions_dir, "*.jsonl"))
+      refute File.exists?(Path.join(target_dir, "symlink-worktree"))
+    end)
+  end
+
+  @tag :tmp_dir
+  test "rejects symlinked final worktree paths", %{conn: conn, tmp_dir: tmp_dir} do
+    workdir =
+      Path.join(System.tmp_dir!(), "sigma-new-session-#{System.unique_integer([:positive])}")
+
+    target_dir =
+      Path.join(System.tmp_dir!(), "sigma-worktree-target-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workdir)
+    File.mkdir_p!(target_dir)
+    init_git_repo!(workdir)
+    run_git!(workdir, ["branch", "feature-final-symlink"])
+    File.mkdir_p!(Path.join(workdir, ".trees"))
+    File.ln_s!(target_dir, Path.join([workdir, ".trees", "safe-name"]))
+
+    on_exit(fn ->
+      File.rm_rf!(workdir)
+      File.rm_rf!(target_dir)
+    end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+
+      render_change(view, "select_branch", %{"branch" => "feature-final-symlink"})
+      render_click(view, "set_mode", %{"mode" => "create_worktree"})
+      render_change(view, "update_worktree_name", %{"worktree_name" => "safe-name"})
+
+      rendered = render_click(view, "create_session")
+      assert is_binary(rendered)
+      assert rendered =~ "Invalid worktree path"
+      assert [] = Path.wildcard(Path.join(sessions_dir, "*.meta.json"))
+      assert [] = Path.wildcard(Path.join(sessions_dir, "*.jsonl"))
+      refute File.exists?(Path.join(target_dir, ".git"))
+      refute File.exists?(Path.join(target_dir, "README.md"))
+    end)
+  end
+
   defp with_agent_dir(tmp_dir, fun) do
     previous = Application.get_env(:sigma_session, :agent_dir)
     Application.put_env(:sigma_session, :agent_dir, Path.join(tmp_dir, "agent"))
@@ -90,6 +363,22 @@ defmodule Sigma.Web.NewSessionLiveTest do
       else
         Application.delete_env(:sigma_session, :agent_dir)
       end
+    end
+  end
+
+  defp init_git_repo!(workdir) do
+    run_git!(workdir, ["init", "-b", "main"])
+    run_git!(workdir, ["config", "user.email", "sigma@example.com"])
+    run_git!(workdir, ["config", "user.name", "Sigma Test"])
+    File.write!(Path.join(workdir, "README.md"), "# Test repo\n")
+    run_git!(workdir, ["add", "README.md"])
+    run_git!(workdir, ["commit", "-m", "initial commit"])
+  end
+
+  defp run_git!(workdir, args) do
+    case System.cmd("git", args, cd: workdir, stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      {output, status} -> flunk("git #{Enum.join(args, " ")} failed with #{status}: #{output}")
     end
   end
 end
