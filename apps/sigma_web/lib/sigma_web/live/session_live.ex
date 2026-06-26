@@ -7,6 +7,7 @@ defmodule Sigma.Web.SessionLive do
   alias Sigma.Session.SessionFiles
   alias Sigma.Session.Skills
   alias Sigma.Session.SlashCommands
+  alias Phoenix.LiveView.AsyncResult
 
   @fork_id_attempts 5
 
@@ -52,6 +53,47 @@ defmodule Sigma.Web.SessionLive do
        ) do
     repo_key = ConfigManager.repository_key(workdir)
     log_session_id = Sigma.Logs.session_key(repo_key, session_id)
+
+    if connected?(socket) do
+      Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(repo_key, session_id))
+      Phoenix.PubSub.subscribe(Sigma.Web.PubSub, logs_topic(repo_key, session_id))
+      Sigma.Logs.start_session(log_session_id)
+    end
+
+    socket =
+      socket
+      |> assign_session_defaults(
+        session_id,
+        encoded_repository,
+        workdir,
+        sessions_dir,
+        log_session_id
+      )
+      |> stream(:messages, [])
+      |> start_async(:session_load, fn ->
+        load_session_data(
+          session_id,
+          workdir,
+          sessions_dir,
+          storage_path,
+          meta_path,
+          repo_key,
+          log_session_id
+        )
+      end)
+
+    {:ok, socket}
+  end
+
+  defp load_session_data(
+         session_id,
+         workdir,
+         sessions_dir,
+         storage_path,
+         meta_path,
+         repo_key,
+         log_session_id
+       ) do
     session_meta = read_session_meta(meta_path)
     effective_cwd = Map.get(session_meta, "cwd", workdir)
     session_branch = Map.get(session_meta, "branch")
@@ -87,98 +129,113 @@ defmodule Sigma.Web.SessionLive do
 
     case resolve_provider(config) do
       {:error, reason} ->
-        {:ok, socket |> put_flash(:error, reason) |> push_navigate(to: ~p"/settings")}
+        {:error, {:provider_config, reason}}
 
       {:ok, {provider_mod, model_id, provider_id, provider_options}} ->
         selected_agent_model = agent_model(config, provider_id, model_id)
 
-        if connected?(socket) do
-          Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(repo_key, session_id))
-          Phoenix.PubSub.subscribe(Sigma.Web.PubSub, logs_topic(repo_key, session_id))
-          Sigma.Logs.start_session(log_session_id)
-        end
+        with {:ok, initial_messages} <- Sigma.Session.Log.replay(storage_path),
+             {:ok, runtime_session} <-
+               Sigma.Agent.Runtime.get_session(workdir, session_id,
+                 model: selected_agent_model,
+                 provider: provider_mod,
+                 options: provider_options,
+                 system_prompt: nil,
+                 session_context: session_context,
+                 on_event: session_event_handler(storage_path, repo_key, session_id),
+                 tools: builtin_tools,
+                 mcp_servers: mcp_servers,
+                 messages: initial_messages,
+                 cwd: effective_cwd,
+                 transcript_path: storage_path,
+                 log_session_id: log_session_id
+               ),
+             {:ok, sessions} <- Sigma.Session.Log.list_sessions(sessions_dir) do
+          agent = runtime_session.agent
 
-        {:ok, initial_messages} = Sigma.Session.Log.replay(storage_path)
-
-        on_event = fn event ->
-          Sigma.Session.Log.persist_event(storage_path, event)
-          Phoenix.PubSub.broadcast(Sigma.Web.PubSub, session_topic(repo_key, session_id), event)
-        end
-
-        {:ok, runtime_session} =
-          Sigma.Agent.Runtime.get_session(workdir, session_id,
-            model: selected_agent_model,
-            provider: provider_mod,
-            options: provider_options,
-            system_prompt: nil,
-            session_context: session_context,
-            on_event: on_event,
-            tools: builtin_tools,
-            mcp_servers: mcp_servers,
-            messages: initial_messages,
-            cwd: effective_cwd,
-            transcript_path: storage_path,
-            log_session_id: log_session_id
+          Sigma.Agent.set_provider(
+            agent,
+            provider_mod,
+            selected_agent_model,
+            provider_options
           )
 
-        agent = runtime_session.agent
+          pending_user_questions = Sigma.Agent.pending_user_questions(agent)
+          model_options = model_options(system_config, provider_id)
+          current_model_value = model_option_value(provider_id, model_id)
+          {stream_messages, tool_results, tool_call_to_msg} = split_messages(initial_messages)
 
-        Sigma.Agent.set_provider(
-          agent,
-          provider_mod,
-          selected_agent_model,
-          provider_options
-        )
-
-        agent_ref = if connected?(socket), do: Process.monitor(agent), else: nil
-
-        pending_user_questions = Sigma.Agent.pending_user_questions(agent)
-
-        {:ok, sessions} = Sigma.Session.Log.list_sessions(sessions_dir)
-
-        model_options = model_options(system_config, provider_id)
-        current_model_value = model_option_value(provider_id, model_id)
-
-        {stream_messages, tool_results, tool_call_to_msg} = split_messages(initial_messages)
-
-        socket =
-          socket
-          |> assign(:active_tab, :repository)
-          |> assign(:session_id, session_id)
-          |> assign(:log_session_id, log_session_id)
-          |> assign(:workdir, workdir)
-          |> assign(:effective_cwd, effective_cwd)
-          |> assign(:encoded_repository, encoded_repository)
-          |> assign(:sessions_dir, sessions_dir)
-          |> assign(:agent, agent)
-          |> assign(:agent_ref, agent_ref)
-          |> assign(:turn_in_flight, false)
-          |> assign(:streaming_message_id, nil)
-          |> assign(:tool_results, tool_results)
-          |> assign(:tool_call_to_msg, tool_call_to_msg)
-          |> assign(:sessions, sessions)
-          |> assign(:renaming_session, nil)
-          |> assign(:active_provider_id, provider_id)
-          |> assign(:current_model, model_id)
-          |> assign(:current_model_value, current_model_value)
-          |> assign(:model_options, ensure_model_option(model_options, provider_id, model_id))
-          |> assign(:context_token_count, latest_context_token_count(initial_messages))
-          |> assign(:context_window, model_context_window(selected_agent_model))
-          |> assign(:pending_user_questions, pending_user_questions)
-          |> assign(:logs_available, true)
-          |> assign(:mcp_server_ids, mcp_server_ids)
-          |> assign(:show_logs, false)
-          |> assign(:log_entries, [])
-          |> assign(:log_filter, nil)
-          |> assign(:log_search, "")
-          |> assign(:show_web_shell, false)
-          |> assign(:web_shell_pid, nil)
-          |> assign(:web_shell_ref, nil)
-          |> assign(:web_shell_status, "Shell ready")
-          |> stream(:messages, stream_messages)
-
-        {:ok, socket}
+          {:ok,
+           %{
+             active_provider_id: provider_id,
+             agent: agent,
+             context_token_count: latest_context_token_count(initial_messages),
+             context_window: model_context_window(selected_agent_model),
+             current_model: model_id,
+             current_model_value: current_model_value,
+             effective_cwd: effective_cwd,
+             mcp_server_ids: mcp_server_ids,
+             model_options: ensure_model_option(model_options, provider_id, model_id),
+             pending_user_questions: pending_user_questions,
+             sessions: sessions,
+             stream_messages: stream_messages,
+             tool_call_to_msg: tool_call_to_msg,
+             tool_results: tool_results
+           }}
+        else
+          {:error, reason} -> {:error, reason}
+          reason -> {:error, reason}
+        end
     end
+  end
+
+  @impl true
+  def handle_async(:session_load, {:ok, {:ok, session_data}}, socket) do
+    agent_ref = Process.monitor(session_data.agent)
+
+    socket =
+      socket
+      |> assign(:session_load, AsyncResult.ok(socket.assigns.session_load, true))
+      |> assign(:active_provider_id, session_data.active_provider_id)
+      |> assign(:agent, session_data.agent)
+      |> assign(:agent_ref, agent_ref)
+      |> assign(:context_token_count, session_data.context_token_count)
+      |> assign(:context_window, session_data.context_window)
+      |> assign(:current_model, session_data.current_model)
+      |> assign(:current_model_value, session_data.current_model_value)
+      |> assign(:effective_cwd, session_data.effective_cwd)
+      |> assign(:mcp_server_ids, session_data.mcp_server_ids)
+      |> assign(:model_options, session_data.model_options)
+      |> assign(:pending_user_questions, session_data.pending_user_questions)
+      |> assign(:sessions, session_data.sessions)
+      |> assign(:session_ready, true)
+      |> assign(:tool_call_to_msg, session_data.tool_call_to_msg)
+      |> assign(:tool_results, session_data.tool_results)
+      |> stream(:messages, session_data.stream_messages, reset: true)
+
+    {:noreply, socket}
+  end
+
+  def handle_async(:session_load, {:ok, {:error, {:provider_config, reason}}}, socket) do
+    {:noreply,
+     socket
+     |> assign(:session_load, AsyncResult.failed(socket.assigns.session_load, reason))
+     |> put_flash(:error, reason)
+     |> push_navigate(to: ~p"/settings")}
+  end
+
+  def handle_async(:session_load, {:ok, {:error, reason}}, socket) do
+    {:noreply,
+     socket
+     |> assign(:session_load, AsyncResult.failed(socket.assigns.session_load, reason))
+     |> put_flash(:error, "Could not load session: #{format_load_error(reason)}")}
+  end
+
+  def handle_async(:session_load, {:exit, reason}, socket) do
+    {:noreply,
+     socket
+     |> assign(:session_load, AsyncResult.failed(socket.assigns.session_load, {:exit, reason}))
+     |> put_flash(:error, "Could not load session: #{format_load_error(reason)}")}
   end
 
   @impl true
@@ -322,6 +379,11 @@ defmodule Sigma.Web.SessionLive do
             }
             class="max-w-4xl mx-auto relative"
           >
+            <div :if={not @session_ready} class="mb-3 flex items-center gap-3 text-sm text-on-surface-variant">
+              <.dm_loading_spinner size="sm" />
+              <span>Loading session...</span>
+            </div>
+
             <.pending_user_questions questions={@pending_user_questions} />
 
             <div :if={@turn_in_flight} class="mb-3 flex items-center justify-between gap-3">
@@ -352,8 +414,18 @@ defmodule Sigma.Web.SessionLive do
                 duskmoon-send-send="send_prompt"
               />
 
-              <form phx-change="select_model" class="absolute bottom-[8px] right-[107px] z-10 flex items-center">
-                <.dm_select id="model-select" name="model" value={@current_model_value} size="xs" disabled={@turn_in_flight}>
+              <form
+                id="model-select-form"
+                phx-change="select_model"
+                class="absolute bottom-[8px] right-[107px] z-10 flex items-center"
+              >
+                <.dm_select
+                  id="model-select"
+                  name="model"
+                  value={@current_model_value}
+                  size="xs"
+                  disabled={not @session_ready or @turn_in_flight}
+                >
                   <option
                     :for={option <- @model_options}
                     value={option.value}
@@ -1132,7 +1204,10 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def handle_event("cancel_turn", _, socket) do
-    Sigma.Agent.cancel(socket.assigns.agent)
+    if socket.assigns.agent do
+      Sigma.Agent.cancel(socket.assigns.agent)
+    end
+
     {:noreply, socket}
   end
 
@@ -1154,25 +1229,34 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def handle_event("send_prompt", %{"value" => prompt}, socket) do
-    case String.trim(prompt) do
-      "" ->
-        {:noreply, socket}
+    if session_ready?(socket) do
+      case String.trim(prompt) do
+        "" ->
+          {:noreply, socket}
 
-      trimmed ->
-        handle_prompt(trimmed, socket)
+        trimmed ->
+          handle_prompt(trimmed, socket)
+      end
+    else
+      {:noreply, put_flash(socket, :info, "Session is still loading.")}
     end
   end
 
   @impl true
   def handle_event("open_web_shell", _params, socket) do
-    if is_pid(socket.assigns.web_shell_pid) and Process.alive?(socket.assigns.web_shell_pid) do
-      {:noreply,
-       socket
-       |> assign(:show_web_shell, true)
-       |> assign(:web_shell_status, "Shell ready")
-       |> push_event("web_shell_focus", %{})}
-    else
-      start_web_shell(socket)
+    cond do
+      not session_ready?(socket) ->
+        {:noreply, put_flash(socket, :info, "Session is still loading.")}
+
+      is_pid(socket.assigns.web_shell_pid) and Process.alive?(socket.assigns.web_shell_pid) ->
+        {:noreply,
+         socket
+         |> assign(:show_web_shell, true)
+         |> assign(:web_shell_status, "Shell ready")
+         |> push_event("web_shell_focus", %{})}
+
+      true ->
+        start_web_shell(socket)
     end
   end
 
@@ -1237,6 +1321,14 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def handle_event("select_model", %{"model" => selected}, socket) do
+    if session_ready?(socket) do
+      select_model(selected, socket)
+    else
+      {:noreply, put_flash(socket, :info, "Session is still loading.")}
+    end
+  end
+
+  defp select_model(selected, socket) do
     with {:ok, provider_id, model_id} <- parse_model_option_value(selected),
          provider_config when is_map(provider_config) <-
            ConfigManager.get_provider_config(provider_id),
@@ -1593,6 +1685,63 @@ defmodule Sigma.Web.SessionLive do
   defp handle_fork_result(socket, {:error, _reason}) do
     put_flash(socket, :error, "Unable to fork session")
   end
+
+  defp assign_session_defaults(
+         socket,
+         session_id,
+         encoded_repository,
+         workdir,
+         sessions_dir,
+         log_session_id
+       ) do
+    socket
+    |> assign(:active_tab, :repository)
+    |> assign(:session_id, session_id)
+    |> assign(:log_session_id, log_session_id)
+    |> assign(:workdir, workdir)
+    |> assign(:effective_cwd, workdir)
+    |> assign(:encoded_repository, encoded_repository)
+    |> assign(:sessions_dir, sessions_dir)
+    |> assign(:agent, nil)
+    |> assign(:agent_ref, nil)
+    |> assign(:turn_in_flight, false)
+    |> assign(:streaming_message_id, nil)
+    |> assign(:tool_results, %{})
+    |> assign(:tool_call_to_msg, %{})
+    |> assign(:sessions, [])
+    |> assign(:renaming_session, nil)
+    |> assign(:active_provider_id, nil)
+    |> assign(:current_model, nil)
+    |> assign(:current_model_value, nil)
+    |> assign(:model_options, [])
+    |> assign(:context_token_count, 0)
+    |> assign(:context_window, nil)
+    |> assign(:pending_user_questions, [])
+    |> assign(:logs_available, true)
+    |> assign(:mcp_server_ids, [])
+    |> assign(:show_logs, false)
+    |> assign(:log_entries, [])
+    |> assign(:log_filter, nil)
+    |> assign(:log_search, "")
+    |> assign(:show_web_shell, false)
+    |> assign(:web_shell_pid, nil)
+    |> assign(:web_shell_ref, nil)
+    |> assign(:web_shell_status, "Shell ready")
+    |> assign(:session_ready, false)
+    |> assign(:session_load, AsyncResult.loading())
+  end
+
+  defp session_event_handler(storage_path, repo_key, session_id) do
+    fn event ->
+      Sigma.Session.Log.persist_event(storage_path, event)
+      Phoenix.PubSub.broadcast(Sigma.Web.PubSub, session_topic(repo_key, session_id), event)
+    end
+  end
+
+  defp session_ready?(socket), do: Map.get(socket.assigns, :session_ready, false)
+
+  defp format_load_error(reason) when is_binary(reason), do: reason
+  defp format_load_error(reason), do: inspect(reason)
 
   defp resolve_provider(nil) do
     case Application.get_env(:sigma_web, :test_provider_config) do

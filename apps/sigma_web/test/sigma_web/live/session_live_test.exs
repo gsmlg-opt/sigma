@@ -102,7 +102,7 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   test "renders session page", %{conn: conn} do
-    {:ok, _view, html} = live(conn, session_path(unique_session_id("render")))
+    {:ok, _view, html} = live_loaded(conn, session_path(unique_session_id("render")))
     assert html =~ "Ask ∑ anything"
     assert html =~ "⌘/Ctrl+Enter to send"
     assert html =~ ~s(id="prompt-input")
@@ -119,6 +119,19 @@ defmodule Sigma.Web.SessionLiveTest do
     assert_session_sidebar_order(html)
   end
 
+  test "does not render the ignored prompt input disabled while loading" do
+    html =
+      session_render_assigns(session_ready: false, turn_in_flight: false)
+      |> render_session()
+
+    [prompt_input] =
+      html
+      |> Floki.parse_document!()
+      |> Floki.find("#prompt-input")
+
+    refute has_attr?(prompt_input, "disabled")
+  end
+
   test "renders session menu anchors with selector-safe session ids", %{conn: conn} do
     session_id = unique_session_id("selector-safe")
     listed_session_id = "PR#5"
@@ -126,7 +139,7 @@ defmodule Sigma.Web.SessionLiveTest do
     File.mkdir_p!(sessions_dir)
     File.write!(Path.join(sessions_dir, "#{listed_session_id}.jsonl"), "")
 
-    {:ok, _view, html} = live(conn, session_path(session_id))
+    {:ok, _view, html} = live_loaded(conn, session_path(session_id))
 
     assert html =~ ~s(id="session-menu-btn-UFIjNQ")
     assert html =~ ~s(anchor="#session-menu-btn-UFIjNQ")
@@ -139,7 +152,7 @@ defmodule Sigma.Web.SessionLiveTest do
     File.mkdir_p!(sessions_dir)
     File.write!(Path.join(sessions_dir, "#{session_id}.jsonl"), "")
 
-    {:ok, _view, html} = live(conn, session_path(session_id))
+    {:ok, _view, html} = live_loaded(conn, session_path(session_id))
 
     assert html =~ "Ask ∑ anything"
     assert html =~ ~s(id="session-menu-btn-UFIjNQ")
@@ -181,7 +194,7 @@ defmodule Sigma.Web.SessionLiveTest do
     File.mkdir_p!(sessions_dir)
     File.write!(outside_path, "outside\n")
 
-    {:ok, view, _html} = live(conn, session_path(session_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
     assert render_hook(view, "session_menu_action", %{
              "value" => "delete",
@@ -200,7 +213,7 @@ defmodule Sigma.Web.SessionLiveTest do
     File.mkdir_p!(sessions_dir)
     File.write!(source_path, "source\n")
 
-    {:ok, view, _html} = live(conn, session_path(session_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
     assert render_submit(view, "rename_session", %{
              "old_id" => session_id,
@@ -226,7 +239,7 @@ defmodule Sigma.Web.SessionLiveTest do
     File.write!(Path.join(sessions_dir, "fork_collision_2.jsonl"), "existing 2\n")
 
     with_fork_id_generator(~w(fork_collision_1 fork_collision_2 fork_success), fn ->
-      {:ok, view, _html} = live(conn, session_path(session_id))
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
       assert {:error,
               {:live_redirect, %{to: "/repository/#{@encoded_workdir}/sessions/fork_success"}}} =
@@ -253,8 +266,8 @@ defmodule Sigma.Web.SessionLiveTest do
       File.rm_rf!(other_workdir)
     end)
 
-    {:ok, view, _html} = live(conn, session_path(session_id))
-    {:ok, other_view, _html} = live(conn, session_path(other_workdir, session_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    {:ok, other_view, _html} = live_loaded(conn, session_path(other_workdir, session_id))
 
     render_submit(view, "send_prompt", %{"value" => "from repo one"})
 
@@ -263,7 +276,7 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   test "opens a web shell panel from the session workspace", %{conn: conn} do
-    {:ok, view, _html} = live(conn, session_path(unique_session_id("terminal")))
+    {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("terminal")))
 
     html =
       view
@@ -287,7 +300,7 @@ defmodule Sigma.Web.SessionLiveTest do
         "anthropic" => ["claude", "opus"]
       })
 
-      {:ok, view, html} = live(conn, session_path(unique_session_id("models")))
+      {:ok, view, html} = live_loaded(conn, session_path(unique_session_id("models")))
 
       options = Floki.parse_document!(html) |> Floki.find("#model-select option")
 
@@ -338,7 +351,8 @@ defmodule Sigma.Web.SessionLiveTest do
         with_capture_provider_pid(self(), fn ->
           write_selectable_provider_configs()
 
-          {:ok, view, html} = live(conn, session_path(unique_session_id("model-credential")))
+          {:ok, view, html} =
+            live_loaded(conn, session_path(unique_session_id("model-credential")))
 
           minimax_value =
             html
@@ -376,7 +390,7 @@ defmodule Sigma.Web.SessionLiveTest do
         storage_path = preload_compactable_history(session_id)
         Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
 
-        {:ok, view, _html} = live(conn, session_path(session_id))
+        {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
         render_submit(view, "send_prompt", %{"value" => "hello"})
 
@@ -392,7 +406,7 @@ defmodule Sigma.Web.SessionLiveTest do
   test "submits prompt", %{conn: conn} do
     session_id = unique_session_id("submit")
     Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
-    {:ok, view, _html} = live(conn, session_path(session_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
     render_submit(view, "send_prompt", %{"value" => "hello"})
 
@@ -405,7 +419,7 @@ defmodule Sigma.Web.SessionLiveTest do
   test "expands init slash command before submitting to the agent", %{conn: conn} do
     session_id = unique_session_id("init")
     Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
-    {:ok, view, _html} = live(conn, session_path(session_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
     render_submit(view, "send_prompt", %{"value" => "/init"})
 
@@ -418,7 +432,7 @@ defmodule Sigma.Web.SessionLiveTest do
   test "rejects unknown slash commands", %{conn: conn} do
     session_id = unique_session_id("unknown")
     Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
-    {:ok, view, _html} = live(conn, session_path(session_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
     assert render_submit(view, "send_prompt", %{"value" => "/compact"}) =~
              "Unknown slash command: /compact"
@@ -427,7 +441,7 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   test "renders streaming tool call before arguments are finalized", %{conn: conn} do
-    {:ok, view, _html} = live(conn, session_path(unique_session_id("tool_call")))
+    {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("tool_call")))
 
     message = %Sigma.Agent.Message{
       id: "msg_assistant_tool_call",
@@ -450,7 +464,7 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   test "renders user messages aligned to the left", %{conn: conn} do
-    {:ok, view, _html} = live(conn, session_path(unique_session_id("user_left")))
+    {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("user_left")))
 
     message = %Sigma.Agent.Message{
       id: "msg_user_left",
@@ -469,7 +483,7 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   test "renders message timestamps through the browser-local time hook", %{conn: conn} do
-    {:ok, view, _html} = live(conn, session_path(unique_session_id("local_time")))
+    {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("local_time")))
 
     message = %Sigma.Agent.Message{
       id: "msg_user_time",
@@ -487,7 +501,7 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   test "renders latest session context size below the chat box", %{conn: conn} do
-    {:ok, view, html} = live(conn, session_path(unique_session_id("context_size")))
+    {:ok, view, html} = live_loaded(conn, session_path(unique_session_id("context_size")))
 
     assert html =~ ~s(id="session-context-size")
     assert html =~ "Context: 0 tokens"
@@ -515,7 +529,7 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   test "keeps session context size readable and monotonic", %{conn: conn} do
-    {:ok, view, _html} = live(conn, session_path(unique_session_id("context_monotonic")))
+    {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("context_monotonic")))
 
     send(view.pid, {:message_end, assistant_usage_message("large", 12_345)})
     assert render(view) =~ "Context: ~12.3K tokens"
@@ -544,7 +558,7 @@ defmodule Sigma.Web.SessionLiveTest do
         {:message_end, assistant_usage_message("small", 105)}
       )
 
-    {:ok, _view, html} = live(conn, session_path(session_id))
+    {:ok, _view, html} = live_loaded(conn, session_path(session_id))
 
     assert html =~ "Context: ~12.3K tokens"
   end
@@ -552,7 +566,7 @@ defmodule Sigma.Web.SessionLiveTest do
   test "renders and answers an AskUserQuestion request", %{conn: conn} do
     session_id = "ask_#{System.unique_integer([:positive])}"
     path = "/repository/#{@encoded_workdir}/sessions/#{session_id}"
-    {:ok, view, _html} = live(conn, path)
+    {:ok, view, _html} = live_loaded(conn, path)
     {:ok, {agent, _policy}} = Sigma.Web.SessionManager.get_agent(session_id, repo_path: @workdir)
 
     task =
@@ -593,7 +607,7 @@ defmodule Sigma.Web.SessionLiveTest do
   test "reopens a pending AskUserQuestion after refresh", %{conn: conn} do
     session_id = "ask_refresh_#{System.unique_integer([:positive])}"
     path = "/repository/#{@encoded_workdir}/sessions/#{session_id}"
-    {:ok, _view, _html} = live(conn, path)
+    {:ok, _view, _html} = live_loaded(conn, path)
     {:ok, {agent, _policy}} = Sigma.Web.SessionManager.get_agent(session_id, repo_path: @workdir)
 
     task =
@@ -610,7 +624,7 @@ defmodule Sigma.Web.SessionLiveTest do
       end)
 
     Process.sleep(20)
-    {:ok, refreshed_view, refreshed_html} = live(conn, path)
+    {:ok, refreshed_view, refreshed_html} = live_loaded(conn, path)
 
     assert refreshed_html =~ "Which mode should I use?"
     assert refreshed_html =~ "Fast"
@@ -628,7 +642,7 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   test "renders placeholder examples as selectable answers before freeform input", %{conn: conn} do
-    {:ok, view, _html} = live(conn, session_path(unique_session_id("examples")))
+    {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("examples")))
 
     send(
       view.pid,
@@ -712,6 +726,50 @@ defmodule Sigma.Web.SessionLiveTest do
     "/repository/#{encoded_workdir}/sessions/#{URI.encode(session_id, &URI.char_unreserved?/1)}"
   end
 
+  defp render_session(assigns) do
+    assigns
+    |> Map.put(:__changed__, %{})
+    |> Sigma.Web.SessionLive.render()
+    |> Phoenix.HTML.Safe.to_iodata()
+    |> IO.iodata_to_binary()
+  end
+
+  defp session_render_assigns(overrides) do
+    Map.merge(
+      %{
+        active_provider_id: nil,
+        context_token_count: 0,
+        context_window: nil,
+        current_model_value: nil,
+        effective_cwd: @workdir,
+        encoded_repository: @encoded_workdir,
+        log_entries: [],
+        log_filter: nil,
+        log_search: "",
+        model_options: [],
+        pending_user_questions: [],
+        renaming_session: nil,
+        session_id: "render_session",
+        session_ready: true,
+        sessions: [],
+        show_logs: false,
+        show_web_shell: false,
+        streaming_message_id: nil,
+        streams: %{messages: []},
+        tool_results: %{},
+        turn_in_flight: false,
+        web_shell_status: "Shell ready",
+        workdir: @workdir
+      },
+      Map.new(overrides)
+    )
+  end
+
+  defp live_loaded(conn, path) do
+    {:ok, view, _html} = live(conn, path)
+    {:ok, view, render_async(view)}
+  end
+
   defp session_topic(workdir, session_id) do
     repo_key = ConfigManager.repository_key(workdir)
     "session:#{repo_key}:#{session_id}"
@@ -776,6 +834,13 @@ defmodule Sigma.Web.SessionLiveTest do
 
       _ ->
         false
+    end)
+  end
+
+  defp has_attr?({_tag, attrs, _children}, name) do
+    Enum.any?(attrs, fn
+      {^name, _value} -> true
+      _ -> false
     end)
   end
 

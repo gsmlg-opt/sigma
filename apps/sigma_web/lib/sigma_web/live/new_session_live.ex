@@ -2,6 +2,7 @@ defmodule Sigma.Web.NewSessionLive do
   use Sigma.Web, :live_view
 
   alias Sigma.Session.{ConfigManager, Log, RepoManager}
+  alias Phoenix.LiveView.AsyncResult
   import Sigma.Web.ProjectSidebar
 
   @impl true
@@ -10,33 +11,79 @@ defmodule Sigma.Web.NewSessionLive do
       {:ok, workdir, _repo} ->
         sessions_dir = get_sessions_dir(workdir)
 
-        branches = list_git_branches(workdir)
-        worktrees = list_existing_worktrees(workdir)
-        mcp_servers = ConfigManager.list_mcp_servers()
-
-        selected_mcp_server_ids =
-          RepoManager.mcp_server_ids(workdir) |> filter_mcp_server_ids(mcp_servers)
-
         socket =
           socket
           |> assign(:active_tab, :repository)
           |> assign(:workdir, workdir)
           |> assign(:encoded_repository, encoded_repository)
           |> assign(:sessions_dir, sessions_dir)
-          |> assign(:branches, branches)
-          |> assign(:worktrees, worktrees)
-          |> assign(:selected_branch, List.first(branches))
+          |> assign(:branches, [])
+          |> assign(:worktrees, [])
+          |> assign(:selected_branch, nil)
           |> assign(:mode, :project_dir)
-          |> assign(:selected_worktree, List.first(worktrees))
+          |> assign(:selected_worktree, nil)
           |> assign(:worktree_name, "")
-          |> assign(:mcp_servers, mcp_servers)
-          |> assign(:selected_mcp_server_ids, selected_mcp_server_ids)
+          |> assign(:mcp_servers, %{})
+          |> assign(:selected_mcp_server_ids, [])
+          |> assign(:session_options_loading, true)
+          |> assign(:session_options, AsyncResult.loading())
+          |> start_async(:session_options, fn -> load_session_options(workdir) end)
 
         {:ok, socket}
 
       {:error, :unknown_repository} ->
         {:ok, redirect_unknown_repository(socket)}
     end
+  end
+
+  defp load_session_options(workdir) do
+    branches = list_git_branches(workdir)
+    worktrees = list_existing_worktrees(workdir)
+    mcp_servers = ConfigManager.list_mcp_servers()
+
+    selected_mcp_server_ids =
+      RepoManager.mcp_server_ids(workdir) |> filter_mcp_server_ids(mcp_servers)
+
+    {:ok,
+     %{
+       branches: branches,
+       worktrees: worktrees,
+       mcp_servers: mcp_servers,
+       selected_mcp_server_ids: selected_mcp_server_ids
+     }}
+  end
+
+  @impl true
+  def handle_async(:session_options, {:ok, {:ok, options}}, socket) do
+    {:noreply,
+     socket
+     |> assign(:branches, options.branches)
+     |> assign(:worktrees, options.worktrees)
+     |> assign(:selected_branch, List.first(options.branches))
+     |> assign(:selected_worktree, List.first(options.worktrees))
+     |> assign(:mcp_servers, options.mcp_servers)
+     |> assign(:selected_mcp_server_ids, options.selected_mcp_server_ids)
+     |> assign(:session_options_loading, false)
+     |> assign(:session_options, AsyncResult.ok(socket.assigns.session_options, true))}
+  end
+
+  def handle_async(:session_options, {:ok, {:error, reason}}, socket) do
+    {:noreply,
+     socket
+     |> assign(:session_options_loading, false)
+     |> assign(:session_options, AsyncResult.failed(socket.assigns.session_options, reason))
+     |> put_flash(:error, "Could not load session options: #{inspect(reason)}")}
+  end
+
+  def handle_async(:session_options, {:exit, reason}, socket) do
+    {:noreply,
+     socket
+     |> assign(:session_options_loading, false)
+     |> assign(
+       :session_options,
+       AsyncResult.failed(socket.assigns.session_options, {:exit, reason})
+     )
+     |> put_flash(:error, "Could not load session options: #{inspect(reason)}")}
   end
 
   @impl true
@@ -61,6 +108,16 @@ defmodule Sigma.Web.NewSessionLive do
           </div>
 
           <div class="space-y-6">
+            <div
+              :if={@session_options_loading}
+              class="rounded-xl border border-outline-variant bg-surface-container-low p-4"
+            >
+              <div class="flex items-center gap-3 text-sm text-on-surface-variant">
+                <.dm_loading_spinner size="sm" />
+                <span>Loading session options...</span>
+              </div>
+            </div>
+
             <!-- Branch selection (searchable) -->
             <.dm_card :if={!Enum.empty?(@branches)} variant="bordered" class="bg-surface-container-low">
               <:title>
@@ -219,6 +276,7 @@ defmodule Sigma.Web.NewSessionLive do
                 phx-hook="WebComponentHook"
                 variant="primary"
                 size="lg"
+                disabled={@session_options_loading}
               >
                 <:prefix><.dm_mdi name="plus" class="w-5 h-5" /></:prefix>
                 Create Session
@@ -356,6 +414,11 @@ defmodule Sigma.Web.NewSessionLive do
   def handle_event("select_mcp_servers", params, socket) do
     ids = params |> Map.get("mcp_server_ids", []) |> List.wrap()
     {:noreply, assign(socket, :selected_mcp_server_ids, ids)}
+  end
+
+  @impl true
+  def handle_event("create_session", _, %{assigns: %{session_options_loading: true}} = socket) do
+    {:noreply, put_flash(socket, :info, "Session options are still loading.")}
   end
 
   @impl true

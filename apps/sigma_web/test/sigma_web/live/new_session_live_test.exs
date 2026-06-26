@@ -28,6 +28,31 @@ defmodule Sigma.Web.NewSessionLiveTest do
   end
 
   @tag :tmp_dir
+  test "disconnected mount does not run git discovery", %{tmp_dir: tmp_dir} do
+    repo = Path.join(tmp_dir, "repo")
+    File.mkdir_p!(repo)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(repo, name: "Repo")
+
+      with_fake_git(tmp_dir, fn git_log ->
+        encoded_repository = Base.url_encode64(repo, padding: false)
+        socket = %Phoenix.LiveView.Socket{}
+
+        assert {:ok, socket} =
+                 Sigma.Web.NewSessionLive.mount(
+                   %{"repository" => encoded_repository},
+                   %{},
+                   socket
+                 )
+
+        refute File.exists?(git_log)
+        assert socket.assigns.session_options_loading
+      end)
+    end)
+  end
+
+  @tag :tmp_dir
   test "defaults new sessions to project MCP servers and allows disabling", %{
     conn: conn,
     tmp_dir: tmp_dir
@@ -55,7 +80,9 @@ defmodule Sigma.Web.NewSessionLiveTest do
       assert html =~ ~s(href="/repository/#{encoded_repository}")
       assert html =~ ~s(href="/repository/#{encoded_repository}/settings")
       assert html =~ ~s(href="/repository/#{encoded_repository}/skills")
+      assert html =~ "Loading session options"
 
+      html = render_async(view)
       assert html =~ "MCP Servers"
       assert html =~ "github"
       assert html =~ ~s(value="github" checked)
@@ -70,9 +97,10 @@ defmodule Sigma.Web.NewSessionLiveTest do
       assert %{"mcp_server_ids" => []} = meta_path |> File.read!() |> Jason.decode!()
       assert {:ok, [%{"type" => "session", "cwd" => ^workdir}]} = JsonlFile.read(log_path)
 
-      {:ok, _session_view, session_html} =
+      {:ok, session_view, _session_html} =
         live(conn, "/repository/#{encoded_repository}/sessions/#{session_id}")
 
+      session_html = render_async(session_view)
       menu_token = Base.url_encode64(session_id, padding: false)
       assert session_html =~ ~s(id="session-menu-btn-#{menu_token}")
     end)
@@ -94,6 +122,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       sessions_dir = ConfigManager.sessions_dir(workdir)
 
       {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+      render_async(view)
 
       render_click(view, "set_mode", %{"mode" => "create_worktree"})
       render_change(view, "update_worktree_name", %{"worktree_name" => "../escape"})
@@ -121,6 +150,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       sessions_dir = ConfigManager.sessions_dir(workdir)
 
       {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+      render_async(view)
 
       render_click(view, "set_mode", %{"mode" => "create_worktree"})
       render_change(view, "update_worktree_name", %{"worktree_name" => "feature-worktree"})
@@ -149,6 +179,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       sessions_dir = ConfigManager.sessions_dir(workdir)
 
       {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+      render_async(view)
 
       render_change(view, "select_branch", %{"branch" => "forged-branch"})
       render_click(view, "set_mode", %{"mode" => "create_worktree"})
@@ -184,6 +215,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       worktree_path = Path.join([workdir, ".trees", "stale-worktree"])
 
       {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+      render_async(view)
 
       render_change(view, "select_branch", %{"branch" => "stale-branch"})
       render_click(view, "set_mode", %{"mode" => "create_worktree"})
@@ -220,6 +252,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       sessions_dir = ConfigManager.sessions_dir(workdir)
 
       {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+      render_async(view)
 
       render_click(view, "set_mode", %{"mode" => "create_worktree"})
       render_change(view, "update_worktree_name", %{"worktree_name" => "feature-worktree"})
@@ -250,6 +283,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       worktree_path = Path.join([workdir, ".trees", "feature-success-worktree"])
 
       {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+      render_async(view)
 
       render_change(view, "select_branch", %{"branch" => "feature-success"})
       html = render_click(view, "set_mode", %{"mode" => "create_worktree"})
@@ -296,6 +330,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       sessions_dir = ConfigManager.sessions_dir(workdir)
 
       {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+      render_async(view)
 
       render_change(view, "select_branch", %{"branch" => "feature-symlink"})
       render_click(view, "set_mode", %{"mode" => "create_worktree"})
@@ -336,6 +371,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       sessions_dir = ConfigManager.sessions_dir(workdir)
 
       {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+      render_async(view)
 
       render_change(view, "select_branch", %{"branch" => "feature-final-symlink"})
       render_click(view, "set_mode", %{"mode" => "create_worktree"})
@@ -362,6 +398,33 @@ defmodule Sigma.Web.NewSessionLiveTest do
         Application.put_env(:sigma_session, :agent_dir, previous)
       else
         Application.delete_env(:sigma_session, :agent_dir)
+      end
+    end
+  end
+
+  defp with_fake_git(tmp_dir, fun) do
+    bin_dir = Path.join(tmp_dir, "bin")
+    File.mkdir_p!(bin_dir)
+    git_log = Path.join(tmp_dir, "git.log")
+    git_path = Path.join(bin_dir, "git")
+
+    File.write!(git_path, """
+    #!/bin/sh
+    echo "$@" >> "#{git_log}"
+    exit 0
+    """)
+
+    File.chmod!(git_path, 0o755)
+    previous_path = System.get_env("PATH")
+    System.put_env("PATH", "#{bin_dir}:#{previous_path}")
+
+    try do
+      fun.(git_log)
+    after
+      if previous_path do
+        System.put_env("PATH", previous_path)
+      else
+        System.delete_env("PATH")
       end
     end
   end
