@@ -69,6 +69,7 @@ defmodule Sigma.Web.SessionLive do
         sessions_dir,
         log_session_id
       )
+      |> assign(:storage_path, storage_path)
       |> stream(:messages, [])
       |> start_async(:session_load, fn ->
         load_session_data(
@@ -160,7 +161,7 @@ defmodule Sigma.Web.SessionLive do
             provider_options
           )
 
-          pending_user_questions = Sigma.Agent.pending_user_questions(agent)
+          pending_user_questions = load_pending_user_questions(agent)
           model_options = model_options(system_config, provider_id)
           current_model_value = model_option_value(provider_id, model_id)
           {stream_messages, tool_results, tool_call_to_msg} = split_messages(initial_messages)
@@ -359,6 +360,8 @@ defmodule Sigma.Web.SessionLive do
               message={message}
               tool_results={@tool_results}
               streaming_message_id={@streaming_message_id}
+              session_ready={@session_ready}
+              turn_in_flight={@turn_in_flight}
             />
           </div>
         </div>
@@ -635,6 +638,21 @@ defmodule Sigma.Web.SessionLive do
       content={user_content(@message.content)}
     >
       <:header><.local_time id={@message.id} timestamp={@message.timestamp} /></:header>
+      <:actions_slot>
+        <.dm_btn
+          id={"retry-#{@message.id}"}
+          phx-click="retry_message"
+          phx-value-msg-id={@message.id}
+          phx-hook="WebComponentHook"
+          variant="ghost"
+          size="xs"
+          disabled={not @session_ready or @turn_in_flight}
+          title="Retry message"
+        >
+          <:prefix><.dm_mdi name="refresh" class="w-3 h-3" /></:prefix>
+          Retry
+        </.dm_btn>
+      </:actions_slot>
     </.dm_chat>
     """
   end
@@ -1114,6 +1132,52 @@ defmodule Sigma.Web.SessionLive do
     )
   end
 
+  defp retry_message(socket, msg_id) do
+    with {:ok, messages} <- Sigma.Session.Log.replay(socket.assigns.storage_path),
+         {:ok, prompt} <- find_retry_prompt(messages, msg_id) do
+      submit_prompt(socket, prompt)
+      {:noreply, socket}
+    else
+      {:error, :not_found} ->
+        {:noreply, put_flash(socket, :error, "Could not find that message to retry.")}
+
+      {:error, :not_retryable} ->
+        {:noreply, put_flash(socket, :error, "Only text user messages can be retried.")}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "Could not retry that message.")}
+    end
+  end
+
+  defp find_retry_prompt(messages, msg_id) do
+    case Enum.find(messages, &(&1.id == msg_id)) do
+      %{role: :user, content: content} ->
+        retry_prompt_content(content)
+
+      nil ->
+        {:error, :not_found}
+
+      _message ->
+        {:error, :not_retryable}
+    end
+  end
+
+  defp retry_prompt_content(content) when is_binary(content) do
+    case String.trim(content) do
+      "" -> {:error, :not_retryable}
+      prompt -> {:ok, prompt}
+    end
+  end
+
+  defp retry_prompt_content(content) when is_list(content) do
+    content
+    |> Enum.filter(&match?(%{type: :text, text: text} when is_binary(text), &1))
+    |> Enum.map_join("\n", & &1.text)
+    |> retry_prompt_content()
+  end
+
+  defp retry_prompt_content(_content), do: {:error, :not_retryable}
+
   @impl true
   def handle_event("theme_changed", _, socket) do
     {:noreply, socket}
@@ -1243,6 +1307,20 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
+  def handle_event("retry_message", %{"msg-id" => msg_id}, socket) do
+    cond do
+      not session_ready?(socket) ->
+        {:noreply, put_flash(socket, :info, "Session is still loading.")}
+
+      socket.assigns.turn_in_flight ->
+        {:noreply, put_flash(socket, :info, "Agent is still working.")}
+
+      true ->
+        retry_message(socket, msg_id)
+    end
+  end
+
+  @impl true
   def handle_event("open_web_shell", _params, socket) do
     cond do
       not session_ready?(socket) ->
@@ -1256,7 +1334,12 @@ defmodule Sigma.Web.SessionLive do
          |> push_event("web_shell_focus", %{})}
 
       true ->
-        start_web_shell(socket)
+        {:noreply,
+         socket
+         |> clear_web_shell_monitor()
+         |> assign(:show_web_shell, true)
+         |> assign(:web_shell_pid, nil)
+         |> assign(:web_shell_status, "Starting shell...")}
     end
   end
 
@@ -1276,11 +1359,17 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def handle_event("web_shell_resize", %{"cols" => cols, "rows" => rows}, socket) do
-    if is_pid(socket.assigns.web_shell_pid) do
-      Sigma.Web.WebShell.resize(socket.assigns.web_shell_pid, cols, rows)
-    end
+    cond do
+      is_pid(socket.assigns.web_shell_pid) ->
+        Sigma.Web.WebShell.resize(socket.assigns.web_shell_pid, cols, rows)
+        {:noreply, socket}
 
-    {:noreply, socket}
+      socket.assigns.show_web_shell ->
+        start_web_shell(socket, cols, rows)
+
+      true ->
+        {:noreply, socket}
+    end
   end
 
   @impl true
@@ -1384,8 +1473,13 @@ defmodule Sigma.Web.SessionLive do
     end
   end
 
-  defp start_web_shell(socket) do
-    case Sigma.Web.WebShell.open(owner: self(), cwd: socket.assigns.effective_cwd) do
+  defp start_web_shell(socket, cols, rows) do
+    case Sigma.Web.WebShell.open(
+           owner: self(),
+           cwd: socket.assigns.effective_cwd,
+           cols: cols,
+           rows: rows
+         ) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
 
@@ -1399,7 +1493,12 @@ defmodule Sigma.Web.SessionLive do
          |> push_event("web_shell_opened", %{cwd: socket.assigns.effective_cwd})}
 
       {:error, reason} ->
-        {:noreply, put_flash(socket, :error, web_shell_error(reason))}
+        {:noreply,
+         socket
+         |> assign(:show_web_shell, false)
+         |> assign(:web_shell_pid, nil)
+         |> assign(:web_shell_status, "Shell closed")
+         |> put_flash(:error, web_shell_error(reason))}
     end
   end
 
@@ -1742,6 +1841,12 @@ defmodule Sigma.Web.SessionLive do
 
   defp format_load_error(reason) when is_binary(reason), do: reason
   defp format_load_error(reason), do: inspect(reason)
+
+  defp load_pending_user_questions(agent) do
+    Sigma.Agent.pending_user_questions(agent, 100)
+  catch
+    :exit, _reason -> []
+  end
 
   defp resolve_provider(nil) do
     case Application.get_env(:sigma_web, :test_provider_config) do

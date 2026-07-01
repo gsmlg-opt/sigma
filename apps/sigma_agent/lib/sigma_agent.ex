@@ -81,8 +81,8 @@ defmodule Sigma.Agent do
     end
   end
 
-  def pending_user_questions(pid) do
-    GenServer.call(pid, :pending_user_questions)
+  def pending_user_questions(pid, timeout \\ 5_000) do
+    GenServer.call(pid, :pending_user_questions, timeout)
   end
 
   def answer_user_question(pid, question_id, reply) when is_binary(question_id) do

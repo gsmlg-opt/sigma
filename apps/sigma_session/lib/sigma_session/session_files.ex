@@ -190,16 +190,12 @@ defmodule Sigma.Session.SessionFiles do
   defp metadata_cwd(_metadata), do: nil
 
   defp source_log_cwd(source_jsonl_path) do
-    case JsonlFile.read(source_jsonl_path) do
-      {:ok, entries} ->
-        Enum.find_value(entries, fn
-          %{"type" => "session", "cwd" => cwd} when is_binary(cwd) -> cwd
-          _entry -> nil
-        end)
+    {:ok, entries} = JsonlFile.read(source_jsonl_path)
 
-      _ ->
-        nil
-    end
+    Enum.find_value(entries, fn
+      %{"type" => "session", "cwd" => cwd} when is_binary(cwd) -> cwd
+      _entry -> nil
+    end)
   end
 
   defp write_fork_metadata_or_cleanup(metadata, target_meta_path, target_jsonl_path, opts) do

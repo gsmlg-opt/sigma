@@ -356,7 +356,8 @@ const WebShellTerminal = {
     this.el.innerHTML = ''
 
     this._terminal = new Terminal({
-      convertEol: true,
+      // Raw PTY output must preserve CR/LF exactly for full-screen programs.
+      convertEol: false,
       cursorBlink: true,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
       fontSize: 13,

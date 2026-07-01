@@ -119,6 +119,22 @@ defmodule Sigma.Web.SessionLiveTest do
     assert_session_sidebar_order(html)
   end
 
+  @tag :tmp_dir
+  test "loads session while agent startup is still busy", %{conn: conn, tmp_dir: tmp_dir} do
+    with_agent_config(tmp_dir, fn ->
+      write_provider_configs("openai", "smart", %{"openai" => ["smart"]})
+      trust_workdir!(@workdir)
+      write_session_start_hook!(@workdir, "sleep 2", timeout: 3)
+
+      {:ok, view, _html} = live(conn, session_path(unique_session_id("slow-start")))
+      html = render_async(view, 1000)
+
+      assert html =~ "Ask ∑ anything"
+      refute html =~ "Could not load session"
+      refute html =~ "pending_user_questions"
+    end)
+  end
+
   test "does not render the ignored prompt input disabled while loading" do
     html =
       session_render_assigns(session_ready: false, turn_in_flight: false)
@@ -286,6 +302,10 @@ defmodule Sigma.Web.SessionLiveTest do
     assert html =~ ~s(id="web-shell-panel")
     assert html =~ ~s(phx-hook="WebShellTerminal")
     assert html =~ ~s(data-cwd="#{@workdir}")
+    assert html =~ "Starting shell..."
+
+    html = render_hook(view, "web_shell_resize", %{"cols" => 132, "rows" => 31})
+
     assert html =~ "Shell ready"
   end
 
@@ -416,6 +436,24 @@ defmodule Sigma.Web.SessionLiveTest do
     assert_receive {:message_end, %{role: :assistant}}, 2000
   end
 
+  test "retries a persisted user message", %{conn: conn} do
+    session_id = unique_session_id("retry")
+    storage_path = session_storage_path(session_id)
+    File.mkdir_p!(Path.dirname(storage_path))
+    :ok = Sigma.Session.Log.persist_event(storage_path, {:message_end, Message.user("u_retry", "try again")})
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    view
+    |> element("#retry-u_retry")
+    |> render_click()
+
+    assert_receive {:agent_start, _}, 2000
+    assert_receive {:turn_start}, 2000
+    assert_receive {:message_start, %{role: :user, content: "try again"}}, 2000
+  end
+
   test "expands init slash command before submitting to the agent", %{conn: conn} do
     session_id = unique_session_id("init")
     Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
@@ -479,6 +517,8 @@ defmodule Sigma.Web.SessionLiveTest do
     assert html =~ ~s(id="msg_user_left")
     assert html =~ ~s(align="start")
     assert html =~ ~s(color="secondary")
+    assert html =~ ~s(id="retry-msg_user_left")
+    assert html =~ "Retry"
     refute html =~ ~s(variant="filled")
   end
 
@@ -717,6 +757,37 @@ defmodule Sigma.Web.SessionLiveTest do
     {:ok, _repo} = RepoManager.add_repo(workdir, name: name)
   end
 
+  defp trust_workdir!(workdir) do
+    agent_dir = Sigma.Session.ConfigManager.agent_dir()
+    File.mkdir_p!(agent_dir)
+
+    File.write!(
+      Path.join(agent_dir, "repos.jsonl"),
+      Jason.encode!(%{"path" => Path.expand(workdir), "trusted" => true}) <> "\n"
+    )
+  end
+
+  defp write_session_start_hook!(workdir, command, opts) do
+    hooks_dir = Path.join(workdir, ".pi")
+    File.mkdir_p!(hooks_dir)
+
+    File.write!(
+      Path.join(hooks_dir, "hooks.json"),
+      Jason.encode!([
+        %{
+          "event" => "SessionStart",
+          "hooks" => [
+            %{
+              "hooks" => [
+                %{"command" => command, "timeout" => Keyword.fetch!(opts, :timeout)}
+              ]
+            }
+          ]
+        }
+      ])
+    )
+  end
+
   defp session_path(session_id) do
     session_path(@workdir, session_id)
   end
@@ -754,6 +825,7 @@ defmodule Sigma.Web.SessionLiveTest do
         sessions: [],
         show_logs: false,
         show_web_shell: false,
+        storage_path: session_storage_path("render_session"),
         streaming_message_id: nil,
         streams: %{messages: []},
         tool_results: %{},

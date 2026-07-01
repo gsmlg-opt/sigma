@@ -39,6 +39,39 @@ defmodule Sigma.Web.WebShellTest do
     assert_receive {:web_shell_exit, ^pid, 0}, 1_000
   end
 
+  @tag :tmp_dir
+  test "default shell startup uses a sized pty when script is available", %{tmp_dir: tmp_dir} do
+    if System.find_executable("script") do
+      shell = Path.join(tmp_dir, "zsh")
+
+      File.write!(shell, """
+      #!/bin/sh
+      if [ -t 0 ]; then
+        printf 'stdin:tty\\n'
+      else
+        printf 'stdin:pipe\\n'
+      fi
+      printf 'size:%s\\n' "$(stty size)"
+      """)
+
+      File.chmod!(shell, 0o755)
+
+      assert {:ok, pid} =
+               Sigma.Web.WebShell.start_link(
+                 owner: self(),
+                 cwd: tmp_dir,
+                 shell: shell,
+                 cols: 132,
+                 rows: 31
+               )
+
+      output = wait_for_output(pid, "size:31 132")
+      assert output =~ "stdin:tty"
+      assert output =~ "size:31 132"
+      assert_receive {:web_shell_exit, ^pid, _status}, 1_000
+    end
+  end
+
   defp wait_for_output(pid, expected, acc \\ "") do
     receive do
       {:web_shell_output, ^pid, data} ->

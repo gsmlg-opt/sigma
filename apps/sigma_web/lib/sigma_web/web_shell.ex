@@ -37,10 +37,12 @@ defmodule Sigma.Web.WebShell do
   def init(opts) do
     owner = Keyword.fetch!(opts, :owner)
     cwd = opts |> Keyword.get(:cwd, File.cwd!()) |> Path.expand()
+    cols = normalize_size(Keyword.get(opts, :cols), 120)
+    rows = normalize_size(Keyword.get(opts, :rows), 24)
 
     with :ok <- validate_cwd(cwd),
-         {:ok, shell, shell_args} <- shell_command(opts),
-         {:ok, port} <- open_port(shell, shell_args, cwd) do
+         {:ok, shell, shell_args} <- shell_command(opts, cols, rows),
+         {:ok, port} <- open_port(shell, shell_args, cwd, cols, rows) do
       owner_ref = Process.monitor(owner)
 
       {:ok,
@@ -49,8 +51,8 @@ defmodule Sigma.Web.WebShell do
          owner_ref: owner_ref,
          cwd: cwd,
          port: port,
-         cols: 120,
-         rows: 24
+         cols: cols,
+         rows: rows
        }}
     else
       {:error, reason} -> {:stop, {:shutdown, reason}}
@@ -102,9 +104,10 @@ defmodule Sigma.Web.WebShell do
     end
   end
 
-  defp shell_command(opts) do
+  defp shell_command(opts, cols, rows) do
     shell = Keyword.get(opts, :shell) || System.get_env("SHELL") || find_default_shell()
-    shell_args = Keyword.get(opts, :shell_args, default_shell_args(shell))
+    explicit_shell_args? = Keyword.has_key?(opts, :shell_args)
+    shell_args = Keyword.get(opts, :shell_args, default_shell_args(shell, pty?: true))
 
     cond do
       is_nil(shell) ->
@@ -113,8 +116,12 @@ defmodule Sigma.Web.WebShell do
       not File.exists?(shell) ->
         {:error, "Shell executable does not exist: #{shell}"}
 
-      true ->
+      explicit_shell_args? ->
         {:ok, shell, shell_args}
+
+      true ->
+        {:ok, command, args} = pty_shell_command(shell, shell_args, cols, rows)
+        {:ok, command, args}
     end
   end
 
@@ -124,16 +131,54 @@ defmodule Sigma.Web.WebShell do
       System.find_executable("sh")
   end
 
-  defp default_shell_args(nil), do: []
+  defp default_shell_args(nil, _opts), do: []
 
-  defp default_shell_args(shell) do
+  defp default_shell_args(shell, opts) do
     case shell |> Path.basename() |> String.downcase() do
-      name when name in ["bash", "fish", "sh", "zsh"] -> ["-i"]
+      "bash" -> if opts[:pty?], do: ["-i"], else: ["--noprofile", "--norc", "-i"]
+      "fish" -> if opts[:pty?], do: ["-i"], else: ["--no-config", "-i"]
+      "zsh" -> if opts[:pty?], do: ["-i"], else: ["-f", "-i"]
+      "sh" -> ["-i"]
       _ -> []
     end
   end
 
-  defp open_port(shell, shell_args, cwd) do
+  defp pty_shell_command(shell, shell_args, cols, rows) do
+    case System.find_executable("script") do
+      nil ->
+        {:ok, shell, default_shell_args(shell, pty?: false)}
+
+      script ->
+        {:ok, script, script_args(shell, shell_args, cols, rows)}
+    end
+  end
+
+  defp script_args(shell, shell_args, cols, rows) do
+    command = pty_bootstrap_command(shell, shell_args, cols, rows)
+
+    case :os.type() do
+      {:unix, :linux} ->
+        ["-q", "-c", command, "/dev/null"]
+
+      _ ->
+        ["-q", "/dev/null", "/bin/sh", "-lc", command]
+    end
+  end
+
+  defp pty_bootstrap_command(shell, shell_args, cols, rows) do
+    shell_command =
+      [shell | shell_args]
+      |> Enum.map(&shell_escape/1)
+      |> Enum.join(" ")
+
+    "stty cols #{cols} rows #{rows} 2>/dev/null || true; exec #{shell_command}"
+  end
+
+  defp shell_escape(value) do
+    "'" <> String.replace(to_string(value), "'", "'\"'\"'") <> "'"
+  end
+
+  defp open_port(shell, shell_args, cwd, cols, rows) do
     port =
       Port.open({:spawn_executable, shell}, [
         :binary,
@@ -142,7 +187,7 @@ defmodule Sigma.Web.WebShell do
         :use_stdio,
         args: shell_args,
         cd: cwd,
-        env: terminal_env(cwd)
+        env: terminal_env(cwd, cols, rows)
       ])
 
     {:ok, port}
@@ -150,9 +195,11 @@ defmodule Sigma.Web.WebShell do
     error -> {:error, "Could not start shell: #{Exception.message(error)}"}
   end
 
-  defp terminal_env(cwd) do
+  defp terminal_env(cwd, cols, rows) do
     %{
+      "COLUMNS" => to_string(cols),
       "COLORTERM" => "truecolor",
+      "LINES" => to_string(rows),
       "PS1" => "\\w $ ",
       "PWD" => cwd,
       "TERM" => "xterm-256color"

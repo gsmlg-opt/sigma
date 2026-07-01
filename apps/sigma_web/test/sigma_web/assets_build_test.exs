@@ -20,4 +20,10 @@ defmodule Sigma.Web.AssetsBuildTest do
     assert css =~ ".appbar"
     assert css =~ ".xterm"
   end
+
+  test "web shell terminal preserves raw pty line endings" do
+    app_js = File.read!(Path.join(@repo_root, "apps/sigma_web/assets/js/app.js"))
+
+    assert app_js =~ "convertEol: false"
+  end
 end
