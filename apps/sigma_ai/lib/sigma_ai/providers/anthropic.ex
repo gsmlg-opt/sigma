@@ -228,26 +228,54 @@ defmodule Sigma.Ai.Providers.Anthropic do
   end
 
   defp transform_messages(messages) do
-    Enum.map(messages, fn
-      %{role: :user, content: content} ->
-        %{role: "user", content: content}
+    {transformed_messages, pending_tool_results} =
+      Enum.reduce(messages, {[], []}, fn
+        %{role: :tool_result} = message, {acc, pending_tool_results} ->
+          {acc, [transform_tool_result(message) | pending_tool_results]}
 
-      %{role: :assistant, content: content} ->
-        %{role: "assistant", content: transform_content(content)}
+        message, {acc, pending_tool_results} ->
+          acc = flush_tool_results(acc, pending_tool_results)
+          {[transform_message(message) | acc], []}
+      end)
 
-      %{role: :tool_result, tool_call_id: id, content: content, is_error: is_error} ->
-        %{
-          role: "user",
-          content: [
-            %{
-              type: "tool_result",
-              tool_use_id: id,
-              content: transform_tool_result_content(content),
-              is_error: is_error
-            }
-          ]
-        }
-    end)
+    transformed_messages
+    |> flush_tool_results(pending_tool_results)
+    |> Enum.reverse()
+  end
+
+  defp transform_message(
+         %{role: :user, content: content}
+       ) do
+    %{role: "user", content: content}
+  end
+
+  defp transform_message(
+         %{role: :assistant, content: content}
+       ) do
+    %{role: "assistant", content: transform_content(content)}
+  end
+
+  defp flush_tool_results(acc, []), do: acc
+
+  defp flush_tool_results(acc, pending_tool_results) do
+    [
+      %{
+        role: "user",
+        content: Enum.reverse(pending_tool_results)
+      }
+      | acc
+    ]
+  end
+
+  defp transform_tool_result(
+         %{role: :tool_result, tool_call_id: id, content: content, is_error: is_error}
+       ) do
+    %{
+      type: "tool_result",
+      tool_use_id: id,
+      content: transform_tool_result_content(content),
+      is_error: is_error
+    }
   end
 
   defp transform_tool_result_content(content) when is_list(content) do

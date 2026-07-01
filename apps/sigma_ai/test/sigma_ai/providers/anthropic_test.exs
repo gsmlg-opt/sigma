@@ -147,6 +147,84 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
     end)
   end
 
+  test "groups consecutive tool results into the next Anthropic user message" do
+    sse = [
+      ~s(data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1,"output_tokens":0}}}\n\n),
+      ~s(data: {"type":"message_stop"}\n\n)
+    ]
+
+    messages = [
+      %{
+        role: :assistant,
+        content: [
+          %{
+            type: :tool_call,
+            id: "call_function_rdsm5k4r1nds_2",
+            name: "read_file",
+            arguments: %{"path" => "a.ex"}
+          },
+          %{
+            type: :tool_call,
+            id: "call_function_rdsm5k4r1nds_3",
+            name: "read_file",
+            arguments: %{"path" => "b.ex"}
+          }
+        ]
+      },
+      %{
+        role: :tool_result,
+        tool_call_id: "call_function_rdsm5k4r1nds_2",
+        content: [%{type: :text, text: "first result"}],
+        is_error: false
+      },
+      %{
+        role: :tool_result,
+        tool_call_id: "call_function_rdsm5k4r1nds_3",
+        content: [%{type: :text, text: "second result"}],
+        is_error: false
+      },
+      %{role: :user, content: "continue"}
+    ]
+
+    with_capture_server(sse, fn base_url, captured ->
+      Anthropic.stream(%{
+        model: %{id: "claude-test", api: "anthropic-messages", provider: "anthropic"},
+        context: %{messages: messages, system_prompt: nil, tools: []},
+        options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+      })
+      |> Enum.to_list()
+
+      assert %{"messages" => [assistant, tool_results, user]} = Agent.get(captured, & &1)
+
+      assert assistant["role"] == "assistant"
+
+      assert [
+               %{"type" => "tool_use", "id" => "call_function_rdsm5k4r1nds_2"},
+               %{"type" => "tool_use", "id" => "call_function_rdsm5k4r1nds_3"}
+             ] = assistant["content"]
+
+      assert %{
+               "role" => "user",
+               "content" => [
+                 %{
+                   "type" => "tool_result",
+                   "tool_use_id" => "call_function_rdsm5k4r1nds_2",
+                   "content" => "first result",
+                   "is_error" => false
+                 },
+                 %{
+                   "type" => "tool_result",
+                   "tool_use_id" => "call_function_rdsm5k4r1nds_3",
+                   "content" => "second result",
+                   "is_error" => false
+                 }
+               ]
+             } = tool_results
+
+      assert %{"role" => "user", "content" => "continue"} = user
+    end)
+  end
+
   test "raises provider error details for non-streaming error responses" do
     body =
       Jason.encode!(%{
