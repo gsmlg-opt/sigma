@@ -25,7 +25,6 @@ defmodule Sigma.MixProject do
     [
       setup: ["deps.get", "deps.patch", "quickbeam.compile", "assets.setup", "assets.build"],
       "quickbeam.compile": quickbeam_compile_alias(),
-      "npm.install": ["cmd --app sigma_web mix npm.install"],
       "assets.setup": [
         "deps.patch",
         "cmd --app sigma_web mix npm.install",
@@ -49,7 +48,7 @@ defmodule Sigma.MixProject do
   # without disturbing the project's default Zig toolchain.
   defp quickbeam_source_deps do
     if quickbeam_source_build?() do
-      [{:zigler, "~> 0.15.2", runtime: false}]
+      [{:zigler, "~> 0.15", runtime: false}]
     else
       []
     end

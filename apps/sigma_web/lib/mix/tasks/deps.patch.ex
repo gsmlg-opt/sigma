@@ -11,60 +11,71 @@ defmodule Mix.Tasks.Deps.Patch do
 
   @impl Mix.Task
   def run(_args) do
-    patched_hex_solver = patch_hex_solver()
-    patched_npm = patch_npm()
+    {hex_solver_dep, patched_hex_solver} = patch_hex_solver()
+    {npm_dep, patched_npm} = patch_npm()
 
     if patched_hex_solver do
-      Mix.shell().info("Recompiling hex_solver...")
-      recompile_dep("hex_solver")
+      Mix.shell().info("Recompiling #{hex_solver_dep}...")
+      recompile_dep(hex_solver_dep)
     end
 
     if patched_npm do
-      Mix.shell().info("Recompiling npm...")
-      recompile_dep("npm")
+      Mix.shell().info("Recompiling #{npm_dep}...")
+      recompile_dep(npm_dep)
     end
 
     Mix.shell().info("Dependencies patch check completed.")
   end
 
   defp patch_hex_solver do
-    file_path = Path.expand("deps/hex_solver/lib/hex_solver/requirement.ex")
+    {dep_name, dep_path} =
+      dep_path([
+        {"duskmoon_hex_solver", "deps/duskmoon_hex_solver"},
+        {"hex_solver", "deps/hex_solver"}
+      ])
 
-    if File.exists?(file_path) do
-      content = File.read!(file_path)
+    file_path = Path.join(dep_path, "lib/hex_solver/requirement.ex")
 
-      # Check if already patched
-      if String.contains?(content, "defp delex([op | rest], acc) when op in [:&&, :and] do") do
-        false
+    patched =
+      if File.exists?(file_path) do
+        content = File.read!(file_path)
+
+        # Check if already patched
+        if String.contains?(content, "defp delex([op | rest], acc) when op in [:&&, :and] do") do
+          false
+        else
+          target = "  defp delex([op, version | rest], acc) do"
+
+          patch = """
+            defp delex([op | rest], acc) when op in [:&&, :and] do
+              delex(rest, acc)
+            end
+
+            defp delex([op, version | rest], acc) do\
+          """
+
+          new_content = String.replace(content, target, patch)
+          File.write!(file_path, new_content)
+          Mix.shell().info("Patched #{file_path}")
+          true
+        end
       else
-        target = "  defp delex([op, version | rest], acc) do"
-
-        patch = """
-          defp delex([op | rest], acc) when op in [:&&, :and] do
-            delex(rest, acc)
-          end
-
-          defp delex([op, version | rest], acc) do\
-        """
-
-        new_content = String.replace(content, target, patch)
-        File.write!(file_path, new_content)
-        Mix.shell().info("Patched #{file_path}")
-        true
+        Mix.shell().error("hex_solver requirement.ex not found at #{file_path}")
+        false
       end
-    else
-      Mix.shell().error("hex_solver requirement.ex not found at #{file_path}")
-      false
-    end
+
+    {dep_name, patched}
   end
 
   defp patch_npm do
-    resolver_path = Path.expand("deps/npm/lib/npm/resolver.ex")
-    npm_path = Path.expand("deps/npm/lib/npm.ex")
-    linker_path = Path.expand("deps/npm/lib/npm/install/linker.ex")
-    registry_path = Path.expand("deps/npm/lib/npm/registry.ex")
-    tarball_path = Path.expand("deps/npm/lib/npm/tarball.ex")
-    proxy_path = Path.expand("deps/npm/lib/npm/proxy.ex")
+    {dep_name, dep_path} = dep_path([{"duskmoon_npm", "deps/duskmoon_npm"}, {"npm", "deps/npm"}])
+    npm_lib_path = Path.join(dep_path, "lib")
+    resolver_path = Path.join(npm_lib_path, "npm/resolver.ex")
+    npm_path = Path.join(npm_lib_path, "npm.ex")
+    linker_path = Path.join(npm_lib_path, "npm/install/linker.ex")
+    registry_path = Path.join(npm_lib_path, "npm/registry.ex")
+    tarball_path = Path.join(npm_lib_path, "npm/tarball.ex")
+    proxy_path = Path.join(npm_lib_path, "npm/proxy.ex")
 
     patched_resolver =
       if File.exists?(resolver_path) do
@@ -217,8 +228,8 @@ defmodule Mix.Tasks.Deps.Patch do
         # 2. Rename unused flat parameter to _flat
         if String.contains?(content, "Linker.link_nested(nested_info, flat, @node_modules)") do
           target = """
-            defp link_and_nest(lockfile, nested_info, flat) do
-              with :ok <- link_from_lockfile(lockfile) do
+            defp link_and_nest(lockfile, nested_info, flat, local_links) do
+              with :ok <- link_from_lockfile(lockfile, local_links) do
                 if nested_info != %{}, do: Linker.link_nested(nested_info, flat, @node_modules)
                 :ok
               end
@@ -226,8 +237,8 @@ defmodule Mix.Tasks.Deps.Patch do
           """
 
           replacement = """
-            defp link_and_nest(lockfile, nested_info, _flat) do
-              with :ok <- link_from_lockfile(lockfile) do
+            defp link_and_nest(lockfile, nested_info, _flat, local_links) do
+              with :ok <- link_from_lockfile(lockfile, local_links) do
                 if nested_info != %{}, do: Linker.link_nested(nested_info, lockfile, @node_modules)
                 :ok
               end
@@ -257,8 +268,11 @@ defmodule Mix.Tasks.Deps.Patch do
     patched_proxy = patch_npm_proxy(proxy_path)
     patched_linker = patch_npm_linker(linker_path)
 
-    patched_resolver or patched_npm_core or patched_registry or patched_tarball or patched_proxy or
-      patched_linker
+    patched =
+      patched_resolver or patched_npm_core or patched_registry or patched_tarball or patched_proxy or
+        patched_linker
+
+    {dep_name, patched}
   end
 
   defp patch_npm_linker(file_path) do
@@ -283,7 +297,11 @@ defmodule Mix.Tasks.Deps.Patch do
                 cache_path = NPM.Cache.package_dir(pkg, version)
                 target = Path.join([nm_dir, parent, "node_modules", pkg])
                 link_package(cache_path, target, strategy)
+              else
+                :ok
               end
+            else
+              _ -> :ok
             end
 
             :ok
@@ -303,7 +321,11 @@ defmodule Mix.Tasks.Deps.Patch do
                 target = Path.join([nm_dir, parent, "node_modules", pkg])
                 link_package(cache_path, target, strategy)
                 install_nested_dependencies(info, target, strategy, MapSet.new([{pkg, version}]))
+              else
+                :ok
               end
+            else
+              _ -> :ok
             end
 
             :ok
@@ -335,7 +357,11 @@ defmodule Mix.Tasks.Deps.Patch do
                   target = Path.join([package_dir, "node_modules", dep])
                   link_package(cache_path, target, strategy)
                   install_nested_dependencies(info, target, strategy, MapSet.put(seen, key))
+                else
+                  :ok
                 end
+              else
+                _ -> :ok
               end
             end
 
@@ -517,6 +543,16 @@ defmodule Mix.Tasks.Deps.Patch do
       Mix.shell().info("Patched #{file_path} (environment proxy support)")
       true
     end
+  end
+
+  defp dep_path(candidates) do
+    candidates
+    |> Enum.find(fn {_dep_name, path} -> File.dir?(Path.expand(path)) end)
+    |> case do
+      nil -> List.last(candidates)
+      candidate -> candidate
+    end
+    |> then(fn {dep_name, path} -> {dep_name, Path.expand(path)} end)
   end
 
   defp recompile_dep(dep_name) do

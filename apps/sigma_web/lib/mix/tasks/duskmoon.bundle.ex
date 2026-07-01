@@ -76,7 +76,7 @@ defmodule Mix.Tasks.Duskmoon.Bundle do
       {:error, errors} -> Mix.raise("Failed to bundle elements: #{inspect(errors)}")
     end
 
-    bundle_rich_elements(tmp_dir, rich_output_path)
+    bundle_rich_elements(tmp_dir, rich_output_path, node_modules_path)
   end
 
   defp paths do
@@ -110,7 +110,7 @@ defmodule Mix.Tasks.Duskmoon.Bundle do
     Mix.shell().info("Wrote #{output_path} (#{size_kb} KB, #{length(elements)} element(s))")
   end
 
-  defp bundle_rich_elements(tmp_dir, output_path) do
+  defp bundle_rich_elements(tmp_dir, output_path, node_modules_path) do
     bun =
       System.find_executable("bun") ||
         Mix.raise("bun is required to bundle DuskMoon rich elements")
@@ -124,6 +124,7 @@ defmodule Mix.Tasks.Duskmoon.Bundle do
 
     File.write!(entry, imports <> "\n")
     File.mkdir_p!(Path.dirname(output_path))
+    ensure_rich_bundle_dependencies!(node_modules_path)
 
     args = [
       "build",
@@ -137,12 +138,124 @@ defmodule Mix.Tasks.Duskmoon.Bundle do
 
     Mix.shell().info("Bundling #{length(@rich_elements)} rich DuskMoon element(s) with Bun...")
 
-    case System.cmd(bun, args, stderr_to_stdout: true) do
+    case System.cmd(bun, args, cd: Path.dirname(node_modules_path), stderr_to_stdout: true) do
       {output, 0} ->
         unless String.trim(output) == "", do: Mix.shell().info(output)
 
       {output, status} ->
         Mix.raise("Failed to bundle rich DuskMoon elements with Bun (#{status}):\n#{output}")
     end
+  end
+
+  # WORKAROUND(upstream): duskmoon-dev/phoenix-duskmoon-ui#63
+  defp ensure_rich_bundle_dependencies!(node_modules_path) do
+    {:ok, _} = Application.ensure_all_started(:req)
+
+    @rich_elements
+    |> Enum.flat_map(fn el ->
+      package_dependency_specs(Path.join(node_modules_path, "@duskmoon-dev/#{el}"))
+    end)
+    |> Enum.reduce(MapSet.new(), fn spec, seen ->
+      ensure_dependency_link(node_modules_path, spec, seen)
+    end)
+
+    :ok
+  end
+
+  defp ensure_dependency_link(node_modules_path, {name, range}, seen) do
+    key = {name, range}
+
+    if MapSet.member?(seen, key) do
+      seen
+    else
+      seen = MapSet.put(seen, key)
+
+      case ensure_dependency_package(node_modules_path, name, range) do
+        {:ok, package_path} ->
+          package_path
+          |> package_dependency_specs()
+          |> Enum.reduce(seen, fn spec, acc ->
+            ensure_dependency_link(node_modules_path, spec, acc)
+          end)
+
+        :error ->
+          seen
+      end
+    end
+  end
+
+  defp ensure_dependency_package(node_modules_path, name, range) do
+    target = Path.join(node_modules_path, name)
+
+    if package_ready?(target) do
+      {:ok, target}
+    else
+      with {:ok, version, info} <- resolve_npm_package(name, range),
+           {:ok, _} <- NPM.Cache.ensure(name, version, info.dist.tarball, info.dist.integrity) do
+        source = NPM.Cache.package_dir(name, version)
+        link_package(source, target)
+        {:ok, target}
+      else
+        _ -> :error
+      end
+    end
+  end
+
+  defp package_ready?(target) do
+    case File.lstat(target) do
+      {:ok, %File.Stat{type: :symlink}} -> false
+      _ -> File.exists?(Path.join(target, "package.json"))
+    end
+  end
+
+  defp resolve_npm_package(name, range) do
+    with {:ok, packument} <- NPM.Registry.get_packument(name),
+         {version, info} <- best_matching_version(packument.versions, range) do
+      {:ok, version, info}
+    else
+      _ -> :error
+    end
+  end
+
+  defp best_matching_version(versions, range) do
+    versions
+    |> Enum.filter(fn {version, _info} -> version_matches?(version, range) end)
+    |> Enum.sort_by(fn {version, _info} -> Version.parse!(version) end, {:desc, Version})
+    |> List.first()
+  end
+
+  defp version_matches?(version, range) do
+    match?({:ok, _}, Version.parse(version)) and NPMSemver.matches?(version, range)
+  rescue
+    ArgumentError -> false
+  end
+
+  defp package_dependency_specs(package_path) do
+    package_path
+    |> Path.join("package.json")
+    |> File.read()
+    |> case do
+      {:ok, content} ->
+        content
+        |> Jason.decode!()
+        |> package_dependencies()
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  defp package_dependencies(package) do
+    package
+    |> Map.get("dependencies", %{})
+    |> Map.merge(Map.get(package, "optionalDependencies", %{}))
+    |> Map.to_list()
+  end
+
+  defp link_package(source, target) do
+    File.mkdir_p!(Path.dirname(target))
+    File.rm_rf!(target)
+    File.cp_r!(source, target)
+    :ok
   end
 end

@@ -34,6 +34,7 @@
 </.dm_appbar>
 
 <main>
-  <.dm_flash_group flash={@flash} />
+  <%!-- # TODO(upstream): duskmoon-dev/phoenix-duskmoon-ui#55 --%>
+  <.sigma_flash_group flash={@flash} />
   {@inner_content}
 </main>
