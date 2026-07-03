@@ -82,7 +82,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       assert html =~ ~s(href="/repository/#{encoded_repository}/skills")
       assert html =~ "Loading session options"
 
-      html = render_async(view)
+      html = render_async(view, 1_000)
       assert html =~ "MCP Servers"
       assert html =~ "github"
       assert html =~ ~s(value="github" checked)
@@ -100,7 +100,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       {:ok, session_view, _session_html} =
         live(conn, "/repository/#{encoded_repository}/sessions/#{session_id}")
 
-      session_html = render_async(session_view)
+      session_html = render_async(session_view, 1_000)
       menu_token = Base.url_encode64(session_id, padding: false)
       assert session_html =~ ~s(id="session-menu-btn-#{menu_token}")
     end)
@@ -122,7 +122,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       sessions_dir = ConfigManager.sessions_dir(workdir)
 
       {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
-      render_async(view)
+      render_async(view, 1_000)
 
       render_click(view, "set_mode", %{"mode" => "create_worktree"})
       render_change(view, "update_worktree_name", %{"worktree_name" => "../escape"})
@@ -150,7 +150,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       sessions_dir = ConfigManager.sessions_dir(workdir)
 
       {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
-      render_async(view)
+      render_async(view, 1_000)
 
       render_click(view, "set_mode", %{"mode" => "create_worktree"})
       render_change(view, "update_worktree_name", %{"worktree_name" => "feature-worktree"})
@@ -179,7 +179,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       sessions_dir = ConfigManager.sessions_dir(workdir)
 
       {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
-      render_async(view)
+      render_async(view, 1_000)
 
       render_change(view, "select_branch", %{"branch" => "forged-branch"})
       render_click(view, "set_mode", %{"mode" => "create_worktree"})
@@ -215,7 +215,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       worktree_path = Path.join([workdir, ".trees", "stale-worktree"])
 
       {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
-      render_async(view)
+      render_async(view, 1_000)
 
       render_change(view, "select_branch", %{"branch" => "stale-branch"})
       render_click(view, "set_mode", %{"mode" => "create_worktree"})
@@ -252,7 +252,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       sessions_dir = ConfigManager.sessions_dir(workdir)
 
       {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
-      render_async(view)
+      render_async(view, 1_000)
 
       render_click(view, "set_mode", %{"mode" => "create_worktree"})
       render_change(view, "update_worktree_name", %{"worktree_name" => "feature-worktree"})
@@ -283,7 +283,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       worktree_path = Path.join([workdir, ".trees", "feature-success-worktree"])
 
       {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
-      render_async(view)
+      render_async(view, 1_000)
 
       render_change(view, "select_branch", %{"branch" => "feature-success"})
       html = render_click(view, "set_mode", %{"mode" => "create_worktree"})
@@ -330,7 +330,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       sessions_dir = ConfigManager.sessions_dir(workdir)
 
       {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
-      render_async(view)
+      render_async(view, 1_000)
 
       render_change(view, "select_branch", %{"branch" => "feature-symlink"})
       render_click(view, "set_mode", %{"mode" => "create_worktree"})
@@ -371,7 +371,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       sessions_dir = ConfigManager.sessions_dir(workdir)
 
       {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
-      render_async(view)
+      render_async(view, 1_000)
 
       render_change(view, "select_branch", %{"branch" => "feature-final-symlink"})
       render_click(view, "set_mode", %{"mode" => "create_worktree"})

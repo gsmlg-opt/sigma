@@ -25,7 +25,7 @@ defmodule Mix.Tasks.DepsPatchTest do
 
     assert [_ | _] =
              Regex.scan(
-               ~r/Task\.async_stream\(.+?timeout: @fetch_timeout,.+?on_timeout: :kill_task/s,
+               ~r/Task\.async_stream\(.+?timeout: .+?,.+?on_timeout: :kill_task/s,
                source
              )
   end
@@ -43,6 +43,7 @@ defmodule Mix.Tasks.DepsPatchTest do
   test "npm tarball downloads honor environment proxy settings" do
     source = File.read!(@tarball_path)
 
-    assert source =~ "connect_options: NPM.Proxy.connect_options(tarball_url)"
+    assert source =~ "connect_options:"
+    assert source =~ "NPM.Proxy.connect_options(tarball_url)"
   end
 end

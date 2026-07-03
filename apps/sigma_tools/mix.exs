@@ -25,7 +25,7 @@ defmodule Sigma.Tools.MixProject do
     [
       {:sigma_coding, in_umbrella: true},
       {:jason, "~> 1.4"},
-      {:rustler, "~> 0.36"}
+      {:rustler, "~> 0.36", runtime: false}
     ]
   end
 end

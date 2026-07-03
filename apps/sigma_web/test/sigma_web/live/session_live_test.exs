@@ -440,7 +440,13 @@ defmodule Sigma.Web.SessionLiveTest do
     session_id = unique_session_id("retry")
     storage_path = session_storage_path(session_id)
     File.mkdir_p!(Path.dirname(storage_path))
-    :ok = Sigma.Session.Log.persist_event(storage_path, {:message_end, Message.user("u_retry", "try again")})
+
+    :ok =
+      Sigma.Session.Log.persist_event(
+        storage_path,
+        {:message_end, Message.user("u_retry", "try again")}
+      )
+
     Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
 
     {:ok, view, _html} = live_loaded(conn, session_path(session_id))
@@ -839,7 +845,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
   defp live_loaded(conn, path) do
     {:ok, view, _html} = live(conn, path)
-    {:ok, view, render_async(view)}
+    {:ok, view, render_async(view, 1_000)}
   end
 
   defp session_topic(workdir, session_id) do

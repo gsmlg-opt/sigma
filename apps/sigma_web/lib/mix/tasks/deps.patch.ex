@@ -444,8 +444,12 @@ defmodule Mix.Tasks.Deps.Patch do
         false
       else
         new_content =
-          String.replace(
-            content,
+          content
+          |> String.replace(
+            "connect_options: [timeout: @connect_timeout],",
+            "connect_options: Keyword.merge([timeout: @connect_timeout], NPM.Proxy.connect_options(tarball_url)),"
+          )
+          |> String.replace(
             "case Req.get(tarball_url, decode_body: false) do",
             """
             case Req.get(tarball_url,
