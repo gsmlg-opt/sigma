@@ -106,7 +106,7 @@ defmodule Sigma.Web.HomeLive do
 
         <.dm_card variant="bordered" shadow="md" class="p-6">
           <div class="flex flex-col h-[600px]">
-            <form phx-change="name_change" class="mb-4">
+            <form id="repository-name-form" phx-change="name_change" class="mb-4">
               <.dm_input
                 name="name"
                 value={@repo_name}

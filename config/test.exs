@@ -6,6 +6,8 @@ config :sigma_web, Sigma.Web.Endpoint,
 
 config :logger, level: :warning
 
+config :phoenix_live_view, :test_warnings, missing_form_id: :raise
+
 config :sigma_web,
   test_provider_config: %{
     "id" => "test",

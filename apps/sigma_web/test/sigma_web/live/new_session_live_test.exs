@@ -234,6 +234,32 @@ defmodule Sigma.Web.NewSessionLiveTest do
   end
 
   @tag :tmp_dir
+  test "existing worktree selector form has a recovery id", %{conn: conn, tmp_dir: tmp_dir} do
+    workdir =
+      Path.join(System.tmp_dir!(), "sigma-new-session-#{System.unique_integer([:positive])}")
+
+    worktree_path = Path.join([workdir, ".trees", "feature-existing"])
+
+    File.mkdir_p!(workdir)
+    init_git_repo!(workdir)
+    run_git!(workdir, ["branch", "feature-existing"])
+    run_git!(workdir, ["worktree", "add", worktree_path, "feature-existing"])
+
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+      render_async(view, 1_000)
+
+      html = render_click(view, "set_mode", %{"mode" => "existing_worktree"})
+      assert html =~ ~s(id="worktree-select-form")
+    end)
+  end
+
+  @tag :tmp_dir
   test "failed git worktree creation does not write session files", %{
     conn: conn,
     tmp_dir: tmp_dir

@@ -1197,7 +1197,7 @@ defmodule Sigma.Web.SettingsLive do
       </div>
 
       <.dm_card variant="bordered" class="bg-surface-container-low">
-        <form phx-submit="save_hooks" phx-change="change_hooks" class="space-y-4">
+        <form id="settings-hooks-form" phx-submit="save_hooks" phx-change="change_hooks" class="space-y-4">
           <div class="flex items-center gap-2 text-on-surface">
             <.dm_mdi name="hook" class="w-5 h-5 text-primary" />
             <h3 class="text-lg font-bold">hooks.json</h3>

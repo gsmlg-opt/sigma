@@ -37,6 +37,16 @@ defmodule Sigma.Web.SettingsLiveTest do
   end
 
   @tag :tmp_dir
+  test "hooks settings form has a recovery id", %{conn: conn, tmp_dir: tmp_dir} do
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _view, html} = live(conn, "/settings/hooks")
+
+      assert html =~ "Hooks"
+      assert html =~ ~s(id="settings-hooks-form")
+    end)
+  end
+
+  @tag :tmp_dir
   test "manages providers with modal forms and delete confirmation", %{
     conn: conn,
     tmp_dir: tmp_dir

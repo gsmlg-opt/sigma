@@ -207,7 +207,7 @@ defmodule Sigma.Web.NewSessionLive do
                   :if={@mode == :existing_worktree and !Enum.empty?(@worktrees)}
                   class="mt-2 pl-4 border-l-2 border-primary"
                 >
-                  <form phx-change="select_worktree">
+                  <form id="worktree-select-form" phx-change="select_worktree">
                     <.dm_select
                       id="worktree-select"
                       name="worktree"
