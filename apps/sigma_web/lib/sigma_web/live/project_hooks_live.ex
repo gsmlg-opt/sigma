@@ -122,7 +122,13 @@ defmodule Sigma.Web.ProjectHooksLive do
                   <:prefix><.dm_mdi name="code-json" class="w-4 h-4" /></:prefix>
                   Format JSON
                 </.dm_btn>
-                <.dm_btn type="submit" phx-hook="WebComponentHook" variant="primary" size="md">
+                <.dm_btn
+                  id="project-hooks-save-btn"
+                  type="submit"
+                  phx-hook="WebComponentHook"
+                  variant="primary"
+                  size="md"
+                >
                   Save hooks.json
                 </.dm_btn>
               </div>

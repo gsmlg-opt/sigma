@@ -248,6 +248,7 @@ defmodule Sigma.Web.SettingsLive do
             </div>
             <.dm_tooltip :if={@active_id != row.id} content="Activate">
               <.dm_btn
+                id={"provider-activate-#{row.id}"}
                 phx-click="set_active_provider"
                 phx-value-id={row.id}
                 phx-hook="WebComponentHook"
@@ -614,9 +615,15 @@ defmodule Sigma.Web.SettingsLive do
           />
 
           <div class="flex justify-end pt-4 border-t border-outline-variant">
-             <.dm_btn type="submit" phx-hook="WebComponentHook" variant="primary" size="md">
-               Save AGENTS.md
-             </.dm_btn>
+            <.dm_btn
+              id="system-prompt-save-btn"
+              type="submit"
+              phx-hook="WebComponentHook"
+              variant="primary"
+              size="md"
+            >
+              Save AGENTS.md
+            </.dm_btn>
           </div>
         </form>
       </.dm_card>
@@ -1231,7 +1238,13 @@ defmodule Sigma.Web.SettingsLive do
               <:prefix><.dm_mdi name="code-json" class="w-4 h-4" /></:prefix>
               Format JSON
             </.dm_btn>
-            <.dm_btn type="submit" phx-hook="WebComponentHook" variant="primary" size="md">
+            <.dm_btn
+              id="settings-hooks-save-btn"
+              type="submit"
+              phx-hook="WebComponentHook"
+              variant="primary"
+              size="md"
+            >
               Save hooks.json
             </.dm_btn>
           </div>

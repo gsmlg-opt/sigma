@@ -639,6 +639,14 @@ defmodule Sigma.Web.SessionLiveTest do
     assert html =~ "Type another answer"
     assert html =~ ~s(id="ask-user-question-option-)
 
+    hook_buttons =
+      html
+      |> Floki.parse_document!()
+      |> Floki.find(~s(#ask-user-questions el-dm-button[phx-hook="WebComponentHook"]))
+
+    assert [_cancel_button, _submit_button] = hook_buttons
+    assert Enum.all?(hook_buttons, &has_attr?(&1, "id"))
+
     view
     |> form("#ask-user-questions form", %{
       "selected_answer" => "project",

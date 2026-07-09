@@ -608,6 +608,7 @@ defmodule Sigma.Web.SessionLive do
 
           <div class="flex justify-end gap-2">
             <.dm_btn
+              id={"ask-user-question-cancel-#{question.id}"}
               type="button"
               phx-click="cancel_user_question"
               phx-value-question-id={question.id}
@@ -617,7 +618,13 @@ defmodule Sigma.Web.SessionLive do
             >
               Cancel
             </.dm_btn>
-            <.dm_btn type="submit" phx-hook="WebComponentHook" variant="primary" size="sm">
+            <.dm_btn
+              id={"ask-user-question-submit-#{question.id}"}
+              type="submit"
+              phx-hook="WebComponentHook"
+              variant="primary"
+              size="sm"
+            >
               Send answer
             </.dm_btn>
           </div>
