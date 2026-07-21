@@ -32,7 +32,7 @@ defmodule Sigma.Session.Journal do
         Enum.reduce(nodes, {snapshot, []}, &reduce_entry/2)
 
       payload_diagnostics = Enum.reverse(payload_diagnostics_rev)
-      {messages, message_diagnostics} = decode_messages(nodes)
+      {messages, message_diagnostics} = render_messages(nodes)
 
       journal_diagnostics =
         index.diagnostics
@@ -160,18 +160,59 @@ defmodule Sigma.Session.Journal do
         {updated, diagnostics}
 
       {:error, reason} ->
-        diagnostic = %{
-          kind: :invalid_payload,
-          entry_index: node.entry_index,
-          entry_id: node.entry["id"],
-          reason: reason
-        }
-
-        {snapshot, [diagnostic | diagnostics]}
+        {snapshot, [payload_diagnostic(node, reason) | diagnostics]}
     end
   end
 
-  defp decode_messages(nodes) do
+  defp render_messages(nodes) do
+    case latest_compaction(nodes) do
+      nil ->
+        decode_message_nodes(nodes)
+
+      compaction_node ->
+        render_compacted_messages(nodes, compaction_node)
+    end
+  end
+
+  defp latest_compaction(nodes) do
+    nodes
+    |> Enum.filter(&(&1.entry["type"] == "compaction"))
+    |> List.last()
+  end
+
+  defp render_compacted_messages(nodes, compaction_node) do
+    compaction_position = Enum.find_index(nodes, &(&1.entry["id"] == compaction_node.entry["id"]))
+    target_id = compaction_node.entry["firstKeptEntryId"] || compaction_node.entry["firstKeptId"]
+
+    target_position =
+      Enum.find_index(nodes, fn node ->
+        node.entry["id"] == target_id or get_in(node.entry, ["message", "id"]) == target_id
+      end)
+
+    if is_integer(target_position) and target_position < compaction_position do
+      {kept_messages, diagnostics} = nodes |> Enum.drop(target_position) |> decode_message_nodes()
+
+      case EntryDecoder.compaction(compaction_node.entry) do
+        {:ok, summary} ->
+          {[summary | kept_messages], diagnostics}
+
+        {:error, reason} ->
+          {all_messages, all_diagnostics} = decode_message_nodes(nodes)
+
+          {all_messages,
+           merge_diagnostics(all_diagnostics, [payload_diagnostic(compaction_node, reason)])}
+      end
+    else
+      {all_messages, diagnostics} = decode_message_nodes(nodes)
+
+      {all_messages,
+       merge_diagnostics(diagnostics, [
+         payload_diagnostic(compaction_node, :invalid_compaction_target)
+       ])}
+    end
+  end
+
+  defp decode_message_nodes(nodes) do
     {messages_rev, diagnostics_rev} =
       Enum.reduce(nodes, {[], []}, fn node, {messages, diagnostics} ->
         if node.entry["type"] == "message" do
@@ -180,14 +221,7 @@ defmodule Sigma.Session.Journal do
               {[message | messages], diagnostics}
 
             {:error, reason} ->
-              diagnostic = %{
-                kind: :invalid_payload,
-                entry_index: node.entry_index,
-                entry_id: node.entry["id"],
-                reason: reason
-              }
-
-              {messages, [diagnostic | diagnostics]}
+              {messages, [payload_diagnostic(node, reason) | diagnostics]}
           end
         else
           {messages, diagnostics}
@@ -195,6 +229,15 @@ defmodule Sigma.Session.Journal do
       end)
 
     {Enum.reverse(messages_rev), Enum.reverse(diagnostics_rev)}
+  end
+
+  defp payload_diagnostic(node, reason) do
+    %{
+      kind: :invalid_payload,
+      entry_index: node.entry_index,
+      entry_id: node.entry["id"],
+      reason: reason
+    }
   end
 
   defp split_model(model) when is_binary(model) do

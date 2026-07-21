@@ -100,6 +100,10 @@ defmodule Sigma.Session.JournalTest do
               mode: "build",
               mode_data: %{"file" => "BUILD.md"},
               compaction: %{"id" => "left-compact", "summary" => "latest summary"},
+              messages: [
+                %Message{role: :compaction_summary, content: "latest summary"},
+                %Message{id: "message-1"}
+              ],
               branch_summary: %{"id" => "left-summary", "summary" => "left branch"}
             }} = Journal.replay(entries, leaf_id: "left-summary")
 
@@ -169,7 +173,7 @@ defmodule Sigma.Session.JournalTest do
             }} = Journal.replay(entries)
   end
 
-  test "records compaction state without collapsing branch messages" do
+  test "renders compaction state with kept and subsequent branch messages" do
     entries = [
       header("session", "/repo"),
       message_entry("root", nil, "message-1", "user", "one"),
@@ -184,6 +188,7 @@ defmodule Sigma.Session.JournalTest do
             %Snapshot{
               compaction: %{"id" => "compact", "summary" => "earlier work"},
               messages: [
+                %Message{role: :compaction_summary, content: "earlier work"},
                 %Message{id: "message-1"},
                 %Message{id: "message-2", content: [%{type: :text, text: "two"}]}
               ]
@@ -424,6 +429,74 @@ defmodule Sigma.Session.JournalTest do
     ]
 
     assert {:error, {:leaf_not_found, "missing"}} = Journal.replay(entries, leaf_id: "missing")
+  end
+
+  test "applies only the latest compaction on the active branch" do
+    entries = [
+      header("session", "/repo"),
+      message_entry("entry-1", nil, "message-1", "user", "one"),
+      message_entry("entry-2", "entry-1", "message-2", "assistant", "two"),
+      message_entry("entry-3", "entry-2", "message-3", "user", "three"),
+      state_entry("compact-left", "entry-3", "compaction", %{
+        "summary" => "left summary",
+        "firstKeptEntryId" => "entry-3"
+      }),
+      state_entry("sibling", "entry-2", "message", %{
+        "message" => %{
+          "id" => "message-sibling",
+          "role" => "user",
+          "content" => "sibling",
+          "timestamp" => 1
+        }
+      }),
+      state_entry("compact-right", "sibling", "compaction", %{
+        "summary" => "right summary",
+        "firstKeptEntryId" => "sibling"
+      })
+    ]
+
+    assert {:ok, %Snapshot{messages: [summary, kept]}} =
+             Journal.replay(entries, leaf_id: "compact-left")
+
+    assert %Message{role: :compaction_summary, content: "left summary"} = summary
+    assert %Message{id: "message-3"} = kept
+
+    assert {:ok, %Snapshot{messages: [right_summary, right_kept]}} = Journal.replay(entries)
+    assert %Message{role: :compaction_summary, content: "right summary"} = right_summary
+    assert %Message{id: "message-sibling"} = right_kept
+  end
+
+  test "accepts legacy firstKeptId values that refer to nested message IDs" do
+    entries = [
+      header("session", "/repo"),
+      message_entry("entry-1", nil, "message-1", "user", "one"),
+      message_entry("entry-2", "entry-1", "message-2", "assistant", "two"),
+      state_entry("compact", "entry-2", "compaction", %{
+        "summary" => "legacy summary",
+        "firstKeptId" => "message-2"
+      })
+    ]
+
+    assert {:ok, %Snapshot{messages: [summary, kept]}} = Journal.replay(entries)
+    assert %Message{content: "legacy summary"} = summary
+    assert %Message{id: "message-2"} = kept
+  end
+
+  test "ignores an invalid compaction target and diagnoses it" do
+    entries = [
+      header("session", "/repo"),
+      message_entry("entry-1", nil, "message-1", "user", "one"),
+      state_entry("compact", "entry-1", "compaction", %{
+        "summary" => "bad summary",
+        "firstKeptEntryId" => "missing"
+      })
+    ]
+
+    assert {:ok, %Snapshot{messages: [%Message{id: "message-1"}], diagnostics: diagnostics}} =
+             Journal.replay(entries)
+
+    assert Enum.any?(diagnostics, &(&1.reason == :invalid_compaction_target))
+    assert [_diagnostic] = diagnostics
   end
 
   defp header(id, cwd) do
