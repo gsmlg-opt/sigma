@@ -626,6 +626,39 @@ defmodule Sigma.Session.JournalTest do
             }} = Journal.replay(entries)
   end
 
+  test "diagnoses an older malformed compaction without replacing a newer valid one" do
+    entries = [
+      header("session", "/repo"),
+      message_entry("entry-1", nil, "message-1", "user", "one"),
+      state_entry("compact-older", "entry-1", "compaction", %{
+        "summary" => 42,
+        "firstKeptEntryId" => "entry-1"
+      }),
+      message_entry("entry-2", "compact-older", "message-2", "assistant", "two"),
+      state_entry("compact-newer", "entry-2", "compaction", %{
+        "summary" => "newer summary",
+        "firstKeptEntryId" => "entry-2"
+      })
+    ]
+
+    assert {:ok,
+            %Snapshot{
+              compaction: %{"id" => "compact-newer"},
+              messages: [
+                %Message{role: :compaction_summary, content: "newer summary"},
+                %Message{id: "message-2"}
+              ],
+              diagnostics: [
+                %{
+                  kind: :invalid_payload,
+                  entry_index: 2,
+                  entry_id: "compact-older",
+                  reason: :invalid_compaction
+                }
+              ]
+            }} = Journal.replay(entries)
+  end
+
   test "clears compaction state when no compaction timestamp is valid" do
     entries = [
       header("session", "/repo"),

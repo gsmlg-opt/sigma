@@ -250,15 +250,17 @@ defmodule Sigma.Session.Journal do
   end
 
   defp select_compaction(analysis) do
-    Enum.reduce_while(analysis.compactions, {nil, []}, fn {position, node},
-                                                          {_selected, diagnostics} ->
+    Enum.reduce(analysis.compactions, {nil, []}, fn {position, node}, {selected, diagnostics} ->
       case applicable_compaction(node, position, analysis) do
-        {:ok, summary, target_position} ->
+        {:ok, summary, target_position} when is_nil(selected) ->
           selected = %{node: node, summary: summary, target_position: target_position}
-          {:halt, {selected, diagnostics}}
+          {selected, diagnostics}
+
+        {:ok, _summary, _target_position} ->
+          {selected, diagnostics}
 
         {:error, reason} ->
-          {:cont, {nil, [payload_diagnostic(node, reason) | diagnostics]}}
+          {selected, [payload_diagnostic(node, reason) | diagnostics]}
       end
     end)
   end
