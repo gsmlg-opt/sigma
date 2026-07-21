@@ -3,8 +3,7 @@ defmodule Sigma.Session.Log do
   Public API for session persistence and replay.
   """
 
-  alias Sigma.Session.Storage.JsonlFile
-  alias Sigma.Agent.Message
+  alias Sigma.Session.{Journal, Storage.JsonlFile}
 
   @doc """
   Lists all session files in the given directory.
@@ -33,46 +32,36 @@ defmodule Sigma.Session.Log do
   end
 
   @doc """
-  Replays messages from the session log.
+  Replays model-facing messages from the latest valid journal branch.
   """
   def replay(storage_id, storage_mod \\ JsonlFile) do
-    case storage_mod.read(storage_id) do
-      {:ok, entries} ->
-        # Find the last compaction if any
-        compaction =
-          entries
-          |> Enum.filter(fn e -> e["type"] == "compaction" end)
-          |> List.last()
+    with {:ok, snapshot} <- snapshot(storage_id, [], storage_mod) do
+      {:ok, snapshot.messages}
+    end
+  end
 
-        messages =
-          if compaction do
-            # Filter messages before compaction, but keep ones after firstKeptId
-            first_kept_id = compaction["firstKeptId"]
+  @doc """
+  Reads and reduces a session journal into a deterministic snapshot.
+  """
+  def snapshot(storage_id, opts \\ [], storage_mod \\ JsonlFile) do
+    with {:ok, entries, storage_diagnostics} <- read_entries(storage_id, storage_mod) do
+      journal_opts =
+        Keyword.update(opts, :diagnostics, storage_diagnostics, fn existing ->
+          storage_diagnostics ++ existing
+        end)
 
-            # Convert compaction to a summary message
-            summary_msg = reconstruct_compaction(compaction)
+      Journal.replay(entries, journal_opts)
+    end
+  end
 
-            # Get messages after compaction, or ones that should be kept
-            kept_messages =
-              entries
-              |> Enum.drop_while(fn e ->
-                e["id"] != first_kept_id and
-                  (is_nil(e["message"]) or e["message"]["id"] != first_kept_id)
-              end)
-              |> Enum.filter(fn e -> e["type"] == "message" end)
-              |> Enum.map(&reconstruct_message/1)
-
-            [summary_msg | kept_messages]
-          else
-            entries
-            |> Enum.filter(fn entry -> entry["type"] == "message" end)
-            |> Enum.map(&reconstruct_message/1)
-          end
-
-        {:ok, messages}
-
-      {:error, _} = error ->
-        error
+  defp read_entries(storage_id, storage_mod) do
+    if Code.ensure_loaded?(storage_mod) and
+         function_exported?(storage_mod, :read_with_diagnostics, 1) do
+      storage_mod.read_with_diagnostics(storage_id)
+    else
+      with {:ok, entries} <- storage_mod.read(storage_id) do
+        {:ok, entries, []}
+      end
     end
   end
 
@@ -360,87 +349,5 @@ defmodule Sigma.Session.Log do
     |> Map.from_struct()
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
     |> Map.new(fn {k, v} -> {Atom.to_string(k), v} end)
-  end
-
-  defp reconstruct_message(entry) do
-    data = entry["message"]
-
-    # 1. Map top-level keys to atoms
-    atom_data =
-      for {k, v} <- data, into: %{} do
-        {String.to_atom(k), v}
-      end
-
-    # 2. Fix specific fields that should be atoms
-    atom_data =
-      atom_data
-      |> fix_atom_field(:role)
-      |> fix_atom_field(:stop_reason)
-      |> fix_atom_field(:level)
-      |> fix_atom_field(:status_type)
-
-    # 3. Handle nested content if it's a list of maps
-    atom_data = Map.update(atom_data, :content, nil, &fix_content/1)
-
-    # 4. Handle usage map
-    atom_data = Map.update(atom_data, :usage, nil, &fix_usage/1)
-
-    struct(Message, atom_data)
-  end
-
-  defp reconstruct_compaction(entry) do
-    {:ok, dt, _} = DateTime.from_iso8601(entry["timestamp"])
-
-    %Message{
-      role: :compaction_summary,
-      content: entry["summary"],
-      timestamp: DateTime.to_unix(dt, :millisecond),
-      id: entry["id"]
-    }
-  end
-
-  defp fix_atom_field(map, field) do
-    case Map.get(map, field) do
-      nil -> map
-      val when is_binary(val) -> Map.put(map, field, String.to_atom(val))
-      _ -> map
-    end
-  end
-
-  defp fix_content(content) when is_list(content) do
-    Enum.map(content, fn
-      item when is_map(item) ->
-        for {k, v} <- item, into: %{} do
-          {String.to_atom(k), v}
-        end
-        |> Map.update(:type, nil, fn
-          nil -> nil
-          type -> String.to_atom(type)
-        end)
-
-      item ->
-        item
-    end)
-  end
-
-  defp fix_content(content), do: content
-
-  defp fix_usage(nil), do: nil
-
-  defp fix_usage(usage) when is_map(usage) do
-    for {k, v} <- usage, into: %{} do
-      case k do
-        "cost" -> {:cost, fix_cost(v)}
-        _ -> {String.to_atom(k), v}
-      end
-    end
-  end
-
-  defp fix_cost(nil), do: nil
-
-  defp fix_cost(cost) when is_map(cost) do
-    for {k, v} <- cost, into: %{} do
-      {String.to_atom(k), v}
-    end
   end
 end

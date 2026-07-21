@@ -3,12 +3,23 @@ defmodule Sigma.Session.LogTest do
   alias Sigma.Session.Log
   alias Sigma.Agent.Message
 
+  defmodule ReadOnlyStorage do
+    @behaviour Sigma.Session.Storage
+
+    @impl true
+    def append(path, entry), do: Sigma.Session.Storage.JsonlFile.append(path, entry)
+
+    @impl true
+    def read(path), do: Sigma.Session.Storage.JsonlFile.read(path)
+  end
+
   @storage_path "test_session.jsonl"
 
   setup do
     on_exit(fn ->
       File.rm(@storage_path)
     end)
+
     :ok
   end
 
@@ -82,5 +93,99 @@ defmodule Sigma.Session.LogTest do
     assert c2.type == :text
     assert replayed.usage.input == 10
     assert replayed.usage.cost.total == 0.001
+  end
+
+  @tag :tmp_dir
+  test "snapshot selects an explicit active leaf while replay keeps the latest leaf", %{
+    tmp_dir: tmp_dir
+  } do
+    path = Path.join(tmp_dir, "branched.jsonl")
+
+    entries = [
+      %{
+        "type" => "session",
+        "version" => 3,
+        "id" => "session",
+        "timestamp" => "2026-07-21T00:00:00Z",
+        "cwd" => "/repo"
+      },
+      %{
+        "type" => "message",
+        "id" => "root",
+        "parentId" => nil,
+        "timestamp" => "2026-07-21T00:00:01Z",
+        "message" => %{
+          "id" => "message-root",
+          "role" => "user",
+          "content" => "root",
+          "timestamp" => 1
+        }
+      },
+      %{
+        "type" => "message",
+        "id" => "left",
+        "parentId" => "root",
+        "timestamp" => "2026-07-21T00:00:02Z",
+        "message" => %{
+          "id" => "message-left",
+          "role" => "assistant",
+          "content" => "left",
+          "timestamp" => 2
+        }
+      },
+      %{
+        "type" => "message",
+        "id" => "right",
+        "parentId" => "root",
+        "timestamp" => "2026-07-21T00:00:03Z",
+        "message" => %{
+          "id" => "message-right",
+          "role" => "assistant",
+          "content" => "right",
+          "timestamp" => 3
+        }
+      }
+    ]
+
+    Enum.each(entries, &Sigma.Session.Storage.JsonlFile.append(path, &1))
+
+    assert {:ok, snapshot} = Log.snapshot(path, leaf_id: "left")
+    assert snapshot.active_leaf_id == "left"
+    assert Enum.map(snapshot.messages, & &1.id) == ["message-root", "message-left"]
+
+    assert {:ok, latest_messages} = Log.replay(path, ReadOnlyStorage)
+    assert Enum.map(latest_messages, & &1.id) == ["message-root", "message-right"]
+  end
+
+  @tag :tmp_dir
+  test "snapshot includes storage diagnostics while replay remains tolerant", %{tmp_dir: tmp_dir} do
+    path = Path.join(tmp_dir, "torn.jsonl")
+
+    caller_diagnostic = %{
+      kind: :invalid_entry,
+      entry_index: 0,
+      entry_id: nil,
+      reason: :caller_diagnostic
+    }
+
+    File.write!(path, [
+      Jason.encode!(%{
+        "type" => "session",
+        "version" => 3,
+        "id" => "session",
+        "timestamp" => "2026-07-21T00:00:00Z",
+        "cwd" => "/repo"
+      }),
+      "\n{torn"
+    ])
+
+    assert {:ok, snapshot} = Log.snapshot(path, diagnostics: [caller_diagnostic])
+
+    assert snapshot.diagnostics == [
+             %{kind: :trailing_incomplete_json, line: 2},
+             caller_diagnostic
+           ]
+
+    assert {:ok, []} = Log.replay(path)
   end
 end
