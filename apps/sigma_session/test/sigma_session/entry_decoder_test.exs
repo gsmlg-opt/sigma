@@ -112,18 +112,21 @@ defmodule Sigma.Session.EntryDecoderTest do
             }} = EntryDecoder.compaction(entry)
   end
 
-  test "decodes the generic status type through an explicit mapping" do
+  test "allows an explicitly nil status type" do
     entry =
       message_entry(%{
         "role" => "status",
         "content" => "working",
-        "status_type" => "status"
+        "status_type" => nil
       })
 
-    assert {:ok, %Message{role: :status, status_type: :status}} = EntryDecoder.message(entry)
+    assert {:ok, %Message{role: :status, status_type: nil}} = EntryDecoder.message(entry)
   end
 
   test "rejects unknown status types without creating atoms" do
+    assert {:error, {:unknown_status_type, "status"}} =
+             EntryDecoder.message(message_entry(%{"role" => "status", "status_type" => "status"}))
+
     unknown = "journal_unknown_#{System.unique_integer([:positive])}"
     assert_raise ArgumentError, fn -> String.to_existing_atom(unknown) end
 
@@ -153,7 +156,7 @@ defmodule Sigma.Session.EntryDecoderTest do
       valid_message(%{
         "role" => "assistant",
         "content" => "legacy response",
-        "usage" => %{"input" => 10, "cost" => %{"total" => 0.1}}
+        "usage" => %{"input" => 10, "output" => 2, "cost" => %{"total" => 0.1}}
       })
       |> Map.delete("timestamp")
 
@@ -163,8 +166,57 @@ defmodule Sigma.Session.EntryDecoderTest do
             %Message{
               timestamp: 1_784_592_000_000,
               content: "legacy response",
-              usage: %{input: 10, cost: %{total: 0.1}}
+              usage: %{input: 10, output: 2, cost: %{total: 0.1}}
             }} = EntryDecoder.message(entry)
+  end
+
+  test "requires input and output when usage is present" do
+    empty_usage = message_entry(%{"usage" => %{}})
+    input_only = message_entry(%{"usage" => %{"input" => 10}})
+
+    assert {:error, {:invalid_usage_field, :input}} = EntryDecoder.message(empty_usage)
+    assert {:error, {:invalid_usage_field, :output}} = EntryDecoder.message(input_only)
+  end
+
+  test "requires non-empty tool result identities" do
+    valid = %{
+      "role" => "tool_result",
+      "content" => "result",
+      "tool_call_id" => "call-1",
+      "tool_name" => "read"
+    }
+
+    cases = [
+      {Map.delete(valid, "tool_call_id"), :tool_call_id},
+      {Map.put(valid, "tool_call_id", ""), :tool_call_id},
+      {Map.delete(valid, "tool_name"), :tool_name},
+      {Map.put(valid, "tool_name", ""), :tool_name}
+    ]
+
+    for {overrides, field} <- cases do
+      assert {:error, {:invalid_tool_result_field, ^field}} =
+               EntryDecoder.message(message_entry(overrides))
+    end
+  end
+
+  test "validates tool result is_error while preserving nil" do
+    valid = %{
+      "role" => "tool_result",
+      "content" => "result",
+      "tool_call_id" => "call-1",
+      "tool_name" => "read"
+    }
+
+    assert {:ok, %Message{is_error: nil}} = EntryDecoder.message(message_entry(valid))
+
+    assert {:ok, %Message{is_error: nil}} =
+             EntryDecoder.message(message_entry(Map.put(valid, "is_error", nil)))
+
+    assert {:ok, %Message{is_error: false}} =
+             EntryDecoder.message(message_entry(Map.put(valid, "is_error", false)))
+
+    assert {:error, {:invalid_tool_result_field, :is_error}} =
+             EntryDecoder.message(message_entry(Map.put(valid, "is_error", "false")))
   end
 
   test "rejects content that violates role contracts" do
@@ -207,7 +259,11 @@ defmodule Sigma.Session.EntryDecoderTest do
 
   test "rejects malformed known usage and cost fields" do
     invalid_usage = message_entry(%{"usage" => %{"input" => "10"}})
-    invalid_cost = message_entry(%{"usage" => %{"cost" => %{"total" => "0.1"}}})
+
+    invalid_cost =
+      message_entry(%{
+        "usage" => %{"input" => 10, "output" => 2, "cost" => %{"total" => "0.1"}}
+      })
 
     assert {:error, {:invalid_usage_field, :input}} = EntryDecoder.message(invalid_usage)
     assert {:error, {:invalid_cost_field, :total}} = EntryDecoder.message(invalid_cost)

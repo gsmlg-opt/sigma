@@ -79,7 +79,7 @@ defmodule Sigma.Session.EntryDecoder do
 
   @levels %{"info" => :info, "warning" => :warning, "error" => :error}
 
-  @status_types %{"status" => :status}
+  @status_types %{}
 
   @content_types %{
     "text" => :text,
@@ -100,6 +100,7 @@ defmodule Sigma.Session.EntryDecoder do
            optional_enum(Map.get(data, "status_type"), @status_types, :status_type),
          {:ok, content} <- content(Map.get(data, "content")),
          :ok <- validate_content_for_role(role, content),
+         :ok <- validate_role_fields(role, data),
          {:ok, usage} <- usage(Map.get(data, "usage")) do
       attrs =
         data
@@ -308,10 +309,33 @@ defmodule Sigma.Session.EntryDecoder do
 
   defp invalid_content_for_role(role), do: {:error, {:invalid_content_for_role, role}}
 
+  defp validate_role_fields(:tool_result, data) do
+    with :ok <- required_tool_result_identity(data, "tool_call_id", :tool_call_id),
+         :ok <- required_tool_result_identity(data, "tool_name", :tool_name),
+         :ok <- optional_tool_result_error(Map.get(data, "is_error")) do
+      :ok
+    end
+  end
+
+  defp validate_role_fields(_role, _data), do: :ok
+
+  defp required_tool_result_identity(data, string_key, atom_key) do
+    case Map.get(data, string_key) do
+      value when is_binary(value) and byte_size(value) > 0 -> :ok
+      _value -> {:error, {:invalid_tool_result_field, atom_key}}
+    end
+  end
+
+  defp optional_tool_result_error(nil), do: :ok
+  defp optional_tool_result_error(value) when is_boolean(value), do: :ok
+  defp optional_tool_result_error(_value), do: {:error, {:invalid_tool_result_field, :is_error}}
+
   defp usage(nil), do: {:ok, nil}
 
   defp usage(data) when is_map(data) do
-    with {:ok, decoded} <-
+    with :ok <- required_usage_field(data, "input", :input),
+         :ok <- required_usage_field(data, "output", :output),
+         {:ok, decoded} <-
            take_validated(data, @usage_fields, &is_integer/1, :invalid_usage_field),
          {:ok, cost} <- usage_cost(Map.get(data, "cost")) do
       {:ok, maybe_put(decoded, :cost, cost)}
@@ -319,6 +343,13 @@ defmodule Sigma.Session.EntryDecoder do
   end
 
   defp usage(_data), do: {:error, :invalid_usage}
+
+  defp required_usage_field(data, string_key, atom_key) do
+    case Map.get(data, string_key) do
+      value when is_integer(value) -> :ok
+      _value -> {:error, {:invalid_usage_field, atom_key}}
+    end
+  end
 
   defp usage_cost(nil), do: {:ok, nil}
 
