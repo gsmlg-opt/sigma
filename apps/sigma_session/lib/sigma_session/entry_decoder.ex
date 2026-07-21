@@ -3,27 +3,25 @@ defmodule Sigma.Session.EntryDecoder do
 
   alias Sigma.Agent.Message
 
-  @message_fields %{
-    "id" => :id,
-    "timestamp" => :timestamp,
-    "api" => :api,
-    "provider" => :provider,
-    "model" => :model,
-    "response_model" => :response_model,
-    "response_id" => :response_id,
-    "error_message" => :error_message,
-    "tool_call_id" => :tool_call_id,
-    "tool_name" => :tool_name,
-    "is_error" => :is_error,
-    "attachments" => :attachments,
-    "metadata" => :metadata,
-    "redacted" => :redacted,
-    "command" => :command,
-    "exit_code" => :exit_code,
-    "summary" => :summary,
-    "from_id" => :from_id,
-    "tokens_before" => :tokens_before
-  }
+  @message_fields [
+    {"api", :api, :nullable_string},
+    {"provider", :provider, :nullable_string},
+    {"model", :model, :nullable_string},
+    {"response_model", :response_model, :nullable_string},
+    {"response_id", :response_id, :nullable_string},
+    {"error_message", :error_message, :nullable_string},
+    {"tool_call_id", :tool_call_id, :nullable_string},
+    {"tool_name", :tool_name, :nullable_string},
+    {"is_error", :is_error, :nullable_boolean},
+    {"attachments", :attachments, :nullable_list},
+    {"metadata", :metadata, :map},
+    {"redacted", :redacted, :boolean},
+    {"command", :command, :nullable_string},
+    {"exit_code", :exit_code, :nullable_integer},
+    {"summary", :summary, :nullable_string},
+    {"from_id", :from_id, :nullable_string},
+    {"tokens_before", :tokens_before, :nullable_integer}
+  ]
 
   @content_fields %{
     "id" => :id,
@@ -101,10 +99,10 @@ defmodule Sigma.Session.EntryDecoder do
          {:ok, content} <- content(Map.get(data, "content")),
          :ok <- validate_content_for_role(role, content),
          :ok <- validate_role_fields(role, data),
+         {:ok, message_fields} <- message_fields(data),
          {:ok, usage} <- usage(Map.get(data, "usage")) do
       attrs =
-        data
-        |> take_known(@message_fields)
+        message_fields
         |> Map.put(:id, id)
         |> Map.put(:timestamp, timestamp)
         |> Map.put(:role, role)
@@ -120,7 +118,7 @@ defmodule Sigma.Session.EntryDecoder do
 
   def message(_entry), do: {:error, :invalid_message}
 
-  defp message_id(id) when is_binary(id), do: {:ok, id}
+  defp message_id(id) when is_binary(id) and byte_size(id) > 0, do: {:ok, id}
   defp message_id(_id), do: {:error, :invalid_message_id}
 
   defp message_timestamp(timestamp, _entry_timestamp) when is_integer(timestamp),
@@ -238,8 +236,8 @@ defmodule Sigma.Session.EntryDecoder do
   end
 
   defp validate_content_item(:tool_call, item) do
-    with :ok <- required_content_field(item, :tool_call, :id, &is_binary/1),
-         :ok <- required_content_field(item, :tool_call, :name, &is_binary/1),
+    with :ok <- required_content_field(item, :tool_call, :id, &non_empty_binary?/1),
+         :ok <- required_content_field(item, :tool_call, :name, &non_empty_binary?/1),
          :ok <- required_content_field(item, :tool_call, :arguments, &is_map/1),
          :ok <- nullable_content_field(item, :tool_call, :thought_signature, &is_binary/1) do
       :ok
@@ -299,7 +297,55 @@ defmodule Sigma.Session.EntryDecoder do
   defp validate_content_for_role(:tool_result, _content),
     do: invalid_content_for_role(:tool_result)
 
-  defp validate_content_for_role(_role, _content), do: :ok
+  defp validate_content_for_role(:assistant, content)
+       when is_binary(content) or is_nil(content),
+       do: :ok
+
+  defp validate_content_for_role(:assistant, content) when is_list(content),
+    do: validate_content_types(:assistant, content, [:text, :thinking, :image, :tool_call])
+
+  defp validate_content_for_role(:assistant, _content),
+    do: invalid_content_for_role(:assistant)
+
+  defp validate_content_for_role(:thought, content) when is_binary(content), do: :ok
+  defp validate_content_for_role(:thought, _content), do: invalid_content_for_role(:thought)
+
+  defp validate_content_for_role(:status, content) when is_binary(content), do: :ok
+
+  defp validate_content_for_role(:status, _content), do: invalid_content_for_role(:status)
+
+  defp validate_content_for_role(:notification, content) when is_binary(content), do: :ok
+
+  defp validate_content_for_role(:notification, _content),
+    do: invalid_content_for_role(:notification)
+
+  defp validate_content_for_role(:branch_summary, content)
+       when is_binary(content) or is_nil(content),
+       do: :ok
+
+  defp validate_content_for_role(:branch_summary, _content),
+    do: invalid_content_for_role(:branch_summary)
+
+  defp validate_content_for_role(:compaction_summary, content) when is_binary(content), do: :ok
+
+  defp validate_content_for_role(:compaction_summary, _content),
+    do: invalid_content_for_role(:compaction_summary)
+
+  defp validate_content_for_role(:bash_execution, content)
+       when is_binary(content) or is_nil(content),
+       do: :ok
+
+  defp validate_content_for_role(:bash_execution, _content),
+    do: invalid_content_for_role(:bash_execution)
+
+  defp validate_content_for_role(:artifact, content) when is_binary(content) or is_nil(content),
+    do: :ok
+
+  defp validate_content_for_role(:artifact, content) when is_list(content),
+    do: validate_content_types(:artifact, content, [:text, :image])
+
+  defp validate_content_for_role(:artifact, _content),
+    do: invalid_content_for_role(:artifact)
 
   defp validate_content_types(role, content, allowed_types) do
     if Enum.all?(content, &(Map.get(&1, :type) in allowed_types)),
@@ -329,6 +375,29 @@ defmodule Sigma.Session.EntryDecoder do
   defp optional_tool_result_error(nil), do: :ok
   defp optional_tool_result_error(value) when is_boolean(value), do: :ok
   defp optional_tool_result_error(_value), do: {:error, {:invalid_tool_result_field, :is_error}}
+
+  defp message_fields(data) do
+    Enum.reduce_while(@message_fields, {:ok, %{}}, fn {string_key, atom_key, type}, {:ok, acc} ->
+      case Map.fetch(data, string_key) do
+        {:ok, value} ->
+          if valid_message_field?(value, type) do
+            {:cont, {:ok, Map.put(acc, atom_key, value)}}
+          else
+            {:halt, {:error, {:invalid_message_field, atom_key}}}
+          end
+
+        :error ->
+          {:cont, {:ok, acc}}
+      end
+    end)
+  end
+
+  defp valid_message_field?(value, :nullable_string), do: is_binary(value) or is_nil(value)
+  defp valid_message_field?(value, :nullable_boolean), do: is_boolean(value) or is_nil(value)
+  defp valid_message_field?(value, :nullable_list), do: is_list(value) or is_nil(value)
+  defp valid_message_field?(value, :nullable_integer), do: is_integer(value) or is_nil(value)
+  defp valid_message_field?(value, :map), do: is_map(value)
+  defp valid_message_field?(value, :boolean), do: is_boolean(value)
 
   defp usage(nil), do: {:ok, nil}
 
@@ -381,6 +450,8 @@ defmodule Sigma.Session.EntryDecoder do
       end
     end)
   end
+
+  defp non_empty_binary?(value), do: is_binary(value) and byte_size(value) > 0
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)

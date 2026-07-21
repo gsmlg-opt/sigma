@@ -141,6 +141,7 @@ defmodule Sigma.Session.EntryDecoderTest do
 
     cases = [
       {Map.delete(valid, "id"), :invalid_message_id},
+      {Map.put(valid, "id", ""), :invalid_message_id},
       {Map.put(valid, "id", 123), :invalid_message_id},
       {Map.delete(valid, "timestamp"), :invalid_message_timestamp},
       {Map.put(valid, "timestamp", "1"), :invalid_message_timestamp}
@@ -149,6 +150,58 @@ defmodule Sigma.Session.EntryDecoderTest do
     for {message, expected_error} <- cases do
       assert {:error, ^expected_error} = EntryDecoder.message(%{"message" => message})
     end
+  end
+
+  test "validates every copied message field against the Message type" do
+    nullable_strings = [
+      {"api", :api},
+      {"provider", :provider},
+      {"model", :model},
+      {"response_model", :response_model},
+      {"response_id", :response_id},
+      {"error_message", :error_message},
+      {"tool_call_id", :tool_call_id},
+      {"tool_name", :tool_name},
+      {"command", :command},
+      {"summary", :summary},
+      {"from_id", :from_id}
+    ]
+
+    for {field, expected_field} <- nullable_strings do
+      assert {:ok, %Message{}} = EntryDecoder.message(message_entry(%{field => nil}))
+
+      assert {:error, {:invalid_message_field, ^expected_field}} =
+               EntryDecoder.message(message_entry(%{field => 42}))
+    end
+
+    for {field, expected_field} <- [{"exit_code", :exit_code}, {"tokens_before", :tokens_before}] do
+      assert {:ok, %Message{}} = EntryDecoder.message(message_entry(%{field => nil}))
+
+      assert {:error, {:invalid_message_field, ^expected_field}} =
+               EntryDecoder.message(message_entry(%{field => "1"}))
+    end
+
+    assert {:ok, %Message{is_error: nil}} =
+             EntryDecoder.message(message_entry(%{"is_error" => nil}))
+
+    assert {:error, {:invalid_message_field, :is_error}} =
+             EntryDecoder.message(message_entry(%{"is_error" => "false"}))
+
+    assert {:ok, %Message{attachments: nil}} =
+             EntryDecoder.message(message_entry(%{"attachments" => nil}))
+
+    assert {:error, {:invalid_message_field, :attachments}} =
+             EntryDecoder.message(message_entry(%{"attachments" => %{}}))
+
+    assert {:ok, %Message{metadata: %{}}} = EntryDecoder.message(message_entry(%{}))
+
+    assert {:error, {:invalid_message_field, :metadata}} =
+             EntryDecoder.message(message_entry(%{"metadata" => nil}))
+
+    assert {:ok, %Message{redacted: false}} = EntryDecoder.message(message_entry(%{}))
+
+    assert {:error, {:invalid_message_field, :redacted}} =
+             EntryDecoder.message(message_entry(%{"redacted" => "false"}))
   end
 
   test "uses the journal timestamp for legacy messages without a nested timestamp" do
@@ -233,12 +286,66 @@ defmodule Sigma.Session.EntryDecoderTest do
       {"system", nil, :system},
       {"user", nil, :user},
       {"user", [tool_call], :user},
-      {"tool_result", [thinking], :tool_result}
+      {"tool_result", [thinking], :tool_result},
+      {"thought", [%{"type" => "image", "data" => "a", "mime_type" => "image/png"}], :thought},
+      {"status", nil, :status},
+      {"status", [thinking], :status},
+      {"notification", nil, :notification},
+      {"notification", [thinking], :notification},
+      {"branch_summary", [thinking], :branch_summary},
+      {"compaction_summary", nil, :compaction_summary},
+      {"bash_execution", [thinking], :bash_execution},
+      {"artifact", [thinking], :artifact}
     ]
 
     for {role, content, role_atom} <- cases do
-      entry = message_entry(%{"role" => role, "content" => content})
+      overrides =
+        if role == "tool_result" do
+          %{
+            "role" => role,
+            "content" => content,
+            "tool_call_id" => "call-1",
+            "tool_name" => "read"
+          }
+        else
+          %{"role" => role, "content" => content}
+        end
+
+      entry = message_entry(overrides)
       assert {:error, {:invalid_content_for_role, ^role_atom}} = EntryDecoder.message(entry)
+    end
+  end
+
+  test "accepts structurally safe content for every known role" do
+    image = [%{"type" => "image", "data" => "a", "mime_type" => "image/png"}]
+    assistant = [%{"type" => "thinking", "thinking" => "hmm"}]
+
+    cases = [
+      %{"role" => "system", "content" => "instructions"},
+      %{"role" => "user", "content" => image},
+      %{"role" => "assistant", "content" => assistant},
+      %{
+        "role" => "tool_result",
+        "content" => image,
+        "tool_call_id" => "call-1",
+        "tool_name" => "read"
+      },
+      %{"role" => "thought", "content" => "thinking"},
+      %{"role" => "status", "content" => "working"},
+      %{"role" => "notification", "content" => "done"},
+      %{
+        "role" => "branch_summary",
+        "content" => nil,
+        "summary" => "earlier branch",
+        "from_id" => "message-1"
+      },
+      %{"role" => "compaction_summary", "content" => "summary"},
+      %{"role" => "bash_execution", "content" => nil, "command" => "mix test", "exit_code" => 0},
+      %{"role" => "artifact", "content" => nil, "attachments" => []}
+    ]
+
+    for overrides <- cases do
+      assert {:ok, %Message{}} = EntryDecoder.message(message_entry(overrides))
     end
   end
 
@@ -247,6 +354,10 @@ defmodule Sigma.Session.EntryDecoderTest do
       {%{"type" => "text"}, {:invalid_content_field, :text, :text}},
       {%{"type" => "thinking", "thinking" => 42}, {:invalid_content_field, :thinking, :thinking}},
       {%{"type" => "image", "data" => "image"}, {:invalid_content_field, :image, :mime_type}},
+      {%{"type" => "tool_call", "id" => "", "name" => "read", "arguments" => %{}},
+       {:invalid_content_field, :tool_call, :id}},
+      {%{"type" => "tool_call", "id" => "call-1", "name" => "", "arguments" => %{}},
+       {:invalid_content_field, :tool_call, :name}},
       {%{"type" => "tool_call", "id" => "call-1", "name" => "read", "arguments" => []},
        {:invalid_content_field, :tool_call, :arguments}}
     ]

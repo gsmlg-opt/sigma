@@ -403,6 +403,43 @@ defmodule Sigma.Session.JournalTest do
              {:ok, snapshot}
   end
 
+  test "excludes malformed messages without disconnecting their valid descendants" do
+    entries = [
+      header("session", "/repo"),
+      message_entry("bad-redacted", nil, "message-1", "user", "hidden")
+      |> put_in(["message", "redacted"], "false"),
+      message_entry(
+        "bad-thought",
+        "bad-redacted",
+        "message-2",
+        "thought",
+        [%{"type" => "image", "data" => "a", "mime_type" => "image/png"}]
+      ),
+      message_entry("leaf", "bad-thought", "message-3", "user", "kept")
+    ]
+
+    assert {:ok,
+            %Snapshot{
+              active_leaf_id: "leaf",
+              branch_entry_ids: ["bad-redacted", "bad-thought", "leaf"],
+              messages: [%Message{id: "message-3", content: "kept"}],
+              diagnostics: [
+                %{
+                  kind: :invalid_payload,
+                  entry_index: 1,
+                  entry_id: "bad-redacted",
+                  reason: {:invalid_message_field, :redacted}
+                },
+                %{
+                  kind: :invalid_payload,
+                  entry_index: 2,
+                  entry_id: "bad-thought",
+                  reason: {:invalid_content_for_role, :thought}
+                }
+              ]
+            }} = Journal.replay(entries)
+  end
+
   test "keeps unknown entries in the branch but out of model context" do
     entries = [
       header("session", "/repo"),

@@ -31,7 +31,7 @@ defmodule Sigma.Session.CompactionTest do
 
     # 4. Replay and verify filtering
     {:ok, messages} = Log.replay(@test_storage)
-    
+
     # Should have compaction_summary + m3
     assert Enum.count(messages) == 2
     assert Enum.at(messages, 0).role == :compaction_summary
@@ -43,15 +43,15 @@ defmodule Sigma.Session.CompactionTest do
     Log.persist_event(@test_storage, {:agent_start, "/tmp"})
     Log.persist_event(@test_storage, {:message_end, Message.user("m1", "1")})
     Log.persist_event(@test_storage, {:message_end, Message.user("m2", "2")})
-    
+
     Log.compact(@test_storage, "Summary 1", "m2")
-    
+
     Log.persist_event(@test_storage, {:message_end, Message.user("m3", "3")})
-    
+
     Log.compact(@test_storage, "Summary 2", "m3")
-    
+
     {:ok, messages} = Log.replay(@test_storage)
-    
+
     # Should have Summary 2 + m3
     assert Enum.count(messages) == 2
     assert Enum.at(messages, 0).content == "Summary 2"
