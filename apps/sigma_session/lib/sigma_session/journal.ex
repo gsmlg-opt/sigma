@@ -32,7 +32,7 @@ defmodule Sigma.Session.Journal do
         Enum.reduce(nodes, {snapshot, []}, &reduce_entry/2)
 
       payload_diagnostics = Enum.reverse(payload_diagnostics_rev)
-      {messages, message_diagnostics} = render_messages(nodes)
+      {messages, message_diagnostics, rendered_compaction} = render_messages(nodes)
 
       journal_diagnostics =
         index.diagnostics
@@ -44,7 +44,8 @@ defmodule Sigma.Session.Journal do
       {:ok,
        %{
          snapshot
-         | messages: messages,
+         | compaction: rendered_compaction,
+           messages: messages,
            diagnostics: diagnostics
        }}
     end
@@ -165,70 +166,155 @@ defmodule Sigma.Session.Journal do
   end
 
   defp render_messages(nodes) do
-    case latest_compaction(nodes) do
-      nil ->
-        decode_message_nodes(nodes)
+    analysis = analyze_message_branch(nodes)
+    {selected_compaction, compaction_diagnostics} = select_compaction(analysis)
 
-      compaction_node ->
-        render_compacted_messages(nodes, compaction_node)
-    end
+    messages = render_analyzed_messages(analysis.decoded_messages, selected_compaction)
+
+    diagnostics =
+      merge_diagnostics(analysis.message_diagnostics, compaction_diagnostics)
+
+    rendered_compaction =
+      case selected_compaction do
+        nil -> nil
+        %{node: node} -> node.entry
+      end
+
+    {messages, diagnostics, rendered_compaction}
   end
 
-  defp latest_compaction(nodes) do
-    nodes
-    |> Enum.filter(&(&1.entry["type"] == "compaction"))
-    |> List.last()
-  end
+  defp analyze_message_branch(nodes) do
+    initial = %{
+      entry_positions: %{},
+      message_positions: %{},
+      decoded_messages: [],
+      message_diagnostics: [],
+      compactions: []
+    }
 
-  defp render_compacted_messages(nodes, compaction_node) do
-    compaction_position = Enum.find_index(nodes, &(&1.entry["id"] == compaction_node.entry["id"]))
-    target_id = compaction_node.entry["firstKeptEntryId"] || compaction_node.entry["firstKeptId"]
+    {analysis, _next_position} =
+      Enum.reduce(nodes, {initial, 0}, fn node, {analysis, position} ->
+        entry = node.entry
 
-    target_position =
-      Enum.find_index(nodes, fn node ->
-        node.entry["id"] == target_id or get_in(node.entry, ["message", "id"]) == target_id
+        entry_positions =
+          case entry["id"] do
+            id when is_binary(id) -> Map.put(analysis.entry_positions, id, position)
+            _id -> analysis.entry_positions
+          end
+
+        message_positions =
+          case entry do
+            %{"message" => %{"id" => id}} when is_binary(id) ->
+              Map.put_new(analysis.message_positions, id, position)
+
+            _entry ->
+              analysis.message_positions
+          end
+
+        {decoded_messages, message_diagnostics} =
+          if entry["type"] == "message" do
+            case EntryDecoder.message(entry) do
+              {:ok, message} ->
+                {[{position, message} | analysis.decoded_messages], analysis.message_diagnostics}
+
+              {:error, reason} ->
+                {analysis.decoded_messages,
+                 [payload_diagnostic(node, reason) | analysis.message_diagnostics]}
+            end
+          else
+            {analysis.decoded_messages, analysis.message_diagnostics}
+          end
+
+        compactions =
+          if entry["type"] == "compaction" do
+            [{position, node} | analysis.compactions]
+          else
+            analysis.compactions
+          end
+
+        {%{
+           analysis
+           | entry_positions: entry_positions,
+             message_positions: message_positions,
+             decoded_messages: decoded_messages,
+             message_diagnostics: message_diagnostics,
+             compactions: compactions
+         }, position + 1}
       end)
 
-    if is_integer(target_position) and target_position < compaction_position do
-      {kept_messages, diagnostics} = nodes |> Enum.drop(target_position) |> decode_message_nodes()
+    %{
+      analysis
+      | decoded_messages: Enum.reverse(analysis.decoded_messages),
+        message_diagnostics: Enum.reverse(analysis.message_diagnostics)
+    }
+  end
 
-      case EntryDecoder.compaction(compaction_node.entry) do
-        {:ok, summary} ->
-          {[summary | kept_messages], diagnostics}
+  defp select_compaction(analysis) do
+    Enum.reduce_while(analysis.compactions, {nil, []}, fn {position, node},
+                                                          {_selected, diagnostics} ->
+      case applicable_compaction(node, position, analysis) do
+        {:ok, summary, target_position} ->
+          selected = %{node: node, summary: summary, target_position: target_position}
+          {:halt, {selected, diagnostics}}
 
         {:error, reason} ->
-          {all_messages, all_diagnostics} = decode_message_nodes(nodes)
-
-          {all_messages,
-           merge_diagnostics(all_diagnostics, [payload_diagnostic(compaction_node, reason)])}
+          {:cont, {nil, [payload_diagnostic(node, reason) | diagnostics]}}
       end
-    else
-      {all_messages, diagnostics} = decode_message_nodes(nodes)
+    end)
+  end
 
-      {all_messages,
-       merge_diagnostics(diagnostics, [
-         payload_diagnostic(compaction_node, :invalid_compaction_target)
-       ])}
+  defp applicable_compaction(node, position, analysis) do
+    with {:ok, summary} <- EntryDecoder.compaction(node.entry),
+         target_position when is_integer(target_position) <-
+           compaction_target_position(node.entry, analysis),
+         true <- target_position < position do
+      {:ok, summary, target_position}
+    else
+      {:error, reason} -> {:error, reason}
+      _invalid_target -> {:error, :invalid_compaction_target}
     end
   end
 
-  defp decode_message_nodes(nodes) do
-    {messages_rev, diagnostics_rev} =
-      Enum.reduce(nodes, {[], []}, fn node, {messages, diagnostics} ->
-        if node.entry["type"] == "message" do
-          case EntryDecoder.message(node.entry) do
-            {:ok, message} ->
-              {[message | messages], diagnostics}
+  defp compaction_target_position(entry, analysis) do
+    case entry["firstKeptEntryId"] do
+      nil ->
+        legacy_target_position(entry["firstKeptId"], analysis)
 
-            {:error, reason} ->
-              {messages, [payload_diagnostic(node, reason) | diagnostics]}
-          end
-        else
-          {messages, diagnostics}
-        end
-      end)
+      target_id ->
+        entry_target_position(target_id, analysis)
+    end
+  end
 
-    {Enum.reverse(messages_rev), Enum.reverse(diagnostics_rev)}
+  defp entry_target_position(target_id, analysis) when is_binary(target_id),
+    do: Map.get(analysis.entry_positions, target_id)
+
+  defp entry_target_position(_target_id, _analysis), do: nil
+
+  defp legacy_target_position(target_id, analysis) when is_binary(target_id) do
+    entry_position = Map.get(analysis.entry_positions, target_id)
+    message_position = Map.get(analysis.message_positions, target_id)
+
+    case {entry_position, message_position} do
+      {nil, nil} -> nil
+      {nil, position} -> position
+      {position, nil} -> position
+      {entry_position, message_position} -> min(entry_position, message_position)
+    end
+  end
+
+  defp legacy_target_position(_target_id, _analysis), do: nil
+
+  defp render_analyzed_messages(decoded_messages, nil) do
+    Enum.map(decoded_messages, fn {_position, message} -> message end)
+  end
+
+  defp render_analyzed_messages(decoded_messages, selected_compaction) do
+    kept_messages =
+      for {position, message} <- decoded_messages,
+          position >= selected_compaction.target_position,
+          do: message
+
+    [selected_compaction.summary | kept_messages]
   end
 
   defp payload_diagnostic(node, reason) do

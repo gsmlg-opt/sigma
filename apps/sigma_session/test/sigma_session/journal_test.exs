@@ -482,6 +482,29 @@ defmodule Sigma.Session.JournalTest do
     assert %Message{id: "message-2"} = kept
   end
 
+  test "uses legacy firstKeptId when the canonical target is nil" do
+    entries = [
+      header("session", "/repo"),
+      message_entry("entry-1", nil, "message-1", "user", "one"),
+      message_entry("entry-2", "entry-1", "message-2", "assistant", "two"),
+      state_entry("compact", "entry-2", "compaction", %{
+        "summary" => "legacy summary",
+        "firstKeptEntryId" => nil,
+        "firstKeptId" => "message-2"
+      })
+    ]
+
+    assert {:ok,
+            %Snapshot{
+              compaction: %{"id" => "compact"},
+              messages: [
+                %Message{role: :compaction_summary, content: "legacy summary"},
+                %Message{id: "message-2"}
+              ],
+              diagnostics: []
+            }} = Journal.replay(entries)
+  end
+
   test "ignores an invalid compaction target and diagnoses it" do
     entries = [
       header("session", "/repo"),
@@ -492,11 +515,214 @@ defmodule Sigma.Session.JournalTest do
       })
     ]
 
-    assert {:ok, %Snapshot{messages: [%Message{id: "message-1"}], diagnostics: diagnostics}} =
+    assert {:ok,
+            %Snapshot{
+              compaction: nil,
+              messages: [%Message{id: "message-1"}],
+              diagnostics: diagnostics
+            }} =
              Journal.replay(entries)
 
     assert Enum.any?(diagnostics, &(&1.reason == :invalid_compaction_target))
     assert [_diagnostic] = diagnostics
+  end
+
+  test "diagnoses a non-map message before a valid compaction target without raising" do
+    entries = [
+      header("session", "/repo"),
+      state_entry("bad-message", nil, "message", %{"message" => "malformed"}),
+      message_entry("kept", "bad-message", "message-kept", "user", "kept"),
+      state_entry("compact", "kept", "compaction", %{
+        "summary" => "summary",
+        "firstKeptEntryId" => "kept"
+      })
+    ]
+
+    assert {:ok,
+            %Snapshot{
+              compaction: %{"id" => "compact"},
+              messages: [
+                %Message{role: :compaction_summary, content: "summary"},
+                %Message{id: "message-kept"}
+              ],
+              diagnostics: [
+                %{
+                  kind: :invalid_payload,
+                  entry_index: 1,
+                  entry_id: "bad-message",
+                  reason: :invalid_message
+                }
+              ]
+            }} = Journal.replay(entries)
+  end
+
+  test "falls back to an earlier compaction when the latest target is invalid" do
+    entries = [
+      header("session", "/repo"),
+      message_entry("entry-1", nil, "message-1", "user", "one"),
+      message_entry("entry-2", "entry-1", "message-2", "assistant", "two"),
+      state_entry("compact-earlier", "entry-2", "compaction", %{
+        "summary" => "earlier summary",
+        "firstKeptEntryId" => "entry-2"
+      }),
+      message_entry("entry-3", "compact-earlier", "message-3", "user", "three"),
+      state_entry("compact-latest", "entry-3", "compaction", %{
+        "summary" => "latest summary",
+        "firstKeptEntryId" => "missing"
+      })
+    ]
+
+    assert {:ok,
+            %Snapshot{
+              compaction: %{"id" => "compact-earlier"},
+              messages: [
+                %Message{role: :compaction_summary, content: "earlier summary"},
+                %Message{id: "message-2"},
+                %Message{id: "message-3"}
+              ],
+              diagnostics: [
+                %{
+                  kind: :invalid_payload,
+                  entry_index: 5,
+                  entry_id: "compact-latest",
+                  reason: :invalid_compaction_target
+                }
+              ]
+            }} = Journal.replay(entries)
+  end
+
+  test "falls back to an earlier compaction when the latest summary is malformed" do
+    entries = [
+      header("session", "/repo"),
+      message_entry("entry-1", nil, "message-1", "user", "one"),
+      message_entry("entry-2", "entry-1", "message-2", "assistant", "two"),
+      state_entry("compact-earlier", "entry-2", "compaction", %{
+        "summary" => "earlier summary",
+        "firstKeptEntryId" => "entry-2"
+      }),
+      message_entry("entry-3", "compact-earlier", "message-3", "user", "three"),
+      state_entry("compact-latest", "entry-3", "compaction", %{
+        "summary" => 42,
+        "firstKeptEntryId" => "entry-3"
+      })
+    ]
+
+    assert {:ok,
+            %Snapshot{
+              compaction: %{"id" => "compact-earlier"},
+              messages: [
+                %Message{role: :compaction_summary, content: "earlier summary"},
+                %Message{id: "message-2"},
+                %Message{id: "message-3"}
+              ],
+              diagnostics: [
+                %{
+                  kind: :invalid_payload,
+                  entry_index: 5,
+                  entry_id: "compact-latest",
+                  reason: :invalid_compaction
+                }
+              ]
+            }} = Journal.replay(entries)
+  end
+
+  test "clears compaction state when no compaction timestamp is valid" do
+    entries = [
+      header("session", "/repo"),
+      message_entry("entry-1", nil, "message-1", "user", "one"),
+      state_entry("compact", "entry-1", "compaction", %{
+        "summary" => "summary",
+        "firstKeptEntryId" => "entry-1"
+      })
+      |> Map.put("timestamp", "not-a-timestamp")
+    ]
+
+    assert {:ok,
+            %Snapshot{
+              compaction: nil,
+              messages: [%Message{id: "message-1"}],
+              diagnostics: [
+                %{
+                  kind: :invalid_entry,
+                  entry_index: 2,
+                  entry_id: "compact",
+                  reason: :invalid_timestamp
+                }
+              ]
+            }} = Journal.replay(entries)
+  end
+
+  test "diagnoses malformed messages across the complete compacted branch" do
+    caller_diagnostic = %{
+      kind: :invalid_json,
+      entry_id: nil,
+      reason: {:decode_error, :truncated},
+      byte_offset: 42
+    }
+
+    entries = [
+      header("session", "/repo"),
+      message_entry("old", nil, "message-old", "user", "old"),
+      message_entry("bad-before", "old", "message-bad-before", "user", nil),
+      message_entry("kept", "bad-before", "message-kept", "user", "kept"),
+      state_entry("compact", "kept", "compaction", %{
+        "summary" => "summary",
+        "firstKeptEntryId" => "kept"
+      }),
+      message_entry("bad-after", "compact", "message-bad-after", "user", nil),
+      message_entry("tail", "bad-after", "message-tail", "user", "tail")
+    ]
+
+    assert {:ok,
+            %Snapshot{
+              compaction: %{"id" => "compact"},
+              messages: [
+                %Message{role: :compaction_summary, content: "summary"},
+                %Message{id: "message-kept"},
+                %Message{id: "message-tail"}
+              ],
+              diagnostics: diagnostics
+            }} =
+             Journal.replay(entries, diagnostics: [caller_diagnostic, caller_diagnostic])
+
+    assert diagnostics == [
+             caller_diagnostic,
+             %{
+               kind: :invalid_payload,
+               entry_index: 2,
+               entry_id: "bad-before",
+               reason: {:invalid_content_for_role, :user}
+             },
+             %{
+               kind: :invalid_payload,
+               entry_index: 5,
+               entry_id: "bad-after",
+               reason: {:invalid_content_for_role, :user}
+             }
+           ]
+  end
+
+  test "resolves canonical compaction targets only by entry ID when IDs collide" do
+    entries = [
+      header("session", "/repo"),
+      message_entry("root", nil, "collision", "user", "drop me"),
+      state_entry("collision", "root", "mode_change", %{"mode" => "plan"}),
+      message_entry("kept", "collision", "message-kept", "user", "keep me"),
+      state_entry("compact", "kept", "compaction", %{
+        "summary" => "summary",
+        "firstKeptEntryId" => "collision"
+      })
+    ]
+
+    assert {:ok,
+            %Snapshot{
+              compaction: %{"id" => "compact"},
+              messages: [
+                %Message{role: :compaction_summary, content: "summary"},
+                %Message{id: "message-kept"}
+              ],
+              diagnostics: []
+            }} = Journal.replay(entries)
   end
 
   defp header(id, cwd) do
