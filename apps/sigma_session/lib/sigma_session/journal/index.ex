@@ -3,6 +3,7 @@ defmodule Sigma.Session.Journal.Index do
 
   defstruct header: nil,
             header_ids: MapSet.new(),
+            header_indexes: %{},
             ordered: [],
             by_id: %{},
             diagnostics: []
@@ -16,13 +17,14 @@ defmodule Sigma.Session.Journal.Index do
   @type diagnostic :: %{
           kind: atom(),
           entry_index: non_neg_integer(),
-          entry_id: String.t() | nil,
+          entry_id: term(),
           reason: atom()
         }
 
   @type t :: %__MODULE__{
           header: map() | nil,
           header_ids: MapSet.t(String.t()),
+          header_indexes: %{optional(String.t()) => non_neg_integer()},
           ordered: [journal_node()],
           by_id: %{optional(String.t()) => journal_node()},
           diagnostics: [diagnostic()]
@@ -44,6 +46,12 @@ defmodule Sigma.Session.Journal.Index do
 
     header_ids = valid_headers |> Enum.map(& &1["id"]) |> MapSet.new()
 
+    header_indexes =
+      Enum.reduce(header_results, %{}, fn
+        {entry, index, :ok}, indexes -> Map.put_new(indexes, entry["id"], index)
+        {_entry, _index, {:error, _reason}}, indexes -> indexes
+      end)
+
     header_diagnostics =
       for {entry, index, {:error, reason}} <- header_results,
           do: diagnostic(:invalid_header, index, entry["id"], reason)
@@ -58,6 +66,7 @@ defmodule Sigma.Session.Journal.Index do
     initial = %__MODULE__{
       header: List.last(valid_headers),
       header_ids: header_ids,
+      header_indexes: header_indexes,
       diagnostics: Enum.reverse(header_diagnostics ++ missing_header_diagnostics)
     }
 
@@ -88,7 +97,7 @@ defmodule Sigma.Session.Journal.Index do
   end
 
   defp insert({entry, entry_index}, index) do
-    case validate_entry(entry, index) do
+    case validate_entry(entry, entry_index, index) do
       {:ok, id, parent_id} ->
         node = %{
           entry: Map.put(entry, "parentId", parent_id),
@@ -116,41 +125,51 @@ defmodule Sigma.Session.Journal.Index do
     }
   end
 
-  defp validate_entry(entry, _index) when not is_map(entry),
+  defp validate_entry(entry, _entry_index, _index) when not is_map(entry),
     do: {:error, nil, :invalid_entry, :not_a_map}
 
-  defp validate_entry(entry, index) do
+  defp validate_entry(entry, entry_index, index) do
     id = entry["id"]
-    parent_id = Map.get(entry, "parentId")
 
-    cond do
-      not is_binary(entry["type"]) ->
-        {:error, id, :invalid_entry, :invalid_type}
+    with {:ok, parent_id} <- Map.fetch(entry, "parentId") do
+      cond do
+        not is_binary(entry["type"]) ->
+          {:error, id, :invalid_entry, :invalid_type}
 
-      not valid_id?(id) ->
-        {:error, id, :invalid_entry, :invalid_id}
+        not valid_id?(id) ->
+          {:error, id, :invalid_entry, :invalid_id}
 
-      MapSet.member?(index.header_ids, id) or Map.has_key?(index.by_id, id) ->
-        {:error, id, :duplicate_id, :duplicate_id}
+        MapSet.member?(index.header_ids, id) or Map.has_key?(index.by_id, id) ->
+          {:error, id, :duplicate_id, :duplicate_id}
 
-      not valid_timestamp?(entry["timestamp"]) ->
-        {:error, id, :invalid_entry, :invalid_timestamp}
+        not valid_timestamp?(entry["timestamp"]) ->
+          {:error, id, :invalid_entry, :invalid_timestamp}
 
-      parent_id == id ->
-        {:error, id, :invalid_entry, :self_parent}
+        parent_id == id ->
+          {:error, id, :invalid_entry, :self_parent}
 
-      is_nil(parent_id) or MapSet.member?(index.header_ids, parent_id) ->
-        {:ok, id, nil}
+        is_nil(parent_id) or prior_header?(index.header_indexes, parent_id, entry_index) ->
+          {:ok, id, nil}
 
-      is_binary(parent_id) and Map.has_key?(index.by_id, parent_id) ->
-        {:ok, id, parent_id}
+        is_binary(parent_id) and Map.has_key?(index.by_id, parent_id) ->
+          {:ok, id, parent_id}
 
-      true ->
-        {:error, id, :invalid_entry, :missing_parent}
+        true ->
+          {:error, id, :invalid_entry, :missing_parent}
+      end
+    else
+      :error -> {:error, id, :invalid_entry, :missing_parent_id}
     end
   end
 
   defp valid_id?(id), do: is_binary(id) and id != ""
+
+  defp prior_header?(header_indexes, parent_id, entry_index) do
+    case Map.fetch(header_indexes, parent_id) do
+      {:ok, header_index} -> header_index < entry_index
+      :error -> false
+    end
+  end
 
   defp validate_header(entry) do
     cond do

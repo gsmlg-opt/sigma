@@ -34,6 +34,30 @@ defmodule Sigma.Session.Journal.IndexTest do
     assert {:error, {:leaf_not_found, "missing"}} = Index.path(index, "missing")
   end
 
+  test "requires parentId while preserving an explicitly nil root parent" do
+    missing_parent_id =
+      entry("missing-parent-id", nil, "message")
+      |> Map.delete("parentId")
+
+    index =
+      Index.build([
+        header("session", "/repo"),
+        missing_parent_id,
+        entry("root", nil, "message")
+      ])
+
+    assert Enum.map(index.ordered, & &1.entry["id"]) == ["root"]
+
+    assert [
+             %{
+               kind: :invalid_entry,
+               entry_index: 1,
+               entry_id: "missing-parent-id",
+               reason: :missing_parent_id
+             }
+           ] = index.diagnostics
+  end
+
   test "keeps the first duplicate and diagnoses invalid entries deterministically" do
     index =
       Index.build([
@@ -59,11 +83,67 @@ defmodule Sigma.Session.Journal.IndexTest do
            ]
   end
 
+  test "diagnoses malformed entries in source order and preserves invalid ids" do
+    index =
+      Index.build([
+        header("session", "/repo"),
+        :not_a_map,
+        entry(123, nil, "message"),
+        entry("bad-type", nil, nil)
+      ])
+
+    assert index.ordered == []
+
+    assert Enum.map(
+             index.diagnostics,
+             &{&1.kind, &1.entry_index, &1.entry_id, &1.reason}
+           ) == [
+             {:invalid_entry, 1, nil, :not_a_map},
+             {:invalid_entry, 2, 123, :invalid_id},
+             {:invalid_entry, 3, "bad-type", :invalid_type}
+           ]
+  end
+
+  test "resolves an empty latest path and honors an explicit nil selection" do
+    empty_index = Index.build([])
+
+    populated_index =
+      Index.build([
+        header("session", "/repo"),
+        entry("root", nil, "message")
+      ])
+
+    assert {:ok, {nil, []}} = Index.path(empty_index)
+    assert {:ok, {nil, []}} = Index.path(populated_index, nil)
+  end
+
   test "accepts a valid header id as a legacy root parent" do
     index = Index.build([header("session", "/repo"), entry("message", "session", "message")])
 
     assert {:ok, {"message", [node]}} = Index.path(index)
     assert node.parent_id == nil
+  end
+
+  test "rejects a parent header that appears after the entry" do
+    index =
+      Index.build([
+        header("source", "/old"),
+        entry("root", "source", "message"),
+        entry("forward", "fork", "message"),
+        Map.put(header("fork", "/new"), "parentSession", "source")
+      ])
+
+    assert index.header["id"] == "fork"
+    assert Enum.map(index.ordered, & &1.entry["id"]) == ["root"]
+
+    assert [
+             %{
+               kind: :invalid_entry,
+               entry_index: 2,
+               entry_id: "forward",
+               reason: :missing_parent
+             }
+           ] = index.diagnostics
   end
 
   test "falls back to the last structurally valid legacy header" do
