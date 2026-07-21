@@ -107,6 +107,52 @@ defmodule Sigma.Web.NewSessionLiveTest do
   end
 
   @tag :tmp_dir
+  test "stores selected model in new session metadata", %{conn: conn, tmp_dir: tmp_dir} do
+    workdir =
+      Path.join(System.tmp_dir!(), "sigma-new-session-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workdir)
+
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      write_provider_configs("openai", "smart", %{
+        "openai" => ["fast", "smart"],
+        "anthropic" => ["claude", "opus"]
+      })
+
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+      html = render_async(view, 1_000)
+
+      options = Floki.parse_document!(html) |> Floki.find("#session-model-select option")
+
+      assert Enum.map(options, &option_text/1) == [
+               "openai: fast",
+               "openai: smart",
+               "anthropic: claude",
+               "anthropic: opus"
+             ]
+
+      anthropic_value =
+        options
+        |> Enum.find(&(option_text(&1) == "anthropic: opus"))
+        |> Floki.attribute("value")
+        |> List.first()
+
+      render_change(view, "select_model", %{"model" => anthropic_value})
+      assert {:error, {:live_redirect, %{kind: :push}}} = render_click(view, "create_session")
+
+      [meta_path] = Path.wildcard(Path.join(ConfigManager.sessions_dir(workdir), "*.meta.json"))
+
+      assert %{"provider_id" => "anthropic", "model_id" => "opus"} =
+               meta_path |> File.read!() |> Jason.decode!()
+    end)
+  end
+
+  @tag :tmp_dir
   test "rejects invalid worktree names", %{conn: conn, tmp_dir: tmp_dir} do
     workdir =
       Path.join(System.tmp_dir!(), "sigma-new-session-#{System.unique_integer([:positive])}")
@@ -469,5 +515,39 @@ defmodule Sigma.Web.NewSessionLiveTest do
       {_output, 0} -> :ok
       {output, status} -> flunk("git #{Enum.join(args, " ")} failed with #{status}: #{output}")
     end
+  end
+
+  defp write_provider_configs(default_provider_id, default_model, providers) do
+    agent_dir = ConfigManager.agent_dir()
+    File.mkdir_p!(agent_dir)
+
+    File.write!(
+      Path.join(agent_dir, "settings.json"),
+      Jason.encode!(%{"defaultProvider" => default_provider_id, "defaultModel" => default_model})
+    )
+
+    File.write!(
+      Path.join(agent_dir, "models.json"),
+      Jason.encode!(%{
+        "providers" =>
+          Enum.into(providers, %{}, fn {provider_id, models} ->
+            {provider_id,
+             %{
+               "name" => provider_id,
+               "api" => "mock",
+               "models" => Enum.map(models, &test_model_config/1)
+             }}
+          end)
+      })
+    )
+  end
+
+  defp test_model_config(model) when is_map(model), do: model
+  defp test_model_config(model), do: %{"id" => model}
+
+  defp option_text(option) do
+    option
+    |> Floki.text()
+    |> String.trim()
   end
 end

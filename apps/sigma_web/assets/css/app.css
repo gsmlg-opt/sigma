@@ -56,6 +56,149 @@ el-dm-dialog [slot="footer"] {
   white-space: nowrap;
 }
 
+.sigma-session-shell {
+  min-width: 0;
+}
+
+.sigma-session-main {
+  min-width: 0;
+  min-height: 0;
+}
+
+.sigma-session-header {
+  min-height: 3.25rem;
+}
+
+.sigma-session-transcript {
+  min-height: 0;
+  scrollbar-gutter: stable;
+}
+
+.sigma-session-composer {
+  padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
+}
+
+.sigma-session-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 14rem;
+  height: 1.75rem;
+  padding: 0 0.625rem;
+  border: 1px solid var(--color-outline-variant);
+  border-radius: 6px;
+  background: var(--color-surface-container);
+  color: var(--color-on-surface-variant);
+  font-family: monospace;
+  font-size: 0.6875rem;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sigma-session-model-select {
+  width: min(18rem, 38vw);
+}
+
+.sigma-session-status-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--color-outline);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-outline) 18%, transparent);
+}
+
+.sigma-session-status-dot.is-ready {
+  background: var(--color-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 18%, transparent);
+}
+
+.sigma-session-status-dot.is-running {
+  background: var(--color-tertiary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-tertiary) 18%, transparent);
+  animation: sigma-session-pulse 1.2s ease-in-out infinite;
+}
+
+.sigma-session-status-dot.is-loading {
+  background: var(--color-on-surface-variant);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-on-surface-variant) 14%, transparent);
+}
+
+.sigma-context-gauge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  height: 1.75rem;
+  min-width: 10rem;
+  padding: 0 0.625rem;
+  border: 1px solid var(--color-outline-variant);
+  border-radius: 6px;
+  background: var(--color-surface-container);
+  color: var(--color-on-surface-variant);
+  font-family: monospace;
+  font-size: 0.6875rem;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.sigma-context-gauge-track {
+  width: 4.5rem;
+  height: 0.25rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--color-outline-variant);
+}
+
+.sigma-context-gauge-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-primary);
+}
+
+.sigma-context-gauge.is-warning .sigma-context-gauge-fill {
+  background: var(--color-warning);
+}
+
+.sigma-context-gauge.is-warning .sigma-context-gauge-label {
+  color: var(--color-warning);
+}
+
+@keyframes sigma-session-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.4;
+  }
+}
+
+@media (max-width: 900px) {
+  .sigma-session-model-select {
+    width: min(16rem, 50vw);
+  }
+
+  .sigma-context-gauge {
+    min-width: 0;
+  }
+
+  .sigma-context-gauge-track {
+    display: none;
+  }
+}
+
+@media (max-width: 767px) {
+  .sigma-session-header {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+
+  .sigma-session-model-select {
+    width: min(100%, 17rem);
+  }
+}
+
 /* Markdown content rendering */
 .markdown p { margin: 0.5rem 0; }
 .markdown h1, .markdown h2, .markdown h3, .markdown h4 { font-weight: 700; margin: 1rem 0 0.5rem; }

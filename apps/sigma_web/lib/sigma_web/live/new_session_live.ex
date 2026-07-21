@@ -25,6 +25,8 @@ defmodule Sigma.Web.NewSessionLive do
           |> assign(:worktree_name, "")
           |> assign(:mcp_servers, %{})
           |> assign(:selected_mcp_server_ids, [])
+          |> assign(:model_options, [])
+          |> assign(:selected_model_value, nil)
           |> assign(:session_options_loading, true)
           |> assign(:session_options, AsyncResult.loading())
           |> start_async(:session_options, fn -> load_session_options(workdir) end)
@@ -40,6 +42,9 @@ defmodule Sigma.Web.NewSessionLive do
     branches = list_git_branches(workdir)
     worktrees = list_existing_worktrees(workdir)
     mcp_servers = ConfigManager.list_mcp_servers()
+    system_config = ConfigManager.get_config()
+    active_provider_id = system_config["active_provider_id"]
+    model_options = model_options(system_config, active_provider_id)
 
     selected_mcp_server_ids =
       RepoManager.mcp_server_ids(workdir) |> filter_mcp_server_ids(mcp_servers)
@@ -49,7 +54,9 @@ defmodule Sigma.Web.NewSessionLive do
        branches: branches,
        worktrees: worktrees,
        mcp_servers: mcp_servers,
-       selected_mcp_server_ids: selected_mcp_server_ids
+       selected_mcp_server_ids: selected_mcp_server_ids,
+       model_options: model_options,
+       selected_model_value: default_model_value(system_config, active_provider_id)
      }}
   end
 
@@ -63,6 +70,8 @@ defmodule Sigma.Web.NewSessionLive do
      |> assign(:selected_worktree, List.first(options.worktrees))
      |> assign(:mcp_servers, options.mcp_servers)
      |> assign(:selected_mcp_server_ids, options.selected_mcp_server_ids)
+     |> assign(:model_options, options.model_options)
+     |> assign(:selected_model_value, options.selected_model_value)
      |> assign(:session_options_loading, false)
      |> assign(:session_options, AsyncResult.ok(socket.assigns.session_options, true))}
   end
@@ -227,6 +236,37 @@ defmodule Sigma.Web.NewSessionLive do
               </div>
             </.dm_card>
 
+            <!-- Model selection -->
+            <.dm_card :if={!Enum.empty?(@model_options)} variant="bordered" class="bg-surface-container-low">
+              <:title>
+                <div class="flex items-center gap-2 text-on-surface py-1">
+                  <.dm_mdi name="hexagon-multiple-outline" class="w-5 h-5 text-primary" />
+                  <span class="font-semibold">Model</span>
+                </div>
+              </:title>
+              <div class="py-4 px-1">
+                <form id="session-model-form" phx-change="select_model">
+                  <.dm_select
+                    id="session-model-select"
+                    name="model"
+                    value={@selected_model_value}
+                    class="w-full"
+                  >
+                    <option
+                      :for={option <- @model_options}
+                      value={option.value}
+                      selected={option.value == @selected_model_value}
+                    >
+                      {option.label}
+                    </option>
+                  </.dm_select>
+                </form>
+                <p class="mt-2 text-xs text-on-surface-variant">
+                  Stored with this session and restored when the session opens.
+                </p>
+              </div>
+            </.dm_card>
+
             <!-- MCP server overrides -->
             <.dm_card :if={map_size(@mcp_servers) > 0} variant="bordered" class="bg-surface-container-low">
               <:title>
@@ -352,6 +392,53 @@ defmodule Sigma.Web.NewSessionLive do
   defp mcp_server_summary(%{"type" => type, "url" => url}), do: "#{type}: #{url}"
   defp mcp_server_summary(server), do: inspect(server)
 
+  defp model_options(system_config, active_provider_id) do
+    system_config
+    |> Map.get("providers", %{})
+    |> Enum.sort_by(fn {provider_id, provider} ->
+      {provider_id != active_provider_id, provider["name"] || provider_id}
+    end)
+    |> Enum.flat_map(fn {provider_id, provider} ->
+      provider
+      |> Map.get("models", [])
+      |> List.wrap()
+      |> Enum.map(&to_model_id/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+      |> Enum.map(&model_option(provider_id, provider, &1))
+    end)
+  end
+
+  defp default_model_value(system_config, active_provider_id) do
+    provider = get_in(system_config, ["providers", active_provider_id])
+    model_id = provider && provider["model"]
+
+    if is_binary(active_provider_id) and active_provider_id != "" and is_binary(model_id) and
+         model_id != "" do
+      model_option_value(active_provider_id, model_id)
+    end
+  end
+
+  defp model_option(provider_id, provider, model_id) do
+    provider_name = provider["name"] || provider_id
+
+    %{
+      value: model_option_value(provider_id, model_id),
+      label: "#{provider_name}: #{model_id}",
+      provider_id: provider_id,
+      model_id: model_id
+    }
+  end
+
+  defp model_option_value(provider_id, model_id) do
+    Jason.encode!(%{"provider_id" => provider_id, "model_id" => model_id})
+  end
+
+  defp to_model_id(%{"id" => id}) when is_binary(id), do: id
+  defp to_model_id(%{id: id}) when is_binary(id), do: id
+  defp to_model_id(id) when is_binary(id), do: id
+  defp to_model_id(_), do: ""
+
   defp effective_path(assigns) do
     case assigns.mode do
       :project_dir ->
@@ -417,6 +504,15 @@ defmodule Sigma.Web.NewSessionLive do
   end
 
   @impl true
+  def handle_event("select_model", %{"model" => selected}, socket) do
+    if valid_model_value?(socket.assigns.model_options, selected) do
+      {:noreply, assign(socket, :selected_model_value, selected)}
+    else
+      {:noreply, put_flash(socket, :error, "Unknown model selection.")}
+    end
+  end
+
+  @impl true
   def handle_event("create_session", _, %{assigns: %{session_options_loading: true}} = socket) do
     {:noreply, put_flash(socket, :info, "Session options are still loading.")}
   end
@@ -433,12 +529,17 @@ defmodule Sigma.Web.NewSessionLive do
 
     case session_workdir(socket, workdir, branch, mode) do
       {:ok, cwd, is_worktree} ->
-        meta = %{
-          cwd: cwd,
-          branch: branch,
-          worktree: is_worktree,
-          mcp_server_ids: socket.assigns.selected_mcp_server_ids
-        }
+        meta =
+          %{
+            cwd: cwd,
+            branch: branch,
+            worktree: is_worktree,
+            mcp_server_ids: socket.assigns.selected_mcp_server_ids
+          }
+          |> maybe_put_session_model(
+            socket.assigns.model_options,
+            socket.assigns.selected_model_value
+          )
 
         File.write!(meta_path, Jason.encode!(meta))
         :ok = Log.persist_event(log_path, {:agent_start, cwd})
@@ -479,6 +580,27 @@ defmodule Sigma.Web.NewSessionLive do
   end
 
   defp session_workdir(_socket, workdir, _branch, _mode), do: {:ok, workdir, false}
+
+  defp maybe_put_session_model(meta, model_options, selected) do
+    case selected_model(model_options, selected) do
+      %{provider_id: provider_id, model_id: model_id} ->
+        meta
+        |> Map.put(:provider_id, provider_id)
+        |> Map.put(:model_id, model_id)
+
+      nil ->
+        meta
+    end
+  end
+
+  defp valid_model_value?(model_options, selected),
+    do: not is_nil(selected_model(model_options, selected))
+
+  defp selected_model(model_options, selected) when is_binary(selected) do
+    Enum.find(model_options, &(&1.value == selected))
+  end
+
+  defp selected_model(_model_options, _selected), do: nil
 
   defp validate_worktree_branch(_socket, _workdir, branch)
        when not is_binary(branch) or branch == "" do

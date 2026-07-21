@@ -320,7 +320,8 @@ defmodule Sigma.Web.SessionLiveTest do
         "anthropic" => ["claude", "opus"]
       })
 
-      {:ok, view, html} = live_loaded(conn, session_path(unique_session_id("models")))
+      session_id = unique_session_id("models")
+      {:ok, view, html} = live_loaded(conn, session_path(session_id))
 
       options = Floki.parse_document!(html) |> Floki.find("#model-select option")
 
@@ -358,6 +359,40 @@ defmodule Sigma.Web.SessionLiveTest do
 
       assert settings["defaultProvider"] == "anthropic"
       assert settings["defaultModel"] == "opus"
+
+      meta_path = Path.join(ConfigManager.sessions_dir(@workdir), "#{session_id}.meta.json")
+
+      assert %{"provider_id" => "anthropic", "model_id" => "opus"} =
+               meta_path |> File.read!() |> Jason.decode!()
+    end)
+  end
+
+  @tag :tmp_dir
+  test "restores session scoped model from metadata", %{conn: conn, tmp_dir: tmp_dir} do
+    with_agent_config(tmp_dir, fn ->
+      write_provider_configs("openai", "smart", %{
+        "openai" => ["smart"],
+        "anthropic" => ["opus"]
+      })
+
+      session_id = unique_session_id("session-model")
+      sessions_dir = ConfigManager.sessions_dir(@workdir)
+      File.mkdir_p!(sessions_dir)
+
+      File.write!(
+        Path.join(sessions_dir, "#{session_id}.meta.json"),
+        Jason.encode!(%{"cwd" => @workdir, "provider_id" => "anthropic", "model_id" => "opus"})
+      )
+
+      {:ok, _view, html} = live_loaded(conn, session_path(session_id))
+
+      selected_option =
+        html
+        |> Floki.parse_document!()
+        |> Floki.find("#model-select option")
+        |> Enum.find(&selected?/1)
+
+      assert option_text(selected_option) == "anthropic: opus"
     end)
   end
 

@@ -67,6 +67,7 @@ defmodule Sigma.Web.SessionLive do
         encoded_repository,
         workdir,
         sessions_dir,
+        meta_path,
         log_session_id
       )
       |> assign(:storage_path, storage_path)
@@ -105,7 +106,7 @@ defmodule Sigma.Web.SessionLive do
 
     config =
       Application.get_env(:sigma_web, :test_provider_config) ||
-        ConfigManager.get_active_provider_config()
+        session_provider_config(session_meta)
 
     global_agents = Map.get(system_config, "system_prompt")
 
@@ -242,63 +243,65 @@ defmodule Sigma.Web.SessionLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="flex h-[calc(100vh-64px)] relative bg-surface text-on-surface font-sans">
-      <!-- Sidebar -->
-      <aside class="w-72 bg-secondary text-secondary-content border-r border-outline-variant shrink-0 flex flex-col">
-        <div class="p-6 border-b border-secondary-content/10 text-on-secondary">
-          <div class="flex items-center gap-2 mb-1">
-            <.dm_mdi name="folder-outline" class="w-4 h-4 opacity-70" />
-            <span class="text-xs uppercase tracking-widest font-bold opacity-70">Workspace</span>
+    <div class="sigma-session-shell relative flex h-[calc(100vh-64px)] overflow-hidden bg-surface text-on-surface font-sans">
+      <aside class="sigma-session-sidebar hidden w-64 shrink-0 flex-col border-r border-outline-variant bg-secondary text-secondary-content md:flex">
+        <div class="border-b border-secondary-content/10 p-4 text-on-secondary">
+          <div class="mb-1 flex items-center gap-2">
+            <.dm_mdi name="folder-outline" class="h-4 w-4 opacity-70" />
+            <span class="text-xs font-bold uppercase tracking-widest opacity-70">Workspace</span>
           </div>
-          <h2 class="font-semibold truncate" title={@workdir}>{Path.basename(@workdir)}</h2>
+          <h2 class="truncate text-sm font-semibold" title={@workdir}>{Path.basename(@workdir)}</h2>
+          <p class="mt-1 truncate font-mono text-[11px] opacity-60" title={@effective_cwd}>
+            {short_path(@effective_cwd)}
+          </p>
 
-          <nav class="flex flex-col gap-2 mt-4">
+          <nav class="mt-4 flex flex-col gap-1.5">
             <.dm_link
               id="session-sidebar-settings"
               navigate={~p"/repository/#{@encoded_repository}/settings"}
               class="btn btn-ghost w-full justify-start"
             >
-              <.dm_mdi name="cog-outline" class="w-4 h-4 mr-1" /> Settings
+              <.dm_mdi name="cog-outline" class="mr-1 h-4 w-4" /> Settings
             </.dm_link>
             <.dm_link
               id="session-sidebar-skills"
               navigate={~p"/repository/#{@encoded_repository}/skills"}
               class="btn btn-ghost w-full justify-start"
             >
-              <.dm_mdi name="auto-fix" class="w-4 h-4 mr-1" /> Skills
+              <.dm_mdi name="auto-fix" class="mr-1 h-4 w-4" /> Skills
             </.dm_link>
             <.dm_link
               id="session-sidebar-new-session"
               navigate={~p"/repository/#{@encoded_repository}/sessions/new"}
               class="btn btn-primary w-full justify-start"
             >
-              <.dm_mdi name="plus" class="w-4 h-4 mr-1" /> New Session
+              <.dm_mdi name="plus" class="mr-1 h-4 w-4" /> New Session
             </.dm_link>
             <.dm_link
               id="session-sidebar-session-list"
               navigate={~p"/repository/#{@encoded_repository}"}
               class="btn btn-ghost w-full justify-start"
             >
-              <.dm_mdi name="format-list-bulleted" class="w-4 h-4 mr-1" /> Session List
+              <.dm_mdi name="format-list-bulleted" class="mr-1 h-4 w-4" /> Session List
             </.dm_link>
             <.dm_btn
-              id="web-shell-open-btn"
+              id="web-shell-sidebar-open-btn"
               type="button"
               phx-click="open_web_shell"
               phx-hook="WebComponentHook"
               variant="ghost"
               class="w-full justify-start"
             >
-              <.dm_mdi name="console-line" class="w-4 h-4 mr-1" /> Terminal
+              <.dm_mdi name="console-line" class="mr-1 h-4 w-4" /> Terminal
             </.dm_btn>
           </nav>
         </div>
 
         <div class="flex-1 overflow-y-auto">
-          <div class="px-4 py-3 text-xs uppercase tracking-widest font-bold opacity-60 text-secondary-content">
+          <div class="px-4 py-3 text-xs font-bold uppercase tracking-widest text-secondary-content opacity-60">
             Sessions
           </div>
-          <ul class="px-2 flex flex-col gap-0.5">
+          <ul class="flex flex-col gap-0.5 px-2">
             <li :for={s <- @sessions} class="group relative flex items-center rounded-xl">
               <% is_renaming = @renaming_session == s %>
               <% menu_button_id = session_menu_button_id(s) %>
@@ -316,10 +319,10 @@ defmodule Sigma.Web.SessionLive do
               <.dm_link
                 :if={not is_renaming}
                 navigate={~p"/repository/#{@encoded_repository}/sessions/#{s}"}
-                class={["flex-1 flex items-center gap-2 px-3 py-2 truncate rounded-xl transition-colors text-secondary-content",
+                class={["flex min-w-0 flex-1 items-center gap-2 truncate rounded-lg px-3 py-2 text-secondary-content transition-colors",
                   if(s == @session_id, do: "bg-primary text-primary-content font-bold", else: "hover:bg-secondary-content/10")]}
               >
-                <.dm_mdi name="chat-outline" class="w-4 h-4 shrink-0 opacity-70" />
+                <.dm_mdi name="chat-outline" class="h-4 w-4 shrink-0 opacity-70" />
                 <span class="truncate text-xs font-mono">{s}</span>
               </.dm_link>
               <.dm_btn
@@ -328,9 +331,9 @@ defmodule Sigma.Web.SessionLive do
                 type="button"
                 variant="ghost"
                 size="xs"
-                class="shrink-0 mr-1 opacity-0 group-hover:opacity-60 transition-opacity"
+                class="mr-1 shrink-0 opacity-0 transition-opacity group-hover:opacity-60"
               >
-                <.dm_mdi name="dots-vertical" class="w-4 h-4" />
+                <.dm_mdi name="dots-vertical" class="h-4 w-4" />
               </.dm_btn>
               <.dm_menu
                 :if={not is_renaming}
@@ -349,13 +352,97 @@ defmodule Sigma.Web.SessionLive do
           </ul>
         </div>
 
-        <div class="p-4 border-t border-secondary-content/10" />
+        <div class="border-t border-secondary-content/10 p-4">
+          <p class="mb-2 text-[10px] font-bold uppercase tracking-widest opacity-50">Project root</p>
+          <code class="block break-all font-mono text-[10px] leading-tight opacity-70">{@workdir}</code>
+        </div>
       </aside>
 
-      <!-- Main Chat -->
-      <div class="flex-1 flex flex-col min-w-0 bg-surface-container-lowest">
-        <div id="messages" phx-update="stream" phx-hook="ScrollBottom" class="flex-1 overflow-y-auto p-6 space-y-2">
-          <div :for={{id, message} <- @streams.messages} id={id} class="max-w-4xl mx-auto w-full">
+      <section class="sigma-session-main grid min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)_auto] bg-surface-container-lowest">
+        <header class="sigma-session-header border-b border-outline-variant bg-surface px-4 py-2">
+          <div class="flex min-w-0 flex-wrap items-center justify-between gap-3">
+            <div class="flex min-w-0 items-center gap-3">
+              <span class={["sigma-session-status-dot", session_status_class(@session_ready, @turn_in_flight)]} />
+              <div class="min-w-0">
+                <p class="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">
+                  Active Session
+                </p>
+                <h1 class="truncate text-sm font-semibold text-on-surface" title={@session_id}>
+                  {@session_id}
+                </h1>
+              </div>
+              <span class="hidden max-w-[28rem] truncate font-mono text-[11px] text-on-surface-variant lg:inline" title={@effective_cwd}>
+                {short_path(@effective_cwd)}
+              </span>
+            </div>
+
+            <div class="flex min-w-0 flex-wrap items-center justify-end gap-2">
+              <span
+                :if={@active_provider_id}
+                class="sigma-session-chip"
+                title={"Provider: #{@active_provider_id}"}
+              >
+                Provider: {@active_provider_id}
+              </span>
+
+              <form id="model-select-form" phx-change="select_model" class="sigma-session-model-select">
+                <.dm_select
+                  id="model-select"
+                  name="model"
+                  value={@current_model_value}
+                  size="xs"
+                  disabled={not @session_ready or @turn_in_flight}
+                >
+                  <option
+                    :for={option <- @model_options}
+                    value={option.value}
+                    selected={option.value == @current_model_value}
+                  >{option.label}</option>
+                </.dm_select>
+              </form>
+
+              <span
+                id="session-context-size"
+                class={["sigma-context-gauge", context_usage_class(@context_token_count, @context_window)]}
+                title={format_context_size_title(@context_token_count, @context_window)}
+                aria-label={"Context #{format_context_size_title(@context_token_count, @context_window)}"}
+              >
+                <span class="sigma-context-gauge-track">
+                  <span
+                    class="sigma-context-gauge-fill"
+                    style={"width: #{context_usage_width(@context_token_count, @context_window)}"}
+                  />
+                </span>
+                <span class="sigma-context-gauge-label">
+                  Context: {format_context_size(@context_token_count, @context_window)}
+                </span>
+              </span>
+
+              <.dm_tooltip content="Open terminal" position="bottom">
+                <.dm_btn
+                  id="web-shell-open-btn"
+                  type="button"
+                  phx-click="open_web_shell"
+                  phx-hook="WebComponentHook"
+                  variant="ghost"
+                  size="sm"
+                  shape="circle"
+                  title="Terminal"
+                >
+                  <.dm_mdi name="console-line" class="h-4 w-4" />
+                </.dm_btn>
+              </.dm_tooltip>
+            </div>
+          </div>
+        </header>
+
+        <div
+          id="messages"
+          phx-update="stream"
+          phx-hook="ScrollBottom"
+          class="sigma-session-transcript space-y-2 overflow-y-auto px-4 py-5 md:px-6"
+        >
+          <div :for={{id, message} <- @streams.messages} id={id} class="mx-auto w-full max-w-4xl">
             <.message_bubble
               message={message}
               tool_results={@tool_results}
@@ -366,7 +453,7 @@ defmodule Sigma.Web.SessionLive do
           </div>
         </div>
 
-        <div class="p-6 border-t border-outline-variant bg-surface">
+        <footer class="sigma-session-composer border-t border-outline-variant bg-surface px-4 py-3 md:px-6">
           <div
             id="chat-input-area"
             phx-hook="ChatInputHook"
@@ -380,7 +467,7 @@ defmodule Sigma.Web.SessionLive do
                 }
               ])
             }
-            class="max-w-4xl mx-auto relative"
+            class="relative mx-auto max-w-4xl"
           >
             <div :if={not @session_ready} class="mb-3 flex items-center gap-3 text-sm text-on-surface-variant">
               <.dm_loading_spinner size="sm" />
@@ -416,47 +503,69 @@ defmodule Sigma.Web.SessionLive do
                 clear_on_send={true}
                 duskmoon-send-send="send_prompt"
               />
-
-              <form
-                id="model-select-form"
-                phx-change="select_model"
-                class="absolute bottom-[8px] right-[107px] z-10 flex items-center"
-              >
-                <.dm_select
-                  id="model-select"
-                  name="model"
-                  value={@current_model_value}
-                  size="xs"
-                  disabled={not @session_ready or @turn_in_flight}
-                >
-                  <option
-                    :for={option <- @model_options}
-                    value={option.value}
-                    selected={option.value == @current_model_value}
-                  >{option.label}</option>
-                </.dm_select>
-              </form>
             </div>
 
             <div class="mt-3 flex items-center justify-between gap-4 text-[11px] text-on-surface-variant">
-              <span :if={@active_provider_id != nil} class="opacity-40 font-mono">
-                Provider: {@active_provider_id}
-              </span>
-              <span
-                id="session-context-size"
-                class="opacity-40 font-mono"
-                title={format_context_size_title(@context_token_count, @context_window)}
-                aria-label={"Context #{format_context_size_title(@context_token_count, @context_window)}"}
-              >
-                Context: {format_context_size(@context_token_count, @context_window)}
+              <span class="font-mono opacity-50">
+                Enter sends. Shift+Enter adds a line.
               </span>
               <p class="opacity-60 text-right ml-auto">
                 ∑ is an AI agent. Review its work carefully.
               </p>
             </div>
           </div>
+        </footer>
+      </section>
+
+      <aside class="sigma-session-rail hidden w-72 shrink-0 flex-col border-l border-outline-variant bg-surface-container-low p-4 xl:flex">
+        <div class="mb-4">
+          <p class="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">
+            Runtime
+          </p>
+          <h2 class="mt-1 text-sm font-semibold text-on-surface">Session State</h2>
         </div>
-      </div>
+
+        <div class="grid gap-3 text-sm">
+          <div class="rounded-md border border-outline-variant bg-surface-container p-3">
+            <p class="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">
+              Working Directory
+            </p>
+            <p class="mt-1 break-all font-mono text-xs text-on-surface" title={@effective_cwd}>
+              {@effective_cwd}
+            </p>
+          </div>
+
+          <div class="rounded-md border border-outline-variant bg-surface-container p-3">
+            <p class="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">
+              Model
+            </p>
+            <p
+              class="mt-1 truncate font-mono text-xs text-on-surface"
+              title={assigns[:current_model] || "Loading"}
+            >
+              {assigns[:current_model] || "Loading"}
+            </p>
+          </div>
+
+          <div class="rounded-md border border-outline-variant bg-surface-container p-3">
+            <p class="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">
+              Context
+            </p>
+            <p class="mt-1 font-mono text-xs text-on-surface">
+              {format_context_size(@context_token_count, @context_window)}
+            </p>
+          </div>
+
+          <div class="rounded-md border border-outline-variant bg-surface-container p-3">
+            <p class="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">
+              MCP Servers
+            </p>
+            <p class="mt-1 font-mono text-xs text-on-surface">
+              {length(assigns[:mcp_server_ids] || [])}
+            </p>
+          </div>
+        </div>
+      </aside>
 
       <.web_shell_panel
         :if={@show_web_shell}
@@ -480,7 +589,7 @@ defmodule Sigma.Web.SessionLive do
     ~H"""
     <section
       id="web-shell-panel"
-      class="absolute left-72 right-0 bottom-0 z-20 flex max-h-[48vh] flex-col border-t border-outline-variant bg-surface shadow-2xl"
+      class="absolute bottom-0 left-0 right-0 z-20 flex max-h-[48vh] flex-col border-t border-outline-variant bg-surface shadow-2xl md:left-64"
     >
       <div class="flex min-h-12 items-center justify-between gap-4 border-b border-outline-variant px-4 py-2">
         <div class="flex min-w-0 items-center gap-3">
@@ -886,6 +995,47 @@ defmodule Sigma.Web.SessionLive do
   defp format_context_size_title(count, context_window) do
     "#{format_integer(non_negative_integer(count) || 0)} / #{format_integer(context_window)} tokens"
   end
+
+  defp context_usage_width(count, context_window) do
+    "#{context_usage_percent(count, context_window)}%"
+  end
+
+  defp context_usage_class(count, context_window) do
+    if context_usage_percent(count, context_window) >= 80 do
+      "is-warning"
+    else
+      nil
+    end
+  end
+
+  defp context_usage_percent(count, context_window) do
+    count = non_negative_integer(count) || 0
+
+    case positive_integer(context_window) do
+      nil -> 0
+      window -> count |> Kernel.*(100) |> Kernel./(window) |> min(100) |> max(0) |> round()
+    end
+  end
+
+  defp session_status_class(false, _turn_in_flight), do: "is-loading"
+  defp session_status_class(true, true), do: "is-running"
+  defp session_status_class(true, false), do: "is-ready"
+
+  defp short_path(path) when is_binary(path) do
+    path
+    |> Path.split()
+    |> compact_path_segments()
+    |> Path.join()
+  end
+
+  defp short_path(_path), do: ""
+
+  defp compact_path_segments(segments) when length(segments) > 4 do
+    [first | rest] = segments
+    [first, "…"] ++ Enum.take(rest, -3)
+  end
+
+  defp compact_path_segments(segments), do: segments
 
   defp format_token_count(value) when is_integer(value) and value < 1_000 do
     format_integer(value)
@@ -1441,6 +1591,7 @@ defmodule Sigma.Web.SessionLive do
 
       ConfigManager.set_active_provider(provider_id)
       ConfigManager.update_provider(provider_id, %{"model" => model_id})
+      persist_session_model_meta(socket, provider_id, model_id)
 
       {:noreply,
        assign(socket,
@@ -1798,12 +1949,14 @@ defmodule Sigma.Web.SessionLive do
          encoded_repository,
          workdir,
          sessions_dir,
+         meta_path,
          log_session_id
        ) do
     socket
     |> assign(:active_tab, :repository)
     |> assign(:session_id, session_id)
     |> assign(:log_session_id, log_session_id)
+    |> assign(:meta_path, meta_path)
     |> assign(:workdir, workdir)
     |> assign(:effective_cwd, workdir)
     |> assign(:encoded_repository, encoded_repository)
@@ -1954,6 +2107,41 @@ defmodule Sigma.Web.SessionLive do
 
       _ ->
         %{}
+    end
+  end
+
+  defp session_provider_config(%{"provider_id" => provider_id, "model_id" => model_id})
+       when is_binary(provider_id) and is_binary(model_id) do
+    with provider when is_map(provider) <- ConfigManager.get_provider_config(provider_id),
+         true <- provider_has_model?(provider, model_id) do
+      Map.put(provider, "model", model_id)
+    else
+      _ -> ConfigManager.get_active_provider_config()
+    end
+  end
+
+  defp session_provider_config(_session_meta), do: ConfigManager.get_active_provider_config()
+
+  defp provider_has_model?(provider, model_id) do
+    provider
+    |> Map.get("models", [])
+    |> List.wrap()
+    |> Enum.map(&to_model_id/1)
+    |> Enum.any?(&(&1 == model_id))
+  end
+
+  defp persist_session_model_meta(socket, provider_id, model_id) do
+    meta_path = socket.assigns[:meta_path]
+
+    if meta_path do
+      meta =
+        meta_path
+        |> read_session_meta()
+        |> Map.merge(%{"provider_id" => provider_id, "model_id" => model_id})
+
+      File.write(meta_path, Jason.encode!(meta))
+    else
+      :ok
     end
   end
 
