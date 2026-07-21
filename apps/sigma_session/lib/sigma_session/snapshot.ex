@@ -21,22 +21,20 @@ defmodule Sigma.Session.Snapshot do
   """
   @type service_tier_by_family :: %{optional(String.t()) => String.t()}
 
-  @typedoc "A tagged journal or storage diagnostic reason."
+  @typedoc "A tagged journal diagnostic reason."
   @type diagnostic_reason :: atom() | tuple()
 
-  @typedoc """
-  A recoverable replay diagnostic.
-
-  Journal diagnostics include `entry_index` and `entry_id`. Storage diagnostics
-  may omit either location and add storage-specific fields.
-  """
-  @type diagnostic :: %{
+  @typedoc "A recoverable journal replay diagnostic."
+  @type journal_diagnostic :: %{
           required(:kind) => atom(),
           required(:reason) => diagnostic_reason(),
           optional(:entry_index) => non_neg_integer(),
           required(:entry_id) => term(),
           optional(atom()) => term()
         }
+
+  @typedoc "A recoverable journal or storage diagnostic."
+  @type diagnostic :: journal_diagnostic() | Sigma.Session.Storage.read_diagnostic()
 
   defstruct [
     :header,

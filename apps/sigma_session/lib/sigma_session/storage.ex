@@ -21,4 +21,14 @@ defmodule Sigma.Session.Storage do
   accessible; `{:error, reason}` is reserved for I/O-level failures.
   """
   @callback read(storage_id()) :: {:ok, [entry()]} | {:error, any()}
+
+  @type read_diagnostic :: %{
+          required(:kind) => :invalid_json | :trailing_incomplete_json,
+          required(:line) => pos_integer()
+        }
+
+  @callback read_with_diagnostics(storage_id()) ::
+              {:ok, [entry()], [read_diagnostic()]} | {:error, any()}
+
+  @optional_callbacks read_with_diagnostics: 1
 end
