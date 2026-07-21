@@ -8,7 +8,7 @@ defmodule Sigma.Session.Storage.JsonlFileTest do
   setup do
     tmp_dir = System.tmp_dir!()
     test_file = Path.join(tmp_dir, "test_session_#{:erlang.phash2(make_ref())}.jsonl")
-    on_exit(fn -> File.rm(test_file) end)
+    on_exit(fn -> File.rm_rf(test_file) end)
     {:ok, test_file: test_file}
   end
 
@@ -46,6 +46,20 @@ defmodule Sigma.Session.Storage.JsonlFileTest do
     assert {:ok, []} = JsonlFile.read(test_file)
   end
 
+  test "read_with_diagnostics returns tagged I/O errors", %{test_file: path} do
+    File.mkdir!(path)
+
+    assert {:error, reason} = JsonlFile.read_with_diagnostics(path)
+    refute reason == :enoent
+  end
+
+  test "read returns tagged I/O errors", %{test_file: path} do
+    File.mkdir!(path)
+
+    assert {:error, reason} = JsonlFile.read(path)
+    refute reason == :enoent
+  end
+
   test "read file with empty lines", %{test_file: test_file} do
     entry = %{"type" => "test", "id" => "1"}
     {:ok, json} = Jason.encode(entry)
@@ -74,10 +88,10 @@ defmodule Sigma.Session.Storage.JsonlFileTest do
 
     File.write!(path, [
       Jason.encode!(entry1),
-      "\n\n",
-      "not-valid-json\n",
+      "\r\n\r\n",
+      "not-valid-json\r\n",
       Jason.encode!(entry2),
-      "\n"
+      "\r\n"
     ])
 
     {result, _log} = with_log(fn -> JsonlFile.read_with_diagnostics(path) end)
@@ -103,7 +117,7 @@ defmodule Sigma.Session.Storage.JsonlFileTest do
       "{torn"
     ])
 
-    {result, log} = with_log(fn -> JsonlFile.read_with_diagnostics(path) end)
+    {result, log} = with_log([level: :debug], fn -> JsonlFile.read_with_diagnostics(path) end)
 
     assert {:ok, [^entry1, ^entry2, ^entry3], diagnostics} = result
 
@@ -113,7 +127,14 @@ defmodule Sigma.Session.Storage.JsonlFileTest do
            ]
 
     assert log =~ "Skipping corrupt line 3"
+    refute log =~ "not-valid-json"
+    refute log =~ "{torn"
 
-    assert {:ok, [^entry1, ^entry2, ^entry3]} = JsonlFile.read(path)
+    {compatibility_result, compatibility_log} = with_log(fn -> JsonlFile.read(path) end)
+
+    assert {:ok, [^entry1, ^entry2, ^entry3]} = compatibility_result
+    assert compatibility_log =~ "Skipping corrupt line 3"
+    refute compatibility_log =~ "not-valid-json"
+    refute compatibility_log =~ "{torn"
   end
 end
