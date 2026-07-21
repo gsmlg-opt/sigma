@@ -6,6 +6,10 @@ defmodule Sigma.Session.Journal do
   alias Sigma.Session.{EntryDecoder, Snapshot}
   alias Sigma.Session.Journal.Index
 
+  @service_tier_values ~w(auto default flex scale priority)
+  @legacy_service_tiers @service_tier_values ++ ~w(openai-only claude-only)
+  @service_tier_families ~w(openai anthropic google)
+
   @spec replay([term()], keyword()) :: {:ok, Snapshot.t()} | {:error, term()}
   def replay(entries, opts \\ []) when is_list(entries) do
     index = Index.build(entries)
@@ -13,6 +17,7 @@ defmodule Sigma.Session.Journal do
 
     with {:ok, {leaf_id, nodes}} <- Index.path(index, selector) do
       header = index.header
+      caller_diagnostics = Keyword.get(opts, :diagnostics, [])
 
       snapshot = %Snapshot{
         header: header,
@@ -20,18 +25,27 @@ defmodule Sigma.Session.Journal do
         cwd: header && header["cwd"],
         parent_session_id: header && header["parentSession"],
         active_leaf_id: leaf_id,
-        branch_entry_ids: Enum.map(nodes, & &1.entry["id"]),
-        diagnostics: Keyword.get(opts, :diagnostics, []) ++ index.diagnostics
+        branch_entry_ids: Enum.map(nodes, & &1.entry["id"])
       }
 
-      {snapshot, payload_diagnostics} = Enum.reduce(nodes, {snapshot, []}, &reduce_entry/2)
+      {snapshot, payload_diagnostics_rev} =
+        Enum.reduce(nodes, {snapshot, []}, &reduce_entry/2)
+
+      payload_diagnostics = Enum.reverse(payload_diagnostics_rev)
       {messages, message_diagnostics} = decode_messages(nodes)
+
+      journal_diagnostics =
+        index.diagnostics
+        |> merge_diagnostics(payload_diagnostics)
+        |> merge_diagnostics(message_diagnostics)
+
+      diagnostics = Enum.uniq(caller_diagnostics ++ journal_diagnostics)
 
       {:ok,
        %{
          snapshot
          | messages: messages,
-           diagnostics: snapshot.diagnostics ++ payload_diagnostics ++ message_diagnostics
+           diagnostics: diagnostics
        }}
     end
   end
@@ -79,10 +93,16 @@ defmodule Sigma.Session.Journal do
 
   defp reduce_entry(%{entry: %{"type" => "service_tier_change"} = entry} = node, acc) do
     update_snapshot(acc, node, fn snapshot ->
-      if Map.has_key?(entry, "serviceTier") do
-        {:ok, %{snapshot | service_tier: entry["serviceTier"]}}
-      else
-        {:error, :missing_service_tier}
+      case Map.fetch(entry, "serviceTier") do
+        {:ok, service_tier} ->
+          if valid_service_tier?(service_tier) do
+            {:ok, %{snapshot | service_tier: service_tier}}
+          else
+            {:error, :invalid_service_tier}
+          end
+
+        :error ->
+          {:error, :missing_service_tier}
       end
     end)
   end
@@ -147,7 +167,7 @@ defmodule Sigma.Session.Journal do
           reason: reason
         }
 
-        {snapshot, diagnostics ++ [diagnostic]}
+        {snapshot, [diagnostic | diagnostics]}
     end
   end
 
@@ -188,4 +208,35 @@ defmodule Sigma.Session.Journal do
   end
 
   defp split_model(_model), do: {:error, :invalid_model}
+
+  defp valid_service_tier?(nil), do: true
+
+  defp valid_service_tier?(service_tier) when is_binary(service_tier),
+    do: service_tier in @legacy_service_tiers
+
+  defp valid_service_tier?(service_tiers)
+       when is_map(service_tiers) and map_size(service_tiers) > 0 do
+    Enum.all?(service_tiers, fn {family, service_tier} ->
+      family in @service_tier_families and service_tier in @service_tier_values
+    end)
+  end
+
+  defp valid_service_tier?(_service_tier), do: false
+
+  defp merge_diagnostics(left, right), do: merge_diagnostics(left, right, [])
+
+  defp merge_diagnostics([], right, acc), do: Enum.reverse(acc, right)
+  defp merge_diagnostics(left, [], acc), do: Enum.reverse(acc, left)
+
+  defp merge_diagnostics(
+         [%{entry_index: left_index} = left | left_rest] = left_diagnostics,
+         [%{entry_index: right_index} = right | right_rest] = right_diagnostics,
+         acc
+       ) do
+    if left_index <= right_index do
+      merge_diagnostics(left_rest, right_diagnostics, [left | acc])
+    else
+      merge_diagnostics(left_diagnostics, right_rest, [right | acc])
+    end
+  end
 end

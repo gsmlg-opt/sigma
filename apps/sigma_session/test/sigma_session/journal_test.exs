@@ -44,7 +44,7 @@ defmodule Sigma.Session.JournalTest do
         "configured" => "auto"
       }),
       state_entry("left-tier-old", "left-thinking", "service_tier_change", %{
-        "serviceTier" => "standard"
+        "serviceTier" => "default"
       }),
       state_entry("left-tier", "left-tier-old", "service_tier_change", %{
         "serviceTier" => "priority"
@@ -190,29 +190,175 @@ defmodule Sigma.Session.JournalTest do
             }} = Journal.replay(entries)
   end
 
+  test "preserves supported legacy and family service tiers exactly" do
+    supported = [
+      nil,
+      "auto",
+      "default",
+      "flex",
+      "scale",
+      "priority",
+      "openai-only",
+      "claude-only",
+      %{"openai" => "priority"},
+      %{"anthropic" => "auto", "google" => "flex"},
+      %{"openai" => "default", "anthropic" => "scale", "google" => "priority"}
+    ]
+
+    for {service_tier, index} <- Enum.with_index(supported) do
+      entries = [
+        header("session", "/repo"),
+        state_entry("tier-#{index}", nil, "service_tier_change", %{
+          "serviceTier" => service_tier
+        })
+      ]
+
+      assert {:ok, %Snapshot{service_tier: ^service_tier, diagnostics: []}} =
+               Journal.replay(entries)
+    end
+  end
+
+  test "rejects unsupported service tier shapes with one diagnostic" do
+    invalid_payloads = [
+      {%{}, :missing_service_tier},
+      {%{"serviceTier" => "none"}, :invalid_service_tier},
+      {%{"serviceTier" => "standard"}, :invalid_service_tier},
+      {%{"serviceTier" => 42}, :invalid_service_tier},
+      {%{"serviceTier" => []}, :invalid_service_tier},
+      {%{"serviceTier" => %{}}, :invalid_service_tier},
+      {%{"serviceTier" => %{"openai" => "bogus"}}, :invalid_service_tier},
+      {%{"serviceTier" => %{"future" => "priority"}}, :invalid_service_tier},
+      {%{"serviceTier" => %{"openai" => "priority", "future" => "priority"}},
+       :invalid_service_tier},
+      {%{"serviceTier" => %{"openai" => nil}}, :invalid_service_tier}
+    ]
+
+    for {{payload, reason}, index} <- Enum.with_index(invalid_payloads) do
+      entry_id = "invalid-tier-#{index}"
+
+      entries = [
+        header("session", "/repo"),
+        state_entry(entry_id, nil, "service_tier_change", payload)
+      ]
+
+      assert {:ok,
+              %Snapshot{
+                service_tier: nil,
+                diagnostics: [
+                  %{
+                    kind: :invalid_payload,
+                    entry_index: 1,
+                    entry_id: ^entry_id,
+                    reason: ^reason
+                  }
+                ]
+              }} = Journal.replay(entries)
+    end
+  end
+
+  test "malformed later state preserves the previous valid value" do
+    cases = [
+      {
+        "reasoning",
+        "thinking_level_change",
+        %{"thinkingLevel" => "high", "configured" => "auto"},
+        %{"thinkingLevel" => 42},
+        fn snapshot -> {snapshot.reasoning_level, snapshot.configured_reasoning_level} end,
+        {"high", "auto"},
+        :invalid_reasoning_level
+      },
+      {
+        "service-tier",
+        "service_tier_change",
+        %{"serviceTier" => %{"openai" => "priority", "google" => "flex"}},
+        %{"serviceTier" => %{"openai" => "bogus"}},
+        & &1.service_tier,
+        %{"openai" => "priority", "google" => "flex"},
+        :invalid_service_tier
+      },
+      {
+        "mcp",
+        "mcp_server_selection_change",
+        %{"serverIds" => ["fs", "git"]},
+        %{"serverIds" => ["fs", 42]},
+        & &1.mcp_server_ids,
+        ["fs", "git"],
+        :invalid_mcp_server_ids
+      },
+      {
+        "mode",
+        "mode_change",
+        %{"mode" => "plan", "data" => %{"file" => "PLAN.md"}},
+        %{"mode" => "build", "data" => []},
+        fn snapshot -> {snapshot.mode, snapshot.mode_data} end,
+        {"plan", %{"file" => "PLAN.md"}},
+        :invalid_mode_change
+      },
+      {
+        "branch-summary",
+        "branch_summary",
+        %{"fromId" => "root", "summary" => "kept summary"},
+        %{"fromId" => "root", "summary" => 42},
+        fn snapshot -> Map.take(snapshot.branch_summary, ["fromId", "summary"]) end,
+        %{"fromId" => "root", "summary" => "kept summary"},
+        :invalid_branch_summary
+      }
+    ]
+
+    for {name, type, valid_payload, invalid_payload, project, expected, reason} <- cases do
+      valid_id = "#{name}-valid"
+      invalid_id = "#{name}-invalid"
+
+      entries = [
+        header("session", "/repo"),
+        state_entry(valid_id, nil, type, valid_payload),
+        state_entry(invalid_id, valid_id, type, invalid_payload)
+      ]
+
+      assert {:ok, %Snapshot{} = snapshot} = Journal.replay(entries)
+      assert project.(snapshot) == expected, name
+
+      assert snapshot.diagnostics == [
+               %{
+                 kind: :invalid_payload,
+                 entry_index: 2,
+                 entry_id: invalid_id,
+                 reason: reason
+               }
+             ],
+             name
+    end
+  end
+
   test "diagnoses malformed payloads deterministically without losing valid messages" do
-    caller_diagnostic = %{kind: :storage_warning, entry_index: nil, entry_id: nil}
+    caller_diagnostic = %{
+      kind: :invalid_json,
+      entry_id: nil,
+      reason: {:decode_error, :truncated},
+      byte_offset: 42
+    }
 
     entries = [
       header("session", "/repo"),
       state_entry("orphan", "missing", "mode_change", %{"mode" => "plan"}),
       message_entry("root", nil, "message-1", "user", "hello"),
-      state_entry("bad-model", "root", "model_change", %{"model" => "invalid"}),
+      message_entry("bad-message", "root", "message-2", "user", nil),
+      state_entry("bad-model", "bad-message", "model_change", %{"model" => "invalid"}),
       state_entry("bad-model-role", "bad-model", "model_change", %{
         "role" => 42,
         "model" => "anthropic/valid"
       }),
       state_entry("bad-mcp", "bad-model-role", "mcp_server_selection_change", %{
         "serverIds" => ["ok", 42]
-      }),
-      message_entry("bad-message", "bad-mcp", "message-2", "user", nil)
+      })
     ]
 
     assert {:ok,
             %Snapshot{
               messages: [%Message{id: "message-1", content: "hello"}],
               diagnostics: diagnostics
-            } = snapshot} = Journal.replay(entries, diagnostics: [caller_diagnostic])
+            } = snapshot} =
+             Journal.replay(entries, diagnostics: [caller_diagnostic, caller_diagnostic])
 
     assert diagnostics == [
              caller_diagnostic,
@@ -225,30 +371,31 @@ defmodule Sigma.Session.JournalTest do
              %{
                kind: :invalid_payload,
                entry_index: 3,
+               entry_id: "bad-message",
+               reason: {:invalid_content_for_role, :user}
+             },
+             %{
+               kind: :invalid_payload,
+               entry_index: 4,
                entry_id: "bad-model",
                reason: :invalid_model
              },
              %{
                kind: :invalid_payload,
-               entry_index: 4,
+               entry_index: 5,
                entry_id: "bad-model-role",
                reason: :invalid_model_role
              },
              %{
                kind: :invalid_payload,
-               entry_index: 5,
+               entry_index: 6,
                entry_id: "bad-mcp",
                reason: :invalid_mcp_server_ids
-             },
-             %{
-               kind: :invalid_payload,
-               entry_index: 6,
-               entry_id: "bad-message",
-               reason: {:invalid_content_for_role, :user}
              }
            ]
 
-    assert Journal.replay(entries, diagnostics: [caller_diagnostic]) == {:ok, snapshot}
+    assert Journal.replay(entries, diagnostics: [caller_diagnostic, caller_diagnostic]) ==
+             {:ok, snapshot}
   end
 
   test "keeps unknown entries in the branch but out of model context" do
