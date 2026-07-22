@@ -23,6 +23,7 @@ defmodule Sigma.MixProject do
   defp aliases do
     [
       setup: ["deps.get", "deps.patch", "assets.setup", "assets.build"],
+      "sigma.run": ["phx.server"],
       "assets.setup": [
         "deps.patch",
         "npm.install",
