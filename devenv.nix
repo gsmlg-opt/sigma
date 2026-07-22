@@ -41,6 +41,10 @@ in {
     figlet -w 120 $GREET | lolcat
   '';
 
+  processes.sigma = {
+    exec = "mix sigma.run";
+  };
+
   enterShell = ''
     hello
   '';
