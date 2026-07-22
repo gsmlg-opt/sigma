@@ -1,0 +1,250 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (e.g. 1.2.3)
+        required: true
+        type: string
+      git_ref:
+        description: Git ref to release from
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version }}
+  cancel-in-progress: true
+
+jobs:
+  resolve:
+    name: Resolve release source
+    runs-on: ubuntu-24.04
+    outputs:
+      branch: ${{ steps.source.outputs.branch }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.git_ref }}
+          fetch-depth: 0
+
+      - name: Validate version and branch
+        id: source
+        env:
+          GIT_REF: ${{ inputs.git_ref }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Version must be a semantic version without a leading v."
+            exit 1
+          fi
+
+          branch="${GIT_REF#refs/heads/}"
+          if ! git check-ref-format --branch "$branch" >/dev/null; then
+            echo "::error::git_ref must name a valid branch."
+            exit 1
+          fi
+
+          remote_sha="$(git ls-remote --heads origin "refs/heads/${branch}" | awk 'NR == 1 { print $1 }')"
+          if [[ -z "$remote_sha" ]]; then
+            echo "::error::git_ref must name a branch on origin so the release commit can be pushed."
+            exit 1
+          fi
+
+          source_sha="$(git rev-parse HEAD)"
+          if [[ "$source_sha" != "$remote_sha" ]]; then
+            echo "::error::Checked-out source does not match origin/${branch}."
+            exit 1
+          fi
+
+          if git show-ref --verify --quiet "refs/tags/v${VERSION}"; then
+            echo "::error::Tag v${VERSION} already exists."
+            exit 1
+          fi
+
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.os }} ${{ matrix.arch }}
+    needs: resolve
+    runs-on: ${{ matrix.runner }}
+    env:
+      MIX_ENV: prod
+      VERSION: ${{ inputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: linux
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: arm64
+          - runner: macos-15-intel
+            os: macos
+            arch: amd64
+          - runner: macos-15
+            os: macos
+            arch: arm64
+
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.source_sha }}
+
+      - name: Set up Erlang and Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28.5"
+          elixir-version: "1.18.4"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Restore build caches
+        uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            _build
+            node_modules
+            ~/.hex
+            ~/.mix
+            ~/.cache/rebar3
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/sigma_tools/native/sigma_tools_hashline/target
+          key: release-${{ matrix.os }}-${{ matrix.arch }}-otp-28.5-elixir-1.18.4-${{ hashFiles('mix.lock', 'npm.lock', '**/Cargo.lock', '**/package.json') }}
+          restore-keys: |
+            release-${{ matrix.os }}-${{ matrix.arch }}-otp-28.5-elixir-1.18.4-
+
+      - name: Set release version
+        run: |
+          perl -0pi -e 's/version: "[^"]+"/version: "$ENV{VERSION}"/' mix.exs
+          grep -Fq "version: \"${VERSION}\"" mix.exs
+
+      - name: Install production dependencies
+        run: |
+          mix deps.get --only prod
+          mix assets.setup
+
+      - name: Build production assets
+        run: mix assets.deploy
+
+      - name: Build release
+        run: mix release sigma --overwrite
+
+      - name: Package release
+        env:
+          ARCH: ${{ matrix.arch }}
+          OS: ${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          archive="sigma-v${VERSION}-${OS}-${ARCH}.tar.gz"
+          tar -czf "dist/${archive}" -C _build/prod/rel sigma
+
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$archive" > "${archive}.sha256"
+          else
+            shasum -a 256 "$archive" > "${archive}.sha256"
+          fi
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: sigma-release-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - resolve
+      - build
+    runs-on: ubuntu-24.04
+    env:
+      BRANCH: ${{ needs.resolve.outputs.branch }}
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      VERSION: ${{ inputs.version }}
+
+    steps:
+      - name: Check out release branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.branch }}
+          fetch-depth: 0
+
+      - name: Verify release branch has not moved
+        run: |
+          set -euo pipefail
+          current_sha="$(git rev-parse HEAD)"
+          if [[ "$current_sha" != "$SOURCE_SHA" ]]; then
+            echo "::error::origin/${BRANCH} moved while release artifacts were building. Run the release again."
+            exit 1
+          fi
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: sigma-release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify release artifacts
+        run: |
+          set -euo pipefail
+          for checksum in dist/*.sha256; do
+            (cd dist && sha256sum --check "$(basename "$checksum")")
+          done
+
+      - name: Commit version and create tag
+        run: |
+          set -euo pipefail
+          perl -0pi -e 's/version: "[^"]+"/version: "$ENV{VERSION}"/' mix.exs
+          grep -Fq "version: \"${VERSION}\"" mix.exs
+
+          if git diff --quiet -- mix.exs; then
+            echo "::error::mix.exs already contains version ${VERSION}; no release commit can be created."
+            exit 1
+          fi
+
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore(release): v${VERSION}"
+          git tag -a "v${VERSION}" -m "Sigma v${VERSION}"
+          git push --atomic origin \
+            "HEAD:refs/heads/${BRANCH}" \
+            "refs/tags/v${VERSION}:refs/tags/v${VERSION}"
+
+      - name: Create GitHub Release
+        run: |
+          gh release create "v${VERSION}" dist/* \
+            --verify-tag \
+            --title "Sigma v${VERSION}" \
+            --generate-notes

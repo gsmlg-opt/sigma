@@ -82,14 +82,18 @@ defmodule Mix.Tasks.Duskmoon.Bundle do
   defp paths do
     cwd = File.cwd!()
 
-    web_root =
-      if String.ends_with?(cwd, "apps/sigma_web"), do: cwd, else: Path.join(cwd, "apps/sigma_web")
+    {repo_root, web_root} =
+      if String.ends_with?(cwd, "apps/sigma_web") do
+        {Path.expand("../..", cwd), cwd}
+      else
+        {cwd, Path.join(cwd, "apps/sigma_web")}
+      end
 
     %{
-      node_modules: Path.join(web_root, "node_modules"),
+      node_modules: Path.join(repo_root, "node_modules"),
       output: Path.join(web_root, "assets/js/duskmoon_elements.js"),
       rich_output: Path.join(web_root, "priv/static/assets/js/duskmoon_rich_elements.js"),
-      tmp_dir: Path.join(web_root, "_build/duskmoon_bundle")
+      tmp_dir: Path.join(repo_root, "_build/duskmoon_bundle")
     }
   end
 
@@ -147,19 +151,36 @@ defmodule Mix.Tasks.Duskmoon.Bundle do
     end
   end
 
-  # WORKAROUND(upstream): duskmoon-dev/phoenix-duskmoon-ui#63
+  # WORKAROUND(upstream): duskmoon-dev/phoenix-duskmoon-ui#102
   defp ensure_rich_bundle_dependencies!(node_modules_path) do
     {:ok, _} = Application.ensure_all_started(:req)
 
     @rich_elements
-    |> Enum.flat_map(fn el ->
-      package_dependency_specs(Path.join(node_modules_path, "@duskmoon-dev/#{el}"))
+    |> Enum.map(fn el ->
+      materialize_package!(Path.join(node_modules_path, "@duskmoon-dev/#{el}"))
     end)
+    |> Enum.flat_map(&package_dependency_specs/1)
     |> Enum.reduce(MapSet.new(), fn spec, seen ->
       ensure_dependency_link(node_modules_path, spec, seen)
     end)
 
     :ok
+  end
+
+  defp materialize_package!(target) do
+    case File.lstat(target) do
+      {:ok, %File.Stat{type: :symlink}} ->
+        source = target |> File.read_link!() |> Path.expand(Path.dirname(target))
+        File.rm_rf!(target)
+        File.cp_r!(source, target)
+        target
+
+      {:ok, _stat} ->
+        target
+
+      {:error, reason} ->
+        Mix.raise("DuskMoon package is not installed at #{target}: #{:file.format_error(reason)}")
+    end
   end
 
   defp ensure_dependency_link(node_modules_path, {name, range}, seen) do

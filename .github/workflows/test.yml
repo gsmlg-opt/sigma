@@ -1,0 +1,66 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ExUnit
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Erlang and Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28.5"
+          elixir-version: "1.18.4"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Restore build caches
+        uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            _build
+            node_modules
+            ~/.hex
+            ~/.mix
+            ~/.cache/rebar3
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/sigma_tools/native/sigma_tools_hashline/target
+          key: test-${{ runner.os }}-${{ runner.arch }}-otp-28.5-elixir-1.18.4-${{ hashFiles('mix.lock', 'npm.lock', '**/Cargo.lock', '**/package.json') }}
+          restore-keys: |
+            test-${{ runner.os }}-${{ runner.arch }}-otp-28.5-elixir-1.18.4-
+
+      - name: Install dependencies
+        run: |
+          mix deps.get
+          mix assets.setup
+
+      - name: Run unit tests
+        run: mix test

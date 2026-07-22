@@ -8,6 +8,7 @@ defmodule Sigma.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
+      releases: [sigma: [applications: [sigma_web: :permanent]]],
       listeners: [Phoenix.CodeReloader]
     ]
   end
@@ -24,7 +25,7 @@ defmodule Sigma.MixProject do
       setup: ["deps.get", "deps.patch", "assets.setup", "assets.build"],
       "assets.setup": [
         "deps.patch",
-        "cmd --app sigma_web mix npm.install",
+        "npm.install",
         "duskmoon.bundle"
       ],
       # TODO(upstream): duskmoon-dev/phoenix-duskmoon-ui#48
