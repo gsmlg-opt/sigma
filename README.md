@@ -50,6 +50,13 @@ mix setup
 
 Open <http://localhost:4580>.
 
+## Installing a release
+
+GitHub Release archives include user-level service definitions for Linux and
+macOS under `sigma/service/`. Install Sigma under `~/.local/share/sigma`, then
+follow the [user service installation guide](rel/service/README.md) to run it as
+a systemd user service or macOS LaunchAgent. No root-level service is required.
+
 Provider settings are managed in the UI under `/settings/providers` and are saved in pi-compatible files under `~/.pi/agent/`:
 
 - `settings.json`

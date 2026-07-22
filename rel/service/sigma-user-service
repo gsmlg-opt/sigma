@@ -1,0 +1,28 @@
+#!/bin/sh
+
+set -eu
+
+: "${HOME:?HOME must be set}"
+
+sigma_home="${SIGMA_HOME:-${HOME}/.local/share/sigma}"
+env_file="${SIGMA_ENV_FILE:-${HOME}/.config/sigma/env}"
+
+if [ ! -r "$env_file" ]; then
+  echo "Sigma environment file is not readable: $env_file" >&2
+  exit 1
+fi
+
+if [ ! -x "${sigma_home}/bin/sigma" ]; then
+  echo "Sigma release executable is missing: ${sigma_home}/bin/sigma" >&2
+  exit 1
+fi
+
+set -a
+. "$env_file"
+set +a
+
+: "${SECRET_KEY_BASE:?SECRET_KEY_BASE must be set in ${env_file}}"
+export PHX_SERVER="${PHX_SERVER:-true}"
+export PORT="${PORT:-4580}"
+
+exec "${sigma_home}/bin/sigma" start

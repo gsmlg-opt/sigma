@@ -1,0 +1,19 @@
+[Unit]
+Description=Sigma AI coding agent
+Documentation=https://github.com/gsmlg-opt/sigma
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+WorkingDirectory=%h/.local/share/sigma
+Environment=HOME=%h
+Environment=SIGMA_HOME=%h/.local/share/sigma
+Environment=SIGMA_ENV_FILE=%h/.config/sigma/env
+ExecStart=%h/.local/share/sigma/service/sigma-user-service
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

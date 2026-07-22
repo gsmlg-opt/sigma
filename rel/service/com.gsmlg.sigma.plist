@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.gsmlg.sigma</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@HOME@/.local/share/sigma/service/sigma-user-service</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>@HOME@/.local/share/sigma</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@HOME@</string>
+    <key>SIGMA_HOME</key>
+    <string>@HOME@/.local/share/sigma</string>
+    <key>SIGMA_ENV_FILE</key>
+    <string>@HOME@/.config/sigma/env</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/Sigma/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/Sigma/stderr.log</string>
+</dict>
+</plist>

@@ -153,6 +153,24 @@ jobs:
       - name: Build release
         run: mix release sigma --overwrite
 
+      - name: Add user service files
+        run: |
+          scripts/verify-release-services.sh
+          install -d _build/prod/rel/sigma/service
+          install -m 0644 \
+            rel/service/com.gsmlg.sigma.plist \
+            _build/prod/rel/sigma/service/com.gsmlg.sigma.plist
+          install -m 0644 \
+            rel/service/sigma.service \
+            _build/prod/rel/sigma/service/sigma.service
+          install -m 0755 \
+            rel/service/sigma-user-service \
+            _build/prod/rel/sigma/service/sigma-user-service
+          install -m 0644 \
+            rel/service/README.md \
+            _build/prod/rel/sigma/service/README.md
+          scripts/verify-release-services.sh _build/prod/rel/sigma/service
+
       - name: Package release
         env:
           ARCH: ${{ matrix.arch }}
@@ -162,6 +180,16 @@ jobs:
           mkdir -p dist
           archive="sigma-v${VERSION}-${OS}-${ARCH}.tar.gz"
           tar -czf "dist/${archive}" -C _build/prod/rel sigma
+          tar -tzf "dist/${archive}" > "dist/${archive}.contents"
+
+          for service_file in \
+            sigma/service/com.gsmlg.sigma.plist \
+            sigma/service/sigma.service \
+            sigma/service/sigma-user-service \
+            sigma/service/README.md; do
+            grep -Fxq "$service_file" "dist/${archive}.contents"
+          done
+          rm "dist/${archive}.contents"
 
           cd dist
           if command -v sha256sum >/dev/null 2>&1; then
@@ -221,6 +249,13 @@ jobs:
           for checksum in dist/*.sha256; do
             (cd dist && sha256sum --check "$(basename "$checksum")")
           done
+
+      - name: Prepare user service assets
+        run: |
+          scripts/verify-release-services.sh
+          install -m 0644 rel/service/com.gsmlg.sigma.plist dist/com.gsmlg.sigma.plist
+          install -m 0644 rel/service/sigma.service dist/sigma.service
+          install -m 0644 rel/service/README.md dist/USER_SERVICE_INSTALL.md
 
       - name: Commit version and create tag
         run: |
