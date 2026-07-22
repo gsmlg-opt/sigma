@@ -228,15 +228,16 @@ jobs:
           perl -0pi -e 's/version: "[^"]+"/version: "$ENV{VERSION}"/' mix.exs
           grep -Fq "version: \"${VERSION}\"" mix.exs
 
-          if git diff --quiet -- mix.exs; then
-            echo "::error::mix.exs already contains version ${VERSION}; no release commit can be created."
-            exit 1
-          fi
-
-          git diff --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "chore(release): v${VERSION}"
+
+          if git diff --quiet -- mix.exs; then
+            echo "mix.exs already contains version ${VERSION}; tagging the release source."
+          else
+            git diff --check
+            git commit -am "chore(release): v${VERSION}"
+          fi
+
           git tag -a "v${VERSION}" -m "Sigma v${VERSION}"
           git push --atomic origin \
             "HEAD:refs/heads/${BRANCH}" \
