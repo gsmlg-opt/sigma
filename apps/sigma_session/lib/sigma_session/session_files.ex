@@ -17,6 +17,31 @@ defmodule Sigma.Session.SessionFiles do
 
   def meta_path(sessions_dir, id), do: safe_path(sessions_dir, id, ".meta.json")
 
+  @doc "Creates a new journal and sidecar without overwriting an existing session."
+  def create(sessions_dir, id, metadata, cwd, opts \\ [])
+
+  def create(sessions_dir, id, metadata, cwd, opts)
+      when is_map(metadata) and is_binary(cwd) and cwd != "" do
+    with {:ok, target_jsonl_path} <- jsonl_path(sessions_dir, id),
+         {:ok, target_meta_path} <- meta_path(sessions_dir, id),
+         :ok <- ensure_absent(target_jsonl_path),
+         :ok <- ensure_absent(target_meta_path),
+         {:ok, encoded_metadata} <- encode_metadata(metadata),
+         {:ok, temp_jsonl_path} <- unused_temp_path(target_jsonl_path) do
+      create_from_temp(
+        temp_jsonl_path,
+        target_jsonl_path,
+        target_meta_path,
+        encoded_metadata,
+        cwd,
+        Keyword.get(opts, :model)
+      )
+    end
+  end
+
+  def create(_sessions_dir, _id, _metadata, _cwd, _opts),
+    do: {:error, :invalid_session_metadata}
+
   def rename(sessions_dir, old_id, new_id) do
     with {:ok, old_jsonl_path} <- jsonl_path(sessions_dir, old_id),
          {:ok, new_jsonl_path} <- jsonl_path(sessions_dir, new_id),
@@ -73,6 +98,81 @@ defmodule Sigma.Session.SessionFiles do
       {:ok, Path.join(sessions_dir, id <> suffix)}
     else
       {:error, :invalid_session_id}
+    end
+  end
+
+  defp encode_metadata(metadata) do
+    case Jason.encode(metadata) do
+      {:ok, encoded} -> {:ok, encoded}
+      {:error, reason} -> {:error, {:metadata_encode_failed, reason}}
+    end
+  end
+
+  defp create_from_temp(
+         temp_jsonl_path,
+         target_jsonl_path,
+         target_meta_path,
+         encoded_metadata,
+         cwd,
+         model
+       ) do
+    with :ok <- build_new_session_log(temp_jsonl_path, cwd, model) do
+      case write_file_no_overwrite(target_meta_path, encoded_metadata, :before_meta_publish) do
+        :ok ->
+          publish_created_jsonl_or_rollback(
+            temp_jsonl_path,
+            target_jsonl_path,
+            target_meta_path
+          )
+
+        {:error, _reason} = error ->
+          cleanup_new_session_temp(temp_jsonl_path, error)
+      end
+    end
+  end
+
+  defp build_new_session_log(temp_jsonl_path, cwd, model) do
+    result =
+      with :ok <- File.write(temp_jsonl_path, ""),
+           :ok <- Log.ensure_session_header(temp_jsonl_path, cwd),
+           :ok <- append_initial_model(temp_jsonl_path, model) do
+        :ok
+      end
+
+    case result do
+      :ok -> :ok
+      {:error, _reason} = error -> cleanup_new_session_temp(temp_jsonl_path, error)
+    end
+  end
+
+  defp append_initial_model(_jsonl_path, nil), do: :ok
+
+  defp append_initial_model(jsonl_path, {provider_id, model_id}) do
+    case Log.append_model_change(jsonl_path, provider_id, model_id) do
+      {:ok, _entry_id} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp append_initial_model(_jsonl_path, _model), do: {:error, :invalid_initial_model}
+
+  defp cleanup_new_session_temp(temp_jsonl_path, error) do
+    case rm_optional(temp_jsonl_path) do
+      :ok -> error
+      cleanup_error -> {:error, {:session_create_cleanup_failed, error, cleanup_error}}
+    end
+  end
+
+  defp publish_created_jsonl_or_rollback(temp_jsonl_path, jsonl_path, meta_path) do
+    case publish_temp_file(temp_jsonl_path, jsonl_path, :before_jsonl_publish) do
+      :ok ->
+        :ok
+
+      {:error, _reason} = error ->
+        case rm_optional(meta_path) do
+          :ok -> error
+          rollback_error -> {:error, {:session_create_rollback_failed, error, rollback_error}}
+        end
     end
   end
 

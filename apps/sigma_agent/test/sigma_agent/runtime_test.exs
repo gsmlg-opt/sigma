@@ -10,6 +10,16 @@ defmodule Sigma.Agent.RuntimeTest do
     def stream(_params), do: []
   end
 
+  defmodule CapturingProvider do
+    @behaviour Sigma.Ai.Provider
+
+    @impl true
+    def stream(params) do
+      send(params.options[:test_pid], {:provider_model, params.model.id})
+      []
+    end
+  end
+
   setup context do
     tmp_dir =
       Path.join([
@@ -187,5 +197,213 @@ defmodule Sigma.Agent.RuntimeTest do
              compaction_count: 1,
              last_compaction: %{summary_id: "compaction_1", first_kept_id: "m2"}
            } = Sigma.Agent.SessionProcess.status(handle.session)
+  end
+
+  test "session process acknowledges a persisted state change", context do
+    repo = tmp_repo!(context, "repo")
+    test_pid = self()
+
+    assert {:ok, handle} =
+             Sigma.Agent.Runtime.get_session(
+               repo,
+               "session-state-change",
+               session_opts(
+                 cwd: repo,
+                 on_state_change: fn received ->
+                   send(test_pid, {:persisted, received})
+                   :ok
+                 end
+               )
+             )
+
+    event = {:model_change, "anthropic", "opus"}
+    selected_model = %{id: "opus", api: "mock-api", provider: "anthropic"}
+
+    assert :ok =
+             Sigma.Agent.Runtime.change_model(
+               repo,
+               "session-state-change",
+               "anthropic",
+               "opus",
+               EmptyProvider,
+               selected_model,
+               []
+             )
+
+    assert_receive {:persisted, ^event}
+    assert %{event_count: 1} = Sigma.Agent.SessionProcess.status(handle.session)
+    assert %{model: ^selected_model} = :sys.get_state(handle.agent)
+  end
+
+  test "session process rejects a state change when persistence fails", context do
+    repo = tmp_repo!(context, "repo")
+
+    assert {:ok, handle} =
+             Sigma.Agent.Runtime.get_session(
+               repo,
+               "session-state-failure",
+               session_opts(
+                 cwd: repo,
+                 on_state_change: fn _event -> {:error, :disk_full} end
+               )
+             )
+
+    selected_model = %{id: "opus", api: "mock-api", provider: "anthropic"}
+
+    assert {:error, :disk_full} =
+             Sigma.Agent.Runtime.change_model(
+               repo,
+               "session-state-failure",
+               "anthropic",
+               "opus",
+               EmptyProvider,
+               selected_model,
+               []
+             )
+
+    assert %{event_count: 0} = Sigma.Agent.SessionProcess.status(handle.session)
+    assert %{model: %{id: "mock-model"}} = :sys.get_state(handle.agent)
+  end
+
+  test "session process contains persistence callback failures and rolls back", context do
+    repo = tmp_repo!(context, "repo")
+
+    assert {:ok, handle} =
+             Sigma.Agent.Runtime.get_session(
+               repo,
+               "session-state-exception",
+               session_opts(
+                 cwd: repo,
+                 on_state_change: fn _event -> raise "persistence unavailable" end
+               )
+             )
+
+    assert {:error, {:state_change_exception, RuntimeError}} =
+             Sigma.Agent.Runtime.change_model(
+               repo,
+               "session-state-exception",
+               "anthropic",
+               "opus",
+               EmptyProvider,
+               %{id: "opus", api: "mock-api", provider: "anthropic"},
+               []
+             )
+
+    assert Process.alive?(handle.session)
+    assert %{event_count: 0} = Sigma.Agent.SessionProcess.status(handle.session)
+    assert %{model: %{id: "mock-model"}} = :sys.get_state(handle.agent)
+  end
+
+  test "model changes serialize prompts and cannot commit after a caller timeout", context do
+    repo = tmp_repo!(context, "repo")
+    test_pid = self()
+
+    on_state_change = fn event ->
+      send(test_pid, {:state_change_started, self(), event})
+
+      receive do
+        :release_state_change -> {:error, :disk_full}
+      end
+    end
+
+    assert {:ok, handle} =
+             Sigma.Agent.Runtime.get_session(
+               repo,
+               "session-prompt-ordering",
+               session_opts(
+                 cwd: repo,
+                 provider: CapturingProvider,
+                 options: [test_pid: test_pid],
+                 on_state_change: on_state_change
+               )
+             )
+
+    change =
+      Task.async(fn ->
+        Sigma.Agent.Runtime.change_model(
+          repo,
+          "session-prompt-ordering",
+          "anthropic",
+          "opus",
+          CapturingProvider,
+          %{id: "opus", api: "mock-api", provider: "anthropic"},
+          test_pid: test_pid
+        )
+      end)
+
+    assert_receive {:state_change_started, owner, {:model_change, "anthropic", "opus"}}
+
+    Sigma.Agent.prompt(handle.agent, "use the committed model")
+    refute_receive {:provider_model, _model_id}, 100
+
+    assert nil == Task.yield(change, 5_100)
+    send(owner, :release_state_change)
+
+    assert {:error, :disk_full} = Task.await(change, 1_000)
+    assert_receive {:provider_model, "mock-model"}, 1_000
+  end
+
+  test "session process serializes concurrent model changes", context do
+    repo = tmp_repo!(context, "repo")
+    test_pid = self()
+
+    on_state_change = fn
+      {:model_change, "openai", "smart"} = event ->
+        send(test_pid, {:first_change_started, self(), event})
+
+        receive do
+          :release_first_change -> :ok
+        end
+
+      {:model_change, "anthropic", "opus"} = event ->
+        send(test_pid, {:second_change_started, event})
+        :ok
+    end
+
+    assert {:ok, handle} =
+             Sigma.Agent.Runtime.get_session(
+               repo,
+               "session-serialized",
+               session_opts(cwd: repo, on_state_change: on_state_change)
+             )
+
+    first =
+      Task.async(fn ->
+        Sigma.Agent.Runtime.change_model(
+          repo,
+          "session-serialized",
+          "openai",
+          "smart",
+          EmptyProvider,
+          %{id: "smart", api: "mock-api", provider: "openai"},
+          []
+        )
+      end)
+
+    assert_receive {:first_change_started, owner, {:model_change, "openai", "smart"}}
+
+    second =
+      Task.async(fn ->
+        send(test_pid, :second_change_requested)
+
+        Sigma.Agent.Runtime.change_model(
+          repo,
+          "session-serialized",
+          "anthropic",
+          "opus",
+          EmptyProvider,
+          %{id: "opus", api: "mock-api", provider: "anthropic"},
+          []
+        )
+      end)
+
+    assert_receive :second_change_requested
+    refute_receive {:second_change_started, _event}, 100
+    send(owner, :release_first_change)
+
+    assert :ok = Task.await(first)
+    assert_receive {:second_change_started, {:model_change, "anthropic", "opus"}}
+    assert :ok = Task.await(second)
+    assert %{event_count: 2} = Sigma.Agent.SessionProcess.status(handle.session)
   end
 end

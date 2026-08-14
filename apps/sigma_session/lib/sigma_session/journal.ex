@@ -52,6 +52,8 @@ defmodule Sigma.Session.Journal do
   end
 
   defp reduce_entry(%{entry: %{"type" => "model_change"} = entry} = node, acc) do
+    acc = mark_model_source(acc, entry)
+
     update_snapshot(acc, node, fn snapshot ->
       case {Map.get(entry, "role", "default"), split_model(entry["model"])} do
         {role, {:ok, provider_id, model_id}} when role in [nil, "default"] ->
@@ -154,6 +156,19 @@ defmodule Sigma.Session.Journal do
   end
 
   defp reduce_entry(_node, acc), do: acc
+
+  defp mark_model_source({snapshot, diagnostics} = acc, entry) do
+    case Map.get(entry, "role", "default") do
+      role when role in [nil, "default"] ->
+        {%{snapshot | model_source: :journal}, diagnostics}
+
+      role when not is_binary(role) ->
+        {%{snapshot | model_source: :journal}, diagnostics}
+
+      _scoped_role ->
+        acc
+    end
+  end
 
   defp update_snapshot({snapshot, diagnostics}, node, updater) do
     case updater.(snapshot) do

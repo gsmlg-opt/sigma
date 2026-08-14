@@ -22,6 +22,114 @@ defmodule Sigma.Session.SessionFilesTest do
     assert path == Path.join(tmp_dir, "session.1_ok-2.jsonl")
   end
 
+  test "create publishes a new journal and structural metadata", %{tmp_dir: tmp_dir} do
+    metadata = %{
+      cwd: "/tmp/project",
+      branch: "main",
+      worktree: false,
+      mcp_server_ids: ["local"]
+    }
+
+    assert :ok =
+             SessionFiles.create(tmp_dir, "new", metadata, "/tmp/project",
+               model: {"anthropic", "opus"}
+             )
+
+    assert read_meta!(tmp_dir, "new") == %{
+             "cwd" => "/tmp/project",
+             "branch" => "main",
+             "worktree" => false,
+             "mcp_server_ids" => ["local"]
+           }
+
+    assert {:ok, snapshot} = Log.snapshot(jsonl_path(tmp_dir, "new"))
+
+    assert %{
+             header: %{"cwd" => "/tmp/project"},
+             provider_id: "anthropic",
+             model_id: "opus"
+           } = snapshot
+  end
+
+  test "create never overwrites or cleans up a colliding session ID", %{tmp_dir: tmp_dir} do
+    jsonl_path = jsonl_path(tmp_dir, "collision")
+    meta_path = meta_path(tmp_dir, "collision")
+    File.write!(jsonl_path, "existing journal\n")
+    File.write!(meta_path, "existing metadata")
+
+    assert {:error, :already_exists} =
+             SessionFiles.create(
+               tmp_dir,
+               "collision",
+               %{cwd: "/tmp/new"},
+               "/tmp/new",
+               model: {"openai", "smart"}
+             )
+
+    assert File.read!(jsonl_path) == "existing journal\n"
+    assert File.read!(meta_path) == "existing metadata"
+  end
+
+  test "create rolls back its journal when metadata races publication", %{tmp_dir: tmp_dir} do
+    with_session_file_hook(
+      fn
+        :before_meta_publish, %{target: target} -> File.write!(target, "raced metadata")
+        _event, _paths -> :ok
+      end,
+      fn ->
+        assert {:error, :already_exists} =
+                 SessionFiles.create(tmp_dir, "raced", %{cwd: "/tmp/new"}, "/tmp/new")
+      end
+    )
+
+    refute File.exists?(jsonl_path(tmp_dir, "raced"))
+    assert File.read!(meta_path(tmp_dir, "raced")) == "raced metadata"
+  end
+
+  test "create publishes the discoverable journal only after metadata", %{tmp_dir: tmp_dir} do
+    test_pid = self()
+
+    create =
+      Task.async(fn ->
+        Process.put({SessionFiles, :operation_hook}, fn
+          :before_meta_publish, _paths ->
+            send(test_pid, {:metadata_publish_blocked, self()})
+
+            receive do
+              :release_metadata_publish -> :ok
+            end
+
+          _event, _paths ->
+            :ok
+        end)
+
+        SessionFiles.create(tmp_dir, "pending", %{cwd: "/tmp/new"}, "/tmp/new")
+      end)
+
+    assert_receive {:metadata_publish_blocked, owner}
+    assert {:ok, []} = Log.list_sessions(tmp_dir)
+
+    send(owner, :release_metadata_publish)
+    assert :ok = Task.await(create)
+    assert {:ok, ["pending"]} = Log.list_sessions(tmp_dir)
+  end
+
+  test "create removes only its metadata when the journal races publication", %{tmp_dir: tmp_dir} do
+    with_session_file_hook(
+      fn
+        :before_jsonl_publish, %{target: target} -> File.write!(target, "raced journal\n")
+        _event, _paths -> :ok
+      end,
+      fn ->
+        assert {:error, :already_exists} =
+                 SessionFiles.create(tmp_dir, "raced-log", %{cwd: "/tmp/new"}, "/tmp/new")
+      end
+    )
+
+    assert File.read!(jsonl_path(tmp_dir, "raced-log")) == "raced journal\n"
+    refute File.exists?(meta_path(tmp_dir, "raced-log"))
+  end
+
   test "rename moves jsonl and metadata together", %{tmp_dir: tmp_dir} do
     metadata = %{
       "cwd" => "/tmp/worktree",

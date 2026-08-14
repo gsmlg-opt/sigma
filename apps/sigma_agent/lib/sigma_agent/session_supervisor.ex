@@ -57,6 +57,7 @@ defmodule Sigma.Agent.SessionSupervisor do
                session_id: session_id,
                idle_timeout_ms: Keyword.get(opts, :idle_timeout_ms, 3_600_000),
                session_context: Keyword.get(opts, :session_context),
+               on_state_change: Keyword.get(opts, :on_state_change),
                messages: Keyword.get(opts, :messages, [])
              ]
            ]},

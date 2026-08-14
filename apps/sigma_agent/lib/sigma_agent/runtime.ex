@@ -51,6 +51,31 @@ defmodule Sigma.Agent.Runtime do
     end
   end
 
+  @doc """
+  Serializes and acknowledges a persisted model change for a running session.
+  """
+  def change_model(repo_path, session_id, provider_id, model_id, provider, model, options)
+      when is_binary(repo_path) and is_binary(session_id) and is_binary(provider_id) and
+             is_binary(model_id) and is_atom(provider) and is_map(model) do
+    with session_process when is_pid(session_process) <-
+           lookup(repo_path, session_id, :session),
+         agent when is_pid(agent) <- lookup(repo_path, session_id, :agent) do
+      Sigma.Agent.SessionProcess.change_model(
+        session_process,
+        agent,
+        provider_id,
+        model_id,
+        provider,
+        model,
+        options
+      )
+    else
+      nil -> {:error, :session_not_running}
+    end
+  catch
+    :exit, reason -> {:error, {:session_unavailable, reason}}
+  end
+
   def normalize_repo_path(repo_path) do
     repo_path
     |> Path.expand()

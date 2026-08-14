@@ -116,6 +116,11 @@ defmodule Sigma.Agent do
     GenServer.cast(pid, {:set_provider, provider, model, options})
   end
 
+  def change_provider(pid, provider, model, options, persist)
+      when is_atom(provider) and is_map(model) and is_function(persist, 0) do
+    GenServer.call(pid, {:change_provider, provider, model, options, persist}, :infinity)
+  end
+
   def get_policy(pid) do
     GenServer.call(pid, :get_policy)
   end
@@ -234,6 +239,20 @@ defmodule Sigma.Agent do
   @impl true
   def handle_call(:get_policy, _from, state) do
     {:reply, state.policy, state}
+  end
+
+  @impl true
+  def handle_call({:change_provider, provider, model, options, persist}, _from, state) do
+    case run_state_change(persist) do
+      :ok ->
+        {:reply, :ok, %{state | provider: provider, model: model, provider_options: options}}
+
+      {:ok, _result} = success ->
+        {:reply, success, %{state | provider: provider, model: model, provider_options: options}}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
   end
 
   @impl true
@@ -525,6 +544,19 @@ defmodule Sigma.Agent do
        do: true
 
   defp executable_tool_call?(_block), do: false
+
+  defp run_state_change(persist) do
+    case persist.() do
+      :ok -> :ok
+      {:ok, _result} = success -> success
+      {:error, _reason} = error -> error
+      other -> {:error, {:invalid_state_change_result, other}}
+    end
+  rescue
+    exception -> {:error, {:state_change_exception, exception.__struct__}}
+  catch
+    kind, reason -> {:error, {:state_change_failure, kind, reason}}
+  end
 
   defp execute_tools(state, tool_calls) do
     Enum.each(tool_calls, fn tc ->

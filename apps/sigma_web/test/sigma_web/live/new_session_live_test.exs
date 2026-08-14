@@ -3,7 +3,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
 
   import Phoenix.LiveViewTest
 
-  alias Sigma.Session.{ConfigManager, RepoManager}
+  alias Sigma.Session.{ConfigManager, Log, RepoManager}
   alias Sigma.Session.Storage.JsonlFile
 
   @tag :tmp_dir
@@ -107,7 +107,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
   end
 
   @tag :tmp_dir
-  test "stores selected model in new session metadata", %{conn: conn, tmp_dir: tmp_dir} do
+  test "stores selected model in the new session journal", %{conn: conn, tmp_dir: tmp_dir} do
     workdir =
       Path.join(System.tmp_dir!(), "sigma-new-session-#{System.unique_integer([:positive])}")
 
@@ -146,9 +146,46 @@ defmodule Sigma.Web.NewSessionLiveTest do
       assert {:error, {:live_redirect, %{kind: :push}}} = render_click(view, "create_session")
 
       [meta_path] = Path.wildcard(Path.join(ConfigManager.sessions_dir(workdir), "*.meta.json"))
+      session_id = Path.basename(meta_path, ".meta.json")
+      log_path = Path.join(ConfigManager.sessions_dir(workdir), "#{session_id}.jsonl")
+      meta = meta_path |> File.read!() |> Jason.decode!()
 
-      assert %{"provider_id" => "anthropic", "model_id" => "opus"} =
-               meta_path |> File.read!() |> Jason.decode!()
+      assert %{"cwd" => ^workdir, "branch" => _branch, "worktree" => false} = meta
+      refute Map.has_key?(meta, "provider_id")
+      refute Map.has_key?(meta, "model_id")
+
+      assert {:ok, snapshot} = Log.snapshot(log_path)
+      assert %{provider_id: "anthropic", model_id: "opus"} = snapshot
+    end)
+  end
+
+  @tag :tmp_dir
+  test "reports session file failures without leaving partial files", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    workdir =
+      Path.join(System.tmp_dir!(), "sigma-write-failure-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workdir)
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/sessions/new")
+      render_async(view, 1_000)
+
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+      File.chmod!(sessions_dir, 0o500)
+      on_exit(fn -> File.chmod(sessions_dir, 0o700) end)
+
+      html = render_click(view, "create_session")
+
+      assert html =~ "Could not create session."
+      assert [] = Path.wildcard(Path.join(sessions_dir, "*.meta.json"))
+      assert [] = Path.wildcard(Path.join(sessions_dir, "*.jsonl"))
     end)
   end
 

@@ -3,7 +3,7 @@ defmodule Sigma.Web.SessionLiveTest do
   import Phoenix.LiveViewTest
 
   alias Sigma.Agent.Message
-  alias Sigma.Session.{ConfigManager, RepoManager}
+  alias Sigma.Session.{ConfigManager, Log, RepoManager}
 
   @workdir "/tmp/pi-test"
   @encoded_workdir Base.url_encode64(@workdir, padding: false)
@@ -310,7 +310,7 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   @tag :tmp_dir
-  test "model selector lists all configured models and selects default model", %{
+  test "model selector persists the selected model without rewriting legacy metadata", %{
     conn: conn,
     tmp_dir: tmp_dir
   } do
@@ -321,6 +321,22 @@ defmodule Sigma.Web.SessionLiveTest do
       })
 
       session_id = unique_session_id("models")
+      sessions_dir = ConfigManager.sessions_dir(@workdir)
+      meta_path = Path.join(sessions_dir, "#{session_id}.meta.json")
+      storage_path = Path.join(sessions_dir, "#{session_id}.jsonl")
+      File.mkdir_p!(sessions_dir)
+
+      meta_bytes =
+        Jason.encode!(%{
+          "cwd" => @workdir,
+          "branch" => "main",
+          "provider_id" => "openai",
+          "model_id" => "smart"
+        })
+
+      File.write!(meta_path, meta_bytes)
+      assert :ok = Log.persist_event(storage_path, {:agent_start, @workdir})
+
       {:ok, view, html} = live_loaded(conn, session_path(session_id))
 
       options = Floki.parse_document!(html) |> Floki.find("#model-select option")
@@ -360,15 +376,77 @@ defmodule Sigma.Web.SessionLiveTest do
       assert settings["defaultProvider"] == "anthropic"
       assert settings["defaultModel"] == "opus"
 
-      meta_path = Path.join(ConfigManager.sessions_dir(@workdir), "#{session_id}.meta.json")
-
-      assert %{"provider_id" => "anthropic", "model_id" => "opus"} =
-               meta_path |> File.read!() |> Jason.decode!()
+      assert {:ok, snapshot} = Log.snapshot(storage_path)
+      assert %{provider_id: "anthropic", model_id: "opus"} = snapshot
+      assert File.read!(meta_path) == meta_bytes
     end)
   end
 
   @tag :tmp_dir
-  test "restores session scoped model from metadata", %{conn: conn, tmp_dir: tmp_dir} do
+  test "model selector leaves state unchanged when the journal append fails", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    with_agent_config(tmp_dir, fn ->
+      write_provider_configs("openai", "smart", %{
+        "openai" => ["smart"],
+        "anthropic" => ["opus"]
+      })
+
+      session_id = unique_session_id("model-write-failure")
+      sessions_dir = ConfigManager.sessions_dir(@workdir)
+      meta_path = Path.join(sessions_dir, "#{session_id}.meta.json")
+      storage_path = Path.join(sessions_dir, "#{session_id}.jsonl")
+      File.mkdir_p!(sessions_dir)
+
+      meta_bytes = Jason.encode!(%{"cwd" => @workdir})
+      File.write!(meta_path, meta_bytes)
+      assert :ok = Log.persist_event(storage_path, {:agent_start, @workdir})
+
+      {:ok, view, html} = live_loaded(conn, session_path(session_id))
+
+      anthropic_value =
+        html
+        |> Floki.parse_document!()
+        |> Floki.find("#model-select option")
+        |> Enum.find(&(option_text(&1) == "anthropic: opus"))
+        |> Floki.attribute("value")
+        |> List.first()
+
+      File.write!(storage_path, "{torn", [:append])
+
+      html = render_change(view, "select_model", %{"model" => anthropic_value})
+
+      assert html =~ "Could not persist model selection."
+
+      selected_option =
+        html
+        |> Floki.parse_document!()
+        |> Floki.find("#model-select option")
+        |> Enum.find(&selected?/1)
+
+      assert option_text(selected_option) == "openai: smart"
+      assert File.read!(meta_path) == meta_bytes
+
+      settings =
+        Sigma.Session.ConfigManager.agent_dir()
+        |> Path.join("settings.json")
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert settings["defaultProvider"] == "openai"
+      assert settings["defaultModel"] == "smart"
+
+      agent = Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent)
+      assert %{model: %{id: "smart"}} = :sys.get_state(agent)
+    end)
+  end
+
+  @tag :tmp_dir
+  test "restores a legacy sidecar model and migrates its next change", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
     with_agent_config(tmp_dir, fn ->
       write_provider_configs("openai", "smart", %{
         "openai" => ["smart"],
@@ -377,12 +455,70 @@ defmodule Sigma.Web.SessionLiveTest do
 
       session_id = unique_session_id("session-model")
       sessions_dir = ConfigManager.sessions_dir(@workdir)
+      meta_path = Path.join(sessions_dir, "#{session_id}.meta.json")
       File.mkdir_p!(sessions_dir)
 
-      File.write!(
-        Path.join(sessions_dir, "#{session_id}.meta.json"),
+      meta_bytes =
         Jason.encode!(%{"cwd" => @workdir, "provider_id" => "anthropic", "model_id" => "opus"})
-      )
+
+      File.write!(meta_path, meta_bytes)
+
+      {:ok, view, html} = live_loaded(conn, session_path(session_id))
+
+      selected_option =
+        html
+        |> Floki.parse_document!()
+        |> Floki.find("#model-select option")
+        |> Enum.find(&selected?/1)
+
+      assert option_text(selected_option) == "anthropic: opus"
+      assert File.read!(meta_path) == meta_bytes
+
+      openai_value =
+        html
+        |> Floki.parse_document!()
+        |> Floki.find("#model-select option")
+        |> Enum.find(&(option_text(&1) == "openai: smart"))
+        |> Floki.attribute("value")
+        |> List.first()
+
+      render_change(view, "select_model", %{"model" => openai_value})
+
+      log_path = Path.join(sessions_dir, "#{session_id}.jsonl")
+      assert {:ok, snapshot} = Log.snapshot(log_path)
+
+      assert %{
+               header: %{"cwd" => @workdir},
+               provider_id: "openai",
+               model_id: "smart"
+             } = snapshot
+
+      assert File.read!(meta_path) == meta_bytes
+    end)
+  end
+
+  @tag :tmp_dir
+  test "restores journal model before legacy session metadata", %{conn: conn, tmp_dir: tmp_dir} do
+    with_agent_config(tmp_dir, fn ->
+      write_provider_configs("openai", "smart", %{
+        "openai" => ["smart"],
+        "anthropic" => ["opus"]
+      })
+
+      session_id = unique_session_id("journal-model")
+      sessions_dir = ConfigManager.sessions_dir(@workdir)
+      meta_path = Path.join(sessions_dir, "#{session_id}.meta.json")
+      log_path = Path.join(sessions_dir, "#{session_id}.jsonl")
+      File.mkdir_p!(sessions_dir)
+
+      meta_bytes =
+        Jason.encode!(%{"cwd" => @workdir, "provider_id" => "openai", "model_id" => "smart"})
+
+      File.write!(meta_path, meta_bytes)
+
+      assert :ok = Log.persist_event(log_path, {:agent_start, @workdir})
+      assert {:ok, _entry_id} = Log.append_model_change(log_path, "anthropic", "opus")
+      log_bytes = File.read!(log_path)
 
       {:ok, _view, html} = live_loaded(conn, session_path(session_id))
 
@@ -393,6 +529,62 @@ defmodule Sigma.Web.SessionLiveTest do
         |> Enum.find(&selected?/1)
 
       assert option_text(selected_option) == "anthropic: opus"
+      assert File.read!(meta_path) == meta_bytes
+      assert File.read!(log_path) == log_bytes
+
+      settings =
+        Sigma.Session.ConfigManager.agent_dir()
+        |> Path.join("settings.json")
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert settings["defaultProvider"] == "openai"
+      assert settings["defaultModel"] == "smart"
+    end)
+  end
+
+  @tag :tmp_dir
+  test "does not restore legacy model metadata over an invalid journal model change", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    with_agent_config(tmp_dir, fn ->
+      write_provider_configs("openai", "smart", %{
+        "openai" => ["smart"],
+        "anthropic" => ["opus"]
+      })
+
+      session_id = unique_session_id("invalid-journal-model")
+      sessions_dir = ConfigManager.sessions_dir(@workdir)
+      meta_path = Path.join(sessions_dir, "#{session_id}.meta.json")
+      log_path = Path.join(sessions_dir, "#{session_id}.jsonl")
+      File.mkdir_p!(sessions_dir)
+
+      File.write!(
+        meta_path,
+        Jason.encode!(%{"cwd" => @workdir, "provider_id" => "anthropic", "model_id" => "opus"})
+      )
+
+      assert :ok = Log.persist_event(log_path, {:agent_start, @workdir})
+
+      assert :ok =
+               Sigma.Session.Storage.JsonlFile.append(log_path, %{
+                 "type" => "model_change",
+                 "id" => "invalid-model",
+                 "parentId" => nil,
+                 "timestamp" => "2026-08-11T00:00:00Z",
+                 "model" => "invalid"
+               })
+
+      {:ok, _view, html} = live_loaded(conn, session_path(session_id))
+
+      selected_option =
+        html
+        |> Floki.parse_document!()
+        |> Floki.find("#model-select option")
+        |> Enum.find(&selected?/1)
+
+      assert option_text(selected_option) == "openai: smart"
     end)
   end
 
@@ -406,8 +598,13 @@ defmodule Sigma.Web.SessionLiveTest do
         with_capture_provider_pid(self(), fn ->
           write_selectable_provider_configs()
 
-          {:ok, view, html} =
-            live_loaded(conn, session_path(unique_session_id("model-credential")))
+          session_id = unique_session_id("model-credential")
+          sessions_dir = ConfigManager.sessions_dir(@workdir)
+          storage_path = Path.join(sessions_dir, "#{session_id}.jsonl")
+          File.mkdir_p!(sessions_dir)
+          assert :ok = Log.persist_event(storage_path, {:agent_start, @workdir})
+
+          {:ok, view, html} = live_loaded(conn, session_path(session_id))
 
           minimax_value =
             html

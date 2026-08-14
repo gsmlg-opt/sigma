@@ -399,6 +399,8 @@ defmodule Sigma.Session.JournalTest do
              }
            ]
 
+    assert snapshot.model_source == :journal
+
     assert Journal.replay(entries, diagnostics: [caller_diagnostic, caller_diagnostic]) ==
              {:ok, snapshot}
   end

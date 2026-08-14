@@ -96,6 +96,30 @@ defmodule Sigma.Web.SessionLive do
          repo_key,
          log_session_id
        ) do
+    with {:ok, snapshot} <- Sigma.Session.Log.snapshot(storage_path) do
+      load_session_data(
+        snapshot,
+        session_id,
+        workdir,
+        sessions_dir,
+        storage_path,
+        meta_path,
+        repo_key,
+        log_session_id
+      )
+    end
+  end
+
+  defp load_session_data(
+         snapshot,
+         session_id,
+         workdir,
+         sessions_dir,
+         storage_path,
+         meta_path,
+         repo_key,
+         log_session_id
+       ) do
     session_meta = read_session_meta(meta_path)
     effective_cwd = Map.get(session_meta, "cwd", workdir)
     session_branch = Map.get(session_meta, "branch")
@@ -106,7 +130,7 @@ defmodule Sigma.Web.SessionLive do
 
     config =
       Application.get_env(:sigma_web, :test_provider_config) ||
-        session_provider_config(session_meta)
+        session_provider_config(snapshot, session_meta)
 
     global_agents = Map.get(system_config, "system_prompt")
 
@@ -135,9 +159,9 @@ defmodule Sigma.Web.SessionLive do
 
       {:ok, {provider_mod, model_id, provider_id, provider_options}} ->
         selected_agent_model = agent_model(config, provider_id, model_id)
+        initial_messages = snapshot.messages
 
-        with {:ok, initial_messages} <- Sigma.Session.Log.replay(storage_path),
-             {:ok, runtime_session} <-
+        with {:ok, runtime_session} <-
                Sigma.Agent.Runtime.get_session(workdir, session_id,
                  model: selected_agent_model,
                  provider: provider_mod,
@@ -145,6 +169,7 @@ defmodule Sigma.Web.SessionLive do
                  system_prompt: nil,
                  session_context: session_context,
                  on_event: session_event_handler(storage_path, repo_key, session_id),
+                 on_state_change: session_state_change_handler(storage_path, effective_cwd),
                  tools: builtin_tools,
                  mcp_servers: mcp_servers,
                  messages: initial_messages,
@@ -154,13 +179,6 @@ defmodule Sigma.Web.SessionLive do
                ),
              {:ok, sessions} <- Sigma.Session.Log.list_sessions(sessions_dir) do
           agent = runtime_session.agent
-
-          Sigma.Agent.set_provider(
-            agent,
-            provider_mod,
-            selected_agent_model,
-            provider_options
-          )
 
           pending_user_questions = load_pending_user_questions(agent)
           model_options = model_options(system_config, provider_id)
@@ -1581,17 +1599,18 @@ defmodule Sigma.Web.SessionLive do
          selected_config = Map.put(provider_config, "model", model_id),
          selected_agent_model = agent_model(selected_config, provider_id, model_id),
          {:ok, {provider_mod, _model_id, _provider_id, provider_options}} <-
-           resolve_provider(selected_config) do
-      Sigma.Agent.set_provider(
-        socket.assigns.agent,
-        provider_mod,
-        selected_agent_model,
-        provider_options
-      )
-
+           resolve_provider(selected_config),
+         {:ok, _entry_id} <-
+           persist_selected_model(
+             socket,
+             provider_id,
+             model_id,
+             provider_mod,
+             selected_agent_model,
+             provider_options
+           ) do
       ConfigManager.set_active_provider(provider_id)
       ConfigManager.update_provider(provider_id, %{"model" => model_id})
-      persist_session_model_meta(socket, provider_id, model_id)
 
       {:noreply,
        assign(socket,
@@ -1601,8 +1620,33 @@ defmodule Sigma.Web.SessionLive do
          context_window: model_context_window(selected_agent_model)
        )}
     else
+      {:error, {:model_change_persistence_failed, _reason}} ->
+        {:noreply, put_flash(socket, :error, "Could not persist model selection.")}
+
       _ ->
         {:noreply, put_flash(socket, :error, "Unknown model selection.")}
+    end
+  end
+
+  defp persist_selected_model(
+         socket,
+         provider_id,
+         model_id,
+         provider_mod,
+         selected_agent_model,
+         provider_options
+       ) do
+    case Sigma.Agent.Runtime.change_model(
+           socket.assigns.workdir,
+           socket.assigns.session_id,
+           provider_id,
+           model_id,
+           provider_mod,
+           selected_agent_model,
+           provider_options
+         ) do
+      {:ok, _entry_id} = success -> success
+      {:error, reason} -> {:error, {:model_change_persistence_failed, reason}}
     end
   end
 
@@ -1997,6 +2041,17 @@ defmodule Sigma.Web.SessionLive do
     end
   end
 
+  defp session_state_change_handler(storage_path, cwd) do
+    fn
+      {:model_change, provider_id, model_id} ->
+        with :ok <- Sigma.Session.Log.ensure_session_header(storage_path, cwd),
+             {:ok, entry_id} <-
+               Sigma.Session.Log.append_model_change(storage_path, provider_id, model_id) do
+          {:ok, entry_id}
+        end
+    end
+  end
+
   defp session_ready?(socket), do: Map.get(socket.assigns, :session_ready, false)
 
   defp format_load_error(reason) when is_binary(reason), do: reason
@@ -2122,27 +2177,26 @@ defmodule Sigma.Web.SessionLive do
 
   defp session_provider_config(_session_meta), do: ConfigManager.get_active_provider_config()
 
+  defp session_provider_config(
+         %{model_source: :journal, provider_id: provider_id, model_id: model_id},
+         _session_meta
+       )
+       when is_binary(provider_id) and is_binary(model_id) do
+    session_provider_config(%{"provider_id" => provider_id, "model_id" => model_id})
+  end
+
+  defp session_provider_config(%{model_source: :journal}, _session_meta),
+    do: ConfigManager.get_active_provider_config()
+
+  defp session_provider_config(_snapshot, session_meta),
+    do: session_provider_config(session_meta)
+
   defp provider_has_model?(provider, model_id) do
     provider
     |> Map.get("models", [])
     |> List.wrap()
     |> Enum.map(&to_model_id/1)
     |> Enum.any?(&(&1 == model_id))
-  end
-
-  defp persist_session_model_meta(socket, provider_id, model_id) do
-    meta_path = socket.assigns[:meta_path]
-
-    if meta_path do
-      meta =
-        meta_path
-        |> read_session_meta()
-        |> Map.merge(%{"provider_id" => provider_id, "model_id" => model_id})
-
-      File.write(meta_path, Jason.encode!(meta))
-    else
-      :ok
-    end
   end
 
   defp entry_matches?(_entry, nil, ""), do: true

@@ -79,6 +79,95 @@ defmodule Sigma.Session.Log do
   end
 
   @doc """
+  Ensures an empty journal has a valid session header before its first state change.
+  """
+  def ensure_session_header(storage_id, cwd, storage_mod \\ JsonlFile) do
+    with :ok <- validate_session_cwd(cwd),
+         {:ok, snapshot} <- mutation_snapshot(storage_id, storage_mod) do
+      case snapshot do
+        %{header: header} when is_map(header) ->
+          :ok
+
+        %{header: nil, diagnostics: []} ->
+          append_session_header(storage_id, cwd, storage_mod)
+
+        %{header: nil, diagnostics: diagnostics} ->
+          {:error, {:invalid_journal, diagnostics}}
+      end
+    end
+  end
+
+  @doc """
+  Appends the selected provider and model to the active journal branch.
+  """
+  def append_model_change(storage_id, provider_id, model_id, storage_mod \\ JsonlFile) do
+    with :ok <- validate_model_change_id(provider_id, :provider_id),
+         :ok <- validate_model_change_id(model_id, :model_id),
+         {:ok, snapshot} <- mutation_snapshot(storage_id, storage_mod),
+         :ok <- validate_model_change_snapshot(snapshot) do
+      entry = %{
+        "type" => "model_change",
+        "id" => generate_short_id(),
+        "parentId" => snapshot.active_leaf_id,
+        "timestamp" => DateTime.utc_now() |> DateTime.to_iso8601(),
+        "model" => "#{provider_id}/#{model_id}"
+      }
+
+      case storage_mod.append(storage_id, entry) do
+        :ok -> {:ok, entry["id"]}
+        {:error, reason} -> {:error, {:storage_append_failed, reason}}
+        other -> {:error, {:storage_append_failed, other}}
+      end
+    end
+  end
+
+  defp validate_session_cwd(cwd) when is_binary(cwd) and cwd != "", do: :ok
+
+  defp validate_session_cwd(_cwd),
+    do: {:error, {:invalid_session_header, :cwd}}
+
+  defp append_session_header(storage_id, cwd, storage_mod) do
+    header = %{
+      "type" => "session",
+      "version" => 3,
+      "id" => generate_session_id(),
+      "timestamp" => DateTime.utc_now() |> DateTime.to_iso8601(),
+      "cwd" => cwd
+    }
+
+    case storage_mod.append(storage_id, header) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:storage_append_failed, reason}}
+      other -> {:error, {:storage_append_failed, other}}
+    end
+  end
+
+  defp validate_model_change_id(value, _field) when is_binary(value) and value != "", do: :ok
+
+  defp validate_model_change_id(_value, field),
+    do: {:error, {:invalid_model_change, field}}
+
+  defp mutation_snapshot(storage_id, storage_mod) do
+    case snapshot(storage_id, [], storage_mod) do
+      {:ok, snapshot} -> {:ok, snapshot}
+      {:error, reason} -> {:error, {:storage_read_failed, reason}}
+    end
+  end
+
+  defp validate_model_change_snapshot(%{header: nil}),
+    do: {:error, {:invalid_journal, :missing_session_header}}
+
+  defp validate_model_change_snapshot(%{diagnostics: diagnostics}) do
+    case Enum.filter(diagnostics, &mutation_blocking_diagnostic?/1) do
+      [] -> :ok
+      blocking -> {:error, {:invalid_journal, blocking}}
+    end
+  end
+
+  defp mutation_blocking_diagnostic?(%{kind: :invalid_payload}), do: false
+  defp mutation_blocking_diagnostic?(_diagnostic), do: true
+
+  @doc """
   Forks a session at the given index.
   """
   def fork(source_storage_id, target_storage_id, message_count, cwd, storage_mod \\ JsonlFile) do

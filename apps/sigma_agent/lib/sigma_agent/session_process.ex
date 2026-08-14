@@ -12,6 +12,7 @@ defmodule Sigma.Agent.SessionProcess do
     :idle_timer,
     :last_activity_at,
     :session_context,
+    :on_state_change,
     messages: [],
     last_compaction: nil,
     compaction_count: 0,
@@ -32,6 +33,18 @@ defmodule Sigma.Agent.SessionProcess do
     GenServer.cast(pid_or_name, {:record_event, event, on_event})
   end
 
+  @doc """
+  Applies and persists a model change through the session mailbox.
+  """
+  def change_model(pid_or_name, agent, provider_id, model_id, provider, model, options)
+      when is_pid(agent) and is_atom(provider) and is_map(model) do
+    GenServer.call(
+      pid_or_name,
+      {:change_model, agent, provider_id, model_id, provider, model, options},
+      :infinity
+    )
+  end
+
   def await_hibernating(pid_or_name, timeout_ms) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     await_status(pid_or_name, :hibernating, deadline)
@@ -47,6 +60,7 @@ defmodule Sigma.Agent.SessionProcess do
       idle_timeout_ms: Keyword.fetch!(opts, :idle_timeout_ms),
       last_activity_at: now,
       session_context: Keyword.get(opts, :session_context),
+      on_state_change: Keyword.get(opts, :on_state_change),
       messages: Keyword.get(opts, :messages, []),
       status: :active
     }
@@ -68,6 +82,31 @@ defmodule Sigma.Agent.SessionProcess do
        compaction_count: state.compaction_count,
        last_compaction: state.last_compaction
      }, state}
+  end
+
+  def handle_call(
+        {:change_model, agent, provider_id, model_id, provider, model, options},
+        _from,
+        state
+      ) do
+    event = {:model_change, provider_id, model_id}
+
+    if is_function(state.on_state_change, 1) do
+      persist = fn -> state.on_state_change.(event) end
+
+      case safely(fn -> Sigma.Agent.change_provider(agent, provider, model, options, persist) end) do
+        :ok ->
+          {:reply, :ok, apply_recorded_event(state, event)}
+
+        {:ok, _result} = success ->
+          {:reply, success, apply_recorded_event(state, event)}
+
+        {:error, _reason} = error ->
+          {:reply, error, state}
+      end
+    else
+      {:reply, {:error, :state_change_persistence_not_configured}, state}
+    end
   end
 
   @impl true
@@ -93,6 +132,20 @@ defmodule Sigma.Agent.SessionProcess do
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  defp safely(fun) do
+    fun.()
+  rescue
+    exception -> {:error, {:state_change_exception, exception.__struct__}}
+  catch
+    kind, reason -> {:error, {:state_change_failure, kind, reason}}
+  end
+
+  defp apply_recorded_event(state, event) do
+    state
+    |> apply_event(event)
+    |> Map.update!(:event_count, &(&1 + 1))
+  end
 
   defp apply_event(state, {:turn_start}) do
     touch(%{state | status: :turn_running})

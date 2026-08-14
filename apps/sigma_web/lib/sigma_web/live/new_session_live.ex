@@ -1,7 +1,7 @@
 defmodule Sigma.Web.NewSessionLive do
   use Sigma.Web, :live_view
 
-  alias Sigma.Session.{ConfigManager, Log, RepoManager}
+  alias Sigma.Session.{ConfigManager, RepoManager, SessionFiles}
   alias Phoenix.LiveView.AsyncResult
   import Sigma.Web.ProjectSidebar
 
@@ -522,32 +522,33 @@ defmodule Sigma.Web.NewSessionLive do
     workdir = socket.assigns.workdir
     branch = socket.assigns.selected_branch
     mode = socket.assigns.mode
-    session_id = "session_#{System.unique_integer([:positive])}"
     sessions_dir = socket.assigns.sessions_dir
-    meta_path = Path.join(sessions_dir, "#{session_id}.meta.json")
-    log_path = Path.join(sessions_dir, "#{session_id}.jsonl")
 
     case session_workdir(socket, workdir, branch, mode) do
       {:ok, cwd, is_worktree} ->
-        meta =
-          %{
-            cwd: cwd,
-            branch: branch,
-            worktree: is_worktree,
-            mcp_server_ids: socket.assigns.selected_mcp_server_ids
-          }
-          |> maybe_put_session_model(
-            socket.assigns.model_options,
-            socket.assigns.selected_model_value
-          )
+        meta = %{
+          cwd: cwd,
+          branch: branch,
+          worktree: is_worktree,
+          mcp_server_ids: socket.assigns.selected_mcp_server_ids
+        }
 
-        File.write!(meta_path, Jason.encode!(meta))
-        :ok = Log.persist_event(log_path, {:agent_start, cwd})
+        case create_session_files(
+               sessions_dir,
+               meta,
+               cwd,
+               socket.assigns.model_options,
+               socket.assigns.selected_model_value
+             ) do
+          {:ok, session_id} ->
+            {:noreply,
+             push_navigate(socket,
+               to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{session_id}"
+             )}
 
-        {:noreply,
-         push_navigate(socket,
-           to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{session_id}"
-         )}
+          {:error, _reason} ->
+            {:noreply, put_flash(socket, :error, "Could not create session.")}
+        end
 
       {:error, message} ->
         {:noreply, put_flash(socket, :error, message)}
@@ -581,16 +582,35 @@ defmodule Sigma.Web.NewSessionLive do
 
   defp session_workdir(_socket, workdir, _branch, _mode), do: {:ok, workdir, false}
 
-  defp maybe_put_session_model(meta, model_options, selected) do
-    case selected_model(model_options, selected) do
-      %{provider_id: provider_id, model_id: model_id} ->
-        meta
-        |> Map.put(:provider_id, provider_id)
-        |> Map.put(:model_id, model_id)
+  defp create_session_files(sessions_dir, meta, cwd, model_options, selected, attempts \\ 8)
 
-      nil ->
-        meta
+  defp create_session_files(_sessions_dir, _meta, _cwd, _model_options, _selected, 0),
+    do: {:error, :session_id_conflict}
+
+  defp create_session_files(sessions_dir, meta, cwd, model_options, selected, attempts) do
+    session_id = generate_session_id()
+
+    initial_model =
+      case selected_model(model_options, selected) do
+        %{provider_id: provider_id, model_id: model_id} -> {provider_id, model_id}
+        nil -> nil
+      end
+
+    case SessionFiles.create(sessions_dir, session_id, meta, cwd, model: initial_model) do
+      :ok ->
+        {:ok, session_id}
+
+      {:error, :already_exists} ->
+        create_session_files(sessions_dir, meta, cwd, model_options, selected, attempts - 1)
+
+      {:error, _reason} = error ->
+        error
     end
+  end
+
+  defp generate_session_id do
+    suffix = :crypto.strong_rand_bytes(12) |> Base.url_encode64(padding: false)
+    "session_#{suffix}"
   end
 
   defp valid_model_value?(model_options, selected),
