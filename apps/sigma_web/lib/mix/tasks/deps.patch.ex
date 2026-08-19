@@ -394,7 +394,8 @@ defmodule Mix.Tasks.Deps.Patch do
     if File.exists?(file_path) do
       content = File.read!(file_path)
 
-      if String.contains?(content, "connect_options: NPM.Proxy.connect_options(url)") do
+      if String.contains?(content, "NPM.Proxy.with_connect_options(url)") or
+           String.contains?(content, "connect_options: NPM.Proxy.connect_options(url)") do
         false
       else
         target = """
@@ -417,6 +418,16 @@ defmodule Mix.Tasks.Deps.Patch do
         new_content =
           content
           |> String.replace("\r\n", "\n")
+          |> String.replace("request_options()", "request_options(url)")
+          |> String.replace("defp request_options do", "defp request_options(url) do")
+          |> String.replace(
+            "    [receive_timeout: @receive_timeout, retry: false] ++ adapter_options",
+            """
+                ([receive_timeout: @receive_timeout, retry: false] ++ adapter_options)
+                |> NPM.Proxy.with_connect_options(url)
+            """
+            |> String.trim_trailing()
+          )
           |> String.replace(
             String.replace(target, "\r\n", "\n"),
             String.replace(replacement, "\r\n", "\n")
@@ -440,14 +451,26 @@ defmodule Mix.Tasks.Deps.Patch do
     if File.exists?(file_path) do
       content = File.read!(file_path)
 
-      if String.contains?(content, "connect_options: NPM.Proxy.connect_options(tarball_url)") do
+      if String.contains?(content, "NPM.Proxy.with_connect_options(tarball_url)") or
+           String.contains?(content, "connect_options: NPM.Proxy.connect_options(tarball_url)") do
         false
       else
         new_content =
           content
           |> String.replace(
-            "connect_options: [timeout: @connect_timeout],",
-            "connect_options: Keyword.merge([timeout: @connect_timeout], NPM.Proxy.connect_options(tarball_url)),"
+            "case Req.get(tarball_url, request_options()) do",
+            "case Req.get(tarball_url, request_options(tarball_url)) do"
+          )
+          |> String.replace(
+            "  defp request_options, do: __request_options__(req_version())",
+            """
+              defp request_options(tarball_url) do
+                req_version()
+                |> __request_options__()
+                |> NPM.Proxy.with_connect_options(tarball_url)
+              end
+            """
+            |> String.trim_trailing()
           )
           |> String.replace(
             "case Req.get(tarball_url, decode_body: false) do",
@@ -477,6 +500,20 @@ defmodule Mix.Tasks.Deps.Patch do
     content = """
     defmodule NPM.Proxy do
       @moduledoc false
+
+      def with_connect_options(options, url) do
+        proxy_options = connect_options(url)
+
+        case Keyword.fetch(options, :connect_options) do
+          {:ok, connect_options} ->
+            Keyword.put(options, :connect_options, Keyword.merge(connect_options, proxy_options))
+
+          :error ->
+            Keyword.update!(options, :finch, fn finch_options ->
+              Keyword.update!(finch_options, :conn_opts, &Keyword.merge(&1, proxy_options))
+            end)
+        end
+      end
 
       def connect_options(url) do
         uri = URI.parse(url)
@@ -560,7 +597,9 @@ defmodule Mix.Tasks.Deps.Patch do
   end
 
   defp recompile_dep(dep_name) do
-    # Force recompilation by invoking Mix cmd
-    System.cmd("mix", ["deps.compile", dep_name], into: IO.stream(:stdio, :line))
+    case System.cmd("mix", ["deps.compile", dep_name], into: IO.stream(:stdio, :line)) do
+      {_, 0} -> :ok
+      {_, status} -> Mix.raise("Failed to recompile #{dep_name} (status #{status})")
+    end
   end
 end

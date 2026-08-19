@@ -45,7 +45,7 @@ defmodule Sigma.Web.MixProject do
       {:sigma_logs, in_umbrella: true},
       {:sigma_tools, in_umbrella: true},
       {:floki, ">= 0.30.0"},
-      {:lazy_html, ">= 0.1.0", only: :test}
+      {:lazy_html, ">= 0.1.0"}
     ]
   end
 end
