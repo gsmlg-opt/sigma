@@ -2,75 +2,130 @@ defmodule Sigma.Coding.MCP do
   @moduledoc """
   Discovers and executes tools exposed by configured MCP servers.
 
-  Each server is backed by a long-lived `Anubis.Client` process started under
-  `Sigma.Coding.MCP.ClientSupervisor` and addressed through `Sigma.Coding.MCP.Registry`.
-  Clients are keyed by `{session_id, server_id}` so a session keeps its
-  connections warm across many tool calls.
+  Each server is backed by a long-lived `Backplane.McpProtocol.Client` process
+  started under `Sigma.Coding.MCP.ClientSupervisor` and addressed through
+  `Sigma.Coding.MCP.Registry`. Clients are keyed by `{session_id, server_id}` so
+  a session keeps its connections warm across many tool calls.
 
   Lifecycle is owned by the caller (the agent session process):
 
     * `start_session/3` starts the clients and returns the discovered tools
-      plus opaque handles used to tear them down.
-    * `stop/1` terminates the clients for those handles.
+      plus opaque session metadata used to tear them down.
+    * `stop/1` closes subscriptions and terminates the client supervisors.
     * `call_tool/4` routes a tool call to the live client carried by the tool.
+    * `refresh_server_tools/3` re-lists tools for one live client after a
+      `tools/list_changed` notification.
   """
 
+  alias Backplane.McpProtocol.Client
+  alias Backplane.McpProtocol.MCP.Error
+  alias Backplane.McpProtocol.MCP.Response
   alias Sigma.Coding.MCP.Tool
 
   @registry Sigma.Coding.MCP.Registry
   @supervisor Sigma.Coding.MCP.ClientSupervisor
 
-  @protocol_version "2025-06-18"
   @client_info %{"name" => "sigma", "version" => "0.1.0"}
 
   @startup_timeout 15_000
-  @call_timeout 30_000
+  @call_timeout 60_000
 
   @type handle :: pid()
+  @type client_ref :: term()
+
+  @type session :: %{
+          handles: [handle()],
+          subscriptions: [{String.t(), client_ref(), term()}],
+          clients: %{optional(String.t()) => client_ref()}
+        }
 
   @doc """
-  Starts (or reuses) a persistent client per server and lists their tools.
+  Starts a persistent client per server and lists their tools.
 
-  Returns `{:ok, tools, handles}`. A server that fails to connect or list its
+  Returns `{:ok, tools, session}`. A server that fails to connect or list its
   tools is skipped (with telemetry) rather than failing the whole session.
-  Pass `:cwd` to set the working directory for stdio servers and `:timeout`
-  to bound the connect/list step.
+
+  Options:
+
+    * `:cwd` — working directory for stdio servers and MCP roots
+    * `:timeout` — connect/list timeout
+    * `:subscriber` — process that receives `{:mcp_subscription, handle, notification}`
+    * `:elicitation_callback` — `(message, schema) -> {:accept, map} | :decline | :cancel`
+    * `:sampling_callback` — `(params) -> {:ok, map} | {:error, reason}`
   """
-  @spec start_session(String.t(), map(), keyword()) :: {:ok, [Tool.t()], [handle()]}
+  @spec start_session(String.t(), map(), keyword()) :: {:ok, [Tool.t()], session()}
   def start_session(session_id, servers, opts \\ []) when is_map(servers) do
-    {tools, handles} =
-      Enum.reduce(servers, {[], []}, fn {server_id, server}, {tools_acc, handles_acc} ->
+    {tools, session} =
+      Enum.reduce(servers, {[], empty_session()}, fn {server_id, server},
+                                                     {tools_acc, session_acc} ->
         case ensure_client(session_id, server_id, server, opts) do
           {:ok, client, sup} ->
+            configure_client!(client, opts)
+
+            session_acc =
+              session_acc
+              |> put_handle(sup)
+              |> put_client(server_id, client)
+              |> maybe_subscribe(to_string(server_id), client, opts)
+
             case list_tools(client, opts) do
               {:ok, mcp_tools} ->
                 discovered = Enum.map(mcp_tools, &to_tool(server_id, client, &1))
-                {tools_acc ++ discovered, [sup | handles_acc]}
+                {tools_acc ++ discovered, session_acc}
 
               {:error, reason} ->
                 telemetry_error(server_id, reason)
-                {tools_acc, [sup | handles_acc]}
+                {tools_acc, session_acc}
             end
 
           {:error, reason} ->
             telemetry_error(server_id, reason)
-            {tools_acc, handles_acc}
+            {tools_acc, session_acc}
         end
       end)
 
-    {:ok, tools, Enum.reverse(handles)}
+    {:ok, tools, finalize_session(session)}
   end
 
   @doc """
-  Terminates the client supervision trees referenced by `handles`.
+  Closes subscriptions and terminates client supervision trees.
   """
-  @spec stop([handle()]) :: :ok
-  def stop(handles) when is_list(handles) do
+  @spec stop(session() | [handle()]) :: :ok
+  def stop(%{handles: handles, subscriptions: subscriptions}) do
+    Enum.each(subscriptions, fn {_server_id, client, subscription} ->
+      _ = Client.close_subscription(client, subscription)
+    end)
+
     Enum.each(handles, fn sup ->
       DynamicSupervisor.terminate_child(@supervisor, sup)
     end)
 
     :ok
+  end
+
+  def stop(handles) when is_list(handles) do
+    Enum.each(handles, fn
+      %{handles: _} = session -> stop(session)
+      sup when is_pid(sup) -> DynamicSupervisor.terminate_child(@supervisor, sup)
+      _ -> :ok
+    end)
+
+    :ok
+  end
+
+  @doc """
+  Re-lists tools for a live client after a catalog change notification.
+  """
+  @spec refresh_server_tools(String.t(), client_ref(), keyword()) ::
+          {:ok, [Tool.t()]} | {:error, String.t()}
+  def refresh_server_tools(server_id, client, opts \\ []) do
+    case list_tools(client, opts) do
+      {:ok, mcp_tools} ->
+        {:ok, Enum.map(mcp_tools, &to_tool(server_id, client, &1))}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   @doc """
@@ -80,15 +135,16 @@ defmodule Sigma.Coding.MCP do
     timeout = Keyword.get(opts, :timeout, @call_timeout)
 
     try do
-      case Anubis.Client.call_tool(client, tool.server_tool_name, params || %{}, timeout: timeout) do
-        {:ok, %Anubis.MCP.Response{} = response} ->
-          result = Anubis.MCP.Response.get_result(response) || %{}
+      case Client.call_tool(client, tool.server_tool_name, params || %{}, timeout: timeout) do
+        {:ok, %Response{} = response} ->
+          result = Response.get_result(response) || %{}
+          content = normalize_tool_content(result)
 
           {:ok,
            %{
-             content: normalize_content(result["content"]),
+             content: content,
              details: result,
-             is_error: Anubis.MCP.Response.error?(response)
+             is_error: Response.error?(response)
            }}
 
         {:error, error} ->
@@ -99,18 +155,101 @@ defmodule Sigma.Coding.MCP do
     end
   end
 
+  defp empty_session do
+    %{handles: [], subscriptions: [], clients: %{}}
+  end
+
+  defp finalize_session(session) do
+    %{
+      handles: Enum.reverse(session.handles),
+      subscriptions: Enum.reverse(session.subscriptions),
+      clients: session.clients
+    }
+  end
+
+  defp put_handle(session, handle), do: %{session | handles: [handle | session.handles]}
+
+  defp put_client(session, server_id, client) do
+    %{session | clients: Map.put(session.clients, to_string(server_id), client)}
+  end
+
+  defp maybe_subscribe(session, server_id, client, opts) do
+    subscriber = Keyword.get(opts, :subscriber, self())
+
+    case Client.get_protocol_info(client) do
+      %{era: :modern} ->
+        case Client.listen_subscriptions(client, ["notifications/tools/list_changed"],
+               subscriber: subscriber
+             ) do
+          {:ok, subscription} ->
+            %{
+              session
+              | subscriptions: [{server_id, client, subscription} | session.subscriptions]
+            }
+
+          {:error, _reason} ->
+            session
+        end
+
+      _other ->
+        session
+    end
+  rescue
+    _ -> session
+  catch
+    :exit, _ -> session
+  end
+
+  defp configure_client!(client, opts) do
+    cwd = Keyword.get(opts, :cwd)
+
+    if is_binary(cwd) and cwd != "" do
+      uri = cwd_to_file_uri(cwd)
+      _ = Client.add_root(client, uri, "workspace")
+    end
+
+    case Keyword.get(opts, :elicitation_callback) do
+      callback when is_function(callback, 2) ->
+        Client.register_elicitation_callback(client, callback)
+
+      _ ->
+        Client.register_elicitation_callback(client, fn _message, _schema -> :decline end)
+    end
+
+    case Keyword.get(opts, :sampling_callback) do
+      callback when is_function(callback, 1) ->
+        Client.register_sampling_callback(client, callback)
+
+      _ ->
+        Client.register_sampling_callback(client, fn _params ->
+          {:error, "MCP sampling is not configured for this session"}
+        end)
+    end
+
+    :ok
+  end
+
+  defp cwd_to_file_uri(cwd) do
+    abs = Path.expand(cwd)
+    "file://" <> abs
+  end
+
+  defp client_capabilities do
+    Enum.reduce([:roots, :elicitation, :sampling], %{}, &Client.parse_capability/2)
+  end
+
   defp ensure_client(session_id, server_id, server, opts) do
     ref = System.unique_integer([:positive])
     client = client_via(session_id, server_id, ref)
 
     spec =
-      {Anubis.Client,
+      {Client,
        name: client,
        transport_name: transport_via(session_id, server_id, ref),
        transport: transport_config(server, opts),
        client_info: client_info(session_id, server_id, ref),
-       capabilities: %{},
-       protocol_version: @protocol_version}
+       capabilities: client_capabilities(),
+       protocol_version: :auto}
 
     case DynamicSupervisor.start_child(@supervisor, spec) do
       {:ok, sup} -> await_ready(client, sup, opts)
@@ -122,7 +261,7 @@ defmodule Sigma.Coding.MCP do
     timeout = Keyword.get(opts, :timeout, @startup_timeout)
 
     try do
-      case Anubis.Client.await_ready(client, timeout: timeout) do
+      case Client.await_ready(client, timeout: timeout) do
         :ok -> {:ok, client, sup}
         {:error, reason} -> {:error, reason}
       end
@@ -135,9 +274,9 @@ defmodule Sigma.Coding.MCP do
     timeout = Keyword.get(opts, :timeout, @startup_timeout)
 
     try do
-      case Anubis.Client.list_tools(client, timeout: timeout) do
-        {:ok, %Anubis.MCP.Response{} = response} ->
-          result = Anubis.MCP.Response.get_result(response) || %{}
+      case Client.list_tools(client, timeout: timeout) do
+        {:ok, %Response{} = response} ->
+          result = Response.get_result(response) || %{}
           {:ok, Map.get(result, "tools", [])}
 
         {:error, error} ->
@@ -213,7 +352,7 @@ defmodule Sigma.Coding.MCP do
       name: tool_name(server_id, server_tool_name),
       description: mcp_tool["description"] || "MCP tool #{server_id}/#{server_tool_name}",
       schema: mcp_tool["inputSchema"] || %{"type" => "object", "properties" => %{}},
-      server_id: server_id,
+      server_id: to_string(server_id),
       client: client,
       server_tool_name: server_tool_name
     }
@@ -239,6 +378,21 @@ defmodule Sigma.Coding.MCP do
       |> then(&"#{&1}_#{hash}")
     end
   end
+
+  defp normalize_tool_content(result) when is_map(result) do
+    case normalize_content(result["content"]) do
+      [] ->
+        case Map.get(result, "structuredContent") do
+          nil -> []
+          structured -> [%{type: :text, text: inspect(structured)}]
+        end
+
+      content ->
+        content
+    end
+  end
+
+  defp normalize_tool_content(_), do: []
 
   defp normalize_content(content) when is_list(content) do
     Enum.map(content, &normalize_content_block/1)
@@ -266,11 +420,8 @@ defmodule Sigma.Coding.MCP do
     %{type: :text, text: inspect(block)}
   end
 
-  defp format_error(%Anubis.MCP.Error{message: message}) when is_binary(message), do: message
-
-  defp format_error(%Anubis.MCP.Error{reason: reason}) when not is_nil(reason),
-    do: inspect(reason)
-
+  defp format_error(%Error{message: message}) when is_binary(message), do: message
+  defp format_error(%Error{reason: reason}) when not is_nil(reason), do: inspect(reason)
   defp format_error(error), do: inspect(error)
 
   defp expand_env_map(values) when is_map(values) and map_size(values) > 0 do

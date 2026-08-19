@@ -25,7 +25,7 @@ defmodule Sigma.Coding.MixProject do
   defp deps do
     [
       {:sigma_ai, in_umbrella: true},
-      {:anubis_mcp, "~> 2.0"},
+      {:backplane_mcp_protocol, "~> 0.6"},
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.0"}
     ]

@@ -197,6 +197,7 @@ defmodule Sigma.Web.SessionLive do
              mcp_server_ids: mcp_server_ids,
              model_options: ensure_model_option(model_options, provider_id, model_id),
              pending_user_questions: pending_user_questions,
+             pending_mcp_elicitations: load_pending_mcp_elicitations(agent),
              sessions: sessions,
              stream_messages: stream_messages,
              tool_call_to_msg: tool_call_to_msg,
@@ -227,6 +228,7 @@ defmodule Sigma.Web.SessionLive do
       |> assign(:mcp_server_ids, session_data.mcp_server_ids)
       |> assign(:model_options, session_data.model_options)
       |> assign(:pending_user_questions, session_data.pending_user_questions)
+      |> assign(:pending_mcp_elicitations, session_data.pending_mcp_elicitations)
       |> assign(:sessions, session_data.sessions)
       |> assign(:session_ready, true)
       |> assign(:tool_call_to_msg, session_data.tool_call_to_msg)
@@ -493,6 +495,7 @@ defmodule Sigma.Web.SessionLive do
             </div>
 
             <.pending_user_questions questions={@pending_user_questions} />
+            <.pending_mcp_elicitations elicitations={@pending_mcp_elicitations} />
 
             <div :if={@turn_in_flight} class="mb-3 flex items-center justify-between gap-3">
               <div class="flex items-center gap-3 text-sm text-on-surface-variant">
@@ -753,6 +756,93 @@ defmodule Sigma.Web.SessionLive do
               size="sm"
             >
               Send answer
+            </.dm_btn>
+          </div>
+        </form>
+      </div>
+    </div>
+    """
+  end
+
+  defp pending_mcp_elicitations(assigns) do
+    ~H"""
+    <div
+      :if={@elicitations != []}
+      id="mcp-elicitations"
+      class="mb-4 space-y-3"
+      role="group"
+      aria-label="MCP elicitation requests"
+    >
+      <div
+        :for={elicitation <- @elicitations}
+        id={"mcp-elicitation-#{elicitation.id}"}
+        class="rounded-lg border border-primary/30 bg-primary/5 p-4 shadow-sm"
+      >
+        <div class="mb-3 flex items-start gap-3">
+          <div class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-content">
+            <.dm_mdi name="form-textbox" class="h-4 w-4" />
+          </div>
+          <div class="min-w-0">
+            <p class="text-xs font-semibold uppercase text-on-surface-variant">MCP request</p>
+            <p class="text-sm font-medium text-on-surface">{elicitation.message}</p>
+          </div>
+        </div>
+
+        <form
+          id={"mcp-elicitation-form-#{elicitation.id}"}
+          phx-submit="answer_mcp_elicitation"
+          class="space-y-3"
+        >
+          <input type="hidden" name="elicitation_id" value={elicitation.id} />
+
+          <div :for={field <- elicitation.fields} class="space-y-1">
+            <label class="block text-xs font-medium text-on-surface-variant" for={"mcp-field-#{elicitation.id}-#{field.name}"}>
+              {field.title}
+            </label>
+            <p :if={field.description} class="text-xs text-on-surface-variant">{field.description}</p>
+
+            <input
+              :if={field.type in ["string", "number", "integer"]}
+              id={"mcp-field-#{elicitation.id}-#{field.name}"}
+              type={if field.type == "string", do: "text", else: "number"}
+              name={"fields[#{field.name}]"}
+              class="w-full rounded-md border border-outline-variant bg-surface-container-low px-3 py-2 text-sm text-on-surface focus:border-primary focus:outline-none"
+            />
+
+            <label
+              :if={field.type == "boolean"}
+              class="flex items-center gap-2 text-sm text-on-surface"
+            >
+              <input
+                id={"mcp-field-#{elicitation.id}-#{field.name}"}
+                type="checkbox"
+                name={"fields[#{field.name}]"}
+                value="true"
+              />
+              {field.title}
+            </label>
+          </div>
+
+          <div class="flex justify-end gap-2">
+            <.dm_btn
+              id={"mcp-elicitation-decline-#{elicitation.id}"}
+              type="button"
+              phx-click="decline_mcp_elicitation"
+              phx-value-elicitation-id={elicitation.id}
+              phx-hook="WebComponentHook"
+              variant="ghost"
+              size="sm"
+            >
+              Decline
+            </.dm_btn>
+            <.dm_btn
+              id={"mcp-elicitation-submit-#{elicitation.id}"}
+              type="submit"
+              phx-hook="WebComponentHook"
+              variant="primary"
+              size="sm"
+            >
+              Submit
             </.dm_btn>
           </div>
         </form>
@@ -1467,6 +1557,19 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
+  def handle_event("answer_mcp_elicitation", params, socket) do
+    elicitation_id = params["elicitation_id"]
+    content = coerce_mcp_elicitation_fields(params["fields"] || %{})
+
+    reply_to_mcp_elicitation(socket, elicitation_id, {:accept, content})
+  end
+
+  @impl true
+  def handle_event("decline_mcp_elicitation", %{"elicitation-id" => elicitation_id}, socket) do
+    reply_to_mcp_elicitation(socket, elicitation_id, :decline)
+  end
+
+  @impl true
   def handle_event("send_prompt", %{"value" => prompt}, socket) do
     if session_ready?(socket) do
       case String.trim(prompt) do
@@ -1795,6 +1898,20 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
+  def handle_info({:mcp_elicitation, elicitation_id, request}, socket) do
+    elicitation = Map.put(request, :id, elicitation_id)
+
+    {:noreply,
+     update(socket, :pending_mcp_elicitations, &upsert_mcp_elicitation(&1, elicitation))}
+  end
+
+  @impl true
+  def handle_info({:mcp_elicitation_resolved, elicitation_id}, socket) do
+    {:noreply,
+     update(socket, :pending_mcp_elicitations, &remove_mcp_elicitation(&1, elicitation_id))}
+  end
+
+  @impl true
   def handle_info({:message_start, %{role: :assistant} = message}, socket) do
     socket =
       socket
@@ -2020,6 +2137,7 @@ defmodule Sigma.Web.SessionLive do
     |> assign(:context_token_count, 0)
     |> assign(:context_window, nil)
     |> assign(:pending_user_questions, [])
+    |> assign(:pending_mcp_elicitations, [])
     |> assign(:logs_available, true)
     |> assign(:mcp_server_ids, [])
     |> assign(:show_logs, false)
@@ -2062,6 +2180,55 @@ defmodule Sigma.Web.SessionLive do
   catch
     :exit, _reason -> []
   end
+
+  defp load_pending_mcp_elicitations(agent) do
+    Sigma.Agent.pending_mcp_elicitations(agent, 100)
+  catch
+    :exit, _reason -> []
+  end
+
+  defp upsert_mcp_elicitation(elicitations, elicitation) do
+    elicitations
+    |> remove_mcp_elicitation(elicitation.id)
+    |> Kernel.++([elicitation])
+  end
+
+  defp remove_mcp_elicitation(elicitations, elicitation_id) do
+    Enum.reject(elicitations, &(&1.id == elicitation_id))
+  end
+
+  defp reply_to_mcp_elicitation(socket, elicitation_id, reply) do
+    Sigma.Agent.answer_mcp_elicitation(socket.assigns.agent, elicitation_id, reply)
+
+    {:noreply,
+     update(socket, :pending_mcp_elicitations, &remove_mcp_elicitation(&1, elicitation_id))}
+  end
+
+  defp coerce_mcp_elicitation_fields(fields) when is_map(fields) do
+    Map.new(fields, fn {key, value} ->
+      {to_string(key), coerce_mcp_field_value(value)}
+    end)
+  end
+
+  defp coerce_mcp_elicitation_fields(_), do: %{}
+
+  defp coerce_mcp_field_value("true"), do: true
+  defp coerce_mcp_field_value("false"), do: false
+
+  defp coerce_mcp_field_value(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {int, ""} ->
+        int
+
+      _ ->
+        case Float.parse(value) do
+          {float, ""} -> float
+          _ -> value
+        end
+    end
+  end
+
+  defp coerce_mcp_field_value(value), do: value
 
   defp resolve_provider(nil) do
     case Application.get_env(:sigma_web, :test_provider_config) do

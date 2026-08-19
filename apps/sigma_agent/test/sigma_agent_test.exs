@@ -488,6 +488,77 @@ defmodule Sigma.AgentTest do
     assert [] = Sigma.Agent.pending_user_questions(agent)
   end
 
+  test "handles MCP elicitation accept and decline" do
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+        provider: EmptyProvider
+      )
+
+    Sigma.Agent.subscribe(agent)
+
+    schema = %{
+      "type" => "object",
+      "properties" => %{"name" => %{"type" => "string", "title" => "Name"}}
+    }
+
+    task =
+      Task.async(fn ->
+        Sigma.Agent.request_mcp_elicitation(agent, "What is your name?", schema, timeout: 1_000)
+      end)
+
+    assert_receive {:mcp_elicitation, elicitation_id, %{message: "What is your name?"}}, 1_000
+
+    assert [%{id: ^elicitation_id, fields: [%{name: "name", type: "string"}]}] =
+             Sigma.Agent.pending_mcp_elicitations(agent)
+
+    assert :ok =
+             Sigma.Agent.answer_mcp_elicitation(
+               agent,
+               elicitation_id,
+               {:accept, %{"name" => "Ada"}}
+             )
+
+    assert {:accept, %{"name" => "Ada"}} = Task.await(task)
+    assert_receive {:mcp_elicitation_resolved, ^elicitation_id}, 1_000
+    assert [] = Sigma.Agent.pending_mcp_elicitations(agent)
+
+    decline_task =
+      Task.async(fn ->
+        Sigma.Agent.request_mcp_elicitation(agent, "Confirm?", schema, timeout: 1_000)
+      end)
+
+    assert_receive {:mcp_elicitation, decline_id, %{message: "Confirm?"}}, 1_000
+    assert :ok = Sigma.Agent.answer_mcp_elicitation(agent, decline_id, :decline)
+    assert :decline = Task.await(decline_task)
+  end
+
+  test "rejects unsupported MCP elicitation schemas" do
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+        provider: EmptyProvider
+      )
+
+    assert {:error, :unsupported_schema} =
+             Sigma.Agent.request_mcp_elicitation(agent, "Nested?", %{
+               "type" => "object",
+               "properties" => %{"nested" => %{"type" => "object"}}
+             })
+  end
+
+  test "ignores tools/list_changed when no MCP subscriptions are active" do
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+        provider: EmptyProvider
+      )
+
+    send(agent, {:mcp_subscription, :unused, %{"method" => "notifications/tools/list_changed"}})
+    assert Process.alive?(agent)
+    assert :sys.get_state(agent).tools == []
+  end
+
   test "handles pending user questions after hot reload from older state" do
     {:ok, agent} =
       Sigma.Agent.start_link(
@@ -506,7 +577,9 @@ defmodule Sigma.AgentTest do
       end)
 
     assert_receive {:ask_user_question, question_id, %{question: "Continue?"}}, 1_000
-    assert [%{id: ^question_id, question: "Continue?"}] = Sigma.Agent.pending_user_questions(agent)
+
+    assert [%{id: ^question_id, question: "Continue?"}] =
+             Sigma.Agent.pending_user_questions(agent)
 
     assert :ok = Sigma.Agent.answer_user_question(agent, question_id, {:ok, "yes"})
     assert {:ok, "yes"} = Task.await(task)

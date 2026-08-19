@@ -34,13 +34,16 @@ defmodule Sigma.Agent do
     subscribers: [],
     current_turn_assistant_message: nil,
     pending_user_questions: %{},
+    pending_mcp_elicitations: %{},
     hook_specs: [],
     stop_hook_active: false,
     resume_source: :startup,
-    mcp_handles: []
+    mcp_session: %{handles: [], subscriptions: [], clients: %{}}
   ]
 
   @default_user_question_timeout_ms 300_000
+  @default_mcp_elicitation_timeout_ms 60_000
+  @mcp_sampling_timeout_ms 60_000
 
   # Client API
 
@@ -87,6 +90,37 @@ defmodule Sigma.Agent do
 
   def answer_user_question(pid, question_id, reply) when is_binary(question_id) do
     GenServer.call(pid, {:answer_user_question, question_id, reply})
+  end
+
+  @doc """
+  Blocks until the LiveView answers an MCP elicitation request.
+
+  Returns `{:accept, content}`, `:decline`, `:cancel`, or `{:error, reason}`.
+  """
+  def request_mcp_elicitation(pid, message, schema, opts \\ [])
+      when is_binary(message) and is_map(schema) do
+    elicitation_id = "mcp_elicit_#{System.unique_integer([:positive])}"
+    timeout = Keyword.get(opts, :timeout, @default_mcp_elicitation_timeout_ms)
+
+    case GenServer.call(
+           pid,
+           {:request_mcp_elicitation, elicitation_id, self(), message, schema},
+           timeout
+         ) do
+      {:ok, ^elicitation_id} ->
+        wait_for_mcp_elicitation_answer(pid, elicitation_id, timeout)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def pending_mcp_elicitations(pid, timeout \\ 5_000) do
+    GenServer.call(pid, :pending_mcp_elicitations, timeout)
+  end
+
+  def answer_mcp_elicitation(pid, elicitation_id, reply) when is_binary(elicitation_id) do
+    GenServer.call(pid, {:answer_mcp_elicitation, elicitation_id, reply})
   end
 
   def cancel(pid) do
@@ -205,7 +239,7 @@ defmodule Sigma.Agent do
       end
     end
 
-    Sigma.Coding.MCP.stop(state.mcp_handles)
+    Sigma.Coding.MCP.stop(state.mcp_session)
 
     :ok
   end
@@ -217,8 +251,8 @@ defmodule Sigma.Agent do
 
   @impl true
   def handle_call(:reload_mcp_tools, _from, state) do
-    Sigma.Coding.MCP.stop(state.mcp_handles)
-    state = %{state | mcp_handles: []} |> start_mcp_clients()
+    Sigma.Coding.MCP.stop(state.mcp_session)
+    state = %{state | mcp_session: empty_mcp_session()} |> start_mcp_clients()
     mcp_count = length(state.tools) - length(state.base_tools)
     {:reply, {:ok, mcp_count}, state}
   end
@@ -296,6 +330,63 @@ defmodule Sigma.Agent do
   end
 
   @impl true
+  def handle_call(
+        {:request_mcp_elicitation, elicitation_id, reply_to, message, schema},
+        _from,
+        state
+      ) do
+    case elicitation_fields(schema) do
+      :unsupported ->
+        {:reply, {:error, :unsupported_schema}, state}
+
+      fields ->
+        monitor_ref = Process.monitor(reply_to)
+
+        pending = %{
+          id: elicitation_id,
+          message: message,
+          schema: schema,
+          fields: fields,
+          reply_to: reply_to,
+          monitor_ref: monitor_ref,
+          created_at: System.monotonic_time()
+        }
+
+        state = put_pending_mcp_elicitation(state, elicitation_id, pending)
+        emit(state, {:mcp_elicitation, elicitation_id, public_mcp_elicitation(pending)})
+
+        {:reply, {:ok, elicitation_id}, state}
+    end
+  end
+
+  @impl true
+  def handle_call(:pending_mcp_elicitations, _from, state) do
+    {:reply, public_mcp_elicitations(state), state}
+  end
+
+  @impl true
+  def handle_call({:answer_mcp_elicitation, elicitation_id, reply}, _from, state) do
+    case Map.pop(pending_mcp_elicitation_map(state), elicitation_id) do
+      {nil, _pending} ->
+        {:reply, {:error, :not_found}, state}
+
+      {pending, pending_map} ->
+        Process.demonitor(pending.monitor_ref, [:flush])
+        send(pending.reply_to, {:mcp_elicitation_reply, elicitation_id, reply})
+
+        state = put_pending_mcp_elicitations(state, pending_map)
+        emit(state, {:mcp_elicitation_resolved, elicitation_id})
+
+        {:reply, :ok, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:mcp_sampling, params}, _from, state) do
+    {:reply, run_mcp_sampling(state, params), state}
+  end
+
+  @impl true
   def handle_cast({:set_model, model}, state) do
     {:noreply, %{state | model: model}}
   end
@@ -316,6 +407,22 @@ defmodule Sigma.Agent do
 
         state = put_pending_user_questions(state, pending_questions)
         emit(state, {:ask_user_question_resolved, question_id})
+
+        {:noreply, state}
+    end
+  end
+
+  @impl true
+  def handle_cast({:expire_mcp_elicitation, elicitation_id}, state) do
+    case Map.pop(pending_mcp_elicitation_map(state), elicitation_id) do
+      {nil, _pending} ->
+        {:noreply, state}
+
+      {pending, pending_map} ->
+        Process.demonitor(pending.monitor_ref, [:flush])
+
+        state = put_pending_mcp_elicitations(state, pending_map)
+        emit(state, {:mcp_elicitation_resolved, elicitation_id})
 
         {:noreply, state}
     end
@@ -381,8 +488,25 @@ defmodule Sigma.Agent do
             {:noreply, state}
 
           :error ->
-            {:noreply, state}
+            case remove_mcp_elicitation_by_monitor(state, ref) do
+              {:ok, elicitation_id, state} ->
+                emit(state, {:mcp_elicitation_resolved, elicitation_id})
+                {:noreply, state}
+
+              :error ->
+                {:noreply, state}
+            end
         end
+    end
+  end
+
+  def handle_info({:mcp_subscription, _subscription, notification}, state) do
+    method = notification_method(notification)
+
+    if method == "notifications/tools/list_changed" do
+      {:noreply, refresh_mcp_tools_from_notification(state, notification)}
+    else
+      {:noreply, state}
     end
   end
 
@@ -832,14 +956,212 @@ defmodule Sigma.Agent do
   end
 
   defp start_mcp_clients(%{mcp_servers: servers} = state) when map_size(servers) == 0 do
-    %{state | tools: state.base_tools, mcp_handles: []}
+    %{state | tools: state.base_tools, mcp_session: empty_mcp_session()}
   end
 
   defp start_mcp_clients(state) do
-    {:ok, mcp_tools, handles} =
-      Sigma.Coding.MCP.start_session(state.session_id, state.mcp_servers, cwd: state.cwd)
+    agent = self()
 
-    %{state | tools: state.base_tools ++ mcp_tools, mcp_handles: handles}
+    opts = [
+      cwd: state.cwd,
+      subscriber: agent,
+      elicitation_callback: fn message, schema ->
+        case request_mcp_elicitation(agent, message, schema) do
+          {:accept, content} when is_map(content) -> {:accept, content}
+          :decline -> :decline
+          :cancel -> :cancel
+          {:error, _reason} -> :cancel
+          other -> other
+        end
+      end,
+      sampling_callback: fn params ->
+        GenServer.call(agent, {:mcp_sampling, params}, @mcp_sampling_timeout_ms + 5_000)
+      end
+    ]
+
+    {:ok, mcp_tools, session} =
+      Sigma.Coding.MCP.start_session(state.session_id, state.mcp_servers, opts)
+
+    %{state | tools: state.base_tools ++ mcp_tools, mcp_session: session}
+  end
+
+  defp empty_mcp_session, do: %{handles: [], subscriptions: [], clients: %{}}
+
+  defp notification_method(%{"method" => method}) when is_binary(method), do: method
+  defp notification_method(%{method: method}) when is_binary(method), do: method
+  defp notification_method(_), do: nil
+
+  defp refresh_mcp_tools_from_notification(state, _notification) do
+    Enum.reduce(state.mcp_session.subscriptions, state, fn {server_id, client, _sub}, acc ->
+      case Sigma.Coding.MCP.refresh_server_tools(server_id, client) do
+        {:ok, tools} -> replace_mcp_tools_for_server(acc, server_id, tools)
+        {:error, _reason} -> acc
+      end
+    end)
+  end
+
+  defp replace_mcp_tools_for_server(state, server_id, new_tools) do
+    kept =
+      Enum.reject(state.tools, fn
+        %Sigma.Coding.MCP.Tool{server_id: ^server_id} -> true
+        _ -> false
+      end)
+
+    %{state | tools: kept ++ new_tools}
+  end
+
+  defp run_mcp_sampling(state, params) when is_map(params) do
+    messages = Map.get(params, "messages") || Map.get(params, :messages) || []
+    prompt = sampling_messages_to_prompt(messages)
+    model = state.model || %{}
+    model_id = Map.get(model, "id") || Map.get(model, :id) || "unknown"
+
+    max_tokens =
+      Map.get(params, "maxTokens") || Map.get(params, "max_tokens") || 1024
+
+    stream_params = %{
+      model: model,
+      system: Map.get(params, "systemPrompt") || Map.get(params, "system_prompt"),
+      messages: [%{role: :user, content: prompt}],
+      tools: [],
+      max_tokens: max_tokens,
+      options: state.provider_options
+    }
+
+    try do
+      events = state.provider.stream(stream_params)
+
+      case Enum.find(events, &match?({:done, _, _}, &1)) do
+        {:done, stop_reason, ai_msg} ->
+          text = message_text(ai_msg)
+
+          {:ok,
+           %{
+             "role" => "assistant",
+             "content" => %{"type" => "text", "text" => text},
+             "model" => to_string(model_id),
+             "stopReason" => sampling_stop_reason(stop_reason)
+           }}
+
+        nil ->
+          {:error, "MCP sampling produced no completion"}
+      end
+    rescue
+      error -> {:error, Exception.message(error)}
+    catch
+      :exit, reason -> {:error, inspect(reason)}
+    end
+  end
+
+  defp run_mcp_sampling(_state, _params), do: {:error, "Invalid sampling params"}
+
+  defp sampling_messages_to_prompt(messages) when is_list(messages) do
+    Enum.map_join(messages, "\n\n", fn
+      %{"content" => content} when is_binary(content) ->
+        content
+
+      %{"content" => %{"type" => "text", "text" => text}} ->
+        text
+
+      %{"content" => blocks} when is_list(blocks) ->
+        Enum.map_join(blocks, "\n", fn
+          %{"type" => "text", "text" => text} -> text
+          other -> inspect(other)
+        end)
+
+      other ->
+        inspect(other)
+    end)
+  end
+
+  defp sampling_messages_to_prompt(_), do: ""
+
+  defp sampling_stop_reason(:stop), do: "endTurn"
+  defp sampling_stop_reason(:end_turn), do: "endTurn"
+  defp sampling_stop_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp sampling_stop_reason(reason) when is_binary(reason), do: reason
+  defp sampling_stop_reason(_), do: "endTurn"
+
+  defp elicitation_fields(%{"type" => "object", "properties" => properties})
+       when is_map(properties) and map_size(properties) > 0 do
+    fields =
+      Enum.reduce_while(properties, [], fn {name, schema}, acc ->
+        case elicitation_field(name, schema) do
+          {:ok, field} -> {:cont, [field | acc]}
+          :error -> {:halt, :unsupported}
+        end
+      end)
+
+    case fields do
+      :unsupported -> :unsupported
+      list -> Enum.reverse(list)
+    end
+  end
+
+  defp elicitation_fields(_), do: :unsupported
+
+  defp elicitation_field(name, %{"type" => type} = schema)
+       when type in ["string", "number", "integer", "boolean"] do
+    {:ok,
+     %{
+       name: to_string(name),
+       type: type,
+       title: Map.get(schema, "title") || to_string(name),
+       description: Map.get(schema, "description")
+     }}
+  end
+
+  defp elicitation_field(_name, _schema), do: :error
+
+  defp wait_for_mcp_elicitation_answer(pid, elicitation_id, timeout) do
+    receive do
+      {:mcp_elicitation_reply, ^elicitation_id, reply} ->
+        reply
+    after
+      timeout ->
+        GenServer.cast(pid, {:expire_mcp_elicitation, elicitation_id})
+        {:error, "Timed out waiting for MCP elicitation."}
+    end
+  end
+
+  defp public_mcp_elicitations(state) do
+    state
+    |> pending_mcp_elicitation_map()
+    |> Map.values()
+    |> Enum.sort_by(& &1.created_at)
+    |> Enum.map(&public_mcp_elicitation/1)
+  end
+
+  defp public_mcp_elicitation(pending) do
+    %{
+      id: pending.id,
+      message: pending.message,
+      schema: pending.schema,
+      fields: pending.fields
+    }
+  end
+
+  defp pending_mcp_elicitation_map(%{pending_mcp_elicitations: map}) when is_map(map), do: map
+  defp pending_mcp_elicitation_map(_), do: %{}
+
+  defp put_pending_mcp_elicitation(state, id, pending) do
+    put_pending_mcp_elicitations(state, Map.put(pending_mcp_elicitation_map(state), id, pending))
+  end
+
+  defp put_pending_mcp_elicitations(state, map) do
+    %{state | pending_mcp_elicitations: map}
+  end
+
+  defp remove_mcp_elicitation_by_monitor(state, monitor_ref) do
+    pending = pending_mcp_elicitation_map(state)
+
+    case Enum.find(pending, fn {_id, item} -> item.monitor_ref == monitor_ref end) do
+      {id, _item} ->
+        {:ok, id, put_pending_mcp_elicitations(state, Map.delete(pending, id))}
+
+      nil ->
+        :error
+    end
   end
 
   defp run_session_start_hook(state) do
