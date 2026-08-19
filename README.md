@@ -1,8 +1,8 @@
 # sigma
 
-`sigma` is an Elixir umbrella implementation of a `pi`-style AI coding agent. It combines a Phoenix LiveView chat UI, per-repository BEAM processes, streaming LLM providers, pi-compatible JSONL persistence, MCP and hook support, and a small coding-tool runtime.
+`sigma` is an Elixir umbrella implementation of a `pi`-style AI coding agent. It combines a Phoenix LiveView chat UI, per-repository BEAM processes, streaming LLM providers, pi-compatible JSONL persistence, MCP and hook support, and an oh-my-pi-style coding-tool runtime.
 
-The original TypeScript `pi` source is vendored at `./source` for behavior checks while porting.
+The original TypeScript `pi` project is [earendil-works/pi](https://github.com/earendil-works/pi). A local checkout at `./source` is optional and gitignored; it is a porting reference, not part of the published tree.
 
 ## Applications
 
@@ -12,41 +12,40 @@ The original TypeScript `pi` source is vendored at `./source` for behavior check
 | `sigma_protocol` | `Sigma.Agent.Message` | Shared message structs and protocol types used across apps |
 | `sigma_agent` | `Sigma.Agent` | Repository/session supervisors, turn loop, context building, compaction, and tool-call orchestration |
 | `sigma_session` | `Sigma.Session` | pi-compatible config, repository list, context files, skills, slash commands, and JSONL replay/persistence |
-| `sigma_coding` | `Sigma.Coding` | Tool behaviour, dispatcher, permissions, MCP, hooks, and read/write/edit/bash/search tools |
+| `sigma_coding` | `Sigma.Coding` | Tool behaviour, dispatcher, permissions, MCP, and hooks |
+| `sigma_tools` | `Sigma.Tools` | First-party tools (`ask`, `read`, `write`, `bash`, `edit`, `search`, `find`) and the hashline edit NIF |
 | `sigma_logs` | `Sigma.Logs` | Per-session in-memory debug log buffers for LLM, tool, and permission events |
 | `sigma_web` | `Sigma.Web` | Phoenix LiveView UI, routes, settings, and repository/session lifecycle |
 
 ## Features
 
-- Phoenix LiveView UI for repositories, sessions, global settings, project settings, skills, hooks, MCP servers, and interactive permission prompts.
+- Phoenix LiveView UI for repositories, sessions, global settings, project settings, skills, hooks, MCP servers, interactive permission prompts, and a session debug-log drawer.
 - Per-repository and per-session OTP processes for agent runtime lifecycle.
 - Streaming Anthropic and OpenAI-compatible chat providers.
-- Append-only JSONL session logs with replay, compaction entries, and session forking.
+- Append-only JSONL session journals with replay, compaction entries, and session forking.
+- New sessions can run in the project directory, an existing git worktree, or a newly created worktree.
 - Context-file assembly from `AGENTS.md`/`CLAUDE.md`, ordered from filesystem root to the active workdir. `AGENTS.md` wins when both files exist in the same directory.
-- Coding tools for file reads, writes, edits, shell commands, glob, grep, ls, URL fetches, and user questions.
+- Built-in tools: `ask`, `read`, `write`, `bash`, `search`, `find`, and hashline-only `edit` (`[path#TAG]` sections).
 - Global and project MCP server selection, plus hook discovery for Pi, Codex, and Claude-style hook files.
+- Skills from `~/.agents/skills` and `<repo>/.agents/skills`.
 - DuskMoon UI components via `phoenix_duskmoon` and the DuskMoon web component packages.
 
 ## Requirements
 
-- Elixir `~> 1.18`
-- Erlang/OTP 27 or compatible with the configured Elixir version
-- Node/npm for the web asset setup under `apps/sigma_web/package.json`
+- Elixir `~> 1.18` (CI uses 1.18.4)
+- Erlang/OTP 28 (CI uses 28.5)
+- Rust (`rustc` / `cargo`) for the hashline NIF in `apps/sigma_tools/native/sigma_tools_hashline`
+- Node.js or Bun for web assets (`mix assets.setup`)
 - API credentials for Anthropic or an OpenAI-compatible provider
 
 ## Setup
 
 ```bash
-mix deps.get
-mix assets.setup
+mix setup
 mix phx.server
 ```
 
-The umbrella also provides a full setup alias:
-
-```bash
-mix setup
-```
+`mix setup` runs `deps.get`, `deps.patch`, `assets.setup`, and `assets.build`. `mix sigma.run` is an alias for `mix phx.server`.
 
 Open <http://localhost:4580>.
 
@@ -75,7 +74,7 @@ Direct provider calls can also read environment fallbacks, but the LiveView flow
 
 1. Add a repository from the home page or visit `/repository/new`.
 2. Open the repository session list.
-3. Create or open a session.
+3. Create or open a session. New sessions can target the project directory or a git worktree.
 4. Prompt the agent; tool calls stream back through LiveView and may request approval depending on policy.
 5. Fork a session when you want a new branch of the same conversation history.
 
@@ -107,10 +106,10 @@ Global settings routes:
 Runtime state is stored locally in the pi-compatible agent directory:
 
 - Repository list: `~/.pi/agent/repos.jsonl`
-- Session logs: `~/.pi/agent/sessions/--<pi-safe-workdir>--/<session-id>.jsonl`
-- Session metadata: `~/.pi/agent/sessions/--<pi-safe-workdir>--/<session-id>.meta.json`
+- Session logs: `~/.pi/agent/sessions/<base64url-workdir>/<session-id>.jsonl`
+- Session metadata: `~/.pi/agent/sessions/<base64url-workdir>/<session-id>.meta.json`
 
-`Sigma.Session.ConfigManager.sessions_dir/1` derives the session directory by replacing path separators in the absolute workdir with dashes and wrapping the result in double dashes.
+`Sigma.Session.ConfigManager.sessions_dir/1` uses a Base64-URL encoding of the absolute workdir (no padding). Older `--<pi-safe-path>--` directories are migrated on first use.
 
 ## Development
 
@@ -133,4 +132,4 @@ The web app uses DuskMoon UI. Keep UI work on `phoenix_duskmoon` components and 
 
 ## License
 
-This project follows the licensing terms of the upstream `pi` project unless stated otherwise.
+MIT. See [LICENSE](LICENSE).
