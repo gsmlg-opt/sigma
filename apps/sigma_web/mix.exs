@@ -38,8 +38,8 @@ defmodule Sigma.Web.MixProject do
       {:gettext, "~> 1.0"},
       # TODO(upstream): duskmoon-dev/phoenix-duskmoon-ui#53
       # TODO(upstream): duskmoon-dev/phoenix-duskmoon-ui#54
-      {:duskmoon_bundler, "~> 9.5"},
-      {:phoenix_duskmoon, "~> 9.0"},
+      {:duskmoon_bundler, "~> 9.10.1"},
+      {:phoenix_duskmoon, "~> 9.10.1"},
       {:sigma_agent, in_umbrella: true},
       {:sigma_session, in_umbrella: true},
       {:sigma_logs, in_umbrella: true},
