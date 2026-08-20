@@ -71,6 +71,32 @@ defmodule Sigma.Coding.MCPTest do
            ] = Enum.sort_by(tools, & &1.name)
   end
 
+  test "falls back to legacy initialization when HTTP discovery is unsupported" do
+    {server, port} = start_legacy_http_fixture!()
+    on_exit(fn -> Process.exit(server.pid, :kill) end)
+
+    servers = %{
+      "legacy-http" => %{
+        "type" => "http",
+        "url" => "http://127.0.0.1:#{port}/mcp"
+      }
+    }
+
+    assert {:ok, [tool], session} =
+             Sigma.Coding.MCP.start_session(
+               "legacy-http-#{System.unique_integer([:positive])}",
+               servers,
+               timeout: 5_000
+             )
+
+    on_exit(fn -> Sigma.Coding.MCP.stop(session) end)
+
+    assert %Sigma.Coding.MCP.Tool{
+             name: "mcp__legacy-http__echo",
+             server_tool_name: "echo"
+           } = tool
+  end
+
   @tag :tmp_dir
   test "elicitation callback can accept schema content during tools/call", %{tmp_dir: tmp_dir} do
     python = System.find_executable("python3") || System.find_executable("python")
@@ -193,6 +219,122 @@ defmodule Sigma.Coding.MCPTest do
     """)
 
     server_path
+  end
+
+  defp start_legacy_http_fixture! do
+    parent = self()
+
+    server =
+      Task.async(fn ->
+        {:ok, listener} =
+          :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+        {:ok, {{127, 0, 0, 1}, port}} = :inet.sockname(listener)
+        send(parent, {:legacy_http_fixture, self(), port})
+        serve_legacy_http(listener)
+      end)
+
+    port =
+      receive do
+        {:legacy_http_fixture, pid, port} when pid == server.pid -> port
+      after
+        5_000 -> raise "legacy HTTP MCP fixture did not start"
+      end
+
+    {server, port}
+  end
+
+  defp serve_legacy_http(listener) do
+    {:ok, socket} = :gen_tcp.accept(listener)
+    {:ok, request} = read_http_request(socket, "")
+    message = Jason.decode!(request)
+    send_http_response(socket, legacy_http_response(message))
+    :gen_tcp.close(socket)
+    serve_legacy_http(listener)
+  end
+
+  defp read_http_request(socket, buffer) do
+    case String.split(buffer, "\r\n\r\n", parts: 2) do
+      [headers, body] ->
+        content_length =
+          headers
+          |> String.split("\r\n")
+          |> Enum.find_value(0, fn line ->
+            case String.split(line, ":", parts: 2) do
+              [name, value] ->
+                if String.downcase(name) == "content-length",
+                  do: value |> String.trim() |> String.to_integer()
+
+              _ ->
+                nil
+            end
+          end)
+
+        read_http_body(socket, body, content_length)
+
+      [_partial] ->
+        with {:ok, data} <- :gen_tcp.recv(socket, 0, 5_000) do
+          read_http_request(socket, buffer <> data)
+        end
+    end
+  end
+
+  defp read_http_body(_socket, body, content_length) when byte_size(body) >= content_length,
+    do: {:ok, binary_part(body, 0, content_length)}
+
+  defp read_http_body(socket, body, content_length) do
+    with {:ok, data} <- :gen_tcp.recv(socket, 0, 5_000) do
+      read_http_body(socket, body <> data, content_length)
+    end
+  end
+
+  defp legacy_http_response(%{"method" => "server/discover", "id" => id}) do
+    {200, [],
+     %{
+       "jsonrpc" => "2.0",
+       "id" => id,
+       "error" => %{"code" => -32_601, "message" => "Method not found"}
+     }}
+  end
+
+  defp legacy_http_response(%{"method" => "initialize", "id" => id}) do
+    result = %{
+      "protocolVersion" => "2025-03-26",
+      "capabilities" => %{"tools" => %{}},
+      "serverInfo" => %{"name" => "legacy-http", "version" => "1.0.0"}
+    }
+
+    {200, [{"mcp-session-id", "legacy-http-session"}],
+     %{"jsonrpc" => "2.0", "id" => id, "result" => result}}
+  end
+
+  defp legacy_http_response(%{"method" => "notifications/initialized"}), do: {202, [], nil}
+
+  defp legacy_http_response(%{"method" => "tools/list", "id" => id}) do
+    tool = %{
+      "name" => "echo",
+      "description" => "Echo text",
+      "inputSchema" => %{"type" => "object", "properties" => %{}}
+    }
+
+    {200, [], %{"jsonrpc" => "2.0", "id" => id, "result" => %{"tools" => [tool]}}}
+  end
+
+  defp send_http_response(socket, {status, extra_headers, payload}) do
+    body = if payload, do: Jason.encode!(payload), else: ""
+
+    headers =
+      [
+        {"content-type", "application/json"},
+        {"content-length", byte_size(body)},
+        {"connection", "close"} | extra_headers
+      ]
+      |> Enum.map_join("", fn {name, value} -> "#{name}: #{value}\r\n" end)
+
+    :gen_tcp.send(
+      socket,
+      "HTTP/1.1 #{status} #{if status == 202, do: "Accepted", else: "OK"}\r\n#{headers}\r\n#{body}"
+    )
   end
 
   defp write_elicitation_fixture!(tmp_dir) do

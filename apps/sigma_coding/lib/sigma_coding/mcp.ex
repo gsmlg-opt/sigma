@@ -20,6 +20,7 @@ defmodule Sigma.Coding.MCP do
   alias Backplane.McpProtocol.Client
   alias Backplane.McpProtocol.MCP.Error
   alias Backplane.McpProtocol.MCP.Response
+  alias Backplane.McpProtocol.Protocol
   alias Sigma.Coding.MCP.Tool
 
   @registry Sigma.Coding.MCP.Registry
@@ -239,6 +240,10 @@ defmodule Sigma.Coding.MCP do
   end
 
   defp ensure_client(session_id, server_id, server, opts) do
+    ensure_client(session_id, server_id, server, opts, :auto)
+  end
+
+  defp ensure_client(session_id, server_id, server, opts, protocol_version) do
     ref = System.unique_integer([:positive])
     client = client_via(session_id, server_id, ref)
 
@@ -249,11 +254,21 @@ defmodule Sigma.Coding.MCP do
        transport: transport_config(server, opts),
        client_info: client_info(session_id, server_id, ref),
        capabilities: client_capabilities(),
-       protocol_version: :auto}
+       protocol_version: protocol_version}
 
     case DynamicSupervisor.start_child(@supervisor, spec) do
-      {:ok, sup} -> await_ready(client, sup, opts)
-      {:error, reason} -> {:error, reason}
+      {:ok, sup} ->
+        case await_ready(client, sup, opts) do
+          {:error, %Error{reason: :method_not_found}} when protocol_version == :auto ->
+            _ = DynamicSupervisor.terminate_child(@supervisor, sup)
+            ensure_client(session_id, server_id, server, opts, Protocol.fallback_version())
+
+          result ->
+            result
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
