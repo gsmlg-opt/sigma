@@ -77,13 +77,13 @@ defmodule Sigma.Web.RepositoryLive do
               variant="bordered"
               class="group interactive hover:shadow-xl transition-all duration-300 bg-surface-container-low"
             >
-              <:title>
-                <div class="flex items-center justify-between gap-3 overflow-hidden text-on-surface py-1">
-                  <div class="flex items-center gap-3 truncate min-w-0">
+              <:title class="min-w-0 flex-1 overflow-hidden">
+                <div class="flex w-full min-w-0 max-w-full items-center justify-between gap-3 overflow-hidden py-1 text-on-surface">
+                  <div class="flex min-w-0 flex-1 items-center gap-3 overflow-hidden">
                     <div class="p-2 bg-primary/10 rounded-lg text-primary group-hover:bg-primary group-hover:text-primary-content transition-colors duration-300 shrink-0">
                       <.dm_mdi name="chat-processing-outline" class="w-5 h-5" />
                     </div>
-                    <span class="truncate font-bold text-lg">{s}</span>
+                    <span class="block min-w-0 truncate font-bold text-lg" title={s}>{s}</span>
                   </div>
                   <.dm_btn
                     id={"delete-session-#{s}"}

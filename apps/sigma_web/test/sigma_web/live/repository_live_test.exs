@@ -74,6 +74,42 @@ defmodule Sigma.Web.RepositoryLiveTest do
   end
 
   @tag :tmp_dir
+  test "constrains long session titles without displacing the delete button", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    workdir = tmp_workdir!("repository-long-session-title")
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+
+      session_id = "session_abcdefghijklmnopqrstuvwxyz0123456789"
+      write_session_files!(ConfigManager.sessions_dir(workdir), session_id)
+
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      {:ok, _view, html} = live(conn, "/repository/#{encoded_repository}")
+      document = LazyHTML.from_document(html)
+
+      assert document
+             |> LazyHTML.query("[id='delete-session-#{session_id}']")
+             |> Enum.any?()
+
+      assert document
+             |> LazyHTML.query("span[title='#{session_id}'].min-w-0.truncate")
+             |> Enum.any?()
+
+      assert document
+             |> LazyHTML.query(".w-full.min-w-0.max-w-full")
+             |> Enum.any?()
+
+      assert document
+             |> LazyHTML.query("[slot='header'].min-w-0.flex-1.overflow-hidden")
+             |> Enum.any?()
+    end)
+  end
+
+  @tag :tmp_dir
   test "deleting a session removes its log and metadata and refreshes the list", %{
     conn: conn,
     tmp_dir: tmp_dir
