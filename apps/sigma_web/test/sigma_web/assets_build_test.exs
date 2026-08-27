@@ -26,4 +26,13 @@ defmodule Sigma.Web.AssetsBuildTest do
 
     assert app_js =~ "convertEol: false"
   end
+
+  test "web shell terminal can shrink within its viewport panel" do
+    css = File.read!(Path.join(@repo_root, "apps/sigma_web/assets/css/app.css"))
+
+    assert css =~
+             ~r/\.web-shell-terminal\s*\{[^}]*flex:\s*1 1 auto;[^}]*height:\s*auto;[^}]*min-height:\s*0;/s
+
+    refute css =~ ~r/\.web-shell-terminal\s*\{[^}]*min-height:\s*16rem;/s
+  end
 end

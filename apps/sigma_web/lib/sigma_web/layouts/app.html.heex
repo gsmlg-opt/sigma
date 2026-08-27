@@ -4,29 +4,69 @@
   </:logo>
   <:user_profile>
     <div class="flex items-center gap-4 ml-6 pl-6 border-l border-primary-container/30">
-      <.dm_tooltip content="Home" position="bottom">
-        <.dm_link navigate={~p"/"} class={["flex items-center justify-center p-2 rounded-full hover:bg-primary-content/10 transition-colors", @active_tab == :home && "text-primary-content bg-primary-content/20", @active_tab != :home && "text-primary-content/70 hover:text-primary-content"]}>
-          <.dm_mdi name={if @active_tab == :home, do: "home", else: "home-outline"} class="w-6 h-6" />
-        </.dm_link>
-      </.dm_tooltip>
-      <.dm_tooltip content="Settings" position="bottom">
-        <.dm_link navigate={~p"/settings"} class={["flex items-center justify-center p-2 rounded-full hover:bg-primary-content/10 transition-colors", @active_tab == :settings && "text-primary-content bg-primary-content/20", @active_tab != :settings && "text-primary-content/70 hover:text-primary-content"]}>
-          <.dm_mdi name={if @active_tab == :settings, do: "cog", else: "cog-outline"} class="w-6 h-6" />
-        </.dm_link>
-      </.dm_tooltip>
+      <.dm_link
+        navigate={~p"/"}
+        {%{interestfor: "appbar-home-tooltip"}}
+        aria-describedby="appbar-home-tooltip"
+        title="Home"
+        style="anchor-name: --appbar-home-tooltip"
+        class={["flex items-center justify-center p-2 rounded-full hover:bg-primary-content/10 transition-colors", @active_tab == :home && "text-primary-content bg-primary-content/20", @active_tab != :home && "text-primary-content/70 hover:text-primary-content"]}
+      >
+        <.dm_mdi name={if @active_tab == :home, do: "home", else: "home-outline"} class="w-6 h-6" />
+      </.dm_link>
+      <div
+        id="appbar-home-tooltip"
+        popover="hint"
+        role="tooltip"
+        class="tooltip tooltip-bottom"
+        style="position-anchor: --appbar-home-tooltip"
+      >
+        Home
+      </div>
+      <.dm_link
+        navigate={~p"/settings"}
+        {%{interestfor: "appbar-settings-tooltip"}}
+        aria-describedby="appbar-settings-tooltip"
+        title="Settings"
+        style="anchor-name: --appbar-settings-tooltip"
+        class={["flex items-center justify-center p-2 rounded-full hover:bg-primary-content/10 transition-colors", @active_tab == :settings && "text-primary-content bg-primary-content/20", @active_tab != :settings && "text-primary-content/70 hover:text-primary-content"]}
+      >
+        <.dm_mdi name={if @active_tab == :settings, do: "cog", else: "cog-outline"} class="w-6 h-6" />
+      </.dm_link>
+      <div
+        id="appbar-settings-tooltip"
+        popover="hint"
+        role="tooltip"
+        class="tooltip tooltip-bottom"
+        style="position-anchor: --appbar-settings-tooltip"
+      >
+        Settings
+      </div>
       <%= if assigns[:logs_available] do %>
-        <.dm_tooltip content="Debug Logs" position="bottom">
-          <button
-            phx-click="toggle_logs"
-            class={[
-              "flex items-center justify-center p-2 rounded-full hover:bg-primary-content/10 transition-colors",
-              assigns[:show_logs] && "text-primary-content bg-primary-content/20",
-              !assigns[:show_logs] && "text-primary-content/70 hover:text-primary-content"
-            ]}
-          >
-            <.dm_mdi name={if assigns[:show_logs], do: "bug", else: "bug-outline"} class="w-6 h-6" />
-          </button>
-        </.dm_tooltip>
+        <button
+          type="button"
+          phx-click="toggle_logs"
+          interestfor="appbar-debug-logs-tooltip"
+          aria-describedby="appbar-debug-logs-tooltip"
+          title="Debug Logs"
+          style="anchor-name: --appbar-debug-logs-tooltip"
+          class={[
+            "flex items-center justify-center p-2 rounded-full hover:bg-primary-content/10 transition-colors",
+            assigns[:show_logs] && "text-primary-content bg-primary-content/20",
+            !assigns[:show_logs] && "text-primary-content/70 hover:text-primary-content"
+          ]}
+        >
+          <.dm_mdi name={if assigns[:show_logs], do: "bug", else: "bug-outline"} class="w-6 h-6" />
+        </button>
+        <div
+          id="appbar-debug-logs-tooltip"
+          popover="hint"
+          role="tooltip"
+          class="tooltip tooltip-bottom"
+          style="position-anchor: --appbar-debug-logs-tooltip"
+        >
+          Debug Logs
+        </div>
       <% end %>
       <.dm_theme_switcher id="theme-toggle" />
     </div>

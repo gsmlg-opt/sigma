@@ -246,8 +246,16 @@ defmodule Sigma.Web.SettingsLive do
             <div :if={@active_id == row.id} class="inline-flex bg-success/20 text-success text-[10px] font-bold px-3 py-1 rounded-full border border-success/30">
               ACTIVE
             </div>
-            <.dm_tooltip :if={@active_id != row.id} content="Activate">
+            <span
+              :if={@active_id != row.id}
+              interestfor={"provider-activate-#{row.id}-tooltip"}
+              aria-describedby={"provider-activate-#{row.id}-tooltip"}
+              title="Activate"
+              style={"anchor-name: --provider-activate-#{row.id}-tooltip"}
+              class="inline-flex"
+            >
               <.dm_btn
+                :if={@active_id != row.id}
                 id={"provider-activate-#{row.id}"}
                 phx-click="set_active_provider"
                 phx-value-id={row.id}
@@ -259,11 +267,27 @@ defmodule Sigma.Web.SettingsLive do
               >
                 <.dm_mdi name="check-circle-outline" />
               </.dm_btn>
-            </.dm_tooltip>
+            </span>
+            <div
+              :if={@active_id != row.id}
+              id={"provider-activate-#{row.id}-tooltip"}
+              popover="hint"
+              role="tooltip"
+              class="tooltip tooltip-bottom"
+              style={"position-anchor: --provider-activate-#{row.id}-tooltip"}
+            >
+              Activate
+            </div>
           </:col>
           <:col :let={row} label="Actions" class="min-w-32">
             <div class="flex items-center gap-2">
-              <.dm_tooltip content="Edit">
+              <span
+                interestfor={"provider-edit-#{row.id}-tooltip"}
+                aria-describedby={"provider-edit-#{row.id}-tooltip"}
+                title="Edit"
+                style={"anchor-name: --provider-edit-#{row.id}-tooltip"}
+                class="inline-flex"
+              >
                 <.dm_btn
                   id={"provider-edit-#{row.id}"}
                   type="button"
@@ -277,8 +301,23 @@ defmodule Sigma.Web.SettingsLive do
                 >
                   <.dm_mdi name="pencil-outline" />
                 </.dm_btn>
-              </.dm_tooltip>
-              <.dm_tooltip content="Delete">
+              </span>
+              <div
+                id={"provider-edit-#{row.id}-tooltip"}
+                popover="hint"
+                role="tooltip"
+                class="tooltip tooltip-bottom"
+                style={"position-anchor: --provider-edit-#{row.id}-tooltip"}
+              >
+                Edit
+              </div>
+              <span
+                interestfor={"provider-delete-#{row.id}-tooltip"}
+                aria-describedby={"provider-delete-#{row.id}-tooltip"}
+                title="Delete"
+                style={"anchor-name: --provider-delete-#{row.id}-tooltip"}
+                class="inline-flex"
+              >
                 <.dm_btn
                   id={"provider-delete-#{row.id}"}
                   type="button"
@@ -292,7 +331,16 @@ defmodule Sigma.Web.SettingsLive do
                 >
                   <.dm_mdi name="delete-outline" />
                 </.dm_btn>
-              </.dm_tooltip>
+              </span>
+              <div
+                id={"provider-delete-#{row.id}-tooltip"}
+                popover="hint"
+                role="tooltip"
+                class="tooltip tooltip-bottom"
+                style={"position-anchor: --provider-delete-#{row.id}-tooltip"}
+              >
+                Delete
+              </div>
             </div>
           </:col>
         </.dm_table>
@@ -466,7 +514,13 @@ defmodule Sigma.Web.SettingsLive do
           </:col>
           <:col :let={row} label="Actions" class="min-w-32">
             <div class="flex items-center gap-2">
-              <.dm_tooltip content="Edit">
+              <span
+                interestfor={"credential-edit-#{row.id}-tooltip"}
+                aria-describedby={"credential-edit-#{row.id}-tooltip"}
+                title="Edit"
+                style={"anchor-name: --credential-edit-#{row.id}-tooltip"}
+                class="inline-flex"
+              >
                 <.dm_btn
                   id={"credential-edit-#{row.id}"}
                   type="button"
@@ -480,8 +534,23 @@ defmodule Sigma.Web.SettingsLive do
                 >
                   <.dm_mdi name="pencil-outline" />
                 </.dm_btn>
-              </.dm_tooltip>
-              <.dm_tooltip content="Delete">
+              </span>
+              <div
+                id={"credential-edit-#{row.id}-tooltip"}
+                popover="hint"
+                role="tooltip"
+                class="tooltip tooltip-bottom"
+                style={"position-anchor: --credential-edit-#{row.id}-tooltip"}
+              >
+                Edit
+              </div>
+              <span
+                interestfor={"credential-delete-#{row.id}-tooltip"}
+                aria-describedby={"credential-delete-#{row.id}-tooltip"}
+                title="Delete"
+                style={"anchor-name: --credential-delete-#{row.id}-tooltip"}
+                class="inline-flex"
+              >
                 <.dm_btn
                   id={"credential-delete-#{row.id}"}
                   type="button"
@@ -495,7 +564,16 @@ defmodule Sigma.Web.SettingsLive do
                 >
                   <.dm_mdi name="delete-outline" />
                 </.dm_btn>
-              </.dm_tooltip>
+              </span>
+              <div
+                id={"credential-delete-#{row.id}-tooltip"}
+                popover="hint"
+                role="tooltip"
+                class="tooltip tooltip-bottom"
+                style={"position-anchor: --credential-delete-#{row.id}-tooltip"}
+              >
+                Delete
+              </div>
             </div>
           </:col>
         </.dm_table>
@@ -946,7 +1024,13 @@ defmodule Sigma.Web.SettingsLive do
           </:col>
           <:col :let={row} label="Actions" class="min-w-28">
             <div class="flex items-center gap-2">
-              <.dm_tooltip content="Edit">
+              <span
+                interestfor={"mcp-edit-server-#{row.id}-tooltip"}
+                aria-describedby={"mcp-edit-server-#{row.id}-tooltip"}
+                title="Edit"
+                style={"anchor-name: --mcp-edit-server-#{row.id}-tooltip"}
+                class="inline-flex"
+              >
                 <.dm_btn
                   id={"mcp-edit-server-#{row.id}"}
                   type="button"
@@ -960,8 +1044,23 @@ defmodule Sigma.Web.SettingsLive do
                 >
                   <.dm_mdi name="pencil-outline" />
                 </.dm_btn>
-              </.dm_tooltip>
-              <.dm_tooltip content="Delete">
+              </span>
+              <div
+                id={"mcp-edit-server-#{row.id}-tooltip"}
+                popover="hint"
+                role="tooltip"
+                class="tooltip tooltip-bottom"
+                style={"position-anchor: --mcp-edit-server-#{row.id}-tooltip"}
+              >
+                Edit
+              </div>
+              <span
+                interestfor={"mcp-delete-server-#{row.id}-tooltip"}
+                aria-describedby={"mcp-delete-server-#{row.id}-tooltip"}
+                title="Delete"
+                style={"anchor-name: --mcp-delete-server-#{row.id}-tooltip"}
+                class="inline-flex"
+              >
                 <.dm_btn
                   id={"mcp-delete-server-#{row.id}"}
                   type="button"
@@ -975,7 +1074,16 @@ defmodule Sigma.Web.SettingsLive do
                 >
                   <.dm_mdi name="delete-outline" />
                 </.dm_btn>
-              </.dm_tooltip>
+              </span>
+              <div
+                id={"mcp-delete-server-#{row.id}-tooltip"}
+                popover="hint"
+                role="tooltip"
+                class="tooltip tooltip-bottom"
+                style={"position-anchor: --mcp-delete-server-#{row.id}-tooltip"}
+              >
+                Delete
+              </div>
             </div>
           </:col>
         </.dm_table>

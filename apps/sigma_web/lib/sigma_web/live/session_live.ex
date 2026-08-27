@@ -438,7 +438,13 @@ defmodule Sigma.Web.SessionLive do
                 </span>
               </span>
 
-              <.dm_tooltip content="Open terminal" position="bottom">
+              <span
+                interestfor="web-shell-open-tooltip"
+                aria-describedby="web-shell-open-tooltip"
+                title="Terminal"
+                style="anchor-name: --web-shell-open-tooltip"
+                class="inline-flex"
+              >
                 <.dm_btn
                   id="web-shell-open-btn"
                   type="button"
@@ -447,11 +453,19 @@ defmodule Sigma.Web.SessionLive do
                   variant="ghost"
                   size="sm"
                   shape="circle"
-                  title="Terminal"
                 >
                   <.dm_mdi name="console-line" class="h-4 w-4" />
                 </.dm_btn>
-              </.dm_tooltip>
+              </span>
+              <div
+                id="web-shell-open-tooltip"
+                popover="hint"
+                role="tooltip"
+                class="tooltip tooltip-bottom"
+                style="position-anchor: --web-shell-open-tooltip"
+              >
+                Open terminal
+              </div>
             </div>
           </div>
         </header>
@@ -610,9 +624,9 @@ defmodule Sigma.Web.SessionLive do
     ~H"""
     <section
       id="web-shell-panel"
-      class="absolute bottom-0 left-0 right-0 z-20 flex max-h-[48vh] flex-col border-t border-outline-variant bg-surface shadow-2xl md:left-64"
+      class="absolute bottom-0 left-0 right-0 z-20 flex h-[48vh] max-h-full flex-col overflow-hidden border-t border-outline-variant bg-surface shadow-2xl md:left-64"
     >
-      <div class="flex min-h-12 items-center justify-between gap-4 border-b border-outline-variant px-4 py-2">
+      <div class="flex min-h-12 shrink-0 items-center justify-between gap-4 border-b border-outline-variant px-4 py-2">
         <div class="flex min-w-0 items-center gap-3">
           <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-surface-container-high text-on-surface-variant">
             <.dm_mdi name="console-line" class="h-4 w-4" />

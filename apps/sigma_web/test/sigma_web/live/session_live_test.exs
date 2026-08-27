@@ -300,6 +300,9 @@ defmodule Sigma.Web.SessionLiveTest do
       |> render_click()
 
     assert html =~ ~s(id="web-shell-panel")
+    assert html =~ "h-[48vh]"
+    assert html =~ "max-h-full"
+    assert html =~ "overflow-hidden"
     assert html =~ ~s(phx-hook="WebShellTerminal")
     assert html =~ ~s(data-cwd="#{@workdir}")
     assert html =~ "Starting shell..."

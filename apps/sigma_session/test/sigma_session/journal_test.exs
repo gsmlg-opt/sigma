@@ -797,6 +797,26 @@ defmodule Sigma.Session.JournalTest do
             }} = Journal.replay(entries)
   end
 
+  test "repairs assistant tool calls that have no persisted result" do
+    entries = [
+      header("session", "/repo"),
+      message_entry("user", nil, "user-1", "user", "hello"),
+      message_entry("assistant", "user", "assistant-1", "assistant", [
+        %{"type" => "text", "text" => "I will inspect it."},
+        %{"type" => "tool_call", "id" => "call-orphan", "name" => "bash", "arguments" => %{}}
+      ]),
+      message_entry("next-user", "assistant", "user-2", "user", "continue")
+    ]
+
+    assert {:ok, %Snapshot{messages: [user, assistant, next_user], diagnostics: diagnostics}} =
+             Journal.replay(entries)
+
+    assert user.role == :user
+    assert assistant.content == [%{type: :text, text: "I will inspect it."}]
+    assert next_user.role == :user
+    assert [%{kind: :message_repair, reason: {:orphaned_tool_call, "call-orphan"}}] = diagnostics
+  end
+
   defp header(id, cwd) do
     %{"type" => "session", "version" => 3, "id" => id, "timestamp" => iso(), "cwd" => cwd}
   end

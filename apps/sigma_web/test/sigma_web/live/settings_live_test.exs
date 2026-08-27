@@ -640,7 +640,16 @@ defmodule Sigma.Web.SettingsLiveTest do
     assert attr?(button, "aria-label", label)
     assert Floki.text(button) |> String.trim() == ""
 
-    assert html =~ ~s(role="tooltip">#{label}</span>)
+    tooltip_id = "#{id}-tooltip"
+    assert html =~ ~s(id="#{tooltip_id}")
+    assert html =~ ~s(aria-describedby="#{tooltip_id}")
+    assert html =~ ~s(anchor-name: --#{tooltip_id})
+    assert html =~ ~s(position-anchor: --#{tooltip_id})
+
+    [tooltip_el] = Floki.find(tree, "##{tooltip_id}")
+    assert Floki.text(tooltip_el) |> String.trim() == label
+    assert Floki.attribute(tooltip_el, "role") == ["tooltip"]
+    assert Floki.attribute(tooltip_el, "popover") == ["hint"]
   end
 
   defp assert_skill_enabled(html, id, expected) do

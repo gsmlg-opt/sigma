@@ -295,8 +295,9 @@ el-dm-dialog [slot="footer"] {
 }
 
 .web-shell-terminal {
-  height: min(36vh, 26rem);
-  min-height: 16rem;
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
   overflow: hidden;
   background: #0b0f14;
   padding: 0.75rem;

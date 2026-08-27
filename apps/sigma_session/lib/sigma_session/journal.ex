@@ -185,9 +185,12 @@ defmodule Sigma.Session.Journal do
     {selected_compaction, compaction_diagnostics} = select_compaction(analysis)
 
     messages = render_analyzed_messages(analysis.decoded_messages, selected_compaction)
+    {messages, repair_diagnostics} = repair_tool_message_sequence(messages, nodes)
 
     diagnostics =
-      merge_diagnostics(analysis.message_diagnostics, compaction_diagnostics)
+      analysis.message_diagnostics
+      |> merge_diagnostics(compaction_diagnostics)
+      |> merge_diagnostics(repair_diagnostics)
 
     rendered_compaction =
       case selected_compaction do
@@ -332,6 +335,64 @@ defmodule Sigma.Session.Journal do
           do: message
 
     [selected_compaction.summary | kept_messages]
+  end
+
+  # Provider APIs require every assistant tool call to have a matching result.
+  # Interrupted sessions can persist an assistant message without that result.
+  defp repair_tool_message_sequence(messages, nodes) do
+    call_ids =
+      for %{role: :assistant, content: content} <- messages,
+          %{type: :tool_call, id: id} <- List.wrap(content),
+          into: MapSet.new(),
+          do: id
+
+    result_ids =
+      for %{role: :tool_result, tool_call_id: id} <- messages,
+          into: MapSet.new(),
+          do: id
+
+    {repaired, diagnostics} =
+      Enum.map_reduce(messages, [], fn message, diagnostics ->
+        case message do
+          %{role: :assistant, content: content} when is_list(content) ->
+            {kept, removed} =
+              Enum.split_with(content, fn
+                %{type: :tool_call, id: id} -> MapSet.member?(result_ids, id)
+                _ -> true
+              end)
+
+            diagnostics =
+              Enum.reduce(removed, diagnostics, fn %{id: id}, acc ->
+                [tool_repair_diagnostic(message, nodes, {:orphaned_tool_call, id}) | acc]
+              end)
+
+            {%{message | content: kept}, diagnostics}
+
+          %{role: :tool_result, tool_call_id: id} = result ->
+            if MapSet.member?(call_ids, id) do
+              {result, diagnostics}
+            else
+              {nil,
+               [tool_repair_diagnostic(message, nodes, {:orphaned_tool_result, id}) | diagnostics]}
+            end
+
+          _ ->
+            {message, diagnostics}
+        end
+      end)
+
+    {Enum.reject(repaired, &is_nil/1), Enum.reverse(diagnostics)}
+  end
+
+  defp tool_repair_diagnostic(message, nodes, reason) do
+    node = Enum.find(nodes, fn node -> get_in(node, [:entry, "message", "id"]) == message.id end)
+
+    %{
+      kind: :message_repair,
+      entry_index: node && node.entry_index,
+      entry_id: node && node.entry["id"],
+      reason: reason
+    }
   end
 
   defp payload_diagnostic(node, reason) do
