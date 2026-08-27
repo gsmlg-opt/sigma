@@ -47,6 +47,8 @@ mix phx.server
 
 `mix setup` runs `deps.get`, `deps.patch`, `assets.setup`, and `assets.build`. `mix sigma.run` is an alias for `mix phx.server`.
 
+`mix sigma.rel-run` overwrites the `sigma` release for the current Mix environment and runs it in the foreground. It uses the currently built static assets; run `mix assets.build` first when frontend assets have changed.
+
 Open <http://localhost:4580>.
 
 ## Installing a release

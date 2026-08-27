@@ -24,6 +24,7 @@ defmodule Sigma.MixProject do
     [
       setup: ["deps.get", "deps.patch", "assets.setup", "assets.build"],
       "sigma.run": ["phx.server"],
+      "sigma.rel-run": [&release_and_run/1],
       "assets.setup": [
         "deps.patch",
         "npm.install",
@@ -38,5 +39,30 @@ defmodule Sigma.MixProject do
         "phx.digest"
       ]
     ]
+  end
+
+  defp release_and_run([]) do
+    mix = System.find_executable("mix") || Mix.raise("mix executable not found")
+    env = [{"MIX_ENV", Atom.to_string(Mix.env())}, {"SIGMA_RELEASE", "true"}]
+
+    case Mix.shell().cmd({mix, ["release", "sigma", "--overwrite", "--force"]},
+           env: env,
+           use_stdio: true
+         ) do
+      0 -> :ok
+      status -> Mix.raise("Failed to build Sigma release (status #{status})")
+    end
+
+    executable =
+      Path.join([Mix.Project.build_path(), "rel", "sigma", "bin", "sigma"])
+
+    case Mix.shell().cmd({executable, ["start"]}, use_stdio: true) do
+      0 -> :ok
+      status -> Mix.raise("Sigma release exited with status #{status}")
+    end
+  end
+
+  defp release_and_run(_args) do
+    Mix.raise("mix sigma.rel-run does not accept arguments")
   end
 end

@@ -1,5 +1,16 @@
 import Config
 
+if System.get_env("RELEASE_NAME") do
+  config :sigma_web, Sigma.Web.Endpoint,
+    server: System.get_env("PHX_SERVER", "true") in ["1", "true", "TRUE"],
+    http: [
+      port: String.to_integer(System.get_env("PORT") || "4580"),
+      transport_options: [socket_opts: [:inet6]]
+    ],
+    code_reloader: false,
+    watchers: []
+end
+
 if config_env() == :prod do
   secret_key_base =
     System.get_env("SECRET_KEY_BASE") ||
