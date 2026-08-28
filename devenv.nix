@@ -42,7 +42,7 @@ in {
   '';
 
   processes.sigma = {
-    exec = "mix sigma.run";
+    exec = "mix sigma.rel-run";
   };
 
   enterShell = ''
