@@ -530,6 +530,7 @@ defmodule Sigma.Web.SessionLive do
             </div>
 
             <div class="relative">
+              <%!-- # TODO(upstream): duskmoon-dev/duskmoon-elements#77 --%>
               <.dm_chat_input
                 id="prompt-input"
                 phx-update="ignore"
