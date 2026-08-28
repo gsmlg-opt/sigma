@@ -34,6 +34,12 @@ function applyAppearanceTheme(theme) {
   const resolved = (!theme || theme === "default") ? resolveAutoTheme() : theme
   document.documentElement.setAttribute("data-theme", resolved)
 }
+
+// Apply the persisted theme on every page load (survives refresh/navigation),
+// not just on the Appearance settings page. Replaces the appbar theme switcher
+// which used to run on every page via its hook.
+applyAppearanceTheme(localStorage.getItem("theme") || "default")
+
 const AppearanceThemeHook = {
   mounted() {
     this._change = (e) => {
@@ -43,16 +49,22 @@ const AppearanceThemeHook = {
       this.pushEvent("theme_changed", { theme })
     }
     this.el.addEventListener("change", this._change)
-    this._syncChecked()
-    darkQuery.addEventListener("change", this._syncChecked)
+    this._applyStoredTheme()
+    this._mediaListener = () => {
+      // Only re-resolve auto mode when the OS color scheme changes
+      const current = localStorage.getItem("theme") || "default"
+      if (current === "default") this._applyStoredTheme()
+    }
+    darkQuery.addEventListener("change", this._mediaListener)
   },
-  updated() { this._syncChecked() },
+  updated() { this._applyStoredTheme() },
   destroyed() {
     this.el.removeEventListener("change", this._change)
-    darkQuery.removeEventListener("change", this._syncChecked)
+    darkQuery.removeEventListener("change", this._mediaListener)
   },
-  _syncChecked() {
+  _applyStoredTheme() {
     const stored = localStorage.getItem("theme") || "default"
+    applyAppearanceTheme(stored)
     this.el.querySelectorAll('input[type="radio"][name="theme"]').forEach((input) => {
       input.checked = stored === input.value
     })
