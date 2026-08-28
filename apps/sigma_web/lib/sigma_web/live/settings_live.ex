@@ -244,7 +244,7 @@ defmodule Sigma.Web.SettingsLive do
           <span>About Themes</span>
         </div>
         <p class="text-on-surface-variant leading-relaxed">
-          The theme is applied to the whole app and persists in your browser's local storage.
+          The theme is applied to the whole app, saved to your Sigma settings, and persists across sessions.
           Three options are available:
         </p>
         <ul class="text-on-surface-variant leading-relaxed list-disc pl-6 space-y-1">
@@ -1530,8 +1530,13 @@ defmodule Sigma.Web.SettingsLive do
   # Handlers
 
   @impl true
-  def handle_event("theme_changed", _, socket) do
-    {:noreply, socket}
+  def handle_event("theme_changed", %{"theme" => theme}, socket) do
+    Sigma.Session.ConfigManager.set_theme(theme)
+    {:noreply, assign(socket, :theme, Sigma.Session.ConfigManager.get_theme())}
+  end
+
+  def handle_event("theme_changed", _params, socket) do
+    {:noreply, assign(socket, :theme, Sigma.Session.ConfigManager.get_theme())}
   end
 
   @impl true

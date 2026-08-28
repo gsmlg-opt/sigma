@@ -283,6 +283,29 @@ defmodule Sigma.Session.ConfigManagerTest do
   end
 
   @tag :tmp_dir
+  test "persists and normalizes the UI theme in settings.json" do
+    assert ConfigManager.get_theme() == "default"
+
+    assert :ok = ConfigManager.set_theme("moonlight")
+    assert ConfigManager.get_theme() == "moonlight"
+
+    assert :ok = ConfigManager.set_theme("sunshine")
+    assert ConfigManager.get_theme() == "sunshine"
+
+    # Unrecognized values fall back to "default"
+    assert :ok = ConfigManager.set_theme("neon")
+    assert ConfigManager.get_theme() == "default"
+
+    saved_settings =
+      ConfigManager.agent_dir()
+      |> Path.join("settings.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert saved_settings["theme"] == "default"
+  end
+
+  @tag :tmp_dir
   test "loads VS Code-style mcp.json and saves Claude-style mcpServers" do
     File.mkdir_p!(ConfigManager.agent_dir())
 

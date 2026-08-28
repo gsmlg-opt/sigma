@@ -297,6 +297,9 @@ defmodule Sigma.Session.ConfigManager do
   defp trim_config_value(value) when is_binary(value), do: String.trim(value)
   defp trim_config_value(_value), do: ""
 
+  defp normalize_theme(theme) when theme in ["sunshine", "moonlight"], do: theme
+  defp normalize_theme(_theme), do: "default"
+
   def disabled_global_skills do
     @settings_file
     |> load_json(%{})
@@ -342,6 +345,30 @@ defmodule Sigma.Session.ConfigManager do
     get_config()
     |> Map.put("system_prompt", prompt)
     |> save_config()
+  end
+
+  @doc """
+  Returns the persisted UI theme ("default", "sunshine", or "moonlight").
+
+  Defaults to "default" when unset or unrecognized.
+  """
+  def get_theme do
+    @settings_file
+    |> load_json(%{})
+    |> Map.get("theme", "default")
+    |> normalize_theme()
+  end
+
+  @doc """
+  Persists the UI theme to settings.json.
+
+  Accepts "default", "sunshine", or "moonlight"; unknown values fall back to
+  "default" silently so a bad config never breaks the app.
+  """
+  def set_theme(theme) do
+    settings = load_json(@settings_file, %{})
+    save_json(@settings_file, Map.put(settings, "theme", normalize_theme(theme)))
+    :ok
   end
 
   defp provider_models(provider) do

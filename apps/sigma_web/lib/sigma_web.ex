@@ -25,7 +25,8 @@ defmodule Sigma.Web do
   def live_view do
     quote do
       use Phoenix.LiveView,
-        layout: {Sigma.Web.Layouts, :app}
+        layout: {Sigma.Web.Layouts, :app},
+        on_mount: Sigma.Web.ThemeMount
 
       unquote(html_helpers())
     end
