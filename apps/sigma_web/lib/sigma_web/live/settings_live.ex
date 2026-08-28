@@ -54,6 +54,14 @@ defmodule Sigma.Web.SettingsLive do
         </div>
 
         <nav class="flex flex-col gap-3">
+          <.dm_link
+            patch={~p"/settings/appearance"}
+            class={settings_nav_class(@live_action, :appearance)}
+          >
+            <.dm_mdi name="palette-outline" class="w-5 h-5" />
+            <span>Appearance</span>
+          </.dm_link>
+
           <.dm_link patch={~p"/settings/providers"} class={settings_nav_class(@live_action, :providers)}>
             <.dm_mdi name="robot-outline" class="w-5 h-5" />
             <span>Providers</span>
@@ -102,6 +110,8 @@ defmodule Sigma.Web.SettingsLive do
           </div>
 
           <%= case @live_action do %>
+            <% :appearance -> %>
+              <.render_appearance />
             <% :providers -> %>
               <.settings_async_result :let={data} assign={@settings_data}>
                 <.render_providers
@@ -192,6 +202,56 @@ defmodule Sigma.Web.SettingsLive do
       <div class="flex items-center gap-3 text-on-surface-variant">
         <.dm_loading_spinner size="sm" />
         <span class="text-sm font-medium">Loading settings data...</span>
+      </div>
+    </div>
+    """
+  end
+
+  defp render_appearance(assigns) do
+    ~H"""
+    <div class="space-y-6">
+      <div class="flex justify-between items-center text-on-surface">
+        <h2 class="text-2xl font-bold font-display">Appearance</h2>
+      </div>
+
+      <.dm_card variant="bordered" class="bg-surface-container-low">
+        <:title>
+          <div class="flex items-center gap-2 text-on-surface">
+            <.dm_mdi name="palette-outline" class="w-5 h-5 text-primary" />
+            <span>Theme</span>
+          </div>
+        </:title>
+        <p class="text-sm text-on-surface-variant leading-relaxed mb-4">
+          Choose how Sigma looks across the app. The auto option follows your operating system's color scheme.
+        </p>
+        <form
+          id="appearance-theme-form"
+          phx-hook="AppearanceThemeHook"
+          phx-update="ignore"
+          class="flex flex-col gap-3"
+          role="radiogroup"
+          aria-label="Theme"
+        >
+          <.dm_radio name="theme" value="default" label="Auto" />
+          <.dm_radio name="theme" value="sunshine" label="Sunshine" />
+          <.dm_radio name="theme" value="moonlight" label="Moonlight" />
+        </form>
+      </.dm_card>
+
+      <div class="bg-primary/5 rounded-2xl p-6 border border-primary/10 text-sm space-y-3">
+        <div class="flex items-center gap-2 text-primary font-bold">
+          <.dm_mdi name="information-outline" class="w-5 h-5" />
+          <span>About Themes</span>
+        </div>
+        <p class="text-on-surface-variant leading-relaxed">
+          The theme is applied to the whole app and persists in your browser's local storage.
+          Three options are available:
+        </p>
+        <ul class="text-on-surface-variant leading-relaxed list-disc pl-6 space-y-1">
+          <li><span class="font-semibold">Auto</span> follows your operating system preference.</li>
+          <li><span class="font-semibold">Sunshine</span> is the light theme.</li>
+          <li><span class="font-semibold">Moonlight</span> is the dark theme.</li>
+        </ul>
       </div>
     </div>
     """

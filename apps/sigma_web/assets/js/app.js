@@ -21,6 +21,44 @@ const MarkdownInputHook = {
   }
 }
 
+// Mirrors phoenix_duskmoon's ThemeSwitcher hook for a radio-button group.
+// Reads the active theme from localStorage (or "default") and reflects it on the
+// form's radio inputs; on change, applies the theme via `data-theme` on <html>
+// and persists the selection. Use: wrap a group of <input type="radio" name="theme"> in
+// <form phx-hook="AppearanceThemeHook" id="appearance-theme-form">.
+const darkQuery = window.matchMedia("(prefers-color-scheme: dark)")
+function resolveAutoTheme() {
+  return darkQuery.matches ? "moonlight" : "sunshine"
+}
+function applyAppearanceTheme(theme) {
+  const resolved = (!theme || theme === "default") ? resolveAutoTheme() : theme
+  document.documentElement.setAttribute("data-theme", resolved)
+}
+const AppearanceThemeHook = {
+  mounted() {
+    this._change = (e) => {
+      const theme = e.target.value
+      localStorage.setItem("theme", theme)
+      applyAppearanceTheme(theme)
+      this.pushEvent("theme_changed", { theme })
+    }
+    this.el.addEventListener("change", this._change)
+    this._syncChecked()
+    darkQuery.addEventListener("change", this._syncChecked)
+  },
+  updated() { this._syncChecked() },
+  destroyed() {
+    this.el.removeEventListener("change", this._change)
+    darkQuery.removeEventListener("change", this._syncChecked)
+  },
+  _syncChecked() {
+    const stored = localStorage.getItem("theme") || "default"
+    this.el.querySelectorAll('input[type="radio"][name="theme"]').forEach((input) => {
+      input.checked = stored === input.value
+    })
+  }
+}
+
 // Forwards the composed `change` event from el-dm-autocomplete to LiveView.
 // Use: phx-hook="AutocompleteHook" data-event="your_lv_event" name="field_name"
 const AutocompleteHook = {
@@ -421,7 +459,7 @@ let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("
 
 let liveSocket = new LiveSocket("/live", Socket, {
   params: {_csrf_token: csrfToken},
-  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, AutocompleteHook, SessionMenuHook, ChatInputHook, MarkdownInputHook, LocalTime, WebShellTerminal }
+  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, AutocompleteHook, SessionMenuHook, ChatInputHook, MarkdownInputHook, AppearanceThemeHook, LocalTime, WebShellTerminal }
 })
 
 // Show progress bar on live navigation and form submits

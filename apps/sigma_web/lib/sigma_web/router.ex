@@ -14,6 +14,7 @@ defmodule Sigma.Web.Router do
     pipe_through(:browser)
 
     live("/", HomeLive, :index)
+    live("/settings/appearance", SettingsLive, :appearance)
     live("/settings/credentials", SettingsLive, :credentials)
     live("/settings/hooks", SettingsLive, :hooks)
     live("/settings/mcp", SettingsLive, :mcp)
