@@ -10,12 +10,14 @@ defmodule Mix.Tasks.SigmaRelRunTest do
     aliases = Sigma.MixProject.project()[:aliases]
     source = File.read!(@mix_project_path)
 
-    assert [runner] = aliases[:"sigma.rel-run"]
+    assert ["assets.build", runner] = aliases[:"sigma.rel-run"]
     assert is_function(runner, 1)
+    assert source =~ ~S|release_build_path = Path.join(Mix.Project.build_path(), "sigma_rel")|
     assert source =~ ~S|{"MIX_ENV", Atom.to_string(Mix.env())}|
+    assert source =~ ~S|{"MIX_BUILD_PATH", release_build_path}|
     assert source =~ ~S|{"SIGMA_RELEASE", "true"}|
     assert source =~ ~S|["release", "sigma", "--overwrite", "--force"]|
-    assert source =~ ~S|Path.join([Mix.Project.build_path(), "rel", "sigma", "bin", "sigma"])|
+    assert source =~ ~S|Path.join([release_build_path, "rel", "sigma", "bin", "sigma"])|
     assert source =~ ~S|Mix.shell().cmd({executable, ["start"]}, use_stdio: true)|
     assert source =~ ~S|Mix.raise("Sigma release exited with status #{status}")|
   end
