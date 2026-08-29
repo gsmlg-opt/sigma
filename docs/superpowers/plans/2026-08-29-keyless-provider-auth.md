@@ -161,7 +161,7 @@ Expected: Sigma is running and the root endpoint returns HTTP 200.
 devenv shell --no-tui -- mix run -e '
 params = %{
   model: %{id: "dgx-spark/qwen3.6-35b-a3b", api: "openai", provider: "dgx-spark"},
-  context: %{messages: [], system_prompt: nil},
+  context: %{messages: [%{role: :user, content: "Reply with OK."}], system_prompt: nil},
   options: [
     api_key: "",
     base_url: "http://localhost:4220/v1",
