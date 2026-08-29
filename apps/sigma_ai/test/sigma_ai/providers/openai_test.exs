@@ -462,6 +462,25 @@ defmodule Sigma.Ai.Providers.OpenAITest do
     end)
   end
 
+  test "omits authorization header when api key is blank" do
+    sse = [
+      ~s(data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n),
+      "data: [DONE]\n\n"
+    ]
+
+    with_request_capture_server(sse, fn base_url, captured ->
+      OpenAI.stream(%{
+        model: %{id: "gpt-test", api: "openai", provider: "openai"},
+        context: %{messages: [], system_prompt: nil, tools: []},
+        options: [api_key: "", base_url: base_url, receive_timeout: 1_000]
+      })
+      |> Enum.to_list()
+
+      assert %{headers: headers} = Agent.get(captured, & &1)
+      refute Map.has_key?(headers, "authorization")
+    end)
+  end
+
   test "uses configured x-api-key auth header" do
     sse = [
       ~s(data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n),
