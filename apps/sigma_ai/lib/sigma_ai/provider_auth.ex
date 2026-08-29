@@ -2,9 +2,17 @@ defmodule Sigma.Ai.ProviderAuth do
   @moduledoc false
 
   def headers(api_key, options, default_type) do
-    auth_type = normalize_auth_type(options[:auth_type], default_type)
-    [{header_name(auth_type, options, default_type), header_value(auth_type, api_key)}]
+    if blank_credential?(api_key) do
+      []
+    else
+      auth_type = normalize_auth_type(options[:auth_type], default_type)
+      [{header_name(auth_type, options, default_type), header_value(auth_type, api_key)}]
+    end
   end
+
+  defp blank_credential?(nil), do: true
+  defp blank_credential?(api_key) when is_binary(api_key), do: String.trim(api_key) == ""
+  defp blank_credential?(_api_key), do: false
 
   defp normalize_auth_type(value, fallback) do
     normalize_auth_type_value(value) || normalize_auth_type_value(fallback) || "x-api-key"
