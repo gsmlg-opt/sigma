@@ -406,7 +406,7 @@ defmodule Sigma.Web.SettingsLive do
         </.dm_table>
       </div>
 
-      <.dm_modal :if={@form} id="provider-settings-modal" phx-hook="ModalHook" size="lg" responsive={true} hide_close={true}>
+      <.dm_modal :if={@form} id="provider-settings-modal" phx-hook="ModalHook" size="lg" hide_close={true}>
         <:title>
           <div class="flex items-center gap-2 text-on-surface">
             <.dm_mdi name="robot-outline" class="w-6 h-6 text-primary" />
@@ -639,7 +639,7 @@ defmodule Sigma.Web.SettingsLive do
         </.dm_table>
       </div>
 
-      <.dm_modal :if={@form} id="credential-settings-modal" phx-hook="ModalHook" size="md" responsive={true} hide_close={true}>
+      <.dm_modal :if={@form} id="credential-settings-modal" phx-hook="ModalHook" size="md" hide_close={true}>
         <:title>
           <div class="flex items-center gap-2 text-on-surface">
             <.dm_mdi name="key-outline" class="w-6 h-6 text-primary" />
@@ -1149,7 +1149,7 @@ defmodule Sigma.Web.SettingsLive do
         </.dm_table>
       </div>
 
-      <.dm_modal :if={@form} id="mcp-server-modal" phx-hook="ModalHook" size="xl" responsive={true} hide_close={true}>
+      <.dm_modal :if={@form} id="mcp-server-modal" phx-hook="ModalHook" size="xl" hide_close={true}>
         <:title>
           <div class="flex items-center gap-2 text-on-surface">
             <.dm_mdi name="server-network-outline" class="w-6 h-6 text-primary" />
