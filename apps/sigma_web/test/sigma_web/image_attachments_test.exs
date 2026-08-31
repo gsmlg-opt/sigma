@@ -47,6 +47,9 @@ defmodule Sigma.Web.ImageAttachmentsTest do
       assert {:error, :invalid_data} = ImageAttachments.normalize("", [%{}])
 
       assert {:error, :invalid_data} =
+               ImageAttachments.normalize("", [%{"mime_type" => "image/png", "data" => nil}])
+
+      assert {:error, :invalid_data} =
                ImageAttachments.normalize("", [
                  %{"mime_type" => "image/png", "data" => "not/base64!"}
                ])
@@ -94,10 +97,30 @@ defmodule Sigma.Web.ImageAttachmentsTest do
                ImageAttachments.normalize("", [raw_image("image/png", bytes)])
     end
 
+    test "rejects an over-bound encoded per-file payload before decoding" do
+      encoded = String.duplicate("!", 4 * div(5 * 1024 * 1024 + 2, 3) + 1)
+
+      assert {:error, :too_large} =
+               ImageAttachments.normalize("", [%{"mime_type" => "image/png", "data" => encoded}])
+    end
+
     test "rejects images over the decoded aggregate limit" do
       chunk_size = 3_500_000
       bytes = @png <> :binary.copy(<<0>>, chunk_size - byte_size(@png))
       images = List.duplicate(raw_image("image/png", bytes), 3)
+
+      assert {:error, :too_large} = ImageAttachments.normalize("", images)
+    end
+
+    test "rejects an over-bound encoded aggregate payload before decoding" do
+      total_bound = 4 * (div(10 * 1024 * 1024 + 2, 3) + 3)
+      encoded_size = div(total_bound, 4) + 1
+
+      images =
+        List.duplicate(
+          %{"mime_type" => "image/png", "data" => String.duplicate("!", encoded_size)},
+          4
+        )
 
       assert {:error, :too_large} = ImageAttachments.normalize("", images)
     end
@@ -138,6 +161,8 @@ defmodule Sigma.Web.ImageAttachmentsTest do
       assert ImageAttachments.data_url(%{block | mime_type: "image/svg+xml"}) == nil
       assert ImageAttachments.data_url(%{block | type: :text}) == nil
       assert ImageAttachments.data_url(%{block | data: nil}) == nil
+      assert ImageAttachments.data_url(%{block | data: "not-base64!"}) == nil
+      assert ImageAttachments.data_url(%{block | data: Base.encode64("not a PNG")}) == nil
 
       assert ImageAttachments.data_url(%{
                "type" => "image",

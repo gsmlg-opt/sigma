@@ -5,6 +5,8 @@ defmodule Sigma.Web.ImageAttachments do
   @max_images 4
   @max_image_bytes 5 * 1024 * 1024
   @max_total_bytes 10 * 1024 * 1024
+  @max_encoded_image_bytes 4 * div(@max_image_bytes + 2, 3)
+  @max_encoded_total_bytes 4 * (div(@max_total_bytes + 2, 3) + @max_images - 1)
 
   @client_messages %{
     "unsupported_type" => "Attach PNG, JPEG, single-frame GIF, or WebP images only.",
@@ -28,6 +30,7 @@ defmodule Sigma.Web.ImageAttachments do
 
     with :ok <- validate_count(raw_images),
          :ok <- validate_slash_command(text, raw_images),
+         :ok <- validate_encoded_bounds(raw_images),
          {:ok, images} <- decode_images(raw_images) do
       build_content(text, images)
     end
@@ -39,8 +42,12 @@ defmodule Sigma.Web.ImageAttachments do
   def error_message(reason), do: Map.fetch!(@server_messages, reason)
 
   def data_url(%{type: :image, data: data, mime_type: mime})
-      when mime in @allowed_mime_types and is_binary(data),
-      do: "data:#{mime};base64,#{data}"
+      when mime in @allowed_mime_types and is_binary(data) do
+    case decode_image(%{"mime_type" => mime, "data" => data}) do
+      {:ok, _block, _size} -> "data:#{mime};base64,#{data}"
+      {:error, _reason} -> nil
+    end
+  end
 
   def data_url(_block), do: nil
 
@@ -54,6 +61,32 @@ defmodule Sigma.Web.ImageAttachments do
 
   defp validate_slash_command("/" <> _rest, [_image | _images]), do: {:error, :slash_command}
   defp validate_slash_command(_text, _images), do: :ok
+
+  defp validate_encoded_bounds(images) do
+    if Enum.any?(images, &over_encoded_image_bound?/1) or
+         encoded_total(images) > @max_encoded_total_bytes do
+      {:error, :too_large}
+    else
+      :ok
+    end
+  end
+
+  defp over_encoded_image_bound?(%{"mime_type" => mime, "data" => data})
+       when mime in @allowed_mime_types and is_binary(data),
+       do: byte_size(data) > @max_encoded_image_bytes
+
+  defp over_encoded_image_bound?(_raw), do: false
+
+  defp encoded_total(images),
+    do:
+      Enum.reduce(images, 0, fn
+        %{"mime_type" => mime, "data" => data}, total
+        when mime in @allowed_mime_types and is_binary(data) ->
+          total + byte_size(data)
+
+        _, total ->
+          total
+      end)
 
   defp decode_images(images) do
     Enum.reduce_while(images, {:ok, [], 0}, fn raw, {:ok, acc, total} ->
@@ -76,7 +109,8 @@ defmodule Sigma.Web.ImageAttachments do
 
   defp decode_image(%{"mime_type" => mime, "data" => data})
        when mime in @allowed_mime_types and is_binary(data) do
-    with {:ok, bytes} <- Base.decode64(data, strict: true),
+    with :ok <- validate_encoded_size(data),
+         {:ok, bytes} <- Base.decode64(data, strict: true),
          :ok <- validate_size(bytes),
          :ok <- validate_signature(mime, bytes) do
       {:ok, %{type: :image, data: data, mime_type: mime}, byte_size(bytes)}
@@ -86,6 +120,9 @@ defmodule Sigma.Web.ImageAttachments do
     end
   end
 
+  defp decode_image(%{"mime_type" => mime}) when mime in @allowed_mime_types,
+    do: {:error, :invalid_data}
+
   defp decode_image(%{"mime_type" => _mime, "data" => _data}),
     do: {:error, :unsupported_type}
 
@@ -93,6 +130,9 @@ defmodule Sigma.Web.ImageAttachments do
 
   defp validate_size(bytes) when byte_size(bytes) <= @max_image_bytes, do: :ok
   defp validate_size(_bytes), do: {:error, :too_large}
+
+  defp validate_encoded_size(data) when byte_size(data) <= @max_encoded_image_bytes, do: :ok
+  defp validate_encoded_size(_data), do: {:error, :too_large}
 
   defp validate_signature("image/png", <<137, 80, 78, 71, 13, 10, 26, 10, _rest::binary>>),
     do: :ok
