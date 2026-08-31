@@ -1799,18 +1799,18 @@ defmodule Sigma.Web.SessionLive do
 
   defp handle_prompt(content, socket) when is_list(content) do
     submit_prompt(socket, content)
-    {:accepted, socket}
+    {:accepted, assign(socket, :turn_in_flight, true)}
   end
 
   defp handle_prompt(prompt, socket) do
     case SlashCommands.expand(prompt) do
       :not_command ->
         submit_prompt(socket, prompt)
-        {:accepted, socket}
+        {:accepted, assign(socket, :turn_in_flight, true)}
 
       {:ok, expanded_prompt} ->
         submit_prompt(socket, expanded_prompt)
-        {:accepted, socket}
+        {:accepted, assign(socket, :turn_in_flight, true)}
 
       {:error, reason} ->
         {:rejected, put_flash(socket, :error, reason)}

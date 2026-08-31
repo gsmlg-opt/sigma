@@ -58,6 +58,16 @@ defmodule Sigma.Web.SessionLiveTest do
     end
   end
 
+  defmodule SlowProvider do
+    @behaviour Sigma.Ai.Provider
+
+    @impl true
+    def stream(params) do
+      Process.sleep(300)
+      Sigma.Web.MockProvider.stream(params)
+    end
+  end
+
   setup do
     previous_agent_dir = Application.get_env(:sigma_session, :agent_dir)
 
@@ -789,6 +799,25 @@ defmodule Sigma.Web.SessionLiveTest do
     assert html =~ "Agent is still working"
     refute_receive {:agent_start, _}, 200
     refute_receive {:message_start, %{role: :user}}, 200
+  end
+
+  test "rejects an immediate second prompt while the first turn starts", %{conn: conn} do
+    session_id = unique_session_id("hook-double-submit")
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+
+    with_mock_provider(SlowProvider, fn ->
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+      render_hook(view, "send_prompt", %{"value" => "first", "images" => []})
+      assert_reply(view, %{status: "accepted"})
+
+      html = render_hook(view, "send_prompt", %{"value" => "second", "images" => []})
+      assert_reply(view, %{status: "rejected"})
+      assert html =~ "Agent is still working"
+
+      assert_receive {:message_start, %{role: :user, content: "first"}}, 2000
+      refute_receive {:message_start, %{role: :user, content: "second"}}, 500
+    end)
   end
 
   @tag :tmp_dir
