@@ -971,6 +971,11 @@ defmodule Sigma.Web.SessionLiveTest do
     assert html =~ ~s(alt="Attached image")
     assert html =~ ~s(loading="lazy")
     assert html =~ ~s(decoding="async")
+
+    {:ok, _reloaded_view, reloaded_html} = live_loaded(conn, session_path(session_id))
+    assert reloaded_html =~ ~s(src="data:image/png;base64,#{@png_data}")
+    assert reloaded_html =~ ~s(loading="lazy")
+    assert reloaded_html =~ ~s(decoding="async")
   end
 
   test "renders image-only persisted messages without a text artifact", %{conn: conn} do
@@ -1016,6 +1021,49 @@ defmodule Sigma.Web.SessionLiveTest do
     view |> element("#retry-u_retry_image") |> render_click()
 
     assert_receive {:message_start, %{role: :user, content: ^content}}, 2000
+  end
+
+  test "does not retry a whitespace-only persisted text message", %{conn: conn} do
+    session_id = unique_session_id("retry-blank")
+    storage_path = session_storage_path(session_id)
+    File.mkdir_p!(Path.dirname(storage_path))
+    :ok = Log.persist_event(storage_path, {:message_end, Message.user("u_retry_blank", "   ")})
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    html = view |> element("#retry-u_retry_blank") |> render_click()
+
+    assert html =~ "Only text or image messages can be retried"
+    refute_receive {:agent_start, _}, 200
+  end
+
+  test "retries an image when persisted text is only whitespace", %{conn: conn} do
+    session_id = unique_session_id("retry-blank-image")
+    storage_path = session_storage_path(session_id)
+
+    content = [
+      %{type: :text, text: "   "},
+      %{type: :image, mime_type: "image/png", data: @png_data}
+    ]
+
+    File.mkdir_p!(Path.dirname(storage_path))
+
+    :ok =
+      Log.persist_event(
+        storage_path,
+        {:message_end, Message.user("u_retry_blank_image", content)}
+      )
+
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    view |> element("#retry-u_retry_blank_image") |> render_click()
+
+    assert_receive {:message_start,
+                    %{
+                      role: :user,
+                      content: [%{type: :image, mime_type: "image/png", data: @png_data}]
+                    }},
+                   2000
   end
 
   test "renders message timestamps through the browser-local time hook", %{conn: conn} do

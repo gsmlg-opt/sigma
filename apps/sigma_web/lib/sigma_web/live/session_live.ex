@@ -1481,7 +1481,7 @@ defmodule Sigma.Web.SessionLive do
     content =
       Enum.reduce(content, [], fn
         %{type: :text, text: text} = block, acc when is_binary(text) ->
-          [block | acc]
+          if String.trim(text) == "", do: acc, else: [block | acc]
 
         %{type: :image} = block, acc ->
           if ImageAttachments.data_url(block), do: [block | acc], else: acc
