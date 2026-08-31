@@ -2,7 +2,7 @@
 
 ## Status
 
-Conversation design approved on 2026-08-29. Written-spec review is pending.
+Approved on 2026-08-31.
 
 ## Context
 
@@ -119,10 +119,11 @@ through the released `setValue("")` and `clearFiles()` APIs only after LiveView
 acknowledges an accepted prompt. Rejected submissions retain their text and
 attachments for correction or retry.
 
-`attachment_error` carries only a bounded error code from
-`unsupported_type`, `animated_gif`, `too_many`, `too_large`, or `read_failed`.
-`SessionLive` maps those codes to trusted flash text and never renders an
-arbitrary client-provided error string.
+`attachment_error` carries only a bounded client error code from
+`unsupported_type`, `too_many`, `too_large`, `read_failed`, or
+`slash_command`. Server-side validation separately maps `invalid_data`,
+`animated_gif`, and the same size/count failures to trusted flash text.
+`SessionLive` never renders an arbitrary client-provided error string.
 
 ### 3. LiveView normalization
 
