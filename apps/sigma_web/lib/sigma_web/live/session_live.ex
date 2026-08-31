@@ -7,6 +7,7 @@ defmodule Sigma.Web.SessionLive do
   alias Sigma.Session.SessionFiles
   alias Sigma.Session.Skills
   alias Sigma.Session.SlashCommands
+  alias Sigma.Web.ImageAttachments
   alias Phoenix.LiveView.AsyncResult
 
   @fork_id_attempts 5
@@ -535,8 +536,7 @@ defmodule Sigma.Web.SessionLive do
                 phx-update="ignore"
                 placeholder="Ask ∑ anything… (⌘/Ctrl+Enter to send)"
                 disabled={@turn_in_flight}
-                clear_on_send={true}
-                duskmoon-send-send="send_prompt"
+                clear_on_send={false}
               />
             </div>
 
@@ -1584,17 +1584,32 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
-  def handle_event("send_prompt", %{"value" => prompt}, socket) do
-    if session_ready?(socket) do
-      case String.trim(prompt) do
-        "" ->
-          {:noreply, socket}
+  def handle_event("attachment_error", %{"code" => code}, socket) do
+    case ImageAttachments.client_error(code) do
+      {:ok, message} -> {:noreply, put_flash(socket, :error, message)}
+      :error -> {:noreply, socket}
+    end
+  end
 
-        trimmed ->
-          handle_prompt(trimmed, socket)
+  @impl true
+  def handle_event("send_prompt", %{"value" => prompt} = params, socket) do
+    if session_ready?(socket) do
+      case ImageAttachments.normalize(prompt, Map.get(params, "images", [])) do
+        {:ok, :empty} ->
+          {:reply, %{status: "accepted"}, socket}
+
+        {:ok, content} ->
+          case handle_prompt(content, socket) do
+            {:accepted, socket} -> {:reply, %{status: "accepted"}, socket}
+            {:rejected, socket} -> {:reply, %{status: "rejected"}, socket}
+          end
+
+        {:error, reason} ->
+          {:reply, %{status: "rejected"},
+           put_flash(socket, :error, ImageAttachments.error_message(reason))}
       end
     else
-      {:noreply, put_flash(socket, :info, "Session is still loading.")}
+      {:reply, %{status: "rejected"}, put_flash(socket, :info, "Session is still loading.")}
     end
   end
 
@@ -1770,25 +1785,30 @@ defmodule Sigma.Web.SessionLive do
   defp handle_prompt(cmd, socket) when cmd in ["/reload-tools", "/reload_tools"] do
     case Sigma.Agent.reload_mcp_tools(socket.assigns.agent) do
       {:ok, count} ->
-        {:noreply, put_flash(socket, :info, "Reloaded MCP tools (#{count} available).")}
+        {:accepted, put_flash(socket, :info, "Reloaded MCP tools (#{count} available).")}
 
       _ ->
-        {:noreply, put_flash(socket, :error, "Failed to reload MCP tools.")}
+        {:rejected, put_flash(socket, :error, "Failed to reload MCP tools.")}
     end
+  end
+
+  defp handle_prompt(content, socket) when is_list(content) do
+    submit_prompt(socket, content)
+    {:accepted, socket}
   end
 
   defp handle_prompt(prompt, socket) do
     case SlashCommands.expand(prompt) do
       :not_command ->
         submit_prompt(socket, prompt)
-        {:noreply, socket}
+        {:accepted, socket}
 
       {:ok, expanded_prompt} ->
         submit_prompt(socket, expanded_prompt)
-        {:noreply, socket}
+        {:accepted, socket}
 
       {:error, reason} ->
-        {:noreply, put_flash(socket, :error, reason)}
+        {:rejected, put_flash(socket, :error, reason)}
     end
   end
 

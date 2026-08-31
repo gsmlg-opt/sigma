@@ -4,6 +4,7 @@ import {LiveSocket} from "phoenix_live_view"
 import topbar from "topbar"
 import * as DuskmoonHooks from "phoenix_duskmoon/hooks"
 import { Terminal } from "@xterm/xterm"
+import { encodeImageFiles } from "./chat_attachments.js"
 
 import "./duskmoon_elements.js"
 
@@ -93,6 +94,7 @@ const ChatInputHook = {
     this._chatInput = this.el.querySelector('el-dm-chat-input')
     if (!this._chatInput) return
     this._commands = this._parseCommands()
+    this._submitting = false
     this._filteredCommands = []
     this._activeIndex = 0
     this._editorBindings = []
@@ -120,6 +122,8 @@ const ChatInputHook = {
     }
 
     this._chatInput.addEventListener('keydown', this._keyHandler)
+    this._sendHandler = (e) => this._handleSend(e)
+    this._chatInput.addEventListener('send', this._sendHandler)
     this._chatInput.addEventListener('input', this._inputHandler)
     this._chatInput.addEventListener('keyup', this._inputHandler)
     this._chatInput.addEventListener('change', this._inputHandler)
@@ -139,6 +143,7 @@ const ChatInputHook = {
       this._chatInput.removeEventListener('keyup', this._inputHandler)
       this._chatInput.removeEventListener('change', this._inputHandler)
       this._chatInput.removeEventListener('focus', this._inputHandler)
+      this._chatInput.removeEventListener('send', this._sendHandler)
     }
     this._editorObserver?.disconnect()
     if (this._editorFrame) window.cancelAnimationFrame(this._editorFrame)
@@ -200,6 +205,35 @@ const ChatInputHook = {
       this._chatInput.value = value
     }
     this._chatInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+  },
+  async _handleSend(event) {
+    if (this._submitting) return
+
+    const detail = event.detail || {}
+    const value = typeof detail.value === 'string' ? detail.value : this._getValue()
+    const files = detail.files || this._chatInput.getFiles?.() || []
+
+    if (files.length && value.trim().startsWith('/')) {
+      this.pushEvent("attachment_error", { code: "slash_command" })
+      return
+    }
+
+    this._submitting = true
+    const result = await encodeImageFiles(files)
+
+    if (!result.ok) {
+      this._submitting = false
+      this.pushEvent("attachment_error", { code: result.code })
+      return
+    }
+
+    this.pushEvent("send_prompt", { value, images: result.images }, (reply) => {
+      if (reply?.status === "accepted") {
+        this._setValue("")
+        this._chatInput.clearFiles?.()
+      }
+      this._submitting = false
+    })
   },
   _syncMenu() {
     const value = this._getValue()

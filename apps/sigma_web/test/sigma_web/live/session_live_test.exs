@@ -671,6 +671,13 @@ defmodule Sigma.Web.SessionLiveTest do
     assert_receive {:message_end, %{role: :assistant}}, 2000
   end
 
+  test "renders the chat input without generic send handling", %{conn: conn} do
+    {:ok, _view, html} = live_loaded(conn, session_path(unique_session_id("chat-input")))
+
+    refute html =~ ~s(clear-on-send="true")
+    refute html =~ "duskmoon-send-send"
+  end
+
   test "retries a persisted user message", %{conn: conn} do
     session_id = unique_session_id("retry")
     storage_path = session_storage_path(session_id)
