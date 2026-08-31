@@ -145,7 +145,6 @@ defmodule Sigma.Web.ProjectSettingsLive do
               </p>
               <.dm_btn
                 phx-click="remove"
-                phx-hook="WebComponentHook"
                 id="remove-repo-btn"
                 variant="error"
                 confirm="Remove this repository from the list? Session files will be kept on disk."
