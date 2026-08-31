@@ -4,7 +4,7 @@ const MAX_TOTAL_SIZE = 10 * 1024 * 1024
 const ALLOWED_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"])
 
 export function validateImageFiles(files) {
-  const imageFiles = Array.from(files)
+  const imageFiles = Array.from(files || [])
 
   if (imageFiles.length > MAX_FILES) return "too_many"
   if (imageFiles.some((file) => !ALLOWED_TYPES.has(file.type))) return "unsupported_type"
@@ -19,6 +19,7 @@ function readFileAsDataUrl(file) {
     const reader = new FileReader()
     reader.onload = () => resolve(reader.result)
     reader.onerror = () => reject(reader.error)
+    reader.onabort = () => reject(new Error("read aborted"))
     reader.readAsDataURL(file)
   })
 }
@@ -28,7 +29,7 @@ export async function encodeImageFiles(files, read = readFileAsDataUrl) {
   if (validationError) return { ok: false, code: validationError }
 
   try {
-    const images = await Promise.all(Array.from(files).map(async (file) => {
+    const images = await Promise.all(Array.from(files || []).map(async (file) => {
       const dataUrl = await read(file)
       const prefix = `data:${file.type};base64,`
 

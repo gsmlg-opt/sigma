@@ -5,6 +5,10 @@ import { encodeImageFiles, validateImageFiles } from "./chat_attachments.js"
 const file = (type, size = 1) => ({ name: `${type}.image`, type, size })
 
 describe("validateImageFiles", () => {
+  test("accepts no file collection", () => {
+    expect(validateImageFiles(null)).toBeNull()
+  })
+
   test("rejects more than four files", () => {
     expect(validateImageFiles(Array.from({ length: 5 }, () => file("image/png")))).toBe("too_many")
   })
@@ -24,6 +28,10 @@ describe("validateImageFiles", () => {
 })
 
 describe("encodeImageFiles", () => {
+  test("encodes an undefined file collection as empty", async () => {
+    expect(await encodeImageFiles(undefined)).toEqual({ ok: true, images: [] })
+  })
+
   test("encodes data URLs into image payloads", async () => {
     const files = [file("image/png"), file("image/jpeg")]
     const read = async (currentFile) => `data:${currentFile.type};base64,Zm9v`
@@ -49,4 +57,20 @@ describe("encodeImageFiles", () => {
       code: "read_failed"
     })
   })
+
+  test("returns read_failed when the default reader is aborted", async () => {
+    const originalFileReader = globalThis.FileReader
+
+    globalThis.FileReader = class {
+      readAsDataURL() {
+        if (this.onabort) this.onabort()
+      }
+    }
+
+    try {
+      expect(await encodeImageFiles([file("image/png")])).toEqual({ ok: false, code: "read_failed" })
+    } finally {
+      globalThis.FileReader = originalFileReader
+    }
+  }, { timeout: 100 })
 })
