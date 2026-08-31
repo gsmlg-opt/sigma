@@ -27,14 +27,15 @@ const MarkdownInputHook = {
 // and persists the selection. Use: wrap a group of <input type="radio" name="theme"> in
 // <form phx-hook="AppearanceThemeHook" id="appearance-theme-form">.
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)")
+function resolveAutoTheme() {
+  return darkQuery.matches ? "moonlight" : "sunshine"
+}
+
 function applyAppearanceTheme(theme) {
-  if (!theme || theme === "default") {
-    // Auto mode: omit data-theme so DuskMoon CSS auto-detects via
-    // ::root:not([data-theme]) + prefers-color-scheme
-    document.documentElement.removeAttribute("data-theme")
-    return
-  }
-  document.documentElement.setAttribute("data-theme", theme)
+  const resolved =
+    !theme || theme === "default" ? resolveAutoTheme() : theme
+
+  document.documentElement.setAttribute("data-theme", resolved)
 }
 
 // Apply the persisted theme on every page load (survives refresh/navigation),

@@ -27,6 +27,18 @@ defmodule Sigma.Web.AssetsBuildTest do
     assert app_js =~ "convertEol: false"
   end
 
+  test "auto appearance resolves the OS preference to an explicit theme" do
+    app_js = File.read!(Path.join(@repo_root, "apps/sigma_web/assets/js/app.js"))
+
+    assert app_js =~ ~s|return darkQuery.matches ? "moonlight" : "sunshine"|
+
+    assert app_js =~
+             ~r/!theme \|\| theme === "default"\s*\?\s*resolveAutoTheme\(\)\s*:\s*theme/
+
+    assert app_js =~ ~s|document.documentElement.setAttribute("data-theme", resolved)|
+    refute app_js =~ ~s|removeAttribute("data-theme")|
+  end
+
   test "web shell terminal can shrink within its viewport panel" do
     css = File.read!(Path.join(@repo_root, "apps/sigma_web/assets/css/app.css"))
 

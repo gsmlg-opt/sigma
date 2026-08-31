@@ -3,6 +3,7 @@ defmodule Mix.Tasks.SigmaRelRunTest do
 
   @repo_root Path.expand("../../../../..", __DIR__)
   @mix_project_path Path.join(@repo_root, "mix.exs")
+  @devenv_config_path Path.join(@repo_root, "devenv.nix")
   @dev_config_path Path.join(@repo_root, "config/dev.exs")
   @runtime_config_path Path.join(@repo_root, "config/runtime.exs")
 
@@ -10,7 +11,9 @@ defmodule Mix.Tasks.SigmaRelRunTest do
     aliases = Sigma.MixProject.project()[:aliases]
     source = File.read!(@mix_project_path)
 
-    assert ["assets.build", runner] = aliases[:"sigma.rel-run"]
+    assert ["assets.build", builder] = aliases[:"sigma.rel-build"]
+    assert is_function(builder, 1)
+    assert ["sigma.rel-build", runner] = aliases[:"sigma.rel-run"]
     assert is_function(runner, 1)
     assert source =~ ~S|release_build_path = Path.join(Mix.Project.build_path(), "sigma_rel")|
     assert source =~ ~S|{"MIX_ENV", Atom.to_string(Mix.env())}|
@@ -20,6 +23,14 @@ defmodule Mix.Tasks.SigmaRelRunTest do
     assert source =~ ~S|Path.join([release_build_path, "rel", "sigma", "bin", "sigma"])|
     assert source =~ ~S|Mix.shell().cmd({executable, ["start"]}, use_stdio: true)|
     assert source =~ ~S|Mix.raise("Sigma release exited with status #{status}")|
+  end
+
+  test "devenv owns the release as its foreground process" do
+    source = File.read!(@devenv_config_path)
+
+    assert source =~ "mix sigma.rel-build"
+    assert source =~ "exec _build/dev/sigma_rel/rel/sigma/bin/sigma start"
+    refute source =~ ~S|exec = "mix sigma.rel-run"|
   end
 
   test "release runtime starts the endpoint without development watchers" do
