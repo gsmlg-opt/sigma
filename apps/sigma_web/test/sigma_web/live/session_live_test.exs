@@ -1025,15 +1025,26 @@ defmodule Sigma.Web.SessionLiveTest do
     storage_path = session_storage_path(session_id)
     bytes = <<137, 80, 78, 71, 13, 10, 26, 10>> <> :binary.copy(<<0>>, 3_000_000 - 8)
     data = Base.encode64(bytes)
-    content = [%{type: :image, mime_type: "image/png", data: data} |> then(&[&1, &1, &1, &1])]
+    large_image = %{type: :image, mime_type: "image/png", data: data}
+    large_images = List.duplicate(large_image, 4)
     File.mkdir_p!(Path.dirname(storage_path))
-    :ok = Log.persist_event(storage_path, {:message_end, Message.user("u_large_images", content)})
+
+    :ok =
+      Log.persist_event(
+        storage_path,
+        {:message_end, Message.user("u_large_images", large_images)}
+      )
+
+    assert {:ok, messages} = Log.replay(storage_path)
+    assert Enum.any?(messages, &(&1.id == "u_large_images" and &1.content == large_images))
 
     {:ok, view, html} = live_loaded(conn, session_path(session_id))
     refute html =~ "data:image/png"
 
-    render_hook(view, "retry_message", %{"msg-id" => "u_large_images"})
+    html = view |> element("#retry-u_large_images") |> render_click()
+    assert html =~ "Only text or image messages can be retried"
     refute_receive {:agent_start, _}, 200
+    refute_receive {:message_start, %{role: :user}}, 200
   end
 
   test "retries persisted text and image content in canonical order", %{conn: conn} do
