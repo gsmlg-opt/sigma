@@ -9,7 +9,7 @@ defmodule Sigma.Web.Endpoint do
   ]
 
   socket "/live", Phoenix.LiveView.Socket,
-    websocket: [connect_info: [session: @session_options]],
+    websocket: [connect_info: [session: @session_options], max_frame_size: 16 * 1024 * 1024],
     longpoll: [connect_info: [session: @session_options]]
 
   plug Plug.Static,
