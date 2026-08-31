@@ -7,6 +7,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
   @workdir "/tmp/pi-test"
   @encoded_workdir Base.url_encode64(@workdir, padding: false)
+  @png_data Base.encode64(<<137, 80, 78, 71, 13, 10, 26, 10>>)
 
   defmodule HighUsageProvider do
     @behaviour Sigma.Ai.Provider
@@ -669,6 +670,123 @@ defmodule Sigma.Web.SessionLiveTest do
     assert_receive {:turn_start}, 2000
     assert_receive {:message_start, %{role: :user, content: "hello"}}, 2000
     assert_receive {:message_end, %{role: :assistant}}, 2000
+  end
+
+  test "accepts text and valid PNG from the send hook once", %{conn: conn} do
+    session_id = unique_session_id("hook-image")
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    render_hook(view, "send_prompt", %{
+      "value" => "describe this",
+      "images" => [%{"mime_type" => "image/png", "data" => @png_data}]
+    })
+
+    assert_reply(view, %{status: "accepted"})
+    assert_receive {:message_start, %{role: :user, content: content}}, 2000
+
+    assert [%{type: :text, text: "describe this"}, %{type: :image, mime_type: "image/png"}] =
+             content
+
+    refute_receive {:message_start, %{role: :user}}, 200
+  end
+
+  test "accepts image-only prompts from the send hook", %{conn: conn} do
+    session_id = unique_session_id("hook-image-only")
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    render_hook(view, "send_prompt", %{
+      "value" => "",
+      "images" => [%{"mime_type" => "image/png", "data" => @png_data}]
+    })
+
+    assert_reply(view, %{status: "accepted"})
+
+    assert_receive {:message_start,
+                    %{role: :user, content: [%{type: :image, mime_type: "image/png"}]}},
+                   2000
+
+    refute_receive {:message_start, %{role: :user}}, 200
+  end
+
+  test "rejects invalid image data with a trusted flash and no agent", %{conn: conn} do
+    session_id = unique_session_id("hook-invalid-image")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    html =
+      render_hook(view, "send_prompt", %{
+        "value" => "describe this",
+        "images" => [%{"mime_type" => "image/png", "data" => "not-base64"}]
+      })
+
+    assert_reply(view, %{status: "rejected"})
+    assert html =~ "attached images is invalid"
+    refute_receive {:agent_start, _}, 200
+  end
+
+  test "rejects signature mismatches and slash commands with images", %{conn: conn} do
+    session_id = unique_session_id("hook-rejects")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    html =
+      render_hook(view, "send_prompt", %{
+        "value" => "describe this",
+        "images" => [%{"mime_type" => "image/jpeg", "data" => @png_data}]
+      })
+
+    assert_reply(view, %{status: "rejected"})
+    assert html =~ "attached images is invalid"
+
+    html =
+      render_hook(view, "send_prompt", %{
+        "value" => "/init",
+        "images" => [%{"mime_type" => "image/png", "data" => @png_data}]
+      })
+
+    assert_reply(view, %{status: "rejected"})
+    assert html =~ "cannot be combined with slash commands"
+    refute_receive {:agent_start, _}, 200
+  end
+
+  test "maps only bounded attachment errors to trusted flashes", %{conn: conn} do
+    {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("hook-errors")))
+
+    for {code, message} <- [
+          {"unsupported_type", "Attach PNG"},
+          {"too_many", "no more than four"},
+          {"too_large", "at most 5 MiB"},
+          {"read_failed", "could not read"},
+          {"slash_command", "cannot be combined"}
+        ] do
+      assert render_hook(view, "attachment_error", %{"code" => code}) =~ message
+    end
+
+    html = render_hook(view, "attachment_error", %{"code" => "<script>alert(1)</script>"})
+    refute html =~ "<script>"
+    refute html =~ "alert(1)"
+  end
+
+  test "accepts an empty prompt without starting an agent", %{conn: conn} do
+    {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("hook-empty")))
+
+    render_hook(view, "send_prompt", %{"value" => "   ", "images" => []})
+    assert_reply(view, %{status: "accepted"})
+    refute_receive {:agent_start, _}, 200
+  end
+
+  @tag :tmp_dir
+  test "rejects send while the session is still loading", %{conn: conn, tmp_dir: tmp_dir} do
+    with_agent_config(tmp_dir, fn ->
+      trust_workdir!(@workdir)
+      write_session_start_hook!(@workdir, "sleep 2", timeout: 3)
+      {:ok, view, _html} = live(conn, session_path(unique_session_id("hook-not-ready")))
+
+      html = render_hook(view, "send_prompt", %{"value" => "hello", "images" => []})
+      assert_reply(view, %{status: "rejected"})
+      assert html =~ "Session is still loading"
+      refute_receive {:agent_start, _}, 200
+    end)
   end
 
   test "renders the chat input without generic send handling", %{conn: conn} do
