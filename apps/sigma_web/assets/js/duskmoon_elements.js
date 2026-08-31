@@ -637,6 +637,27 @@ const css$6 = `/**
     box-shadow: 0 0 0 3px color-mix(in oklch, var(--color-error) 10%, transparent);
   }
 
+  .autocomplete-accent .autocomplete-input {
+    color: var(--color-accent);
+  }
+  .autocomplete-accent .autocomplete-input:focus {
+    box-shadow: 0 0 0 3px color-mix(in oklch, var(--color-accent) 10%, transparent);
+  }
+
+  .autocomplete-neutral .autocomplete-input {
+    color: var(--color-neutral);
+  }
+  .autocomplete-neutral .autocomplete-input:focus {
+    box-shadow: 0 0 0 3px color-mix(in oklch, var(--color-neutral) 10%, transparent);
+  }
+
+  .autocomplete-base .autocomplete-input {
+    color: var(--color-base-content);
+  }
+  .autocomplete-base .autocomplete-input:focus {
+    box-shadow: 0 0 0 3px color-mix(in oklch, var(--color-base-content) 10%, transparent);
+  }
+
   /* Ghost Variant */
   .autocomplete-ghost .autocomplete-input {
     background-color: transparent;
@@ -1209,6 +1230,92 @@ const css$5 = `/**
     filter: none;
   }
 
+  .btn-accent {
+    --btn-text-color: var(--color-accent-content);
+    background-color: var(--color-accent);
+    border-color: var(--color-accent);
+  }
+
+  .btn-accent:hover {
+    background-color: color-mix(in oklch, var(--color-accent), black 10%);
+    border-color: color-mix(in oklch, var(--color-accent), black 10%);
+    filter: none;
+  }
+
+  .btn-neutral {
+    --btn-text-color: var(--color-neutral-content);
+    background-color: var(--color-neutral);
+    border-color: var(--color-neutral);
+  }
+
+  .btn-neutral:hover {
+    background-color: color-mix(in oklch, var(--color-neutral), black 10%);
+    border-color: color-mix(in oklch, var(--color-neutral), black 10%);
+    filter: none;
+  }
+
+  .btn-base {
+    --btn-text-color: var(--color-base-content);
+    background-color: var(--color-base-100);
+    border-color: var(--color-base-100);
+  }
+
+  .btn-base:hover {
+    background-color: var(--color-base-200);
+    border-color: var(--color-base-200);
+    filter: none;
+  }
+
+  /* Semantic Colors — must precede outline/ghost/text/tonal so those variants
+     can override the filled background at equal specificity. */
+  .btn-info {
+    --btn-text-color: var(--color-info-content);
+    background-color: var(--color-info);
+    border-color: var(--color-info);
+  }
+
+  .btn-info:hover {
+    background-color: color-mix(in oklch, var(--color-info), black 10%);
+    border-color: color-mix(in oklch, var(--color-info), black 10%);
+    filter: none;
+  }
+
+  .btn-success {
+    --btn-text-color: var(--color-success-content);
+    background-color: var(--color-success);
+    border-color: var(--color-success);
+  }
+
+  .btn-success:hover {
+    background-color: color-mix(in oklch, var(--color-success), black 10%);
+    border-color: color-mix(in oklch, var(--color-success), black 10%);
+    filter: none;
+  }
+
+  .btn-warning {
+    --btn-text-color: var(--color-warning-content);
+    background-color: var(--color-warning);
+    border-color: var(--color-warning);
+  }
+
+  .btn-warning:hover {
+    background-color: color-mix(in oklch, var(--color-warning), black 10%);
+    border-color: color-mix(in oklch, var(--color-warning), black 10%);
+    filter: none;
+  }
+
+  .btn-error {
+    --btn-text-color: var(--color-error-content);
+    background-color: var(--color-error);
+    border-color: var(--color-error);
+  }
+
+  .btn-error:hover {
+    background-color: color-mix(in oklch, var(--color-error), black 10%);
+    border-color: color-mix(in oklch, var(--color-error), black 10%);
+    filter: none;
+  }
+
   /* Outline / Outlined Variant (.btn-outlined is an alias) */
   .btn-outline,
   .btn-outlined {
@@ -1257,6 +1364,42 @@ const css$5 = `/**
   .btn-outlined.btn-tertiary:hover {
     --btn-text-color: var(--color-tertiary-content);
     background-color: var(--color-tertiary);
+  }
+
+  .btn-outline.btn-accent,
+  .btn-outlined.btn-accent {
+    --btn-text-color: var(--color-accent);
+    border-color: currentColor;
+  }
+
+  .btn-outline.btn-accent:hover,
+  .btn-outlined.btn-accent:hover {
+    --btn-text-color: var(--color-accent-content);
+    background-color: var(--color-accent);
+  }
+
+  .btn-outline.btn-neutral,
+  .btn-outlined.btn-neutral {
+    --btn-text-color: var(--color-neutral);
+    border-color: currentColor;
+  }
+
+  .btn-outline.btn-neutral:hover,
+  .btn-outlined.btn-neutral:hover {
+    --btn-text-color: var(--color-neutral-content);
+    background-color: var(--color-neutral);
+  }
+
+  .btn-outline.btn-base,
+  .btn-outlined.btn-base {
+    --btn-text-color: var(--color-base-content);
+    border-color: currentColor;
+  }
+
+  .btn-outline.btn-base:hover,
+  .btn-outlined.btn-base:hover {
+    --btn-text-color: var(--color-base-content);
+    background-color: var(--color-base-100);
   }
 
   .btn-outline.btn-info,
@@ -1350,6 +1493,24 @@ const css$5 = `/**
   .btn-ghost.btn-success { --btn-text-color: var(--color-success); }
   .btn-ghost.btn-warning { --btn-text-color: var(--color-warning); }
   .btn-ghost.btn-error   { --btn-text-color: var(--color-error); }
+  .btn-ghost.btn-accent  { --btn-text-color: var(--color-accent); }
+  .btn-ghost.btn-neutral { --btn-text-color: var(--color-neutral); }
+  .btn-ghost.btn-base    { --btn-text-color: var(--color-base-content); }
+
+  .btn-ghost.btn-accent:hover {
+    --btn-text-color: var(--color-accent);
+    background-color: color-mix(in oklch, var(--color-accent) 15%, var(--color-surface));
+  }
+
+  .btn-ghost.btn-neutral:hover {
+    --btn-text-color: var(--color-neutral);
+    background-color: color-mix(in oklch, var(--color-neutral) 15%, var(--color-surface));
+  }
+
+  .btn-ghost.btn-base:hover {
+    --btn-text-color: var(--color-base-content);
+    background-color: var(--color-base-200);
+  }
 
   .btn-ghost.btn-info:hover {
     --btn-text-color: var(--color-on-info-container);
@@ -1414,6 +1575,24 @@ const css$5 = `/**
   .btn-text.btn-success { --btn-text-color: var(--color-success); }
   .btn-text.btn-warning { --btn-text-color: var(--color-warning); }
   .btn-text.btn-error   { --btn-text-color: var(--color-error); }
+  .btn-text.btn-accent  { --btn-text-color: var(--color-accent); }
+  .btn-text.btn-neutral { --btn-text-color: var(--color-neutral); }
+  .btn-text.btn-base    { --btn-text-color: var(--color-base-content); }
+
+  .btn-text.btn-accent:hover {
+    --btn-text-color: var(--color-accent);
+    background-color: color-mix(in oklch, var(--color-accent) 15%, var(--color-surface));
+  }
+
+  .btn-text.btn-neutral:hover {
+    --btn-text-color: var(--color-neutral);
+    background-color: color-mix(in oklch, var(--color-neutral) 15%, var(--color-surface));
+  }
+
+  .btn-text.btn-base:hover {
+    --btn-text-color: var(--color-base-content);
+    background-color: var(--color-base-200);
+  }
 
   .btn-text.btn-info:hover {
     --btn-text-color: var(--color-on-info-container);
@@ -1461,6 +1640,21 @@ const css$5 = `/**
     background-color: var(--color-tertiary-container);
   }
 
+  .btn-tonal.btn-accent {
+    --btn-text-color: var(--color-on-surface);
+    background-color: color-mix(in oklch, var(--color-accent) 15%, var(--color-surface));
+  }
+
+  .btn-tonal.btn-neutral {
+    --btn-text-color: var(--color-on-surface);
+    background-color: color-mix(in oklch, var(--color-neutral) 15%, var(--color-surface));
+  }
+
+  .btn-tonal.btn-base {
+    --btn-text-color: var(--color-base-content);
+    background-color: var(--color-base-200);
+  }
+
   .btn-tonal.btn-info {
     --btn-text-color: var(--color-on-info-container);
     background-color: var(--color-info-container);
@@ -1479,55 +1673,6 @@ const css$5 = `/**
   .btn-tonal.btn-error {
     --btn-text-color: var(--color-on-error-container);
     background-color: var(--color-error-container);
-  }
-
-  /* Semantic Colors */
-  .btn-info {
-    --btn-text-color: var(--color-info-content);
-    background-color: var(--color-info);
-    border-color: var(--color-info);
-  }
-
-  .btn-info:hover {
-    background-color: color-mix(in oklch, var(--color-info), black 10%);
-    border-color: color-mix(in oklch, var(--color-info), black 10%);
-    filter: none;
-  }
-
-  .btn-success {
-    --btn-text-color: var(--color-success-content);
-    background-color: var(--color-success);
-    border-color: var(--color-success);
-  }
-
-  .btn-success:hover {
-    background-color: color-mix(in oklch, var(--color-success), black 10%);
-    border-color: color-mix(in oklch, var(--color-success), black 10%);
-    filter: none;
-  }
-
-  .btn-warning {
-    --btn-text-color: var(--color-warning-content);
-    background-color: var(--color-warning);
-    border-color: var(--color-warning);
-  }
-
-  .btn-warning:hover {
-    background-color: color-mix(in oklch, var(--color-warning), black 10%);
-    border-color: color-mix(in oklch, var(--color-warning), black 10%);
-    filter: none;
-  }
-
-  .btn-error {
-    --btn-text-color: var(--color-error-content);
-    background-color: var(--color-error);
-    border-color: var(--color-error);
-  }
-
-  .btn-error:hover {
-    background-color: color-mix(in oklch, var(--color-error), black 10%);
-    border-color: color-mix(in oklch, var(--color-error), black 10%);
-    filter: none;
   }
 
   /* Size Variants */
@@ -1644,7 +1789,7 @@ const css$5 = `/**
 `;
 new CSSStyleSheet().replaceSync(css$5);
 //#endregion
-//#region ../../../.npm_ex/cache/@duskmoon-dev/el-button/1.5.3/dist/esm/register.js
+//#region node_modules/@duskmoon-dev/el-button/dist/esm/register.js
 var VARIANT_CLASSES$2 = {
 	primary: "btn-primary",
 	secondary: "btn-secondary",
@@ -1727,7 +1872,26 @@ var ElDmButton = class extends BaseElement {
 		}
 		if (this.type === "submit") {
 			const form = this._getAssociatedForm();
-			if (form) form.requestSubmit();
+			if (form) {
+				const submitter = this.ownerDocument.createElement("button");
+				submitter.type = "submit";
+				submitter.hidden = true;
+				for (const attribute of [
+					"name",
+					"value",
+					"formaction",
+					"formenctype",
+					"formmethod",
+					"formnovalidate",
+					"formtarget"
+				]) if (this.hasAttribute(attribute)) submitter.setAttribute(attribute, this.getAttribute(attribute) ?? "");
+				form.appendChild(submitter);
+				try {
+					form.requestSubmit(submitter);
+				} finally {
+					submitter.remove();
+				}
+			}
 		} else if (this.type === "reset") {
 			const form = this._getAssociatedForm();
 			if (form) form.reset();
@@ -1978,6 +2142,33 @@ const css$4 = `/**
     color: var(--color-on-error-container);
   }
 
+  .card-accent {
+    background-color: color-mix(in oklch, var(--color-accent) 15%, var(--color-surface));
+    color: var(--color-on-surface);
+  }
+
+  .card-accent .card-title {
+    color: var(--color-on-surface);
+  }
+
+  .card-neutral {
+    background-color: color-mix(in oklch, var(--color-neutral) 15%, var(--color-surface));
+    color: var(--color-on-surface);
+  }
+
+  .card-neutral .card-title {
+    color: var(--color-on-surface);
+  }
+
+  .card-base {
+    background-color: var(--color-base-200);
+    color: var(--color-base-content);
+  }
+
+  .card-base .card-title {
+    color: var(--color-base-content);
+  }
+
   /* Glass Effect */
   .card-glass {
     background-color: rgb(255 255 255 / 0.1);
@@ -2044,7 +2235,7 @@ const css$4 = `/**
 `;
 new CSSStyleSheet().replaceSync(css$4);
 //#endregion
-//#region ../../../.npm_ex/cache/@duskmoon-dev/el-card/1.5.3/dist/esm/register.js
+//#region node_modules/@duskmoon-dev/el-card/dist/esm/register.js
 var VARIANT_CLASSES$1 = {
 	elevated: "card-elevated",
 	outlined: "card-bordered",
@@ -2266,6 +2457,36 @@ const css$3 = `/**
     background-color: color-mix(in oklch, var(--color-tertiary), black 10%);
   }
 
+  .chip-accent {
+    background-color: var(--color-accent);
+    color: var(--color-accent-content);
+    border-color: var(--color-accent);
+  }
+
+  .chip-accent:hover {
+    background-color: color-mix(in oklch, var(--color-accent), black 10%);
+  }
+
+  .chip-neutral {
+    background-color: var(--color-neutral);
+    color: var(--color-neutral-content);
+    border-color: var(--color-neutral);
+  }
+
+  .chip-neutral:hover {
+    background-color: color-mix(in oklch, var(--color-neutral), black 10%);
+  }
+
+  .chip-base {
+    background-color: var(--color-base-100);
+    color: var(--color-base-content);
+    border-color: var(--color-base-100);
+  }
+
+  .chip-base:hover {
+    background-color: var(--color-base-200);
+  }
+
   .chip-info {
     background-color: var(--color-info);
     color: var(--color-info-content);
@@ -2340,6 +2561,30 @@ const css$3 = `/**
     background-color: var(--color-tertiary-container);
   }
 
+  .chip-outlined.chip-accent {
+    color: var(--color-accent);
+  }
+
+  .chip-outlined.chip-accent:hover {
+    background-color: color-mix(in oklch, var(--color-accent) 15%, var(--color-surface));
+  }
+
+  .chip-outlined.chip-neutral {
+    color: var(--color-neutral);
+  }
+
+  .chip-outlined.chip-neutral:hover {
+    background-color: color-mix(in oklch, var(--color-neutral) 15%, var(--color-surface));
+  }
+
+  .chip-outlined.chip-base {
+    color: var(--color-base-content);
+  }
+
+  .chip-outlined.chip-base:hover {
+    background-color: var(--color-base-200);
+  }
+
   .chip-outlined.chip-info {
     color: var(--color-info);
   }
@@ -2393,6 +2638,21 @@ const css$3 = `/**
     color: var(--color-on-tertiary-container);
   }
 
+  .chip-tonal.chip-accent {
+    background-color: color-mix(in oklch, var(--color-accent) 15%, var(--color-surface));
+    color: var(--color-on-surface);
+  }
+
+  .chip-tonal.chip-neutral {
+    background-color: color-mix(in oklch, var(--color-neutral) 15%, var(--color-surface));
+    color: var(--color-on-surface);
+  }
+
+  .chip-tonal.chip-base {
+    background-color: var(--color-base-200);
+    color: var(--color-base-content);
+  }
+
   .chip-tonal.chip-info {
     background-color: var(--color-info-container);
     color: var(--color-on-info-container);
@@ -2432,6 +2692,9 @@ const css$3 = `/**
   .chip-ghost.chip-success   { background-color: transparent; color: var(--color-success); }
   .chip-ghost.chip-warning   { background-color: transparent; color: var(--color-warning); }
   .chip-ghost.chip-error     { background-color: transparent; color: var(--color-error); }
+  .chip-ghost.chip-accent    { background-color: transparent; color: var(--color-accent); }
+  .chip-ghost.chip-neutral   { background-color: transparent; color: var(--color-neutral); }
+  .chip-ghost.chip-base      { background-color: transparent; color: var(--color-base-content); }
 
   .chip-ghost.chip-primary:hover   { background-color: var(--color-primary-container); }
   .chip-ghost.chip-secondary:hover { background-color: var(--color-secondary-container); }
@@ -2440,6 +2703,9 @@ const css$3 = `/**
   .chip-ghost.chip-success:hover   { background-color: var(--color-success-container); }
   .chip-ghost.chip-warning:hover   { background-color: var(--color-warning-container); }
   .chip-ghost.chip-error:hover     { background-color: var(--color-error-container); }
+  .chip-ghost.chip-accent:hover    { background-color: color-mix(in oklch, var(--color-accent) 15%, var(--color-surface)); }
+  .chip-ghost.chip-neutral:hover   { background-color: color-mix(in oklch, var(--color-neutral) 15%, var(--color-surface)); }
+  .chip-ghost.chip-base:hover      { background-color: var(--color-base-200); }
 
   /* Size Variants */
   .chip-sm {
@@ -2530,7 +2796,7 @@ const css$3 = `/**
 `;
 new CSSStyleSheet().replaceSync(css$3);
 //#endregion
-//#region ../../../.npm_ex/cache/@duskmoon-dev/el-chip/1.5.3/dist/esm/register.js
+//#region node_modules/@duskmoon-dev/el-chip/dist/esm/register.js
 var VARIANT_CLASSES = {
 	filled: "",
 	outlined: "chip-outlined",
@@ -2550,6 +2816,13 @@ var SIZE_CLASSES$1 = {
 	md: "",
 	lg: "chip-lg"
 };
+var DELETE_ICON = `<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" /></svg>`;
+function escapeHtml(value) {
+	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+}
+function matchesSelector(target, selector) {
+	return typeof target.matches === "function" && target.matches(selector);
+}
 var styles$5 = css$7`
   :host {
     display: inline-flex;
@@ -2571,11 +2844,28 @@ var styles$5 = css$7`
     border-radius: 9999px;
     font-size: 0.875rem;
     line-height: 1.25rem;
-    cursor: pointer;
+    cursor: default;
     transition: all 150ms ease;
     background-color: var(--color-surface-variant);
     color: var(--color-on-surface);
     border: 1px solid transparent;
+  }
+
+  a.chip,
+  button.chip {
+    appearance: none;
+    text-decoration: none;
+  }
+
+  .chip-clickable {
+    cursor: pointer;
+  }
+
+  a.chip:focus-visible,
+  button.chip:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    box-shadow: none;
   }
 
   .chip:hover {
@@ -2659,17 +2949,28 @@ var styles$5 = css$7`
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 1rem;
-    height: 1rem;
+    width: 1.5rem;
+    height: 1.5rem;
+    padding: 0;
     margin-left: 0.25rem;
     margin-right: -0.25rem;
+    border: 0;
     border-radius: 50%;
+    background: transparent;
+    color: inherit;
+    font: inherit;
     cursor: pointer;
     opacity: 0.7;
     transition: opacity 150ms ease;
   }
 
   .chip-delete:hover {
+    opacity: 1;
+  }
+
+  .chip-delete:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
     opacity: 1;
   }
 
@@ -2693,9 +2994,35 @@ var ElDmChip = class extends BaseElement {
 			type: String,
 			reflect: true
 		},
+		href: {
+			type: String,
+			reflect: true
+		},
+		target: {
+			type: String,
+			reflect: true
+		},
+		rel: {
+			type: String,
+			reflect: true
+		},
+		clickable: {
+			type: Boolean,
+			reflect: true
+		},
+		selectable: {
+			type: Boolean,
+			reflect: true
+		},
 		deletable: {
 			type: Boolean,
 			reflect: true
+		},
+		deleteLabel: {
+			type: String,
+			reflect: true,
+			attribute: "delete-label",
+			default: "Remove chip"
 		},
 		selected: {
 			type: Boolean,
@@ -2710,36 +3037,113 @@ var ElDmChip = class extends BaseElement {
 		super();
 		this.attachStyles(styles$5);
 	}
-	_handleDelete(event) {
-		event.stopPropagation();
-		if (!this.disabled) this.emit("delete");
+	connectedCallback() {
+		super.connectedCallback();
+		this.shadowRoot.addEventListener("click", this._handleShadowClick);
 	}
-	_handleClick() {
-		if (!this.disabled) this.emit("click");
+	disconnectedCallback() {
+		this.shadowRoot.removeEventListener("click", this._handleShadowClick);
+		super.disconnectedCallback();
 	}
+	_handleShadowClick = (event) => {
+		const eventPath = event.composedPath();
+		const deleteButton = eventPath.find((target) => matchesSelector(target, ".chip-delete"));
+		if (deleteButton) {
+			event.stopPropagation();
+			if (this.disabled || deleteButton.disabled) return;
+			this.emit("dm-delete");
+			this.emit("delete");
+			return;
+		}
+		if (!eventPath.find((target) => matchesSelector(target, ".chip"))) return;
+		if (this.disabled) {
+			event.preventDefault();
+			event.stopPropagation();
+			return;
+		}
+		if (this.deletable) return;
+		if (this.hasAttribute("href")) {
+			if (!this.emit("dm-click")) event.preventDefault();
+			return;
+		}
+		if (this.selectable) {
+			this.selected = !this.selected;
+			this.emit("dm-change", { selected: this.selected });
+			return;
+		}
+		if (this.clickable && !this.emit("dm-click")) event.preventDefault();
+	};
 	_getChipClasses() {
 		const classes = ["chip"];
 		if (this.variant && VARIANT_CLASSES[this.variant]) classes.push(VARIANT_CLASSES[this.variant]);
 		if (this.color && COLOR_CLASSES[this.color]) classes.push(COLOR_CLASSES[this.color]);
 		if (this.size && SIZE_CLASSES$1[this.size]) classes.push(SIZE_CLASSES$1[this.size]);
 		if (this.selected) classes.push("chip-selected");
+		if (!this.disabled && !this.deletable && (this.hasAttribute("href") || this.selectable || this.clickable)) classes.push("chip-clickable");
 		return classes.join(" ");
 	}
-	render() {
+	_renderContent() {
 		return `
-      <span class="${this._getChipClasses()}" part="chip" role="${this.getAttribute("role") || "button"}" tabindex="0"${this.selected ? " aria-selected=\"true\"" : ""}>
-        <span class="chip-icon" part="icon">
-          <slot name="icon"></slot>
+      <span class="chip-icon" part="icon">
+        <slot name="icon"></slot>
+      </span>
+      <slot></slot>
+    `;
+	}
+	render() {
+		const chipClasses = this._getChipClasses();
+		const content = this._renderContent();
+		if (this.deletable) {
+			const deleteLabel = escapeHtml(this.deleteLabel || "Remove chip");
+			return `
+        <span class="${chipClasses}" part="chip"${this.disabled ? " aria-disabled=\"true\"" : ""}>
+          ${content}
+          <button
+            class="chip-delete"
+            part="delete"
+            type="button"
+            aria-label="${deleteLabel}"
+            ${this.disabled ? "disabled" : ""}
+          >${DELETE_ICON}</button>
         </span>
-        <slot></slot>
-        ${this.deletable ? `<span class="chip-delete" part="delete"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" /></svg></span>` : ""}
+      `;
+		}
+		if (this.hasAttribute("href")) {
+			if (this.disabled) return `
+          <span class="${chipClasses}" part="chip" aria-disabled="true">${content}</span>
+        `;
+			return `
+        <a class="${chipClasses}" part="chip" href="${escapeHtml(this.href ?? "")}"${this.target ? ` target="${escapeHtml(this.target)}"` : ""}${this.rel ? ` rel="${escapeHtml(this.rel)}"` : ""}>${content}</a>
+      `;
+		}
+		if (this.selectable) return `
+        <button
+          class="${chipClasses}"
+          part="chip"
+          type="button"
+          aria-pressed="${this.selected ? "true" : "false"}"
+          ${this.disabled ? "disabled" : ""}
+        >${content}</button>
+      `;
+		if (this.clickable) return `
+        <button
+          class="${chipClasses}"
+          part="chip"
+          type="button"
+          ${this.disabled ? "disabled" : ""}
+        >${content}</button>
+      `;
+		return `
+      <span class="${chipClasses}" part="chip">
+        ${content}
       </span>
     `;
 	}
 	update() {
+		const activeElement = this.shadowRoot.activeElement;
+		const activeSelector = activeElement?.classList.contains("chip-delete") ? ".chip-delete" : activeElement?.matches("a.chip, button.chip") ? ".chip" : void 0;
 		super.update();
-		(this.shadowRoot?.querySelector(".chip"))?.addEventListener("click", this._handleClick.bind(this));
-		(this.shadowRoot?.querySelector(".chip-delete"))?.addEventListener("click", this._handleDelete.bind(this));
+		if (activeSelector) this.shadowRoot.querySelector(activeSelector)?.focus();
 	}
 };
 function register$3() {
@@ -2924,7 +3328,7 @@ const css$2 = `/**
 `;
 new CSSStyleSheet().replaceSync(css$2);
 //#endregion
-//#region ../../../.npm_ex/cache/@duskmoon-dev/el-dialog/1.5.3/dist/esm/register.js
+//#region node_modules/@duskmoon-dev/el-dialog/dist/esm/register.js
 var SIZE_CLASSES = {
 	sm: "dialog-sm",
 	md: "",
@@ -2943,110 +3347,8 @@ var styles$3 = css$7`
 
   ${css$2.replace(/@layer\s+components\s*\{/, "").replace(/\}\s*$/, "")}
 
-  .dialog-wrapper {
-    position: fixed;
-    inset: 0;
-    z-index: 1000;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    opacity: 0;
-    visibility: hidden;
-    transition:
-      opacity 200ms ease,
-      visibility 200ms ease;
-  }
-
-  .dialog-wrapper.open {
-    opacity: 1;
-    visibility: visible;
-  }
-
-  .dialog-backdrop {
-    position: absolute;
-    inset: 0;
-    background-color: rgba(0, 0, 0, 0.5);
-  }
-
-  .dialog {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    max-height: 90vh;
-    max-width: 90vw;
-    min-width: 320px;
-    background-color: var(--color-surface);
-    border-radius: 1rem;
-    box-shadow: 0 25px 50px -12px rgb(0 0 0 / 0.25);
-    transform: scale(0.95);
-    transition: transform 200ms ease;
+  dialog.dialog {
     font-family: inherit;
-  }
-
-  .dialog-wrapper.open .dialog {
-    transform: scale(1);
-  }
-
-  .dialog-sm {
-    max-width: 400px;
-  }
-  .dialog-lg {
-    max-width: 800px;
-  }
-  .dialog-xl {
-    max-width: 1140px;
-  }
-  .dialog-fullscreen {
-    max-width: 100vw;
-    max-height: 100vh;
-    width: 100vw;
-    height: 100vh;
-    border-radius: 0;
-  }
-
-  .dialog-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 1rem 1.5rem;
-    border-bottom: 1px solid var(--color-outline);
-  }
-
-  .dialog-body {
-    flex: 1;
-    padding: 1.5rem;
-    overflow-y: auto;
-  }
-
-  .dialog-footer {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 0.5rem;
-    padding: 1rem 1.5rem;
-    border-top: 1px solid var(--color-outline);
-  }
-
-  .dialog-close {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 2rem;
-    height: 2rem;
-    border: none;
-    background: transparent;
-    border-radius: 0.5rem;
-    cursor: pointer;
-    color: var(--color-on-surface);
-    opacity: 0.7;
-    transition:
-      opacity 150ms ease,
-      background-color 150ms ease;
-  }
-
-  .dialog-close:hover {
-    opacity: 1;
-    background-color: var(--color-surface-variant);
   }
 `;
 var ElDmDialog = class extends BaseElement {
@@ -3075,54 +3377,134 @@ var ElDmDialog = class extends BaseElement {
 			attribute: "no-backdrop"
 		}
 	};
+	_syncing = false;
+	_structureKey = "";
 	constructor() {
 		super();
-		this.attachStyles([styles$3, animationStyles]);
+		this.attachStyles(styles$3);
+	}
+	connectedCallback() {
+		super.connectedCallback();
+		this.addEventListener("command", this._handleCommand);
+	}
+	disconnectedCallback() {
+		super.disconnectedCallback?.();
+		this.removeEventListener("command", this._handleCommand);
 	}
 	_canDismiss() {
 		return this.dismissible && !this.noDismiss;
 	}
-	_handleBackdropClick(event) {
-		if (this._canDismiss() && event.target === event.currentTarget) this.close();
+	_getDialog() {
+		return this.query("dialog");
 	}
-	_handleKeyDown = (event) => {
-		if (event.key === "Escape" && this._canDismiss()) this.close();
-	};
+	_getStructureKey() {
+		return [
+			this.size ?? "",
+			this.dismissible ? "1" : "0",
+			this.noDismiss ? "1" : "0"
+		].join("|");
+	}
 	_getDialogClasses() {
 		const classes = ["dialog"];
 		if (this.size && SIZE_CLASSES[this.size]) classes.push(SIZE_CLASSES[this.size]);
 		return classes.join(" ");
 	}
+	_handleCancel = (event) => {
+		if (!this._canDismiss()) event.preventDefault();
+	};
+	_handleNativeClose = () => {
+		if (this._syncing) return;
+		if (!this.open) return;
+		this.open = false;
+		this.emit("close");
+	};
+	_handleBackdropClick = (event) => {
+		if (this._canDismiss() && event.target === event.currentTarget) this.close();
+	};
+	_handleCloseClick = () => {
+		this.close();
+	};
+	_handleCommand = (event) => {
+		const dialog = this._getDialog();
+		if (!dialog) return;
+		switch ("command" in event ? String(event.command) : "") {
+			case "show-modal":
+				this._openNativeDialog(dialog, true);
+				break;
+			case "show":
+				this._openNativeDialog(dialog, false);
+				break;
+			case "close":
+				if (dialog.open) dialog.close();
+				break;
+			case "request-close":
+				this._requestNativeClose(dialog);
+				break;
+			case "toggle":
+				if (dialog.open) dialog.close();
+				else this._openNativeDialog(dialog, !this.noBackdrop);
+				break;
+			default: break;
+		}
+	};
+	_openNativeDialog(dialog, modal) {
+		if (!dialog.open) if (modal) dialog.showModal();
+		else dialog.show();
+		if (!this.open) {
+			this.open = true;
+			this.emit("open");
+		}
+	}
+	_requestNativeClose(dialog) {
+		if (!dialog.open) return;
+		const requestClose = dialog.requestClose;
+		if (typeof requestClose === "function") {
+			requestClose.call(dialog);
+			return;
+		}
+		const cancel = new Event("cancel", { cancelable: true });
+		if (dialog.dispatchEvent(cancel) && !cancel.defaultPrevented) dialog.close();
+	}
+	_bindDialog() {
+		const dialog = this._getDialog();
+		if (!dialog) return;
+		dialog.addEventListener("cancel", this._handleCancel);
+		dialog.addEventListener("close", this._handleNativeClose);
+		dialog.addEventListener("click", this._handleBackdropClick);
+		this.query(".dialog-close")?.addEventListener("click", this._handleCloseClick);
+	}
+	_syncNativeDialog() {
+		const dialog = this._getDialog();
+		if (!dialog) return;
+		if (this.open && !dialog.open) if (this.noBackdrop) dialog.show();
+		else dialog.showModal();
+		else if (!this.open && dialog.open) dialog.close();
+	}
 	show() {
 		this.open = true;
-		document.addEventListener("keydown", this._handleKeyDown);
-		document.body.style.overflow = "hidden";
 		this.emit("open");
 	}
+	showModal() {
+		this.show();
+	}
 	close() {
+		if (!this.open) return;
 		this.open = false;
-		document.removeEventListener("keydown", this._handleKeyDown);
-		document.body.style.overflow = "";
 		this.emit("close");
 	}
 	toggle() {
 		if (this.open) this.close();
 		else this.show();
 	}
-	disconnectedCallback() {
-		super.disconnectedCallback?.();
-		document.removeEventListener("keydown", this._handleKeyDown);
-		document.body.style.overflow = "";
-	}
 	render() {
-		const dialogClasses = this._getDialogClasses();
 		return `
-      <div class="dialog-wrapper ${this.open ? "open" : ""}" part="wrapper">
-        ${!this.noBackdrop ? "<div class=\"dialog-backdrop\" part=\"backdrop\"></div>" : ""}
-        <div class="${dialogClasses}" role="dialog" aria-modal="true" part="dialog">
+      <dialog class="${this._getDialogClasses()}" part="dialog">
+        <div class="dialog-box" part="box">
           <div class="dialog-header" part="header">
-            <slot name="header"></slot>
-            ${this._canDismiss() ? "<button class=\"dialog-close\" part=\"close\" aria-label=\"Close\">✕</button>" : ""}
+            <div class="dialog-title" part="title">
+              <slot name="header"></slot>
+            </div>
+            ${this._canDismiss() ? "<button type=\"button\" class=\"dialog-close\" part=\"close\" aria-label=\"Close\">&times;</button>" : ""}
           </div>
           <div class="dialog-body" part="body">
             <slot></slot>
@@ -3131,13 +3513,23 @@ var ElDmDialog = class extends BaseElement {
             <slot name="footer"></slot>
           </div>
         </div>
-      </div>
+      </dialog>
     `;
 	}
 	update() {
-		super.update();
-		(this.shadowRoot?.querySelector(".dialog-backdrop"))?.addEventListener("click", this._handleBackdropClick.bind(this));
-		(this.shadowRoot?.querySelector(".dialog-close"))?.addEventListener("click", () => this.close());
+		const key = this._getStructureKey();
+		const needsRender = !this._getDialog() || key !== this._structureKey;
+		this._syncing = true;
+		try {
+			if (needsRender) {
+				super.update();
+				this._structureKey = key;
+				this._bindDialog();
+			}
+			this._syncNativeDialog();
+		} finally {
+			this._syncing = false;
+		}
 	}
 };
 function register$2() {
@@ -3161,6 +3553,56 @@ const css$1 = `/**
     padding: 0.5rem 1rem;
     background-color: var(--color-surface);
     color: var(--color-on-surface);
+  }
+
+  .navbar-primary {
+    background-color: var(--color-primary);
+    color: var(--color-primary-content);
+  }
+
+  .navbar-secondary {
+    background-color: var(--color-secondary);
+    color: var(--color-secondary-content);
+  }
+
+  .navbar-tertiary {
+    background-color: var(--color-tertiary);
+    color: var(--color-tertiary-content);
+  }
+
+  .navbar-accent {
+    background-color: var(--color-accent);
+    color: var(--color-accent-content);
+  }
+
+  .navbar-neutral {
+    background-color: var(--color-neutral);
+    color: var(--color-neutral-content);
+  }
+
+  .navbar-base {
+    background-color: var(--color-base-100);
+    color: var(--color-base-content);
+  }
+
+  .navbar-info {
+    background-color: var(--color-info);
+    color: var(--color-info-content);
+  }
+
+  .navbar-success {
+    background-color: var(--color-success);
+    color: var(--color-success-content);
+  }
+
+  .navbar-warning {
+    background-color: var(--color-warning);
+    color: var(--color-warning-content);
+  }
+
+  .navbar-error {
+    background-color: var(--color-error);
+    color: var(--color-error-content);
   }
 
   .navbar-start {
@@ -4341,107 +4783,156 @@ register$1();
 const css = `/**
  * Popover Component Styles
  * DuskMoonUI - Material Design 3 inspired popover system
+ *
+ * Uses native Popover API + CSS Anchor Positioning:
+ *   <button popovertarget="id" style="anchor-name: --id">…</button>
+ *   <div id="id" popover class="popover popover-bottom" style="position-anchor: --id">…</div>
  */
 
 @layer components {
-  /* Popover Container (class-based approach only, not native [popover]) */
-  .popover:not([popover]) {
-    position: relative;
-    display: inline-block;
+  /* ========================================
+   * Native Popover surface
+   * ======================================== */
+
+  .popover {
+    --popover-color-intensity: 30%;
   }
 
-  /* Popover Content */
-  .popover-content {
+  .popover[popover] {
     position: absolute;
+    inset: auto;
     z-index: 1050;
     min-width: 12rem;
     max-width: 20rem;
     padding: 1rem;
+    margin: 0.5rem;
     background-color: var(--color-surface);
     border: 1px solid var(--color-outline-variant);
     border-radius: var(--radius-md);
     box-shadow: var(--shadow-lg);
     opacity: 0;
-    visibility: hidden;
     transform: scale(0.95);
-    transform-origin: center;
-    transition: opacity 150ms ease-out, visibility 150ms ease-out, transform 150ms ease-out;
+    position-area: bottom;
+    position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;
+    transition:
+      opacity 150ms ease-out,
+      transform 150ms ease-out,
+      overlay 150ms ease-out allow-discrete,
+      display 150ms ease-out allow-discrete;
   }
 
-  .popover.show .popover-content,
-  .popover-content.show {
+  .popover[popover]:popover-open {
     opacity: 1;
     visibility: visible;
     transform: scale(1);
   }
 
-  /* Direct popover structure (without .popover-content wrapper) */
-  .popover.popover-show,
-  .popover.show {
-    opacity: 1;
-    visibility: visible;
+  @starting-style {
+    .popover[popover]:popover-open {
+      opacity: 0;
+      transform: scale(0.95);
+    }
   }
 
-  /* Popover as direct overlay (simpler structure) */
-  .popover:not([popover])[class*="popover-top"],
-  .popover:not([popover])[class*="popover-bottom"],
-  .popover:not([popover])[class*="popover-left"],
-  .popover:not([popover])[class*="popover-right"] {
-    position: absolute;
-    z-index: 1050;
-    min-width: 12rem;
-    max-width: 20rem;
-    padding: 1rem;
-    background-color: var(--color-surface);
-    border: 1px solid var(--color-outline-variant);
-    border-radius: var(--radius-md);
-    box-shadow: var(--shadow-lg);
-    opacity: 0;
-    visibility: hidden;
-    transition: opacity 150ms ease-out, visibility 150ms ease-out;
+  /* Preferred position-area */
+  .popover-top[popover] {
+    position-area: top;
   }
 
-  .popover[class*="popover-top"].popover-show,
-  .popover[class*="popover-bottom"].popover-show,
-  .popover[class*="popover-left"].popover-show,
-  .popover[class*="popover-right"].popover-show {
-    opacity: 1;
-    visibility: visible;
+  .popover-bottom[popover] {
+    position-area: bottom;
   }
 
-  /* Direct position: Top */
-  .popover.popover-top:not(:has(.popover-content)) {
-    bottom: 100%;
-    left: 50%;
-    transform: translateX(-50%);
-    margin-bottom: 0.75rem;
+  .popover-left[popover] {
+    position-area: left;
   }
 
-  /* Direct position: Bottom */
-  .popover.popover-bottom:not(:has(.popover-content)) {
-    top: 100%;
-    left: 50%;
-    transform: translateX(-50%);
-    margin-top: 0.75rem;
+  .popover-right[popover] {
+    position-area: right;
   }
 
-  /* Direct position: Left */
-  .popover.popover-left:not(:has(.popover-content)) {
-    right: 100%;
-    top: 50%;
-    transform: translateY(-50%);
-    margin-right: 0.75rem;
+  /* Alignment variants */
+  .popover-start[popover] {
+    position-area: bottom span-right;
   }
 
-  /* Direct position: Right */
-  .popover.popover-right:not(:has(.popover-content)) {
-    left: 100%;
-    top: 50%;
-    transform: translateY(-50%);
-    margin-left: 0.75rem;
+  .popover-end[popover] {
+    position-area: bottom span-left;
   }
 
-  /* Popover Arrow */
+  .popover-top.popover-start[popover] {
+    position-area: top span-right;
+  }
+
+  .popover-top.popover-end[popover] {
+    position-area: top span-left;
+  }
+
+  .popover-bottom.popover-start[popover] {
+    position-area: bottom span-right;
+  }
+
+  .popover-bottom.popover-end[popover] {
+    position-area: bottom span-left;
+  }
+
+  .popover-left.popover-start[popover] {
+    position-area: left span-bottom;
+  }
+
+  .popover-left.popover-end[popover] {
+    position-area: left span-top;
+  }
+
+  .popover-right.popover-start[popover] {
+    position-area: right span-bottom;
+  }
+
+  .popover-right.popover-end[popover] {
+    position-area: right span-top;
+  }
+
+  /* Backdrop */
+  .popover[popover]::backdrop {
+    background-color: transparent;
+    transition:
+      background-color 150ms ease-out,
+      overlay 150ms ease-out allow-discrete,
+      display 150ms ease-out allow-discrete;
+  }
+
+  .popover[popover]:popover-open::backdrop {
+    background-color: color-mix(in srgb, var(--color-scrim) 10%, transparent);
+  }
+
+  @starting-style {
+    .popover[popover]:popover-open::backdrop {
+      background-color: transparent;
+    }
+  }
+
+  .popover-modal[popover]::backdrop {
+    background-color: transparent;
+    transition:
+      background-color 150ms ease-out,
+      overlay 150ms ease-out allow-discrete,
+      display 150ms ease-out allow-discrete;
+  }
+
+  .popover-modal[popover]:popover-open::backdrop {
+    background-color: color-mix(in srgb, var(--color-scrim) 30%, transparent);
+  }
+
+  @starting-style {
+    .popover-modal[popover]:popover-open::backdrop {
+      background-color: transparent;
+    }
+  }
+
+  /* ========================================
+   * Arrow (preferred position; may be wrong after flip)
+   * ======================================== */
+
   .popover-arrow {
     position: absolute;
     width: 0.75rem;
@@ -4451,22 +4942,8 @@ const css = `/**
     transform: rotate(45deg);
   }
 
-  /* Position: Top (default) */
-  .popover-top .popover-content,
-  .popover .popover-content {
-    bottom: 100%;
-    left: 50%;
-    transform: translateX(-50%) scale(0.95);
-    margin-bottom: 0.75rem;
-  }
-
-  .popover-top.show .popover-content,
-  .popover.show .popover-content {
-    transform: translateX(-50%) scale(1);
-  }
-
-  .popover-top .popover-arrow,
-  .popover .popover-arrow {
+  .popover-top[popover] > .popover-arrow,
+  .popover[popover]:not(.popover-bottom):not(.popover-left):not(.popover-right) > .popover-arrow {
     bottom: -0.375rem;
     left: 50%;
     transform: translateX(-50%) rotate(45deg);
@@ -4474,19 +4951,7 @@ const css = `/**
     border-left: none;
   }
 
-  /* Position: Bottom */
-  .popover-bottom .popover-content {
-    top: 100%;
-    left: 50%;
-    transform: translateX(-50%) scale(0.95);
-    margin-top: 0.75rem;
-  }
-
-  .popover-bottom.show .popover-content {
-    transform: translateX(-50%) scale(1);
-  }
-
-  .popover-bottom .popover-arrow {
+  .popover-bottom[popover] > .popover-arrow {
     top: -0.375rem;
     left: 50%;
     transform: translateX(-50%) rotate(45deg);
@@ -4494,19 +4959,7 @@ const css = `/**
     border-right: none;
   }
 
-  /* Position: Left */
-  .popover-left .popover-content {
-    right: 100%;
-    top: 50%;
-    transform: translateY(-50%) scale(0.95);
-    margin-right: 0.75rem;
-  }
-
-  .popover-left.show .popover-content {
-    transform: translateY(-50%) scale(1);
-  }
-
-  .popover-left .popover-arrow {
+  .popover-left[popover] > .popover-arrow {
     right: -0.375rem;
     top: 50%;
     transform: translateY(-50%) rotate(45deg);
@@ -4514,19 +4967,7 @@ const css = `/**
     border-bottom: none;
   }
 
-  /* Position: Right */
-  .popover-right .popover-content {
-    left: 100%;
-    top: 50%;
-    transform: translateY(-50%) scale(0.95);
-    margin-left: 0.75rem;
-  }
-
-  .popover-right.show .popover-content {
-    transform: translateY(-50%) scale(1);
-  }
-
-  .popover-right .popover-arrow {
+  .popover-right[popover] > .popover-arrow {
     left: -0.375rem;
     top: 50%;
     transform: translateY(-50%) rotate(45deg);
@@ -4534,7 +4975,14 @@ const css = `/**
     border-top: none;
   }
 
-  /* Popover Header */
+  .popover-no-arrow > .popover-arrow {
+    display: none;
+  }
+
+  /* ========================================
+   * Structure
+   * ======================================== */
+
   .popover-header {
     display: flex;
     align-items: center;
@@ -4546,23 +4994,42 @@ const css = `/**
 
   .popover-title {
     flex: 1;
+    min-width: 0;
+    margin: 0;
     font-size: 0.875rem;
     font-weight: 600;
+    line-height: 1.5rem;
     color: var(--color-on-surface);
   }
 
+  /* Prefer placing .popover-close inside .popover-header for aligned title + close */
   .popover-close {
-    display: flex;
+    display: inline-flex;
+    flex-shrink: 0;
     align-items: center;
     justify-content: center;
     width: 1.5rem;
     height: 1.5rem;
+    margin-inline-start: auto;
+    padding: 0;
     color: var(--color-on-surface-variant);
     background-color: transparent;
     border: none;
     border-radius: var(--radius-xs);
     cursor: pointer;
     transition: background-color 150ms ease-in-out;
+  }
+
+  /* Fallback when close is a direct child of the popover (not in header) */
+  .popover[popover] > .popover-close {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+    margin-inline-start: 0;
+  }
+
+  .popover[popover]:has(> .popover-close) > .popover-header {
+    padding-right: 1.75rem;
   }
 
   .popover-close:hover {
@@ -4574,14 +5041,12 @@ const css = `/**
     box-shadow: 0 0 0 3px color-mix(in oklch, currentColor 20%, transparent);
   }
 
-  /* Popover Body */
   .popover-body {
     font-size: 0.875rem;
     color: var(--color-on-surface-variant);
     line-height: 1.5;
   }
 
-  /* Popover Footer */
   .popover-footer {
     display: flex;
     align-items: center;
@@ -4592,194 +5057,112 @@ const css = `/**
     border-top: 1px solid var(--color-outline-variant);
   }
 
-  /* No Arrow Variant */
-  .popover-no-arrow .popover-arrow {
-    display: none;
-  }
+  /* ========================================
+   * Size variants
+   * ======================================== */
 
-  /* Size Variants */
-  .popover-sm .popover-content {
+  .popover-sm[popover] {
     min-width: 8rem;
     max-width: 14rem;
     padding: 0.75rem;
   }
 
-  .popover-lg .popover-content {
+  .popover-lg[popover] {
     min-width: 16rem;
     max-width: 28rem;
     padding: 1.25rem;
   }
 
-  .popover-full .popover-content {
+  .popover-full[popover] {
     min-width: 0;
     max-width: none;
     width: max-content;
   }
 
-  /* Color Variants */
-  /*
-   * Color intensity for themed popovers.
-   * Override this variable to adjust how strongly colors appear:
-   * - 20% = subtle tint
-   * - 30% = moderate (default)
-   * - 40% = bold/prominent
-   */
-  .popover {
-    --popover-color-intensity: 30%;
-  }
+  /* ========================================
+   * Color variants
+   * ======================================== */
 
-  /* Dark variant */
-  .popover-dark .popover-content {
+  .popover-dark[popover] {
     background-color: var(--color-on-surface);
     color: var(--color-surface);
     border-color: transparent;
   }
 
-  .popover-dark[class*="popover-top"],
-  .popover-dark[class*="popover-bottom"],
-  .popover-dark[class*="popover-left"],
-  .popover-dark[class*="popover-right"] {
-    background-color: var(--color-on-surface);
-    color: var(--color-surface);
-    border-color: transparent;
-  }
-
-  .popover-dark .popover-arrow {
+  .popover-dark[popover] > .popover-arrow {
     background-color: var(--color-on-surface);
     border-color: transparent;
   }
 
-  .popover-dark .popover-title {
+  .popover-dark[popover] .popover-title {
     color: var(--color-surface);
   }
 
-  .popover-dark .popover-body {
+  .popover-dark[popover] .popover-body {
     color: var(--color-surface);
     opacity: 0.9;
   }
 
-  /* Primary variant */
-  .popover-primary .popover-content {
+  .popover-primary[popover] {
     background-color: color-mix(in oklch, var(--color-primary) var(--popover-color-intensity), var(--color-surface));
     border-color: var(--color-primary);
   }
 
-  .popover-primary[class*="popover-top"],
-  .popover-primary[class*="popover-bottom"],
-  .popover-primary[class*="popover-left"],
-  .popover-primary[class*="popover-right"] {
+  .popover-primary[popover] > .popover-arrow {
     background-color: color-mix(in oklch, var(--color-primary) var(--popover-color-intensity), var(--color-surface));
     border-color: var(--color-primary);
   }
 
-  .popover-primary .popover-arrow {
-    background-color: color-mix(in oklch, var(--color-primary) var(--popover-color-intensity), var(--color-surface));
-    border-color: var(--color-primary);
-  }
-
-  .popover-primary .popover-body {
+  .popover-primary[popover] .popover-body,
+  .popover-primary[popover] .popover-title {
     color: var(--color-on-surface);
   }
 
-  .popover-primary .popover-title {
-    color: var(--color-on-surface);
-  }
-
-  /* Secondary variant */
-  .popover-secondary .popover-content {
+  .popover-secondary[popover] {
     background-color: color-mix(in oklch, var(--color-secondary) var(--popover-color-intensity), var(--color-surface));
     border-color: var(--color-secondary);
   }
 
-  .popover-secondary[class*="popover-top"],
-  .popover-secondary[class*="popover-bottom"],
-  .popover-secondary[class*="popover-left"],
-  .popover-secondary[class*="popover-right"] {
+  .popover-secondary[popover] > .popover-arrow {
     background-color: color-mix(in oklch, var(--color-secondary) var(--popover-color-intensity), var(--color-surface));
     border-color: var(--color-secondary);
   }
 
-  .popover-secondary .popover-arrow {
-    background-color: color-mix(in oklch, var(--color-secondary) var(--popover-color-intensity), var(--color-surface));
-    border-color: var(--color-secondary);
-  }
-
-  .popover-secondary .popover-body {
+  .popover-secondary[popover] .popover-body,
+  .popover-secondary[popover] .popover-title {
     color: var(--color-on-surface);
   }
 
-  .popover-secondary .popover-title {
-    color: var(--color-on-surface);
-  }
-
-  /* Tertiary variant */
-  .popover-tertiary .popover-content {
+  .popover-tertiary[popover] {
     background-color: color-mix(in oklch, var(--color-tertiary) var(--popover-color-intensity), var(--color-surface));
     border-color: var(--color-tertiary);
   }
 
-  .popover-tertiary[class*="popover-top"],
-  .popover-tertiary[class*="popover-bottom"],
-  .popover-tertiary[class*="popover-left"],
-  .popover-tertiary[class*="popover-right"] {
+  .popover-tertiary[popover] > .popover-arrow {
     background-color: color-mix(in oklch, var(--color-tertiary) var(--popover-color-intensity), var(--color-surface));
     border-color: var(--color-tertiary);
   }
 
-  .popover-tertiary .popover-arrow {
-    background-color: color-mix(in oklch, var(--color-tertiary) var(--popover-color-intensity), var(--color-surface));
-    border-color: var(--color-tertiary);
-  }
-
-  .popover-tertiary .popover-body {
+  .popover-tertiary[popover] .popover-body,
+  .popover-tertiary[popover] .popover-title {
     color: var(--color-on-surface);
   }
 
-  .popover-tertiary .popover-title {
-    color: var(--color-on-surface);
-  }
-
-  /* Surface highest variant */
-  .popover-surface-highest .popover-content {
+  .popover-surface-highest[popover] {
     background-color: var(--color-surface-container-highest);
     border-color: var(--color-outline-variant);
   }
 
-  .popover-surface-highest[class*="popover-top"],
-  .popover-surface-highest[class*="popover-bottom"],
-  .popover-surface-highest[class*="popover-left"],
-  .popover-surface-highest[class*="popover-right"] {
+  .popover-surface-highest[popover] > .popover-arrow {
     background-color: var(--color-surface-container-highest);
     border-color: var(--color-outline-variant);
   }
 
-  .popover-surface-highest .popover-arrow {
-    background-color: var(--color-surface-container-highest);
-    border-color: var(--color-outline-variant);
-  }
+  /* ========================================
+   * Menu / confirm
+   * ======================================== */
 
-  /* Hover Trigger */
-  .popover-hover:hover .popover-content,
-  .popover-hover:focus-within .popover-content {
-    opacity: 1;
-    visibility: visible;
-    transform: translateX(-50%) scale(1);
-  }
-
-  .popover-hover.popover-bottom:hover .popover-content,
-  .popover-hover.popover-bottom:focus-within .popover-content {
-    transform: translateX(-50%) scale(1);
-  }
-
-  .popover-hover.popover-left:hover .popover-content,
-  .popover-hover.popover-left:focus-within .popover-content,
-  .popover-hover.popover-right:hover .popover-content,
-  .popover-hover.popover-right:focus-within .popover-content {
-    transform: translateY(-50%) scale(1);
-  }
-
-  /* Menu Popover */
-  .popover-menu .popover-content {
+  .popover-menu[popover] {
     padding: 0.5rem;
   }
 
@@ -4823,239 +5206,19 @@ const css = `/**
     background-color: var(--color-outline-variant);
   }
 
-  /* Confirmation Popover */
-  .popover-confirm .popover-content {
+  .popover-confirm[popover] {
     text-align: center;
   }
 
-  .popover-confirm .popover-footer {
+  .popover-confirm[popover] .popover-footer {
     justify-content: center;
   }
 
   /* ========================================
-   * HTML Popover API Support
-   * Uses native [popover] attribute with :popover-open pseudo-class
+   * Reduce Motion
    * ======================================== */
 
-  /* Native popover base styles */
-  .popover[popover] {
-    position: fixed;
-    inset: unset;
-    z-index: 1050;
-    min-width: 12rem;
-    max-width: 20rem;
-    padding: 1rem;
-    margin: 0;
-    background-color: var(--color-surface);
-    border: 1px solid var(--color-outline-variant);
-    border-radius: var(--radius-md);
-    box-shadow: var(--shadow-lg);
-    opacity: 0;
-    transform: scale(0.95);
-    transition: opacity 150ms ease-out, transform 150ms ease-out, overlay 150ms ease-out allow-discrete, display 150ms ease-out allow-discrete;
-  }
-
-  /* Popover open state */
-  .popover[popover]:popover-open {
-    opacity: 1;
-    visibility: visible;
-    transform: scale(1);
-  }
-
-  /* Starting state for entry animation */
-  @starting-style {
-    .popover[popover]:popover-open {
-      opacity: 0;
-      transform: scale(0.95);
-    }
-  }
-
-  /* Native popover backdrop */
-  .popover[popover]::backdrop {
-    background-color: transparent;
-    transition: background-color 150ms ease-out, overlay 150ms ease-out allow-discrete, display 150ms ease-out allow-discrete;
-  }
-
-  .popover[popover]:popover-open::backdrop {
-    background-color: color-mix(in srgb, var(--color-scrim) 10%, transparent);
-  }
-
-  @starting-style {
-    .popover[popover]:popover-open::backdrop {
-      background-color: transparent;
-    }
-  }
-
-  /* Native popover with modal backdrop */
-  .popover-modal[popover]::backdrop {
-    background-color: transparent;
-    transition: background-color 150ms ease-out, overlay 150ms ease-out allow-discrete, display 150ms ease-out allow-discrete;
-  }
-
-  .popover-modal[popover]:popover-open::backdrop {
-    background-color: color-mix(in srgb, var(--color-scrim) 30%, transparent);
-  }
-
-  @starting-style {
-    .popover-modal[popover]:popover-open::backdrop {
-      background-color: transparent;
-    }
-  }
-
-  /* Native popover color variants */
-  .popover-primary[popover] {
-    background-color: color-mix(in oklch, var(--color-primary) var(--popover-color-intensity), var(--color-surface));
-    border-color: var(--color-primary);
-  }
-
-  .popover-primary[popover] .popover-body {
-    color: var(--color-on-surface);
-  }
-
-  .popover-primary[popover] .popover-title {
-    color: var(--color-on-surface);
-  }
-
-  .popover-secondary[popover] {
-    background-color: color-mix(in oklch, var(--color-secondary) var(--popover-color-intensity), var(--color-surface));
-    border-color: var(--color-secondary);
-  }
-
-  .popover-secondary[popover] .popover-body {
-    color: var(--color-on-surface);
-  }
-
-  .popover-secondary[popover] .popover-title {
-    color: var(--color-on-surface);
-  }
-
-  .popover-tertiary[popover] {
-    background-color: color-mix(in oklch, var(--color-tertiary) var(--popover-color-intensity), var(--color-surface));
-    border-color: var(--color-tertiary);
-  }
-
-  .popover-tertiary[popover] .popover-body {
-    color: var(--color-on-surface);
-  }
-
-  .popover-tertiary[popover] .popover-title {
-    color: var(--color-on-surface);
-  }
-
-  .popover-dark[popover] {
-    background-color: var(--color-on-surface);
-    border-color: transparent;
-  }
-
-  .popover-dark[popover] .popover-body {
-    color: var(--color-surface);
-    opacity: 0.9;
-  }
-
-  .popover-dark[popover] .popover-title {
-    color: var(--color-surface);
-  }
-
-  .popover-surface-highest[popover] {
-    background-color: var(--color-surface-container-highest);
-    border-color: var(--color-outline-variant);
-  }
-
-  /* Native popover size variants */
-  .popover-sm[popover] {
-    min-width: 8rem;
-    max-width: 14rem;
-    padding: 0.75rem;
-  }
-
-  .popover-lg[popover] {
-    min-width: 16rem;
-    max-width: 28rem;
-    padding: 1.25rem;
-  }
-
-  .popover-full[popover] {
-    min-width: 0;
-    max-width: none;
-    width: max-content;
-  }
-
-  /* ========================================
-   * CSS Anchor Positioning
-   * Enables popovers to track their trigger element on scroll
-   * Usage: Add anchor-name CSS property to trigger, position-anchor to popover
-   * ======================================== */
-
-  /* Popover trigger anchor - use inline style or custom class to set anchor-name */
-  [popovertarget] {
-    /* Each trigger needs unique anchor-name, set via inline style:
-       style="anchor-name: --my-popover" */
-  }
-
-  /* Anchored popover positioning
-   * Uses anchor() functions instead of position-area to avoid
-   * a Chrome rendering bug at HiDPI (DPR>=2) where position-area
-   * computes correct CSS-pixel offsets but renders at physical-pixel
-   * coordinates, doubling the distance from the anchor. */
-  .popover[popover][style*="position-anchor"] {
-    inset: unset;
-    top: anchor(bottom);
-    justify-self: anchor-center;
-    margin-top: 0.5rem;
-  }
-
-  /* Position variants for anchored popovers */
-  .popover-top[popover][style*="position-anchor"] {
-    top: unset;
-    bottom: anchor(top);
-    margin-top: 0;
-    margin-bottom: 0.5rem;
-  }
-
-  .popover-bottom[popover][style*="position-anchor"] {
-    top: anchor(bottom);
-    margin-top: 0.5rem;
-    margin-bottom: 0;
-  }
-
-  .popover-left[popover][style*="position-anchor"] {
-    top: anchor(center);
-    right: anchor(left);
-    justify-self: unset;
-    translate: 0 -50%;
-    margin-top: 0;
-    margin-right: 0.5rem;
-  }
-
-  .popover-right[popover][style*="position-anchor"] {
-    top: anchor(center);
-    left: anchor(right);
-    justify-self: unset;
-    translate: 0 -50%;
-    margin-top: 0;
-    margin-left: 0.5rem;
-  }
-
-  /* Anchored popover alignment variants */
-  .popover-start[popover][style*="position-anchor"] {
-    justify-self: start;
-  }
-
-  .popover-end[popover][style*="position-anchor"] {
-    justify-self: end;
-  }
-
-  .popover-top.popover-start[popover][style*="position-anchor"] {
-    justify-self: start;
-  }
-
-  .popover-top.popover-end[popover][style*="position-anchor"] {
-    justify-self: end;
-  }
-
-  /* Reduce Motion */
   @media (prefers-reduced-motion: reduce) {
-    .popover-content,
     .popover-close,
     .popover-menu-item,
     .popover[popover],
@@ -5191,6 +5354,7 @@ var ElDmPopover = class extends BaseElement {
 	_boundUpdatePosition;
 	_hoverTimeout = null;
 	_currentPlacement = "bottom";
+	_restoringFocus = false;
 	constructor() {
 		super();
 		this.attachStyles([styles, animationStyles]);
@@ -5250,7 +5414,7 @@ var ElDmPopover = class extends BaseElement {
 		this._attachTriggerEvents();
 	}
 	_attachTriggerEvents() {
-		const triggerEl = this._getTriggerElement();
+		const triggerEl = this._getAssignedTriggerElement();
 		if (!triggerEl) return;
 		this._detachTriggerEvents(triggerEl);
 		this._updateTriggerAria(this.open);
@@ -5275,14 +5439,29 @@ var ElDmPopover = class extends BaseElement {
 		this.removeEventListener("mouseleave", this._handlePopoverMouseLeave);
 	}
 	_removeTriggerListeners() {
-		const triggerEl = this._getTriggerElement();
+		const triggerEl = this._getAssignedTriggerElement();
 		if (triggerEl) this._detachTriggerEvents(triggerEl);
 	}
-	_getTriggerElement() {
+	_getAssignedTriggerElement() {
 		const triggerSlot = this.shadowRoot?.querySelector("slot[name=\"trigger\"]");
 		if (!triggerSlot) return null;
 		return triggerSlot.assignedElements()[0] || null;
 	}
+	_getTriggerElement() {
+		const assigned = this._getAssignedTriggerElement();
+		if (!assigned) return null;
+		if (assigned.matches(this._focusableSelector)) return assigned;
+		return assigned.querySelector(this._focusableSelector) ?? assigned;
+	}
+	_focusableSelector = [
+		"a[href]",
+		"button:not([disabled])",
+		"input:not([disabled])",
+		"select:not([disabled])",
+		"textarea:not([disabled])",
+		"[contenteditable]:not([contenteditable=\"false\"])",
+		"[tabindex]:not([tabindex=\"-1\"])"
+	].join(",");
 	_handleTriggerClick = () => {
 		this.toggle();
 	};
@@ -5310,6 +5489,7 @@ var ElDmPopover = class extends BaseElement {
 		}, 100);
 	};
 	_handleTriggerFocus = () => {
+		if (this._restoringFocus) return;
 		this.show();
 	};
 	_handleTriggerBlur = () => {
@@ -5336,7 +5516,14 @@ var ElDmPopover = class extends BaseElement {
 	_handleKeyDown(e) {
 		if (e.key === "Escape") {
 			this.hide();
-			this._getTriggerElement()?.focus?.();
+			const triggerEl = this._getTriggerElement();
+			if (triggerEl?.focus) {
+				this._restoringFocus = true;
+				triggerEl.focus();
+				queueMicrotask(() => {
+					this._restoringFocus = false;
+				});
+			}
 		}
 	}
 	_handleScroll() {
