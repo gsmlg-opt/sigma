@@ -27,6 +27,36 @@ defmodule Sigma.Ai.Providers.OpenAITest do
     end)
   end
 
+  test "encodes image blocks in rich OpenAI user content" do
+    sse = [
+      ~s(data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n),
+      "data: [DONE]\n\n"
+    ]
+
+    image = %{type: :image, data: "iVBORw0KGgo=", mime_type: "image/png"}
+
+    with_capture_server(sse, fn base_url, captured ->
+      OpenAI.stream(%{
+        model: %{id: "gpt-test", api: "openai", provider: "openai"},
+        context: %{
+          messages: [%{role: :user, content: [%{type: :text, text: "Describe this"}, image]}],
+          system_prompt: nil,
+          tools: []
+        },
+        options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+      })
+      |> Enum.to_list()
+
+      assert %{"messages" => [%{"content" => [%{"type" => "text"}, image_block]}]} =
+               Agent.get(captured, & &1)
+
+      assert image_block == %{
+               "type" => "image_url",
+               "image_url" => %{"url" => "data:image/png;base64,iVBORw0KGgo="}
+             }
+    end)
+  end
+
   test "normalizes streamed tool calls into unified provider events" do
     sse = [
       sse_json(%{

@@ -99,6 +99,40 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
     end)
   end
 
+  test "encodes image blocks in rich Anthropic user content" do
+    sse = [
+      ~s(data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1,"output_tokens":0}}}\n\n),
+      ~s(data: {"type":"message_stop"}\n\n)
+    ]
+
+    image = %{type: :image, data: "iVBORw0KGgo=", mime_type: "image/png"}
+
+    with_capture_server(sse, fn base_url, captured ->
+      Anthropic.stream(%{
+        model: %{id: "claude-test", api: "anthropic-messages", provider: "anthropic"},
+        context: %{
+          messages: [%{role: :user, content: [%{type: :text, text: "Describe this"}, image]}],
+          system_prompt: nil,
+          tools: []
+        },
+        options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+      })
+      |> Enum.to_list()
+
+      assert %{"messages" => [%{"content" => [%{"type" => "text"}, image_block]}]} =
+               Agent.get(captured, & &1)
+
+      assert image_block == %{
+               "type" => "image",
+               "source" => %{
+                 "type" => "base64",
+                 "media_type" => "image/png",
+                 "data" => "iVBORw0KGgo="
+               }
+             }
+    end)
+  end
+
   test "ignores max_output_tokens model metadata for Anthropic requests" do
     sse = [
       ~s(data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1,"output_tokens":0}}}\n\n),

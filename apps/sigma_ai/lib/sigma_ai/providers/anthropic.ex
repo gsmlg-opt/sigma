@@ -243,17 +243,30 @@ defmodule Sigma.Ai.Providers.Anthropic do
     |> Enum.reverse()
   end
 
-  defp transform_message(
-         %{role: :user, content: content}
-       ) do
-    %{role: "user", content: content}
+  defp transform_message(%{role: :user, content: content}) do
+    %{role: "user", content: transform_user_content(content)}
   end
 
-  defp transform_message(
-         %{role: :assistant, content: content}
-       ) do
+  defp transform_message(%{role: :assistant, content: content}) do
     %{role: "assistant", content: transform_content(content)}
   end
+
+  defp transform_user_content(content) when is_binary(content), do: content
+
+  defp transform_user_content(content) when is_list(content) do
+    Enum.map(content, fn
+      %{type: :text, text: text} ->
+        %{type: "text", text: text}
+
+      %{type: :image, data: data, mime_type: mime} ->
+        %{type: "image", source: %{type: "base64", media_type: mime, data: data}}
+
+      block ->
+        block
+    end)
+  end
+
+  defp transform_user_content(content), do: content
 
   defp flush_tool_results(acc, []), do: acc
 
@@ -267,9 +280,12 @@ defmodule Sigma.Ai.Providers.Anthropic do
     ]
   end
 
-  defp transform_tool_result(
-         %{role: :tool_result, tool_call_id: id, content: content, is_error: is_error}
-       ) do
+  defp transform_tool_result(%{
+         role: :tool_result,
+         tool_call_id: id,
+         content: content,
+         is_error: is_error
+       }) do
     %{
       type: "tool_result",
       tool_use_id: id,
