@@ -252,6 +252,114 @@ jobs:
             (cd dist && sha256sum --check "$(basename "$checksum")")
           done
 
+      - name: Smoke installed Linux release
+        run: |
+          set -euo pipefail
+
+          archive="dist/sigma-v${VERSION}-linux-amd64.tar.gz"
+          smoke_root="${RUNNER_TEMP}/sigma-release-smoke"
+          smoke_home="${smoke_root}/home"
+          smoke_port=14580
+          smoke_log="${smoke_root}/sigma.log"
+
+          rm -rf "$smoke_root"
+          if [[ -n "$(ss -H -ltn "sport = :${smoke_port}")" ]]; then
+            echo "::error::Smoke port ${smoke_port} is already in use."
+            exit 1
+          fi
+          mkdir -p \
+            "$smoke_home/.local/share" \
+            "$smoke_home/.config/sigma"
+          tar -xzf "$archive" -C "$smoke_home/.local/share"
+
+          release_root="$smoke_home/.local/share/sigma"
+          test "$("$release_root/bin/sigma" version)" = "sigma ${VERSION}"
+
+          secret_key_base="$(openssl rand -hex 64)"
+          dependency_version="$(
+            HOME="$smoke_home" \
+            SECRET_KEY_BASE="$secret_key_base" \
+            PHX_SERVER=false \
+            RELEASE_NODE="sigma_release_eval_${GITHUB_RUN_ID}" \
+            "$release_root/bin/sigma" eval \
+              'IO.puts(Application.spec(:backplane_mcp_protocol, :vsn))'
+          )"
+          test "$dependency_version" = "0.6.2"
+
+          printf 'SECRET_KEY_BASE=%s\nPHX_SERVER=true\nPORT=%s\nRELEASE_NODE=%s\n' \
+            "$secret_key_base" \
+            "$smoke_port" \
+            "sigma_release_smoke_${GITHUB_RUN_ID}" \
+            > "$smoke_home/.config/sigma/env"
+          chmod 600 "$smoke_home/.config/sigma/env"
+
+          HOME="$smoke_home" \
+            "$release_root/service/sigma-user-service" \
+            > "$smoke_log" 2>&1 &
+          smoke_pid=$!
+
+          cleanup() {
+            if kill -0 "$smoke_pid" 2>/dev/null; then
+              kill -TERM "$smoke_pid" 2>/dev/null || true
+              for _cleanup_attempt in $(seq 1 20); do
+                kill -0 "$smoke_pid" 2>/dev/null || break
+                sleep 0.5
+              done
+            fi
+
+            if kill -0 "$smoke_pid" 2>/dev/null; then
+              kill -KILL "$smoke_pid" 2>/dev/null || true
+            fi
+            wait "$smoke_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          ready=0
+          for _attempt in $(seq 1 60); do
+            http_code="$(
+              curl --silent --show-error \
+                --output /dev/null \
+                --write-out '%{http_code}' \
+                "http://127.0.0.1:${smoke_port}/" \
+                2>/dev/null || true
+            )"
+            if [[ "$http_code" == 200 ]]; then
+              ready=1
+              break
+            fi
+
+            if ! kill -0 "$smoke_pid" 2>/dev/null; then
+              cat "$smoke_log"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          if [[ "$ready" != 1 ]]; then
+            cat "$smoke_log"
+            exit 1
+          fi
+
+          kill -TERM "$smoke_pid"
+          for _attempt in $(seq 1 60); do
+            kill -0 "$smoke_pid" 2>/dev/null || break
+            sleep 0.5
+          done
+
+          if kill -0 "$smoke_pid" 2>/dev/null; then
+            cat "$smoke_log"
+            echo "::error::Installed Sigma release did not stop after SIGTERM."
+            exit 1
+          fi
+
+          wait "$smoke_pid" || true
+          trap - EXIT
+
+          if [[ -n "$(ss -H -ltn "sport = :${smoke_port}")" ]]; then
+            echo "::error::Installed Sigma release still listens after SIGTERM."
+            exit 1
+          fi
+
       - name: Prepare user service assets
         run: |
           scripts/verify-release-services.sh

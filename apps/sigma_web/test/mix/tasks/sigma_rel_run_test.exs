@@ -5,6 +5,7 @@ defmodule Mix.Tasks.SigmaRelRunTest do
   @mix_project_path Path.join(@repo_root, "mix.exs")
   @devenv_config_path Path.join(@repo_root, "devenv.nix")
   @dev_config_path Path.join(@repo_root, "config/dev.exs")
+  @prod_config_path Path.join(@repo_root, "config/prod.exs")
   @runtime_config_path Path.join(@repo_root, "config/runtime.exs")
 
   test "builds and starts an overwrite release in the current Mix environment" do
@@ -35,15 +36,21 @@ defmodule Mix.Tasks.SigmaRelRunTest do
 
   test "release runtime starts the endpoint without development watchers" do
     dev_source = File.read!(@dev_config_path)
-    source = File.read!(@runtime_config_path)
+    prod_source = File.read!(@prod_config_path)
+    runtime_source = File.read!(@runtime_config_path)
 
     assert dev_source =~ ~S|if System.get_env("SIGMA_RELEASE") == "true" do|
     assert dev_source =~ "code_reloader: false"
     assert dev_source =~ "watchers: []"
-    assert source =~ ~S|if System.get_env("RELEASE_NAME") do|
-    assert source =~ ~S|server: System.get_env("PHX_SERVER", "true") in ["1", "true", "TRUE"]|
-    assert source =~ ~S'port: String.to_integer(System.get_env("PORT") || "4580")'
-    assert source =~ "code_reloader: false"
-    assert source =~ "watchers: []"
+    assert prod_source =~ "code_reloader: false"
+    assert prod_source =~ "watchers: []"
+    assert runtime_source =~ ~S|if System.get_env("RELEASE_NAME") do|
+
+    assert runtime_source =~
+             ~S|server: System.get_env("PHX_SERVER", "true") in ["1", "true", "TRUE"]|
+
+    assert runtime_source =~ ~S'port: String.to_integer(System.get_env("PORT") || "4580")'
+    refute runtime_source =~ "code_reloader: false"
+    refute runtime_source =~ "watchers: []"
   end
 end

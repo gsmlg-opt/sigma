@@ -6,9 +6,7 @@ if System.get_env("RELEASE_NAME") do
     http: [
       port: String.to_integer(System.get_env("PORT") || "4580"),
       transport_options: [socket_opts: [:inet6]]
-    ],
-    code_reloader: false,
-    watchers: []
+    ]
 end
 
 if config_env() == :prod do
