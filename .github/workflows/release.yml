@@ -147,6 +147,9 @@ jobs:
           mix deps.get --only prod
           mix assets.setup
 
+      - name: Rebuild release applications
+        run: mix compile --force
+
       - name: Build production assets
         run: mix assets.deploy
 
@@ -154,6 +157,13 @@ jobs:
         run: |
           rm -rf _build/prod/rel/sigma
           mix release sigma --overwrite
+          test -n "$(
+            find _build/prod/rel/sigma/lib \
+              -path '*/sigma_tools-*/priv/native/sigma_tools_hashline.so' \
+              -type f \
+              -print \
+              -quit
+          )"
 
       - name: Add user service files
         run: |
