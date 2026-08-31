@@ -126,6 +126,82 @@ defmodule Sigma.Web.ImageAttachmentsTest do
     end
   end
 
+  describe "GIF structural validation" do
+    test "accepts one real image frame with global or local color tables and extensions" do
+      assert {:ok, [%{type: :image, mime_type: "image/gif"}]} =
+               ImageAttachments.normalize("", [raw_image("image/gif", @single_gif)])
+
+      with_extension =
+        gif_global_prefix() <>
+          <<0x21, 0xFE, 2, 0x2C, 0x3B, 0>> <>
+          gif_frame() <>
+          <<0x3B>>
+
+      assert {:ok, [%{type: :image, mime_type: "image/gif"}]} =
+               ImageAttachments.normalize("", [raw_image("image/gif", with_extension)])
+
+      assert {:ok, [%{type: :image, mime_type: "image/gif"}]} =
+               ImageAttachments.normalize("", [raw_image("image/gif", gif_with_local_table())])
+    end
+
+    test "rejects a second structurally valid image frame as animated" do
+      animated =
+        gif_global_prefix() <>
+          gif_frame() <>
+          gif_frame() <>
+          <<0x3B>>
+
+      assert {:error, :animated_gif} =
+               ImageAttachments.normalize("", [raw_image("image/gif", animated)])
+    end
+
+    test "rejects truncated logical screens and color tables" do
+      truncated_logical_screen = <<"GIF89a", 1::little-16>>
+
+      truncated_global_table =
+        <<"GIF89a", 1::little-16, 1::little-16, 0x80, 0, 0, 0, 0, 0>>
+
+      for gif <- [truncated_logical_screen, truncated_global_table] do
+        assert {:error, :invalid_data} =
+                 ImageAttachments.normalize("", [raw_image("image/gif", gif)])
+      end
+    end
+
+    test "rejects malformed extension subblocks and image blocks" do
+      malformed_extension = gif_global_prefix() <> <<0x21, 0xFE, 2, 0x41>>
+
+      truncated_descriptor = gif_global_prefix() <> <<0x2C, 0, 0>>
+
+      truncated_local_table =
+        gif_without_global_table_prefix() <>
+          <<0x2C, 0::little-16, 0::little-16, 1::little-16, 1::little-16, 0x80, 0, 0, 0>>
+
+      unterminated_image_data =
+        gif_global_prefix() <>
+          <<0x2C, 0::little-16, 0::little-16, 1::little-16, 1::little-16, 0, 2, 1, 0x4C>>
+
+      for gif <- [
+            malformed_extension,
+            truncated_descriptor,
+            truncated_local_table,
+            unterminated_image_data
+          ] do
+        assert {:error, :invalid_data} =
+                 ImageAttachments.normalize("", [raw_image("image/gif", gif)])
+      end
+    end
+
+    test "rejects zero frames and a missing trailer" do
+      zero_frames = gif_global_prefix() <> <<0x3B>>
+      missing_trailer = binary_part(@single_gif, 0, byte_size(@single_gif) - 1)
+
+      for gif <- [zero_frames, missing_trailer] do
+        assert {:error, :invalid_data} =
+                 ImageAttachments.normalize("", [raw_image("image/gif", gif)])
+      end
+    end
+  end
+
   describe "trusted errors" do
     test "returns messages for every server validation reason" do
       expected = %{
@@ -170,8 +246,36 @@ defmodule Sigma.Web.ImageAttachmentsTest do
                "mime_type" => block.mime_type
              }) == nil
     end
+
+    test "rejects animated and malformed GIF blocks" do
+      animated =
+        gif_global_prefix() <>
+          gif_frame() <>
+          gif_frame() <>
+          <<0x3B>>
+
+      malformed = binary_part(@single_gif, 0, byte_size(@single_gif) - 1)
+
+      assert ImageAttachments.data_url(canonical_gif(animated)) == nil
+      assert ImageAttachments.data_url(canonical_gif(malformed)) == nil
+    end
   end
 
   defp raw_image(mime, bytes),
     do: %{"mime_type" => mime, "data" => Base.encode64(bytes)}
+
+  defp canonical_gif(bytes),
+    do: %{type: :image, mime_type: "image/gif", data: Base.encode64(bytes)}
+
+  defp gif_global_prefix(), do: binary_part(@single_gif, 0, 19)
+  defp gif_frame(), do: binary_part(@single_gif, 19, byte_size(@single_gif) - 20)
+
+  defp gif_without_global_table_prefix(),
+    do: <<"GIF89a", 1::little-16, 1::little-16, 0, 0, 0>>
+
+  defp gif_with_local_table() do
+    gif_without_global_table_prefix() <>
+      <<0x2C, 0::little-16, 0::little-16, 1::little-16, 1::little-16, 0x80, 0, 0, 0, 255, 255,
+        255, 2, 1, 0x4C, 0, 0x3B>>
+  end
 end

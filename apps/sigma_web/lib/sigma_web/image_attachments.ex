@@ -112,7 +112,8 @@ defmodule Sigma.Web.ImageAttachments do
     with :ok <- validate_encoded_size(data),
          {:ok, bytes} <- Base.decode64(data, strict: true),
          :ok <- validate_size(bytes),
-         :ok <- validate_signature(mime, bytes) do
+         :ok <- validate_signature(mime, bytes),
+         :ok <- validate_animation(mime, bytes) do
       {:ok, %{type: :image, data: data, mime_type: mime}, byte_size(bytes)}
     else
       :error -> {:error, :invalid_data}
@@ -147,4 +148,69 @@ defmodule Sigma.Web.ImageAttachments do
     do: :ok
 
   defp validate_signature(_mime, _bytes), do: {:error, :invalid_data}
+
+  defp validate_animation("image/gif", bytes) do
+    case gif_frame_count(bytes) do
+      {:ok, 1} -> :ok
+      {:ok, frames} when frames > 1 -> {:error, :animated_gif}
+      {:ok, 0} -> {:error, :invalid_data}
+      {:error, :invalid_data} = error -> error
+    end
+  end
+
+  defp validate_animation(_mime, _bytes), do: :ok
+
+  defp gif_frame_count(
+         <<header::binary-size(6), _width::little-16, _height::little-16, packed, _background,
+           _aspect_ratio, rest::binary>>
+       )
+       when header in ["GIF87a", "GIF89a"] do
+    with {:ok, blocks} <- skip_color_table(rest, packed),
+         do: count_gif_blocks(blocks, 0)
+  end
+
+  defp gif_frame_count(_bytes), do: {:error, :invalid_data}
+
+  defp skip_color_table(rest, packed) do
+    if Bitwise.band(packed, 0x80) == 0 do
+      {:ok, rest}
+    else
+      table_bytes = 3 * Bitwise.bsl(1, Bitwise.band(packed, 0x07) + 1)
+
+      case rest do
+        <<_table::binary-size(table_bytes), tail::binary>> -> {:ok, tail}
+        _truncated -> {:error, :invalid_data}
+      end
+    end
+  end
+
+  defp count_gif_blocks(<<0x3B>>, frames), do: {:ok, frames}
+
+  defp count_gif_blocks(<<0x21, _extension_label, rest::binary>>, frames) do
+    with {:ok, tail} <- skip_sub_blocks(rest),
+         do: count_gif_blocks(tail, frames)
+  end
+
+  defp count_gif_blocks(
+         <<0x2C, _left::little-16, _top::little-16, _width::little-16, _height::little-16, packed,
+           rest::binary>>,
+         frames
+       ) do
+    with {:ok, image_data} <- skip_color_table(rest, packed),
+         <<_lzw_minimum_code_size, sub_blocks::binary>> <- image_data,
+         {:ok, tail} <- skip_sub_blocks(sub_blocks) do
+      count_gif_blocks(tail, frames + 1)
+    else
+      _malformed -> {:error, :invalid_data}
+    end
+  end
+
+  defp count_gif_blocks(_malformed, _frames), do: {:error, :invalid_data}
+
+  defp skip_sub_blocks(<<0, rest::binary>>), do: {:ok, rest}
+
+  defp skip_sub_blocks(<<size, _data::binary-size(size), rest::binary>>),
+    do: skip_sub_blocks(rest)
+
+  defp skip_sub_blocks(_truncated), do: {:error, :invalid_data}
 end
