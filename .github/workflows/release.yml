@@ -151,7 +151,9 @@ jobs:
         run: mix assets.deploy
 
       - name: Build release
-        run: mix release sigma --overwrite
+        run: |
+          rm -rf _build/prod/rel/sigma
+          mix release sigma --overwrite
 
       - name: Add user service files
         run: |
