@@ -1037,12 +1037,12 @@ defmodule Sigma.Web.SessionLive do
   defp user_content(_), do: ""
 
   defp user_images(content) when is_list(content) do
-    content
-    |> Enum.map(fn
-      %{type: :image} = block -> ImageAttachments.data_url(block)
-      _ -> nil
-    end)
-    |> Enum.reject(&is_nil/1)
+    images = Enum.filter(content, &match?(%{type: :image}, &1))
+
+    case ImageAttachments.data_urls(images) do
+      {:ok, urls} -> urls
+      {:error, _reason} -> []
+    end
   end
 
   defp user_images(_), do: []
@@ -1478,23 +1478,31 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp retry_prompt_content(content) when is_list(content) do
-    content =
-      Enum.reduce(content, [], fn
-        %{type: :text, text: text} = block, acc when is_binary(text) ->
-          if String.trim(text) == "", do: acc, else: [block | acc]
-
-        %{type: :image} = block, acc ->
-          if ImageAttachments.data_url(block), do: [block | acc], else: acc
-
-        _block, acc ->
-          acc
+    text_and_images =
+      Enum.filter(content, fn
+        %{type: :text, text: text} when is_binary(text) -> String.trim(text) != ""
+        %{type: :image} -> true
+        _ -> false
       end)
-      |> Enum.reverse()
 
-    if content == [], do: {:error, :not_retryable}, else: {:ok, content}
+    images = Enum.filter(text_and_images, &match?(%{type: :image}, &1))
+
+    with :ok <- if(images == [], do: :ok, else: validate_retry_images(images)),
+         false <- text_and_images == [] do
+      {:ok, text_and_images}
+    else
+      _ -> {:error, :not_retryable}
+    end
   end
 
   defp retry_prompt_content(_content), do: {:error, :not_retryable}
+
+  defp validate_retry_images(images) do
+    case ImageAttachments.validate_images(images) do
+      {:ok, _images} -> :ok
+      {:error, _reason} -> {:error, :not_retryable}
+    end
+  end
 
   @impl true
   def handle_event("theme_changed", _, socket) do

@@ -1004,6 +1004,38 @@ defmodule Sigma.Web.SessionLiveTest do
     refute html =~ "Attached image"
   end
 
+  test "skips a replayed message with too many images", %{conn: conn} do
+    session_id = unique_session_id("too-many-replay-images")
+    storage_path = session_storage_path(session_id)
+    image = %{type: :image, mime_type: "image/png", data: @png_data}
+    content = [%{type: :text, text: "many"} | List.duplicate(image, 5)]
+    File.mkdir_p!(Path.dirname(storage_path))
+    :ok = Log.persist_event(storage_path, {:message_end, Message.user("u_many_images", content)})
+
+    {:ok, view, html} = live_loaded(conn, session_path(session_id))
+    refute html =~ "data:image/png"
+
+    html = view |> element("#retry-u_many_images") |> render_click()
+    assert html =~ "Only text or image messages can be retried"
+    refute_receive {:agent_start, _}, 200
+  end
+
+  test "skips a replayed message whose images exceed the aggregate limit", %{conn: conn} do
+    session_id = unique_session_id("large-replay-images")
+    storage_path = session_storage_path(session_id)
+    bytes = <<137, 80, 78, 71, 13, 10, 26, 10>> <> :binary.copy(<<0>>, 3_000_000 - 8)
+    data = Base.encode64(bytes)
+    content = [%{type: :image, mime_type: "image/png", data: data} |> then(&[&1, &1, &1, &1])]
+    File.mkdir_p!(Path.dirname(storage_path))
+    :ok = Log.persist_event(storage_path, {:message_end, Message.user("u_large_images", content)})
+
+    {:ok, view, html} = live_loaded(conn, session_path(session_id))
+    refute html =~ "data:image/png"
+
+    render_hook(view, "retry_message", %{"msg-id" => "u_large_images"})
+    refute_receive {:agent_start, _}, 200
+  end
+
   test "retries persisted text and image content in canonical order", %{conn: conn} do
     session_id = unique_session_id("retry-image")
     storage_path = session_storage_path(session_id)

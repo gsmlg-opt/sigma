@@ -261,6 +261,28 @@ defmodule Sigma.Web.ImageAttachmentsTest do
     end
   end
 
+  describe "canonical image lists" do
+    test "validates the complete list before returning data URLs" do
+      block = %{type: :image, data: Base.encode64(@png), mime_type: "image/png"}
+
+      assert {:error, :too_many} = ImageAttachments.validate_images(List.duplicate(block, 5))
+      assert {:ok, [^block]} = ImageAttachments.validate_images([block])
+      assert {:ok, ["data:image/png;base64," <> _]} = ImageAttachments.data_urls([block])
+    end
+
+    test "rejects malformed blocks and aggregate payloads" do
+      assert {:error, :invalid_data} = ImageAttachments.validate_images([%{type: :image}])
+
+      bytes = @png <> :binary.copy(<<0>>, 3_000_000 - byte_size(@png))
+
+      images =
+        List.duplicate(%{type: :image, data: Base.encode64(bytes), mime_type: "image/png"}, 4)
+
+      assert {:error, :too_large} = ImageAttachments.validate_images(images)
+      assert {:error, :too_large} = ImageAttachments.data_urls(images)
+    end
+  end
+
   defp raw_image(mime, bytes),
     do: %{"mime_type" => mime, "data" => Base.encode64(bytes)}
 

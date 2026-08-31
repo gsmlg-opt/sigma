@@ -38,6 +38,26 @@ defmodule Sigma.Web.ImageAttachments do
 
   def normalize(_text, _raw_images), do: {:error, :invalid_data}
 
+  def validate_images(images) when is_list(images) do
+    with :ok <- validate_canonical_shape(images),
+         :ok <- validate_count(images),
+         raw_images <- Enum.map(images, &canonical_to_raw/1),
+         :ok <- validate_encoded_bounds(raw_images),
+         {:ok, blocks} <- decode_images(raw_images) do
+      {:ok, blocks}
+    end
+  end
+
+  def validate_images(_images), do: {:error, :invalid_data}
+
+  def data_urls(images) when is_list(images) do
+    with {:ok, blocks} <- validate_images(images) do
+      {:ok, Enum.map(blocks, &data_url/1)}
+    end
+  end
+
+  def data_urls(_images), do: {:error, :invalid_data}
+
   def client_error(code), do: Map.fetch(@client_messages, code)
   def error_message(reason), do: Map.fetch!(@server_messages, reason)
 
@@ -55,6 +75,22 @@ defmodule Sigma.Web.ImageAttachments do
   defp build_content(text, []), do: {:ok, text}
   defp build_content("", images), do: {:ok, images}
   defp build_content(text, images), do: {:ok, [%{type: :text, text: text} | images]}
+
+  defp validate_canonical_shape(images) do
+    valid? =
+      Enum.all?(images, fn
+        %{type: :image, mime_type: mime, data: data} when is_binary(mime) and is_binary(data) ->
+          true
+
+        _ ->
+          false
+      end)
+
+    if valid?, do: :ok, else: {:error, :invalid_data}
+  end
+
+  defp canonical_to_raw(%{type: :image, mime_type: mime, data: data}),
+    do: %{"mime_type" => mime, "data" => data}
 
   defp validate_count(images) when length(images) <= @max_images, do: :ok
   defp validate_count(_images), do: {:error, :too_many}
