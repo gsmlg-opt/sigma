@@ -125,10 +125,13 @@ Keep `art-elements`, `core`, and `css-art` unchanged.
 
 ```bash
 devenv shell -- mix npm.install
-devenv shell -- mix npm.verify
 devenv shell -- mix duskmoon.bundle
 devenv shell -- mix assets.build
+devenv shell -- mix npm.rebuild
+devenv shell -- mix npm.verify
 ```
+
+`duskmoon.bundle` adds transitive packages to `node_modules` while bundling. Run the documented clean lockfile reinstall after asset generation so the final verification reflects the authoritative lockfile.
 
 Expected: all commands exit 0; `node_modules/@duskmoon-dev/el-chat/package.json` reports `1.7.4`; the generated chat input exposes `getFiles`, `clearFiles`, and `send` detail `{value, files}`.
 
@@ -1487,8 +1490,9 @@ Expected: all tests pass with 0 failures.
 ```bash
 devenv shell -- mix format --check-formatted
 devenv shell -- mix compile --warnings-as-errors
-devenv shell -- mix npm.verify
 devenv shell -- mix assets.build
+devenv shell -- mix npm.rebuild
+devenv shell -- mix npm.verify
 git diff --check
 ```
 
