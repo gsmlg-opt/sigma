@@ -85,12 +85,16 @@ an accepted image remains a no-op.
 
 ### 1. Dependency update
 
-Update the explicitly pinned `@duskmoon-dev/el-*` packages and
+Update the explicitly pinned `@duskmoon-dev/el-*` packages, including
+`@duskmoon-dev/el-base`, and
 `@duskmoon-dev/elements` from 1.7.2 to 1.7.4 as one coherent package family.
 Keep `@duskmoon-dev/core` and `@duskmoon-dev/css-art` on their independent
 release versions. Regenerate the DuskMoon rich-element bundle using the
 repository's existing Mix task. The root `package-lock.json` is the committed
-authoritative npm lockfile; remove the obsolete tracked `npm.lock`.
+authoritative npm lockfile; remove the obsolete tracked `npm.lock`. The checked-in
+element bundle must be self-contained and contain no bare `@duskmoon-dev/*`
+imports; the explicit `el-base` dependency ensures clean installs provide the
+base module for bundling.
 
 Remove the resolved `# TODO(upstream): duskmoon-dev/duskmoon-elements#77`
 marker. No local upstream workaround remains after consuming v1.7.4.

@@ -22,7 +22,8 @@
 
 ### Modify
 
-- `apps/sigma_web/package.json` — pin the explicit DuskMoon element family to 1.7.4.
+- `apps/sigma_web/package.json` — pin the explicit DuskMoon element family,
+  including `@duskmoon-dev/el-base`, to 1.7.4.
 - `apps/sigma_web/assets/js/duskmoon_elements.js` — regenerate the checked-in base-element bundle.
 - `apps/sigma_web/assets/js/app.js` — consume `{value, files}`, serialize images, await the LiveView acknowledgement, and clear on acceptance.
 - `apps/sigma_web/lib/sigma_web/endpoint.ex` — set the LiveView WebSocket frame limit to 16 MiB.
@@ -106,6 +107,7 @@ Change these exact manifest values from `1.7.2` to `1.7.4`:
 
 ```json
 {
+  "@duskmoon-dev/el-base": "1.7.4",
   "@duskmoon-dev/el-badge": "1.7.4",
   "@duskmoon-dev/el-button": "1.7.4",
   "@duskmoon-dev/el-card": "1.7.4",
@@ -134,6 +136,9 @@ devenv shell -- mix npm.verify
 `duskmoon.bundle` adds transitive packages to `node_modules` while bundling. Run the documented clean lockfile reinstall after asset generation so the final verification reflects the authoritative lockfile.
 
 Expected: all commands exit 0; `node_modules/@duskmoon-dev/el-chat/package.json` reports `1.7.4`; the generated chat input exposes `getFiles`, `clearFiles`, and `send` detail `{value, files}`.
+
+The generated element bundle must be self-contained: it must not contain bare
+imports from `@duskmoon-dev/*` packages.
 
 - [ ] **Step 4: Commit the authoritative npm lockfile**
 
