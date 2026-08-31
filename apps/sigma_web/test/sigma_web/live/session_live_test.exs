@@ -956,6 +956,68 @@ defmodule Sigma.Web.SessionLiveTest do
     refute html =~ ~s(variant="filled")
   end
 
+  test "renders persisted text and image content safely", %{conn: conn} do
+    session_id = unique_session_id("persisted-image")
+    storage_path = session_storage_path(session_id)
+    image = %{type: :image, mime_type: "image/png", data: @png_data}
+    content = [%{type: :text, text: "describe this"}, image]
+    File.mkdir_p!(Path.dirname(storage_path))
+    :ok = Log.persist_event(storage_path, {:message_end, Message.user("u_image", content)})
+
+    {:ok, _view, html} = live_loaded(conn, session_path(session_id))
+
+    assert html =~ "describe this"
+    assert html =~ ~s(src="data:image/png;base64,#{@png_data}")
+    assert html =~ ~s(alt="Attached image")
+    assert html =~ ~s(loading="lazy")
+    assert html =~ ~s(decoding="async")
+  end
+
+  test "renders image-only persisted messages without a text artifact", %{conn: conn} do
+    session_id = unique_session_id("image-only-replay")
+    storage_path = session_storage_path(session_id)
+    content = [%{type: :image, mime_type: "image/png", data: @png_data}]
+    File.mkdir_p!(Path.dirname(storage_path))
+    :ok = Log.persist_event(storage_path, {:message_end, Message.user("u_image_only", content)})
+
+    {:ok, _view, html} = live_loaded(conn, session_path(session_id))
+
+    assert html =~ ~s(src="data:image/png;base64,#{@png_data}")
+    refute html =~ ~s(content="")
+  end
+
+  test "does not render unsafe replayed image blocks", %{conn: conn} do
+    session_id = unique_session_id("unsafe-image-replay")
+    storage_path = session_storage_path(session_id)
+    content = [%{type: :image, mime_type: "image/png", data: "not-base64"}]
+    File.mkdir_p!(Path.dirname(storage_path))
+    :ok = Log.persist_event(storage_path, {:message_end, Message.user("u_unsafe_image", content)})
+
+    {:ok, _view, html} = live_loaded(conn, session_path(session_id))
+
+    refute html =~ "data:image/png"
+    refute html =~ "Attached image"
+  end
+
+  test "retries persisted text and image content in canonical order", %{conn: conn} do
+    session_id = unique_session_id("retry-image")
+    storage_path = session_storage_path(session_id)
+
+    content = [
+      %{type: :text, text: "retry this"},
+      %{type: :image, mime_type: "image/png", data: @png_data}
+    ]
+
+    File.mkdir_p!(Path.dirname(storage_path))
+    :ok = Log.persist_event(storage_path, {:message_end, Message.user("u_retry_image", content)})
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    view |> element("#retry-u_retry_image") |> render_click()
+
+    assert_receive {:message_start, %{role: :user, content: ^content}}, 2000
+  end
+
   test "renders message timestamps through the browser-local time hook", %{conn: conn} do
     {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("local_time")))
 

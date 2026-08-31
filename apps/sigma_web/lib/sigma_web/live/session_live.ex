@@ -866,6 +866,11 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp message_bubble(%{message: %{role: :user}} = assigns) do
+    assigns =
+      assigns
+      |> assign(:user_text, user_content(assigns.message.content))
+      |> assign(:user_images, user_images(assigns.message.content))
+
     ~H"""
     <.dm_chat
       id={@message.id}
@@ -873,9 +878,22 @@ defmodule Sigma.Web.SessionLive do
       color="secondary"
       avatar="You"
       author="You"
-      content={user_content(@message.content)}
+      content={if @user_images == [], do: @user_text, else: nil}
     >
       <:header><.local_time id={@message.id} timestamp={@message.timestamp} /></:header>
+
+      <.dm_markdown :if={@user_text != "" and @user_images != []} content={@user_text} />
+      <div :if={@user_images != []} class="grid gap-2 sm:grid-cols-2">
+        <img
+          :for={src <- @user_images}
+          src={src}
+          alt="Attached image"
+          loading="lazy"
+          decoding="async"
+          class="max-h-96 w-full rounded-lg border border-outline-variant bg-surface-container-low object-contain"
+        />
+      </div>
+
       <:actions_slot>
         <.dm_btn
           id={"retry-#{@message.id}"}
@@ -1017,6 +1035,17 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp user_content(_), do: ""
+
+  defp user_images(content) when is_list(content) do
+    content
+    |> Enum.map(fn
+      %{type: :image} = block -> ImageAttachments.data_url(block)
+      _ -> nil
+    end)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp user_images(_), do: []
 
   defp tool_call_status(tool_results, tool_call_id) do
     case Map.get(tool_results, tool_call_id) do
@@ -1421,7 +1450,7 @@ defmodule Sigma.Web.SessionLive do
         {:noreply, put_flash(socket, :error, "Could not find that message to retry.")}
 
       {:error, :not_retryable} ->
-        {:noreply, put_flash(socket, :error, "Only text user messages can be retried.")}
+        {:noreply, put_flash(socket, :error, "Only text or image messages can be retried.")}
 
       {:error, _reason} ->
         {:noreply, put_flash(socket, :error, "Could not retry that message.")}
@@ -1449,10 +1478,20 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp retry_prompt_content(content) when is_list(content) do
-    content
-    |> Enum.filter(&match?(%{type: :text, text: text} when is_binary(text), &1))
-    |> Enum.map_join("\n", & &1.text)
-    |> retry_prompt_content()
+    content =
+      Enum.reduce(content, [], fn
+        %{type: :text, text: text} = block, acc when is_binary(text) ->
+          [block | acc]
+
+        %{type: :image} = block, acc ->
+          if ImageAttachments.data_url(block), do: [block | acc], else: acc
+
+        _block, acc ->
+          acc
+      end)
+      |> Enum.reverse()
+
+    if content == [], do: {:error, :not_retryable}, else: {:ok, content}
   end
 
   defp retry_prompt_content(_content), do: {:error, :not_retryable}
