@@ -42,7 +42,11 @@ in {
   '';
 
   processes.sigma = {
-    exec = "mix sigma.rel-run";
+    exec = ''
+      set -euo pipefail
+      mix sigma.rel-build
+      exec _build/dev/sigma_rel/rel/sigma/bin/sigma start
+    '';
   };
 
   enterShell = ''

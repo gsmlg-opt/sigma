@@ -24,7 +24,8 @@ defmodule Sigma.MixProject do
     [
       setup: ["deps.get", "deps.patch", "assets.setup", "assets.build"],
       "sigma.run": ["phx.server"],
-      "sigma.rel-run": ["assets.build", &release_and_run/1],
+      "sigma.rel-build": ["assets.build", &build_release/1],
+      "sigma.rel-run": ["sigma.rel-build", &run_release/1],
       "assets.setup": [
         "deps.patch",
         "npm.install",
@@ -41,7 +42,7 @@ defmodule Sigma.MixProject do
     ]
   end
 
-  defp release_and_run([]) do
+  defp build_release([]) do
     mix = System.find_executable("mix") || Mix.raise("mix executable not found")
     release_build_path = Path.join(Mix.Project.build_path(), "sigma_rel")
 
@@ -58,6 +59,14 @@ defmodule Sigma.MixProject do
       0 -> :ok
       status -> Mix.raise("Failed to build Sigma release (status #{status})")
     end
+  end
+
+  defp build_release(_args) do
+    Mix.raise("mix sigma.rel-build does not accept arguments")
+  end
+
+  defp run_release([]) do
+    release_build_path = Path.join(Mix.Project.build_path(), "sigma_rel")
 
     executable = Path.join([release_build_path, "rel", "sigma", "bin", "sigma"])
 
@@ -67,7 +76,7 @@ defmodule Sigma.MixProject do
     end
   end
 
-  defp release_and_run(_args) do
+  defp run_release(_args) do
     Mix.raise("mix sigma.rel-run does not accept arguments")
   end
 end
