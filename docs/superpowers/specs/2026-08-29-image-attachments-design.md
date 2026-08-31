@@ -89,7 +89,8 @@ Update the explicitly pinned `@duskmoon-dev/el-*` packages and
 `@duskmoon-dev/elements` from 1.7.2 to 1.7.4 as one coherent package family.
 Keep `@duskmoon-dev/core` and `@duskmoon-dev/css-art` on their independent
 release versions. Regenerate the DuskMoon rich-element bundle using the
-repository's existing Mix task. Do not create or adopt a new npm lockfile.
+repository's existing Mix task. The root `package-lock.json` is the committed
+authoritative npm lockfile; remove the obsolete tracked `npm.lock`.
 
 Remove the resolved `# TODO(upstream): duskmoon-dev/duskmoon-elements#77`
 marker. No local upstream workaround remains after consuming v1.7.4.
@@ -256,11 +257,10 @@ targeted format, compile, asset-build, and browser checks.
 - Work in `.trees/codex/image-attachments` on branch
   `codex/image-attachments`.
 - Preserve unrelated changes in the main worktree, including `AGENTS.md`,
-  `CLAUDE.md`, `devenv.nix`, and `package-lock.json`.
+  `CLAUDE.md`, and `devenv.nix`.
 - Run GitNexus impact analysis before modifying each existing symbol and
   `gitnexus_detect_changes` before any implementation commit.
 - Record the completed feature in agent-note with label `project: sigma`.
-- Do not commit or adopt the unrelated root `package-lock.json`.
 
 ## Acceptance Criteria
 
