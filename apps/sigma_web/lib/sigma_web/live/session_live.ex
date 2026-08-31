@@ -7,6 +7,7 @@ defmodule Sigma.Web.SessionLive do
   alias Sigma.Session.SessionFiles
   alias Sigma.Session.Skills
   alias Sigma.Session.SlashCommands
+  alias Sigma.Web.ImageAttachments
   alias Phoenix.LiveView.AsyncResult
 
   @fork_id_attempts 5
@@ -536,8 +537,7 @@ defmodule Sigma.Web.SessionLive do
                 phx-update="ignore"
                 placeholder="Ask ∑ anything… (⌘/Ctrl+Enter to send)"
                 disabled={@turn_in_flight}
-                clear_on_send={true}
-                duskmoon-send-send="send_prompt"
+                clear_on_send={false}
               />
             </div>
 
@@ -867,6 +867,11 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp message_bubble(%{message: %{role: :user}} = assigns) do
+    assigns =
+      assigns
+      |> assign(:user_text, user_content(assigns.message.content))
+      |> assign(:user_images, user_images(assigns.message.content))
+
     ~H"""
     <.dm_chat
       id={@message.id}
@@ -874,9 +879,22 @@ defmodule Sigma.Web.SessionLive do
       color="secondary"
       avatar="You"
       author="You"
-      content={user_content(@message.content)}
+      content={if @user_images == [], do: @user_text, else: nil}
     >
       <:header><.local_time id={@message.id} timestamp={@message.timestamp} /></:header>
+
+      <.dm_markdown :if={@user_text != "" and @user_images != []} content={@user_text} />
+      <div :if={@user_images != []} class="grid gap-2 sm:grid-cols-2">
+        <img
+          :for={src <- @user_images}
+          src={src}
+          alt="Attached image"
+          loading="lazy"
+          decoding="async"
+          class="max-h-96 w-full rounded-lg border border-outline-variant bg-surface-container-low object-contain"
+        />
+      </div>
+
       <:actions_slot>
         <.dm_btn
           id={"retry-#{@message.id}"}
@@ -1018,6 +1036,17 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp user_content(_), do: ""
+
+  defp user_images(content) when is_list(content) do
+    images = Enum.filter(content, &match?(%{type: :image}, &1))
+
+    case ImageAttachments.data_urls(images) do
+      {:ok, urls} -> urls
+      {:error, _reason} -> []
+    end
+  end
+
+  defp user_images(_), do: []
 
   defp tool_call_status(tool_results, tool_call_id) do
     case Map.get(tool_results, tool_call_id) do
@@ -1416,13 +1445,13 @@ defmodule Sigma.Web.SessionLive do
     with {:ok, messages} <- Sigma.Session.Log.replay(socket.assigns.storage_path),
          {:ok, prompt} <- find_retry_prompt(messages, msg_id) do
       submit_prompt(socket, prompt)
-      {:noreply, socket}
+      {:noreply, assign(socket, :turn_in_flight, true)}
     else
       {:error, :not_found} ->
         {:noreply, put_flash(socket, :error, "Could not find that message to retry.")}
 
       {:error, :not_retryable} ->
-        {:noreply, put_flash(socket, :error, "Only text user messages can be retried.")}
+        {:noreply, put_flash(socket, :error, "Only text or image messages can be retried.")}
 
       {:error, _reason} ->
         {:noreply, put_flash(socket, :error, "Could not retry that message.")}
@@ -1450,13 +1479,31 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp retry_prompt_content(content) when is_list(content) do
-    content
-    |> Enum.filter(&match?(%{type: :text, text: text} when is_binary(text), &1))
-    |> Enum.map_join("\n", & &1.text)
-    |> retry_prompt_content()
+    text_and_images =
+      Enum.filter(content, fn
+        %{type: :text, text: text} when is_binary(text) -> String.trim(text) != ""
+        %{type: :image} -> true
+        _ -> false
+      end)
+
+    images = Enum.filter(text_and_images, &match?(%{type: :image}, &1))
+
+    with :ok <- if(images == [], do: :ok, else: validate_retry_images(images)),
+         false <- text_and_images == [] do
+      {:ok, text_and_images}
+    else
+      _ -> {:error, :not_retryable}
+    end
   end
 
   defp retry_prompt_content(_content), do: {:error, :not_retryable}
+
+  defp validate_retry_images(images) do
+    case ImageAttachments.validate_images(images) do
+      {:ok, _images} -> :ok
+      {:error, _reason} -> {:error, :not_retryable}
+    end
+  end
 
   @impl true
   def handle_event("theme_changed", _, socket) do
@@ -1585,17 +1632,37 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
-  def handle_event("send_prompt", %{"value" => prompt}, socket) do
-    if session_ready?(socket) do
-      case String.trim(prompt) do
-        "" ->
-          {:noreply, socket}
+  def handle_event("attachment_error", %{"code" => code}, socket) do
+    case ImageAttachments.client_error(code) do
+      {:ok, message} -> {:noreply, put_flash(socket, :error, message)}
+      :error -> {:noreply, socket}
+    end
+  end
 
-        trimmed ->
-          handle_prompt(trimmed, socket)
-      end
-    else
-      {:noreply, put_flash(socket, :info, "Session is still loading.")}
+  @impl true
+  def handle_event("send_prompt", %{"value" => prompt} = params, socket) do
+    cond do
+      not session_ready?(socket) ->
+        {:reply, %{status: "rejected"}, put_flash(socket, :info, "Session is still loading.")}
+
+      socket.assigns.turn_in_flight ->
+        {:reply, %{status: "rejected"}, put_flash(socket, :info, "Agent is still working.")}
+
+      true ->
+        case ImageAttachments.normalize(prompt, Map.get(params, "images", [])) do
+          {:ok, :empty} ->
+            {:reply, %{status: "accepted"}, socket}
+
+          {:ok, content} ->
+            case handle_prompt(content, socket) do
+              {:accepted, socket} -> {:reply, %{status: "accepted"}, socket}
+              {:rejected, socket} -> {:reply, %{status: "rejected"}, socket}
+            end
+
+          {:error, reason} ->
+            {:reply, %{status: "rejected"},
+             put_flash(socket, :error, ImageAttachments.error_message(reason))}
+        end
     end
   end
 
@@ -1771,25 +1838,30 @@ defmodule Sigma.Web.SessionLive do
   defp handle_prompt(cmd, socket) when cmd in ["/reload-tools", "/reload_tools"] do
     case Sigma.Agent.reload_mcp_tools(socket.assigns.agent) do
       {:ok, count} ->
-        {:noreply, put_flash(socket, :info, "Reloaded MCP tools (#{count} available).")}
+        {:accepted, put_flash(socket, :info, "Reloaded MCP tools (#{count} available).")}
 
       _ ->
-        {:noreply, put_flash(socket, :error, "Failed to reload MCP tools.")}
+        {:rejected, put_flash(socket, :error, "Failed to reload MCP tools.")}
     end
+  end
+
+  defp handle_prompt(content, socket) when is_list(content) do
+    submit_prompt(socket, content)
+    {:accepted, assign(socket, :turn_in_flight, true)}
   end
 
   defp handle_prompt(prompt, socket) do
     case SlashCommands.expand(prompt) do
       :not_command ->
         submit_prompt(socket, prompt)
-        {:noreply, socket}
+        {:accepted, assign(socket, :turn_in_flight, true)}
 
       {:ok, expanded_prompt} ->
         submit_prompt(socket, expanded_prompt)
-        {:noreply, socket}
+        {:accepted, assign(socket, :turn_in_flight, true)}
 
       {:error, reason} ->
-        {:noreply, put_flash(socket, :error, reason)}
+        {:rejected, put_flash(socket, :error, reason)}
     end
   end
 

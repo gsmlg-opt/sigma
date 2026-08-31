@@ -3,6 +3,8 @@ defmodule Sigma.AgentTest do
 
   alias Sigma.Agent.Message
   alias Sigma.Agent.SessionContext
+  alias Sigma.Coding.Hooks.Spec
+  alias Sigma.Coding.Hooks.Spec.Command
 
   defmodule MockProvider do
     def stream(_params) do
@@ -49,6 +51,109 @@ defmodule Sigma.AgentTest do
       send(params.options[:test_pid], {:provider_params, params})
       MockProvider.stream(params)
     end
+  end
+
+  test "preserves rich user content for the provider and final history" do
+    model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
+    image = %{type: :image, data: "iVBORw0KGgo=", mime_type: "image/png"}
+
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        model: model,
+        provider: CapturingProvider,
+        options: [test_pid: self()]
+      )
+
+    Sigma.Agent.subscribe(agent)
+    Sigma.Agent.prompt(agent, [%{type: :text, text: "Describe"}, image])
+
+    assert_receive {:provider_params, %{context: %{messages: [%{content: content}]}}}, 1000
+    assert content == [%{type: :text, text: "Describe"}, image]
+    assert_receive {:agent_end, [%{role: :user, content: ^content} | _]}, 1000
+  end
+
+  test "hook context is leading text while preserving rich content" do
+    model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
+    image = %{type: :image, data: "iVBORw0KGgo=", mime_type: "image/png"}
+    spec = hook_spec("echo '{\"hookSpecificOutput\":{\"additionalContext\":\"extra\"}}'")
+
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        model: model,
+        provider: CapturingProvider,
+        options: [test_pid: self()]
+      )
+
+    Sigma.Agent.subscribe(agent)
+    :sys.replace_state(agent, &%{&1 | hook_specs: [spec]})
+    malformed = %{type: :text, text: 42}
+
+    Sigma.Agent.prompt(agent, [
+      %{type: :text, text: "Describe"},
+      %{type: :text, text: ""},
+      image,
+      malformed,
+      %{type: :text, text: "more"}
+    ])
+
+    assert_receive {:provider_params, %{context: %{messages: [%{content: content}]}}}, 1000
+
+    assert content == [
+             %{type: :text, text: "Describe\n\nmore\n\n[Additional context from hook]\nextra"},
+             image,
+             malformed
+           ]
+
+    assert_receive {:agent_end, _}, 1000
+
+    {:ok, image_only_agent} =
+      Sigma.Agent.start_link(
+        model: model,
+        provider: CapturingProvider,
+        options: [test_pid: self()]
+      )
+
+    :sys.replace_state(image_only_agent, &%{&1 | hook_specs: [spec]})
+    Sigma.Agent.prompt(image_only_agent, [image])
+
+    assert_receive {:provider_params, %{context: %{messages: [%{content: image_only}]}}}, 1000
+
+    assert image_only == [
+             %{type: :text, text: "[Additional context from hook]\nextra"},
+             image
+           ]
+  end
+
+  test "blocking user prompt hook cancels the rich turn" do
+    model = %{id: "mock-model", api: "mock-api", provider: CapturingProvider}
+    image = %{type: :image, data: "iVBORw0KGgo=", mime_type: "image/png"}
+    spec = hook_spec("sh -c 'printf blocked >&2; exit 2'")
+
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        model: model,
+        provider: CapturingProvider,
+        options: [test_pid: self()]
+      )
+
+    :sys.replace_state(agent, &%{&1 | hook_specs: [spec]})
+    Sigma.Agent.subscribe(agent)
+    Sigma.Agent.prompt(agent, [%{type: :text, text: "Describe"}, image])
+
+    assert_receive {:turn_blocked, _}, 1000
+    refute_receive {:provider_params, _}, 100
+    assert_receive {:agent_end, []}, 1000
+  end
+
+  defp hook_spec(cmd) do
+    %Spec{
+      event: :user_prompt_submit,
+      matcher: :any,
+      handler: %Command{cmd: cmd, timeout_ms: 1_000},
+      origin: {:user, "test"},
+      dialect: :claude,
+      trusted?: true
+    }
   end
 
   defmodule EmptyProvider do

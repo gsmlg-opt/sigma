@@ -7,6 +7,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
   @workdir "/tmp/pi-test"
   @encoded_workdir Base.url_encode64(@workdir, padding: false)
+  @png_data Base.encode64(<<137, 80, 78, 71, 13, 10, 26, 10>>)
 
   defmodule HighUsageProvider do
     @behaviour Sigma.Ai.Provider
@@ -671,6 +672,198 @@ defmodule Sigma.Web.SessionLiveTest do
     assert_receive {:message_end, %{role: :assistant}}, 2000
   end
 
+  test "accepts text and valid PNG from the send hook once", %{conn: conn} do
+    session_id = unique_session_id("hook-image")
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    render_hook(view, "send_prompt", %{
+      "value" => "describe this",
+      "images" => [%{"mime_type" => "image/png", "data" => @png_data}]
+    })
+
+    assert_reply(view, %{status: "accepted"})
+    assert_receive {:message_start, %{role: :user, content: content}}, 2000
+
+    assert [%{type: :text, text: "describe this"}, %{type: :image, mime_type: "image/png"}] =
+             content
+
+    refute_receive {:message_start, %{role: :user}}, 200
+  end
+
+  test "accepts image-only prompts from the send hook", %{conn: conn} do
+    session_id = unique_session_id("hook-image-only")
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    render_hook(view, "send_prompt", %{
+      "value" => "",
+      "images" => [%{"mime_type" => "image/png", "data" => @png_data}]
+    })
+
+    assert_reply(view, %{status: "accepted"})
+
+    assert_receive {:message_start,
+                    %{role: :user, content: [%{type: :image, mime_type: "image/png"}]}},
+                   2000
+
+    refute_receive {:message_start, %{role: :user}}, 200
+  end
+
+  test "rejects invalid image data with a trusted flash and no agent", %{conn: conn} do
+    session_id = unique_session_id("hook-invalid-image")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    html =
+      render_hook(view, "send_prompt", %{
+        "value" => "describe this",
+        "images" => [%{"mime_type" => "image/png", "data" => "not-base64"}]
+      })
+
+    assert_reply(view, %{status: "rejected"})
+    assert html =~ "attached images is invalid"
+    refute_receive {:agent_start, _}, 200
+  end
+
+  test "rejects signature mismatches and slash commands with images", %{conn: conn} do
+    session_id = unique_session_id("hook-rejects")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    html =
+      render_hook(view, "send_prompt", %{
+        "value" => "describe this",
+        "images" => [%{"mime_type" => "image/jpeg", "data" => @png_data}]
+      })
+
+    assert_reply(view, %{status: "rejected"})
+    assert html =~ "attached images is invalid"
+
+    html =
+      render_hook(view, "send_prompt", %{
+        "value" => "/init",
+        "images" => [%{"mime_type" => "image/png", "data" => @png_data}]
+      })
+
+    assert_reply(view, %{status: "rejected"})
+    assert html =~ "cannot be combined with slash commands"
+    refute_receive {:agent_start, _}, 200
+  end
+
+  test "maps only bounded attachment errors to trusted flashes", %{conn: conn} do
+    {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("hook-errors")))
+
+    for {code, message} <- [
+          {"unsupported_type", "Attach PNG"},
+          {"too_many", "no more than four"},
+          {"too_large", "at most 5 MiB"},
+          {"read_failed", "could not read"},
+          {"slash_command", "cannot be combined"}
+        ] do
+      assert render_hook(view, "attachment_error", %{"code" => code}) =~ message
+    end
+
+    html = render_hook(view, "attachment_error", %{"code" => "<script>alert(1)</script>"})
+    refute html =~ "<script>"
+    refute html =~ "alert(1)"
+  end
+
+  test "accepts an empty prompt without starting an agent", %{conn: conn} do
+    {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("hook-empty")))
+
+    render_hook(view, "send_prompt", %{"value" => "   ", "images" => []})
+    assert_reply(view, %{status: "accepted"})
+    refute_receive {:agent_start, _}, 200
+  end
+
+  test "rejects prompts while an agent turn is in flight", %{conn: conn} do
+    session_id = unique_session_id("hook-active-turn")
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    send(view.pid, {:agent_start, @workdir})
+    assert render(view) =~ "Agent is working"
+
+    html = render_hook(view, "send_prompt", %{"value" => "hello", "images" => []})
+
+    assert_reply(view, %{status: "rejected"})
+    assert html =~ "Agent is still working"
+    refute_receive {:agent_start, _}, 200
+    refute_receive {:message_start, %{role: :user}}, 200
+  end
+
+  test "rejects an immediate second prompt while the first turn starts", %{conn: conn} do
+    session_id = unique_session_id("hook-double-submit")
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    agent = Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent)
+    :ok = :sys.suspend(agent)
+    on_exit(fn -> :sys.resume(agent) end)
+
+    render_hook(view, "send_prompt", %{"value" => "first", "images" => []})
+    assert_reply(view, %{status: "accepted"})
+
+    html = render_hook(view, "send_prompt", %{"value" => "second", "images" => []})
+    assert_reply(view, %{status: "rejected"})
+    assert html =~ "Agent is still working"
+
+    :ok = :sys.resume(agent)
+    assert_receive {:message_start, %{role: :user, content: "first"}}, 2000
+    refute_receive {:message_start, %{role: :user, content: "second"}}, 500
+  end
+
+  test "rejects a prompt while a retry is in flight", %{conn: conn} do
+    session_id = unique_session_id("hook-retry-race")
+    storage_path = session_storage_path(session_id)
+    File.mkdir_p!(Path.dirname(storage_path))
+
+    :ok =
+      Sigma.Session.Log.persist_event(
+        storage_path,
+        {:message_end, Message.user("u_retry_race", "retry me")}
+      )
+
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    agent = Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent)
+    :ok = :sys.suspend(agent)
+    on_exit(fn -> :sys.resume(agent) end)
+
+    view
+    |> element("#retry-u_retry_race")
+    |> render_click()
+
+    html = render_hook(view, "send_prompt", %{"value" => "second", "images" => []})
+
+    assert_reply(view, %{status: "rejected"})
+    assert html =~ "Agent is still working"
+    :ok = :sys.resume(agent)
+    assert_receive {:message_start, %{role: :user, content: "retry me"}}, 2000
+    refute_receive {:message_start, %{role: :user, content: "second"}}, 500
+  end
+
+  @tag :tmp_dir
+  test "rejects send while the session is still loading", %{conn: conn, tmp_dir: tmp_dir} do
+    with_agent_config(tmp_dir, fn ->
+      trust_workdir!(@workdir)
+      write_session_start_hook!(@workdir, "sleep 2", timeout: 3)
+      {:ok, view, _html} = live(conn, session_path(unique_session_id("hook-not-ready")))
+
+      html = render_hook(view, "send_prompt", %{"value" => "hello", "images" => []})
+      assert_reply(view, %{status: "rejected"})
+      assert html =~ "Session is still loading"
+      refute_receive {:agent_start, _}, 200
+    end)
+  end
+
+  test "renders the chat input without generic send handling", %{conn: conn} do
+    {:ok, _view, html} = live_loaded(conn, session_path(unique_session_id("chat-input")))
+
+    refute html =~ ~s(clear-on-send="true")
+    refute html =~ "duskmoon-send-send"
+  end
+
   test "retries a persisted user message", %{conn: conn} do
     session_id = unique_session_id("retry")
     storage_path = session_storage_path(session_id)
@@ -761,6 +954,159 @@ defmodule Sigma.Web.SessionLiveTest do
     assert html =~ ~s(id="retry-msg_user_left")
     assert html =~ "Retry"
     refute html =~ ~s(variant="filled")
+  end
+
+  test "renders persisted text and image content safely", %{conn: conn} do
+    session_id = unique_session_id("persisted-image")
+    storage_path = session_storage_path(session_id)
+    image = %{type: :image, mime_type: "image/png", data: @png_data}
+    content = [%{type: :text, text: "describe this"}, image]
+    File.mkdir_p!(Path.dirname(storage_path))
+    :ok = Log.persist_event(storage_path, {:message_end, Message.user("u_image", content)})
+
+    {:ok, _view, html} = live_loaded(conn, session_path(session_id))
+
+    assert html =~ "describe this"
+    assert html =~ ~s(src="data:image/png;base64,#{@png_data}")
+    assert html =~ ~s(alt="Attached image")
+    assert html =~ ~s(loading="lazy")
+    assert html =~ ~s(decoding="async")
+
+    {:ok, _reloaded_view, reloaded_html} = live_loaded(conn, session_path(session_id))
+    assert reloaded_html =~ ~s(src="data:image/png;base64,#{@png_data}")
+    assert reloaded_html =~ ~s(loading="lazy")
+    assert reloaded_html =~ ~s(decoding="async")
+  end
+
+  test "renders image-only persisted messages without a text artifact", %{conn: conn} do
+    session_id = unique_session_id("image-only-replay")
+    storage_path = session_storage_path(session_id)
+    content = [%{type: :image, mime_type: "image/png", data: @png_data}]
+    File.mkdir_p!(Path.dirname(storage_path))
+    :ok = Log.persist_event(storage_path, {:message_end, Message.user("u_image_only", content)})
+
+    {:ok, _view, html} = live_loaded(conn, session_path(session_id))
+
+    assert html =~ ~s(src="data:image/png;base64,#{@png_data}")
+    refute html =~ ~s(content="")
+  end
+
+  test "does not render unsafe replayed image blocks", %{conn: conn} do
+    session_id = unique_session_id("unsafe-image-replay")
+    storage_path = session_storage_path(session_id)
+    content = [%{type: :image, mime_type: "image/png", data: "not-base64"}]
+    File.mkdir_p!(Path.dirname(storage_path))
+    :ok = Log.persist_event(storage_path, {:message_end, Message.user("u_unsafe_image", content)})
+
+    {:ok, _view, html} = live_loaded(conn, session_path(session_id))
+
+    refute html =~ "data:image/png"
+    refute html =~ "Attached image"
+  end
+
+  test "skips a replayed message with too many images", %{conn: conn} do
+    session_id = unique_session_id("too-many-replay-images")
+    storage_path = session_storage_path(session_id)
+    image = %{type: :image, mime_type: "image/png", data: @png_data}
+    content = [%{type: :text, text: "many"} | List.duplicate(image, 5)]
+    File.mkdir_p!(Path.dirname(storage_path))
+    :ok = Log.persist_event(storage_path, {:message_end, Message.user("u_many_images", content)})
+
+    {:ok, view, html} = live_loaded(conn, session_path(session_id))
+    refute html =~ "data:image/png"
+
+    html = view |> element("#retry-u_many_images") |> render_click()
+    assert html =~ "Only text or image messages can be retried"
+    refute_receive {:agent_start, _}, 200
+  end
+
+  test "skips a replayed message whose images exceed the aggregate limit", %{conn: conn} do
+    session_id = unique_session_id("large-replay-images")
+    storage_path = session_storage_path(session_id)
+    bytes = <<137, 80, 78, 71, 13, 10, 26, 10>> <> :binary.copy(<<0>>, 3_000_000 - 8)
+    data = Base.encode64(bytes)
+    large_image = %{type: :image, mime_type: "image/png", data: data}
+    large_images = List.duplicate(large_image, 4)
+    File.mkdir_p!(Path.dirname(storage_path))
+
+    :ok =
+      Log.persist_event(
+        storage_path,
+        {:message_end, Message.user("u_large_images", large_images)}
+      )
+
+    assert {:ok, messages} = Log.replay(storage_path)
+    assert Enum.any?(messages, &(&1.id == "u_large_images" and &1.content == large_images))
+
+    {:ok, view, html} = live_loaded(conn, session_path(session_id))
+    refute html =~ "data:image/png"
+
+    html = view |> element("#retry-u_large_images") |> render_click()
+    assert html =~ "Only text or image messages can be retried"
+    refute_receive {:agent_start, _}, 200
+    refute_receive {:message_start, %{role: :user}}, 200
+  end
+
+  test "retries persisted text and image content in canonical order", %{conn: conn} do
+    session_id = unique_session_id("retry-image")
+    storage_path = session_storage_path(session_id)
+
+    content = [
+      %{type: :text, text: "retry this"},
+      %{type: :image, mime_type: "image/png", data: @png_data}
+    ]
+
+    File.mkdir_p!(Path.dirname(storage_path))
+    :ok = Log.persist_event(storage_path, {:message_end, Message.user("u_retry_image", content)})
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    view |> element("#retry-u_retry_image") |> render_click()
+
+    assert_receive {:message_start, %{role: :user, content: ^content}}, 2000
+  end
+
+  test "does not retry a whitespace-only persisted text message", %{conn: conn} do
+    session_id = unique_session_id("retry-blank")
+    storage_path = session_storage_path(session_id)
+    File.mkdir_p!(Path.dirname(storage_path))
+    :ok = Log.persist_event(storage_path, {:message_end, Message.user("u_retry_blank", "   ")})
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    html = view |> element("#retry-u_retry_blank") |> render_click()
+
+    assert html =~ "Only text or image messages can be retried"
+    refute_receive {:agent_start, _}, 200
+  end
+
+  test "retries an image when persisted text is only whitespace", %{conn: conn} do
+    session_id = unique_session_id("retry-blank-image")
+    storage_path = session_storage_path(session_id)
+
+    content = [
+      %{type: :text, text: "   "},
+      %{type: :image, mime_type: "image/png", data: @png_data}
+    ]
+
+    File.mkdir_p!(Path.dirname(storage_path))
+
+    :ok =
+      Log.persist_event(
+        storage_path,
+        {:message_end, Message.user("u_retry_blank_image", content)}
+      )
+
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    view |> element("#retry-u_retry_blank_image") |> render_click()
+
+    assert_receive {:message_start,
+                    %{
+                      role: :user,
+                      content: [%{type: :image, mime_type: "image/png", data: @png_data}]
+                    }},
+                   2000
   end
 
   test "renders message timestamps through the browser-local time hook", %{conn: conn} do

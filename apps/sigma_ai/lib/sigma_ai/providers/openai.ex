@@ -45,7 +45,8 @@ defmodule Sigma.Ai.Providers.OpenAI do
       ]
       |> List.flatten()
 
-    inner = build_inner_stream(model, body, headers, base_url, options, session_id, log_session_id)
+    inner =
+      build_inner_stream(model, body, headers, base_url, options, session_id, log_session_id)
 
     Elixir.Stream.transform(
       inner,
@@ -227,7 +228,7 @@ defmodule Sigma.Ai.Providers.OpenAI do
   defp transform_messages(messages) do
     Enum.map(messages, fn
       %{role: :user, content: content} ->
-        %{role: "user", content: content}
+        %{role: "user", content: transform_user_content(content)}
 
       %{role: :assistant, content: content} ->
         transform_assistant_message(content)
@@ -240,6 +241,23 @@ defmodule Sigma.Ai.Providers.OpenAI do
         }
     end)
   end
+
+  defp transform_user_content(content) when is_binary(content), do: content
+
+  defp transform_user_content(content) when is_list(content) do
+    Enum.map(content, fn
+      %{type: :text, text: text} ->
+        %{type: "text", text: text}
+
+      %{type: :image, data: data, mime_type: mime} ->
+        %{type: "image_url", image_url: %{url: "data:#{mime};base64,#{data}"}}
+
+      block ->
+        block
+    end)
+  end
+
+  defp transform_user_content(content), do: content
 
   defp transform_tool_result_content(content) when is_list(content) do
     Enum.map_join(content, "\n", fn

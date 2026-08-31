@@ -1280,8 +1280,18 @@ defmodule Sigma.Agent do
   defp message_text(_), do: ""
 
   defp append_text_to_message(%{content: content} = msg, extra) when is_list(content) do
-    extra_block = %{type: :text, text: "\n\n[Additional context from hook]\n#{extra}"}
-    %{msg | content: content ++ [extra_block]}
+    {text_blocks, other_blocks} =
+      Enum.split_with(content, &match?(%{type: :text, text: text} when is_binary(text), &1))
+
+    text_block =
+      text_blocks
+      |> Enum.map(& &1.text)
+      |> Enum.reject(&(&1 == ""))
+      |> Kernel.++(["[Additional context from hook]\n#{extra}"])
+      |> Enum.join("\n\n")
+      |> then(&%{type: :text, text: &1})
+
+    %{msg | content: [text_block | other_blocks]}
   end
 
   defp append_text_to_message(%{content: text} = msg, extra) when is_binary(text) do

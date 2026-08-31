@@ -71,6 +71,23 @@ defmodule Sigma.Session.LogTest do
     assert replayed_msg.content == "Hello"
   end
 
+  @tag :tmp_dir
+  test "persists and replays rich text and image content", %{tmp_dir: tmp_dir} do
+    path = Path.join(tmp_dir, "rich-content.jsonl")
+
+    content = [
+      %{type: :text, text: "Describe"},
+      %{type: :image, mime_type: "image/png", data: "iVBORw0KGgo="}
+    ]
+
+    message = Message.user("user_rich", content)
+
+    assert :ok = Log.persist_event(path, {:message_end, message})
+    assert File.read!(path) =~ ~s("type":"image")
+    assert {:ok, [replayed]} = Log.replay(path)
+    assert replayed.content == content
+  end
+
   test "maintains parentId in linear fashion" do
     Log.persist_event(@storage_path, {:agent_start, "/tmp"})
 

@@ -2773,7 +2773,7 @@ const css$3 = `/**
   /* Disabled State */
   .chip:disabled,
   .chip-disabled {
-    opacity: 0.5;
+    opacity: 0.7;
     pointer-events: none;
     cursor: not-allowed;
   }
@@ -2816,6 +2816,13 @@ var SIZE_CLASSES$1 = {
 	md: "",
 	lg: "chip-lg"
 };
+var DELETE_ICON = `<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" /></svg>`;
+function escapeHtml(value) {
+	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+}
+function matchesSelector(target, selector) {
+	return typeof target.matches === "function" && target.matches(selector);
+}
 var styles$5 = css$7`
   :host {
     display: inline-flex;
@@ -2837,11 +2844,28 @@ var styles$5 = css$7`
     border-radius: 9999px;
     font-size: 0.875rem;
     line-height: 1.25rem;
-    cursor: pointer;
+    cursor: default;
     transition: all 150ms ease;
     background-color: var(--color-surface-variant);
     color: var(--color-on-surface);
     border: 1px solid transparent;
+  }
+
+  a.chip,
+  button.chip {
+    appearance: none;
+    text-decoration: none;
+  }
+
+  .chip-clickable {
+    cursor: pointer;
+  }
+
+  a.chip:focus-visible,
+  button.chip:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    box-shadow: none;
   }
 
   .chip:hover {
@@ -2925,17 +2949,28 @@ var styles$5 = css$7`
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 1rem;
-    height: 1rem;
+    width: 1.5rem;
+    height: 1.5rem;
+    padding: 0;
     margin-left: 0.25rem;
     margin-right: -0.25rem;
+    border: 0;
     border-radius: 50%;
+    background: transparent;
+    color: inherit;
+    font: inherit;
     cursor: pointer;
     opacity: 0.7;
     transition: opacity 150ms ease;
   }
 
   .chip-delete:hover {
+    opacity: 1;
+  }
+
+  .chip-delete:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
     opacity: 1;
   }
 
@@ -2959,9 +2994,35 @@ var ElDmChip = class extends BaseElement {
 			type: String,
 			reflect: true
 		},
+		href: {
+			type: String,
+			reflect: true
+		},
+		target: {
+			type: String,
+			reflect: true
+		},
+		rel: {
+			type: String,
+			reflect: true
+		},
+		clickable: {
+			type: Boolean,
+			reflect: true
+		},
+		selectable: {
+			type: Boolean,
+			reflect: true
+		},
 		deletable: {
 			type: Boolean,
 			reflect: true
+		},
+		deleteLabel: {
+			type: String,
+			reflect: true,
+			attribute: "delete-label",
+			default: "Remove chip"
 		},
 		selected: {
 			type: Boolean,
@@ -2976,36 +3037,113 @@ var ElDmChip = class extends BaseElement {
 		super();
 		this.attachStyles(styles$5);
 	}
-	_handleDelete(event) {
-		event.stopPropagation();
-		if (!this.disabled) this.emit("delete");
+	connectedCallback() {
+		super.connectedCallback();
+		this.shadowRoot.addEventListener("click", this._handleShadowClick);
 	}
-	_handleClick() {
-		if (!this.disabled) this.emit("click");
+	disconnectedCallback() {
+		this.shadowRoot.removeEventListener("click", this._handleShadowClick);
+		super.disconnectedCallback();
 	}
+	_handleShadowClick = (event) => {
+		const eventPath = event.composedPath();
+		const deleteButton = eventPath.find((target) => matchesSelector(target, ".chip-delete"));
+		if (deleteButton) {
+			event.stopPropagation();
+			if (this.disabled || deleteButton.disabled) return;
+			this.emit("dm-delete");
+			this.emit("delete");
+			return;
+		}
+		if (!eventPath.find((target) => matchesSelector(target, ".chip"))) return;
+		if (this.disabled) {
+			event.preventDefault();
+			event.stopPropagation();
+			return;
+		}
+		if (this.deletable) return;
+		if (this.hasAttribute("href")) {
+			if (!this.emit("dm-click")) event.preventDefault();
+			return;
+		}
+		if (this.selectable) {
+			this.selected = !this.selected;
+			this.emit("dm-change", { selected: this.selected });
+			return;
+		}
+		if (this.clickable && !this.emit("dm-click")) event.preventDefault();
+	};
 	_getChipClasses() {
 		const classes = ["chip"];
 		if (this.variant && VARIANT_CLASSES[this.variant]) classes.push(VARIANT_CLASSES[this.variant]);
 		if (this.color && COLOR_CLASSES[this.color]) classes.push(COLOR_CLASSES[this.color]);
 		if (this.size && SIZE_CLASSES$1[this.size]) classes.push(SIZE_CLASSES$1[this.size]);
 		if (this.selected) classes.push("chip-selected");
+		if (!this.disabled && !this.deletable && (this.hasAttribute("href") || this.selectable || this.clickable)) classes.push("chip-clickable");
 		return classes.join(" ");
 	}
-	render() {
+	_renderContent() {
 		return `
-      <span class="${this._getChipClasses()}" part="chip" role="${this.getAttribute("role") || "button"}" tabindex="0"${this.selected ? " aria-selected=\"true\"" : ""}>
-        <span class="chip-icon" part="icon">
-          <slot name="icon"></slot>
+      <span class="chip-icon" part="icon">
+        <slot name="icon"></slot>
+      </span>
+      <slot></slot>
+    `;
+	}
+	render() {
+		const chipClasses = this._getChipClasses();
+		const content = this._renderContent();
+		if (this.deletable) {
+			const deleteLabel = escapeHtml(this.deleteLabel || "Remove chip");
+			return `
+        <span class="${chipClasses}" part="chip"${this.disabled ? " aria-disabled=\"true\"" : ""}>
+          ${content}
+          <button
+            class="chip-delete"
+            part="delete"
+            type="button"
+            aria-label="${deleteLabel}"
+            ${this.disabled ? "disabled" : ""}
+          >${DELETE_ICON}</button>
         </span>
-        <slot></slot>
-        ${this.deletable ? `<span class="chip-delete" part="delete"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" /></svg></span>` : ""}
+      `;
+		}
+		if (this.hasAttribute("href")) {
+			if (this.disabled) return `
+          <span class="${chipClasses}" part="chip" aria-disabled="true">${content}</span>
+        `;
+			return `
+        <a class="${chipClasses}" part="chip" href="${escapeHtml(this.href ?? "")}"${this.target ? ` target="${escapeHtml(this.target)}"` : ""}${this.rel ? ` rel="${escapeHtml(this.rel)}"` : ""}>${content}</a>
+      `;
+		}
+		if (this.selectable) return `
+        <button
+          class="${chipClasses}"
+          part="chip"
+          type="button"
+          aria-pressed="${this.selected ? "true" : "false"}"
+          ${this.disabled ? "disabled" : ""}
+        >${content}</button>
+      `;
+		if (this.clickable) return `
+        <button
+          class="${chipClasses}"
+          part="chip"
+          type="button"
+          ${this.disabled ? "disabled" : ""}
+        >${content}</button>
+      `;
+		return `
+      <span class="${chipClasses}" part="chip">
+        ${content}
       </span>
     `;
 	}
 	update() {
+		const activeElement = this.shadowRoot.activeElement;
+		const activeSelector = activeElement?.classList.contains("chip-delete") ? ".chip-delete" : activeElement?.matches("a.chip, button.chip") ? ".chip" : void 0;
 		super.update();
-		(this.shadowRoot?.querySelector(".chip"))?.addEventListener("click", this._handleClick.bind(this));
-		(this.shadowRoot?.querySelector(".chip-delete"))?.addEventListener("click", this._handleDelete.bind(this));
+		if (activeSelector) this.shadowRoot.querySelector(activeSelector)?.focus();
 	}
 };
 function register$3() {
@@ -3467,6 +3605,10 @@ const css$1 = `/**
     color: var(--color-error-content);
   }
 
+  .navbar a {
+    color: inherit;
+  }
+
   .navbar-start {
     display: flex;
     align-items: center;
@@ -3819,7 +3961,7 @@ const css$1 = `/**
 
   /* Disabled Breadcrumb Item */
   .breadcrumb-item-disabled {
-    opacity: 0.38;
+    opacity: 1;
     pointer-events: none;
     cursor: not-allowed;
   }
