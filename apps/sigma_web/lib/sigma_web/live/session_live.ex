@@ -1593,23 +1593,28 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def handle_event("send_prompt", %{"value" => prompt} = params, socket) do
-    if session_ready?(socket) do
-      case ImageAttachments.normalize(prompt, Map.get(params, "images", [])) do
-        {:ok, :empty} ->
-          {:reply, %{status: "accepted"}, socket}
+    cond do
+      not session_ready?(socket) ->
+        {:reply, %{status: "rejected"}, put_flash(socket, :info, "Session is still loading.")}
 
-        {:ok, content} ->
-          case handle_prompt(content, socket) do
-            {:accepted, socket} -> {:reply, %{status: "accepted"}, socket}
-            {:rejected, socket} -> {:reply, %{status: "rejected"}, socket}
-          end
+      socket.assigns.turn_in_flight ->
+        {:reply, %{status: "rejected"}, put_flash(socket, :info, "Agent is still working.")}
 
-        {:error, reason} ->
-          {:reply, %{status: "rejected"},
-           put_flash(socket, :error, ImageAttachments.error_message(reason))}
-      end
-    else
-      {:reply, %{status: "rejected"}, put_flash(socket, :info, "Session is still loading.")}
+      true ->
+        case ImageAttachments.normalize(prompt, Map.get(params, "images", [])) do
+          {:ok, :empty} ->
+            {:reply, %{status: "accepted"}, socket}
+
+          {:ok, content} ->
+            case handle_prompt(content, socket) do
+              {:accepted, socket} -> {:reply, %{status: "accepted"}, socket}
+              {:rejected, socket} -> {:reply, %{status: "rejected"}, socket}
+            end
+
+          {:error, reason} ->
+            {:reply, %{status: "rejected"},
+             put_flash(socket, :error, ImageAttachments.error_message(reason))}
+        end
     end
   end
 

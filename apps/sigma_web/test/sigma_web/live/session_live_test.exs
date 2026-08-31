@@ -775,6 +775,22 @@ defmodule Sigma.Web.SessionLiveTest do
     refute_receive {:agent_start, _}, 200
   end
 
+  test "rejects prompts while an agent turn is in flight", %{conn: conn} do
+    session_id = unique_session_id("hook-active-turn")
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    send(view.pid, {:agent_start, @workdir})
+    assert render(view) =~ "Agent is working"
+
+    html = render_hook(view, "send_prompt", %{"value" => "hello", "images" => []})
+
+    assert_reply(view, %{status: "rejected"})
+    assert html =~ "Agent is still working"
+    refute_receive {:agent_start, _}, 200
+    refute_receive {:message_start, %{role: :user}}, 200
+  end
+
   @tag :tmp_dir
   test "rejects send while the session is still loading", %{conn: conn, tmp_dir: tmp_dir} do
     with_agent_config(tmp_dir, fn ->
