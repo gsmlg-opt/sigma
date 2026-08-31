@@ -86,13 +86,22 @@ defmodule Sigma.AgentTest do
 
     Sigma.Agent.subscribe(agent)
     :sys.replace_state(agent, &%{&1 | hook_specs: [spec]})
-    Sigma.Agent.prompt(agent, [%{type: :text, text: "Describe"}, image])
+    malformed = %{type: :text, text: 42}
+
+    Sigma.Agent.prompt(agent, [
+      %{type: :text, text: "Describe"},
+      %{type: :text, text: ""},
+      image,
+      malformed,
+      %{type: :text, text: "more"}
+    ])
 
     assert_receive {:provider_params, %{context: %{messages: [%{content: content}]}}}, 1000
 
     assert content == [
-             %{type: :text, text: "Describe\n\n[Additional context from hook]\nextra"},
-             image
+             %{type: :text, text: "Describe\n\nmore\n\n[Additional context from hook]\nextra"},
+             image,
+             malformed
            ]
 
     assert_receive {:agent_end, _}, 1000
@@ -110,7 +119,7 @@ defmodule Sigma.AgentTest do
     assert_receive {:provider_params, %{context: %{messages: [%{content: image_only}]}}}, 1000
 
     assert image_only == [
-             %{type: :text, text: "\n\n[Additional context from hook]\nextra"},
+             %{type: :text, text: "[Additional context from hook]\nextra"},
              image
            ]
   end
