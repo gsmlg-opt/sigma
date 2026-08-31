@@ -1415,7 +1415,7 @@ defmodule Sigma.Web.SessionLive do
     with {:ok, messages} <- Sigma.Session.Log.replay(socket.assigns.storage_path),
          {:ok, prompt} <- find_retry_prompt(messages, msg_id) do
       submit_prompt(socket, prompt)
-      {:noreply, socket}
+      {:noreply, assign(socket, :turn_in_flight, true)}
     else
       {:error, :not_found} ->
         {:noreply, put_flash(socket, :error, "Could not find that message to retry.")}

@@ -58,16 +58,6 @@ defmodule Sigma.Web.SessionLiveTest do
     end
   end
 
-  defmodule SlowProvider do
-    @behaviour Sigma.Ai.Provider
-
-    @impl true
-    def stream(params) do
-      Process.sleep(300)
-      Sigma.Web.MockProvider.stream(params)
-    end
-  end
-
   setup do
     previous_agent_dir = Application.get_env(:sigma_session, :agent_dir)
 
@@ -805,19 +795,52 @@ defmodule Sigma.Web.SessionLiveTest do
     session_id = unique_session_id("hook-double-submit")
     Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
 
-    with_mock_provider(SlowProvider, fn ->
-      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    agent = Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent)
+    :ok = :sys.suspend(agent)
+    on_exit(fn -> :sys.resume(agent) end)
 
-      render_hook(view, "send_prompt", %{"value" => "first", "images" => []})
-      assert_reply(view, %{status: "accepted"})
+    render_hook(view, "send_prompt", %{"value" => "first", "images" => []})
+    assert_reply(view, %{status: "accepted"})
 
-      html = render_hook(view, "send_prompt", %{"value" => "second", "images" => []})
-      assert_reply(view, %{status: "rejected"})
-      assert html =~ "Agent is still working"
+    html = render_hook(view, "send_prompt", %{"value" => "second", "images" => []})
+    assert_reply(view, %{status: "rejected"})
+    assert html =~ "Agent is still working"
 
-      assert_receive {:message_start, %{role: :user, content: "first"}}, 2000
-      refute_receive {:message_start, %{role: :user, content: "second"}}, 500
-    end)
+    :ok = :sys.resume(agent)
+    assert_receive {:message_start, %{role: :user, content: "first"}}, 2000
+    refute_receive {:message_start, %{role: :user, content: "second"}}, 500
+  end
+
+  test "rejects a prompt while a retry is in flight", %{conn: conn} do
+    session_id = unique_session_id("hook-retry-race")
+    storage_path = session_storage_path(session_id)
+    File.mkdir_p!(Path.dirname(storage_path))
+
+    :ok =
+      Sigma.Session.Log.persist_event(
+        storage_path,
+        {:message_end, Message.user("u_retry_race", "retry me")}
+      )
+
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    agent = Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent)
+    :ok = :sys.suspend(agent)
+    on_exit(fn -> :sys.resume(agent) end)
+
+    view
+    |> element("#retry-u_retry_race")
+    |> render_click()
+
+    html = render_hook(view, "send_prompt", %{"value" => "second", "images" => []})
+
+    assert_reply(view, %{status: "rejected"})
+    assert html =~ "Agent is still working"
+    :ok = :sys.resume(agent)
+    assert_receive {:message_start, %{role: :user, content: "retry me"}}, 2000
+    refute_receive {:message_start, %{role: :user, content: "second"}}, 500
   end
 
   @tag :tmp_dir
