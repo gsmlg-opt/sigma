@@ -959,6 +959,7 @@ defmodule Sigma.Web.SessionLiveTest do
   @tag :tmp_dir
   test "rejects send while the session is still loading", %{conn: conn, tmp_dir: tmp_dir} do
     with_agent_config(tmp_dir, fn ->
+      write_provider_configs("openai", "smart", %{"openai" => ["smart"]})
       trust_workdir!(@workdir)
       write_session_start_hook!(@workdir, "sleep 2", timeout: 3)
       {:ok, view, _html} = live(conn, session_path(unique_session_id("hook-not-ready")))
