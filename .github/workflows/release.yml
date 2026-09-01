@@ -143,7 +143,7 @@ jobs:
         run: mix format --check-formatted
 
       - name: Compile with warnings as errors
-        run: mix compile --warnings-as-errors
+        run: mix compile --force --warnings-as-errors
 
       - name: Run core tests
         run: mix test

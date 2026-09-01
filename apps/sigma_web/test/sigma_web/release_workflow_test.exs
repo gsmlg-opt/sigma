@@ -59,6 +59,7 @@ defmodule Sigma.Web.ReleaseWorkflowTest do
     assert release_offset < nif_offset
     assert nif_offset < package_offset
     assert source =~ "mix compile --force"
+    assert source =~ "mix compile --force --warnings-as-errors"
   end
 
   test "freezes web dependencies and configures the tag identity" do
