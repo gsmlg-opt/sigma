@@ -26,6 +26,8 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       branch: ${{ steps.source.outputs.branch }}
+      base_sha: ${{ steps.source.outputs.base_sha }}
+      candidate_ref: ${{ steps.source.outputs.candidate_ref }}
       source_sha: ${{ steps.source.outputs.source_sha }}
 
     steps:
@@ -60,8 +62,8 @@ jobs:
             exit 1
           fi
 
-          source_sha="$(git rev-parse HEAD)"
-          if [[ "$source_sha" != "$remote_sha" ]]; then
+          base_sha="$(git rev-parse HEAD)"
+          if [[ "$base_sha" != "$remote_sha" ]]; then
             echo "::error::Checked-out source does not match origin/${branch}."
             exit 1
           fi
@@ -71,12 +73,103 @@ jobs:
             exit 1
           fi
 
+          perl -0pi -e 's/version: "[^"]+"/version: "$ENV{VERSION}"/' mix.exs
+          grep -Fq "version: \"${VERSION}\"" mix.exs
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet -- mix.exs; then
+            git diff --check
+            git commit -am "chore(release): v${VERSION}"
+          fi
+
+          source_sha="$(git rev-parse HEAD)"
+          candidate_ref="release-candidate/v${VERSION}"
+          git push --force-with-lease origin "HEAD:refs/heads/${candidate_ref}"
+
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "candidate_ref=$candidate_ref" >> "$GITHUB_OUTPUT"
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Verify release source
+    needs: resolve
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out resolved release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.source_sha }}
+
+      - name: Set up Erlang and Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28.5"
+          elixir-version: "1.18.4"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy --component rustfmt --no-self-update
+          rustup default stable
+
+      - name: Restore exact verification cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            _build
+            node_modules
+            ~/.hex
+            ~/.mix
+            ~/.cache/rebar3
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/sigma_tools/native/sigma_tools_hashline/target
+          key: release-verify-${{ runner.os }}-${{ runner.arch }}-otp-28.5-elixir-1.18.4-bun-1.3.13-${{ hashFiles('mix.lock', 'package-lock.json', '**/package.json', '**/Cargo.lock') }}
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Check Elixir formatting
+        run: mix format --check-formatted
+
+      - name: Compile with warnings as errors
+        run: mix compile --warnings-as-errors
+
+      - name: Run core tests
+        run: mix test
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path apps/sigma_tools/native/sigma_tools_hashline/Cargo.toml -- --check
+
+      - name: Lint Rust
+        run: >-
+          cargo clippy
+          --manifest-path apps/sigma_tools/native/sigma_tools_hashline/Cargo.toml
+          --all-targets --
+          -D warnings
+          -A clippy::collapsible-str-replace
+          -A clippy::type-complexity
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path apps/sigma_tools/native/sigma_tools_hashline/Cargo.toml
+
+      - name: Set up and build web assets
+        run: |
+          mix assets.setup
+          mix assets.build
 
   build:
     name: Build ${{ matrix.os }} ${{ matrix.arch }}
-    needs: resolve
+    needs:
+      - resolve
+      - verify
     runs-on: ${{ matrix.runner }}
     env:
       MIX_ENV: prod
@@ -134,13 +227,6 @@ jobs:
             ~/.cargo/git
             apps/sigma_tools/native/sigma_tools_hashline/target
           key: release-${{ matrix.os }}-${{ matrix.arch }}-otp-28.5-elixir-1.18.4-${{ hashFiles('mix.lock', 'npm.lock', '**/Cargo.lock', '**/package.json') }}
-          restore-keys: |
-            release-${{ matrix.os }}-${{ matrix.arch }}-otp-28.5-elixir-1.18.4-
-
-      - name: Set release version
-        run: |
-          perl -0pi -e 's/version: "[^"]+"/version: "$ENV{VERSION}"/' mix.exs
-          grep -Fq "version: \"${VERSION}\"" mix.exs
 
       - name: Install production dependencies
         run: |
@@ -228,22 +314,24 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       BRANCH: ${{ needs.resolve.outputs.branch }}
+      BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+      CANDIDATE_REF: ${{ needs.resolve.outputs.candidate_ref }}
       GH_TOKEN: ${{ github.token }}
       SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
       VERSION: ${{ inputs.version }}
 
     steps:
-      - name: Check out release branch
+      - name: Check out verified release SHA
         uses: actions/checkout@v7
         with:
-          ref: ${{ needs.resolve.outputs.branch }}
+          ref: ${{ needs.resolve.outputs.source_sha }}
           fetch-depth: 0
 
       - name: Verify release branch has not moved
         run: |
           set -euo pipefail
-          current_sha="$(git rev-parse HEAD)"
-          if [[ "$current_sha" != "$SOURCE_SHA" ]]; then
+          remote_sha="$(git ls-remote --heads origin "refs/heads/${BRANCH}" | awk 'NR == 1 { print $1 }')"
+          if [[ "$remote_sha" != "$BASE_SHA" ]]; then
             echo "::error::origin/${BRANCH} moved while release artifacts were building. Run the release again."
             exit 1
           fi
@@ -295,6 +383,16 @@ jobs:
               'IO.puts(Application.spec(:backplane_mcp_protocol, :vsn))'
           )"
           test "$dependency_version" = "0.6.2"
+
+          smoke_code="$(<scripts/verify-release-agent-smoke.exs)"
+          smoke_result="$(
+            HOME="$smoke_home" \
+            SECRET_KEY_BASE="$secret_key_base" \
+            PHX_SERVER=false \
+            RELEASE_NODE="sigma_release_agent_smoke_${GITHUB_RUN_ID}" \
+            "$release_root/bin/sigma" eval "$smoke_code"
+          )"
+          test "$smoke_result" = "release agent smoke ok"
 
           printf 'SECRET_KEY_BASE=%s\nPHX_SERVER=true\nPORT=%s\nRELEASE_NODE=%s\n' \
             "$secret_key_base" \
@@ -377,26 +475,15 @@ jobs:
           install -m 0644 rel/service/sigma.service dist/sigma.service
           install -m 0644 rel/service/README.md dist/USER_SERVICE_INSTALL.md
 
-      - name: Commit version and create tag
+      - name: Publish verified SHA and create tag
         run: |
           set -euo pipefail
-          perl -0pi -e 's/version: "[^"]+"/version: "$ENV{VERSION}"/' mix.exs
           grep -Fq "version: \"${VERSION}\"" mix.exs
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          if git diff --quiet -- mix.exs; then
-            echo "mix.exs already contains version ${VERSION}; tagging the release source."
-          else
-            git diff --check
-            git commit -am "chore(release): v${VERSION}"
-          fi
-
           git tag -a "v${VERSION}" -m "Sigma v${VERSION}"
           git push --atomic origin \
-            "HEAD:refs/heads/${BRANCH}" \
+            "${SOURCE_SHA}:refs/heads/${BRANCH}" \
             "refs/tags/v${VERSION}:refs/tags/v${VERSION}"
+          git push origin --delete "${CANDIDATE_REF}"
 
       - name: Create GitHub Release
         run: |

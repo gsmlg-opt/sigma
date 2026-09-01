@@ -24,7 +24,7 @@ defmodule Sigma.Web.ReleaseWorkflowTest do
              :binary.match(source, "- name: Smoke installed Linux release")
 
     assert {commit_offset, _length} =
-             :binary.match(source, "- name: Commit version and create tag")
+             :binary.match(source, "- name: Publish verified SHA and create tag")
 
     assert verify_offset < smoke_offset
     assert smoke_offset < commit_offset
@@ -32,6 +32,7 @@ defmodule Sigma.Web.ReleaseWorkflowTest do
     assert source =~ "sigma-user-service"
     assert source =~ "Application.spec(:backplane_mcp_protocol, :vsn)"
     assert source =~ ~S|test "$dependency_version" = "0.6.2"|
+    assert source =~ "verify-release-agent-smoke.exs"
     assert source =~ ~S|if [[ "$http_code" == 200 ]]|
     assert source =~ ~S|kill -TERM "$smoke_pid"|
     assert source =~ "for _cleanup_attempt in $(seq 1 20)"

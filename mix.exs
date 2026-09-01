@@ -22,19 +22,17 @@ defmodule Sigma.MixProject do
 
   defp aliases do
     [
-      setup: ["deps.get", "deps.patch", "assets.setup", "assets.build"],
+      setup: ["deps.get", "assets.setup", "assets.build"],
       "sigma.run": ["phx.server"],
       "sigma.rel-build": ["assets.build", &build_release/1],
       "sigma.rel-run": ["sigma.rel-build", &run_release/1],
       "assets.setup": [
-        "deps.patch",
         "npm.install",
         "duskmoon.bundle"
       ],
       # TODO(upstream): duskmoon-dev/phoenix-duskmoon-ui#48
       "assets.build": ["duskmoon.bundle", "duskmoon_bundler.build --tailwind"],
       "assets.deploy": [
-        "deps.patch",
         "duskmoon.bundle",
         "duskmoon_bundler.build --tailwind",
         "phx.digest"
