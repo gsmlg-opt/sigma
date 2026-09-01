@@ -1,5 +1,7 @@
 defmodule Sigma.Ai.ProviderAuth do
-  @moduledoc false
+  @moduledoc "Provider authentication helpers and normalized descriptor."
+
+  defstruct [:type, :header_name, :credential_present?]
 
   def headers(api_key, options, default_type) do
     if blank_credential?(api_key) do

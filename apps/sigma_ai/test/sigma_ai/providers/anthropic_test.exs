@@ -1,8 +1,8 @@
 defmodule Sigma.Ai.Providers.AnthropicTest do
   use ExUnit.Case, async: true
 
+  alias Sigma.Ai.{ProviderError, Stream}
   alias Sigma.Ai.Providers.Anthropic
-  alias Sigma.Ai.Stream
 
   @fixture_path Path.expand("../../fixtures/sse/anthropic_usage.txt", __DIR__)
 
@@ -74,6 +74,29 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
     assert ai_msg.usage.cache_write == 100
     assert ai_msg.usage.output == 200
     assert ai_msg.usage.total_tokens == 5_200
+  end
+
+  test "malformed finalized tool arguments emit a provider error" do
+    events = [
+      %{
+        "type" => "content_block_start",
+        "index" => 0,
+        "content_block" => %{"type" => "tool_use", "id" => "call-1", "name" => "bash"}
+      },
+      %{
+        "type" => "content_block_delta",
+        "index" => 0,
+        "delta" => %{"type" => "input_json_delta", "partial_json" => "{"}
+      },
+      %{"type" => "content_block_stop", "index" => 0}
+    ]
+
+    {processed, _message} = Anthropic.process_events(events, initial_message())
+
+    assert {:provider_error, %Sigma.Ai.ProviderError{kind: :malformed_stream}} =
+             Enum.find(processed, &match?({:provider_error, _error}, &1))
+
+    refute Enum.any?(processed, &match?({:toolcall_end, _, _, _}, &1))
   end
 
   test "uses model maxTokens as the default Anthropic output cap" do
@@ -270,7 +293,7 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
 
     with_response_server(400, "application/json", body, fn base_url ->
       error =
-        assert_raise RuntimeError, fn ->
+        assert_raise ProviderError, fn ->
           Anthropic.stream(%{
             model: %{id: "MiniMax-M3", api: "anthropic-messages", provider: "minimax"},
             context: %{messages: [], system_prompt: nil, tools: []},
@@ -279,8 +302,9 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
           |> Enum.to_list()
         end
 
-      assert Exception.message(error) ==
-               "AI provider error invalid_request_error: max_tokens is too large"
+      assert error.kind == :invalid_request
+      assert error.status == 400
+      assert error.code == "invalid_request_error"
     end)
   end
 

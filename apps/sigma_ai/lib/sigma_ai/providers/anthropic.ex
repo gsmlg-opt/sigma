@@ -1,7 +1,23 @@
 defmodule Sigma.Ai.Providers.Anthropic do
   @behaviour Sigma.Ai.Provider
 
-  alias Sigma.Ai.{ProviderAuth, Stream}
+  alias Sigma.Ai.{ProviderAuth, ProviderCapabilities, ProviderError, ProviderRequest, Stream}
+
+  @impl true
+  def stream_normalized(%ProviderRequest{} = request),
+    do: stream(ProviderRequest.to_legacy(request))
+
+  @impl true
+  def capabilities(model) do
+    %ProviderCapabilities{
+      tools: true,
+      thinking: true,
+      image_input: true,
+      context_window: model[:context_window] || model["contextWindow"],
+      max_output_tokens: model[:max_tokens] || model["maxTokens"],
+      supported_options: [:thinking_budget, :max_tokens]
+    }
+  end
 
   @impl true
   def stream(params) do
@@ -67,8 +83,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
             session_id: session_id,
             log_session_id: log_session_id,
             model: model.id,
-            provider: "anthropic",
-            request_body: body
+            provider: "anthropic"
           }
         )
 
@@ -85,7 +100,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
                 log_session_id: log_session_id,
                 model: model.id,
                 usage: ai_msg.usage,
-                response_content: ai_msg.content
+                stop_reason: ai_msg.stop_reason
               }
             )
 
@@ -122,7 +137,14 @@ defmodule Sigma.Ai.Providers.Anthropic do
           {:halt, {message, "", :done, resp}}
 
         {message, buffer, :streaming, resp} ->
+          cancellation_ref = options[:cancellation_ref]
+
           receive do
+            {:cancel, ^cancellation_ref} when not is_nil(cancellation_ref) ->
+              Req.cancel_async_response(resp)
+              error = ProviderError.from_reason(:cancelled)
+              {[{:provider_error, error}], {message, buffer, :done, resp}}
+
             req_message ->
               {processed_events, new_message, new_buffer, status} =
                 handle_async_message(resp, req_message, message, buffer)
@@ -185,8 +207,12 @@ defmodule Sigma.Ai.Providers.Anthropic do
 
         {acc_events ++ processed_events, new_message, new_buffer, status}
 
-      :done, {acc_events, acc_message, acc_buffer, _status} ->
+      :done, {acc_events, acc_message, acc_buffer, :done} ->
         {acc_events, acc_message, acc_buffer, :done}
+
+      :done, {acc_events, acc_message, acc_buffer, _status} ->
+        error = ProviderError.malformed(:truncated_stream)
+        {acc_events ++ [{:provider_error, error}], acc_message, acc_buffer, :done}
 
       _chunk, acc ->
         acc
@@ -199,7 +225,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
         {acc_events, acc_message, acc_buffer <> chunk, :streaming}
 
       :done, {_acc_events, _acc_message, acc_buffer, _status} ->
-        raise http_error_message(resp.status, acc_buffer)
+        raise http_provider_error(resp.status, acc_buffer, resp.headers)
 
       _chunk, acc ->
         acc
@@ -540,17 +566,23 @@ defmodule Sigma.Ai.Providers.Anthropic do
                 {{:thinking_end, idx, block.thinking, new_acc}, new_acc}
 
               :tool_call ->
-                # Parse JSON
-                args =
-                  case Jason.decode(block.partial_json) do
-                    {:ok, decoded} -> decoded
-                    _ -> %{}
-                  end
+                case Jason.decode(block.partial_json) do
+                  {:ok, args} when is_map(args) ->
+                    tool_call = %{
+                      type: :tool_call,
+                      id: block.id,
+                      name: block.name,
+                      arguments: args
+                    }
 
-                tool_call = %{type: :tool_call, id: block.id, name: block.name, arguments: args}
-                new_content = List.replace_at(acc.content, idx, tool_call)
-                new_acc = %{acc | content: new_content}
-                {{:toolcall_end, idx, tool_call, new_acc}, new_acc}
+                    new_content = List.replace_at(acc.content, idx, tool_call)
+                    new_acc = %{acc | content: new_content}
+                    {{:toolcall_end, idx, tool_call, new_acc}, new_acc}
+
+                  _invalid ->
+                    error = ProviderError.malformed(:invalid_tool_call_arguments)
+                    {{:provider_error, error}, acc}
+                end
 
               _ ->
                 {nil, acc}
@@ -638,4 +670,26 @@ defmodule Sigma.Ai.Providers.Anthropic do
         "AI provider HTTP #{status}: #{String.slice(String.trim(body), 0, 500)}"
     end
   end
+
+  defp http_provider_error(status, body, headers) do
+    error =
+      case Jason.decode(body) do
+        {:ok, %{"error" => error}} -> error
+        {:ok, error} -> error
+        {:error, _reason} -> %{"message" => http_error_message(status, body)}
+      end
+
+    ProviderError.from_http(status, error, retry_after: retry_after(headers))
+  end
+
+  defp retry_after(headers) when is_map(headers),
+    do: Map.get(headers, "retry-after") || Map.get(headers, "Retry-After")
+
+  defp retry_after(headers) when is_list(headers) do
+    Enum.find_value(headers, fn {name, value} ->
+      if String.downcase(to_string(name)) == "retry-after", do: value
+    end)
+  end
+
+  defp retry_after(_headers), do: nil
 end

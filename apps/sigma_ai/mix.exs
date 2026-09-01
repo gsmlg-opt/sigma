@@ -17,6 +17,7 @@ defmodule Sigma.Ai.MixProject do
 
   def application do
     [
+      mod: {Sigma.Ai.Application, []},
       extra_applications: [:logger]
     ]
   end

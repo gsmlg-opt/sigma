@@ -1,7 +1,7 @@
 defmodule Sigma.Ai.Providers.OpenAITest do
   use ExUnit.Case, async: true
 
-  alias Sigma.Ai.Providers.OpenAI
+  alias Sigma.Ai.{ProviderError, Providers.OpenAI}
 
   test "captures prompt tokens from stream usage chunk" do
     sse = [
@@ -189,6 +189,53 @@ defmodule Sigma.Ai.Providers.OpenAITest do
     end)
   end
 
+  test "malformed finalized tool arguments fail the normalized stream" do
+    sse = [
+      sse_json(%{
+        "choices" => [
+          %{
+            "index" => 0,
+            "delta" => %{
+              "tool_calls" => [
+                %{
+                  "index" => 0,
+                  "id" => "call-invalid",
+                  "type" => "function",
+                  "function" => %{"name" => "bash", "arguments" => "{"}
+                }
+              ]
+            },
+            "finish_reason" => nil
+          }
+        ]
+      }),
+      sse_json(%{
+        "choices" => [
+          %{"index" => 0, "delta" => %{}, "finish_reason" => "tool_calls"}
+        ]
+      }),
+      "data: [DONE]\n\n"
+    ]
+
+    with_sse_server(sse, fn base_url ->
+      request =
+        Sigma.Ai.ProviderRequest.from_legacy(%{
+          model: %{id: "gpt-test", api: "openai", provider: "openai"},
+          context: %{messages: [], system_prompt: nil, tools: []},
+          options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+        })
+
+      events = Sigma.Ai.Provider.stream(OpenAI, request) |> Enum.to_list()
+
+      refute Enum.any?(events, &(&1.type == :tool_call_completed))
+
+      assert %Sigma.Ai.ProviderEvent{
+               type: :response_failed,
+               error: %Sigma.Ai.ProviderError{kind: :malformed_stream}
+             } = Enum.find(events, &(&1.type == :response_failed))
+    end)
+  end
+
   test "finalizes streamed tool calls when OpenAI-compatible providers finish with stop" do
     sse = [
       sse_json(%{
@@ -246,7 +293,7 @@ defmodule Sigma.Ai.Providers.OpenAITest do
     end)
   end
 
-  test "finalizes pending streamed tool calls when the transport closes" do
+  test "rejects pending streamed tool calls when the transport closes without a terminal frame" do
     sse = [
       sse_json(%{
         "choices" => [
@@ -280,20 +327,12 @@ defmodule Sigma.Ai.Providers.OpenAITest do
         })
         |> Enum.to_list()
 
-      assert {:toolcall_end, 0, tool_call, tool_msg} =
-               Enum.find(events, &match?({:toolcall_end, 0, _, _}, &1))
+      refute Enum.any?(events, &match?({:toolcall_end, 0, _, _}, &1))
 
-      assert tool_call == %{
-               type: :tool_call,
-               id: "call_transport_done",
-               name: "read",
-               arguments: %{"path" => "/tmp/example.txt"}
-             }
+      assert {:provider_error, %ProviderError{kind: :malformed_stream}} =
+               Enum.find(events, &match?({:provider_error, _}, &1))
 
-      assert tool_msg.content == [tool_call]
-
-      assert {:done, :tool_use, %{content: [^tool_call]}} =
-               Enum.find(events, &match?({:done, _, _}, &1))
+      refute Enum.any?(events, &match?({:done, _, _}, &1))
     end)
   end
 
@@ -401,18 +440,15 @@ defmodule Sigma.Ai.Providers.OpenAITest do
             %{
               session_id: ^session_id,
               model: "gpt-test",
-              provider: "openai",
-              request_body: request_body
+              provider: "openai"
             }} = Enum.find(events, &match?({[:sigma, :llm, :request, :start], _, _}, &1))
-
-    assert request_body.model == "gpt-test"
 
     assert {[:sigma, :llm, :request, :stop], %{duration: duration},
             %{
               session_id: ^session_id,
               model: "gpt-test",
               usage: %{input: 10, output: 1, total_tokens: 11},
-              response_content: [%{type: :text, text: "hello"}]
+              stop_reason: :stop
             }} = Enum.find(events, &match?({[:sigma, :llm, :request, :stop], _, _}, &1))
 
     assert is_integer(duration)
@@ -573,7 +609,7 @@ defmodule Sigma.Ai.Providers.OpenAITest do
 
     with_response_server(400, "application/json", body, fn base_url ->
       error =
-        assert_raise RuntimeError, fn ->
+        assert_raise ProviderError, fn ->
           OpenAI.stream(%{
             model: %{id: "MiniMax-M3", api: "openai", provider: "openai"},
             context: %{messages: [], system_prompt: nil, tools: []},
@@ -582,8 +618,9 @@ defmodule Sigma.Ai.Providers.OpenAITest do
           |> Enum.to_list()
         end
 
-      assert Exception.message(error) ==
-               "AI provider error context_length_exceeded: context is too long"
+      assert error.kind == :context_limit
+      assert error.status == 400
+      assert error.code == "context_length_exceeded"
     end)
   end
 
