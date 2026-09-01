@@ -2,7 +2,7 @@
 
 - Status: Complete
 - Date: 2026-09-01
-- Branch: `codex/contract-stabilization-v2`
+- Integration: locally fast-forwarded into `main` at `48d9ecc`
 - Base: `03a8ca0e8e320b1ef1a608027505a81ca25ab664`
 - Plan: `docs/sigma-contract-stabilization-plan-for-codex-v2.md`
 
@@ -161,5 +161,6 @@
   advisories. They are not introduced by this work and are outside the approved
   stabilization scope, but should be handled in a separate dependency-security
   update.
-- No in-scope implementation work remains. Git commit/merge/PR/push is an
-  optional integration action and was not performed without user authorization.
+- No in-scope implementation work remains. The verified eight-commit branch was
+  locally fast-forwarded into `main` with user authorization; no push or remote
+  mutation was performed.
