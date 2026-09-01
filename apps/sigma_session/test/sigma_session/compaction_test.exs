@@ -27,7 +27,13 @@ defmodule Sigma.Session.CompactionTest do
 
     # 3. Check storage
     {:ok, entries} = Sigma.Session.Storage.JsonlFile.read(@test_storage)
-    assert Enum.any?(entries, fn e -> e["type"] == "compaction" end)
+    assert Enum.any?(entries, fn
+             %{"type" => "compaction", "firstKeptEntryId" => kept_entry_id} ->
+               is_binary(kept_entry_id)
+
+             _entry ->
+               false
+           end)
 
     # 4. Replay and verify filtering
     {:ok, messages} = Log.replay(@test_storage)

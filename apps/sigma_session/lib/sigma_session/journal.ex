@@ -25,7 +25,8 @@ defmodule Sigma.Session.Journal do
         cwd: header && header["cwd"],
         parent_session_id: header && header["parentSession"],
         active_leaf_id: leaf_id,
-        branch_entry_ids: Enum.map(nodes, & &1.entry["id"])
+        branch_entry_ids: Enum.map(nodes, & &1.entry["id"]),
+        message_entry_ids: message_entry_ids(nodes)
       }
 
       {snapshot, payload_diagnostics_rev} =
@@ -156,6 +157,17 @@ defmodule Sigma.Session.Journal do
   end
 
   defp reduce_entry(_node, acc), do: acc
+
+  defp message_entry_ids(nodes) do
+    Enum.reduce(nodes, %{}, fn
+      %{entry: %{"id" => entry_id, "message" => %{"id" => message_id}}}, acc
+      when is_binary(entry_id) and is_binary(message_id) ->
+        Map.put_new(acc, message_id, entry_id)
+
+      _node, acc ->
+        acc
+    end)
+  end
 
   defp mark_model_source({snapshot, diagnostics} = acc, entry) do
     case Map.get(entry, "role", "default") do

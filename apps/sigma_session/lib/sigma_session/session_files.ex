@@ -93,6 +93,43 @@ defmodule Sigma.Session.SessionFiles do
     end
   end
 
+  @doc """
+  Adopts a session into a validated replacement working directory.
+
+  Conversation bytes are copied unchanged. Structural sidecar metadata is
+  preserved with only `cwd` replaced, and cross-directory publication rolls
+  back if source cleanup cannot complete.
+  """
+  def adopt(source_sessions_dir, target_sessions_dir, id, replacement_cwd, opts \\ []) do
+    replacement_cwd = Path.expand(replacement_cwd)
+
+    with true <- File.dir?(replacement_cwd),
+         :ok <- File.mkdir_p(target_sessions_dir),
+         {:ok, source_jsonl_path} <- jsonl_path(source_sessions_dir, id),
+         {:ok, source_meta_path} <- meta_path(source_sessions_dir, id),
+         {:ok, target_jsonl_path} <- jsonl_path(target_sessions_dir, id),
+         {:ok, target_meta_path} <- meta_path(target_sessions_dir, id),
+         :ok <- require_regular(source_jsonl_path),
+         {:ok, metadata} <- read_metadata(source_meta_path),
+         {:ok, metadata_content} <- adopted_metadata(metadata, replacement_cwd) do
+      if source_jsonl_path == target_jsonl_path do
+        adopt_in_place(target_meta_path, metadata_content, opts)
+      else
+        adopt_across_directories(
+          source_jsonl_path,
+          source_meta_path,
+          target_jsonl_path,
+          target_meta_path,
+          metadata_content,
+          opts
+        )
+      end
+    else
+      false -> {:error, :invalid_replacement_cwd}
+      {:error, _reason} = error -> error
+    end
+  end
+
   defp safe_path(sessions_dir, id, suffix) do
     if valid_session_id?(id) do
       {:ok, Path.join(sessions_dir, id <> suffix)}
@@ -206,18 +243,24 @@ defmodule Sigma.Session.SessionFiles do
       :ok
     else
       {:error, _reason} = error ->
-        rollback_jsonl_move(new_jsonl_path, old_jsonl_path)
-        error
+        case rollback_jsonl_move(new_jsonl_path, old_jsonl_path) do
+          :ok -> error
+          rollback_error -> {:error, {:rename_rollback_failed, error, rollback_error}}
+        end
     end
   end
 
   defp rollback_jsonl_move(new_jsonl_path, old_jsonl_path) do
-    with {:ok, _new_stat} <- File.lstat(new_jsonl_path),
-         {:error, :enoent} <- File.lstat(old_jsonl_path) do
-      move_file_no_overwrite(new_jsonl_path, old_jsonl_path)
-    end
+    case {File.lstat(new_jsonl_path), File.lstat(old_jsonl_path)} do
+      {{:ok, _new_stat}, {:error, :enoent}} ->
+        move_file_no_overwrite(new_jsonl_path, old_jsonl_path)
 
-    :ok
+      {{:error, :enoent}, {:ok, _old_stat}} ->
+        :ok
+
+      state ->
+        {:error, {:unexpected_rename_rollback_state, state}}
+    end
   end
 
   defp move_file_no_overwrite(source_path, target_path) do
@@ -273,6 +316,194 @@ defmodule Sigma.Session.SessionFiles do
     end
   end
 
+  defp adopted_metadata(%{exists?: true, data: nil}, _replacement_cwd),
+    do: {:error, :invalid_session_metadata}
+
+  defp adopted_metadata(%{data: data}, replacement_cwd) when is_map(data) do
+    Jason.encode(Map.put(data, "cwd", replacement_cwd), pretty: true)
+  end
+
+  defp adopted_metadata(%{exists?: false}, replacement_cwd) do
+    Jason.encode(%{"cwd" => replacement_cwd}, pretty: true)
+  end
+
+  defp adopt_in_place(meta_path, metadata_content, opts) do
+    with {:ok, temp_path} <- unused_temp_path(meta_path) do
+      result =
+        with :ok <- File.write(temp_path, metadata_content),
+             :ok <- run_adopt_hook(opts, :before_adopt_meta_replace, %{target: meta_path}),
+             :ok <- File.rename(temp_path, meta_path) do
+          :ok
+        end
+
+      if result != :ok, do: rm_optional(temp_path)
+      result
+    end
+  end
+
+  defp adopt_across_directories(
+         source_jsonl_path,
+         source_meta_path,
+         target_jsonl_path,
+         target_meta_path,
+         metadata_content,
+         opts
+       ) do
+    with :ok <- ensure_absent(target_jsonl_path),
+         :ok <- ensure_absent(target_meta_path),
+         {:ok, temp_jsonl_path} <- unused_temp_path(target_jsonl_path) do
+      case prepare_adoption_metadata_temp(
+             source_jsonl_path,
+             temp_jsonl_path,
+             target_meta_path,
+             metadata_content
+           ) do
+        {:ok, temp_meta_path} ->
+          publish_adoption(
+            source_jsonl_path,
+            source_meta_path,
+            target_jsonl_path,
+            target_meta_path,
+            temp_jsonl_path,
+            temp_meta_path,
+            opts
+          )
+
+        {:error, _reason} = error ->
+          rm_optional(temp_jsonl_path)
+          error
+      end
+    end
+  end
+
+  defp prepare_adoption_metadata_temp(
+         source_jsonl_path,
+         temp_jsonl_path,
+         target_meta_path,
+         metadata_content
+       ) do
+    with :ok <- File.cp(source_jsonl_path, temp_jsonl_path),
+         {:ok, temp_meta_path} <- unused_temp_path(target_meta_path) do
+      case File.write(temp_meta_path, metadata_content) do
+        :ok -> {:ok, temp_meta_path}
+        {:error, _reason} = error ->
+          rm_optional(temp_meta_path)
+          error
+      end
+    end
+  end
+
+  defp publish_adoption(
+         source_jsonl_path,
+         source_meta_path,
+         target_jsonl_path,
+         target_meta_path,
+         temp_jsonl_path,
+         temp_meta_path,
+         opts
+       ) do
+    case publish_temp_file(temp_meta_path, target_meta_path, :before_meta_publish) do
+      :ok ->
+        case publish_temp_file(temp_jsonl_path, target_jsonl_path, :before_jsonl_publish) do
+          :ok ->
+            finish_published_adoption(
+              source_jsonl_path,
+              source_meta_path,
+              target_jsonl_path,
+              target_meta_path,
+              temp_jsonl_path,
+              temp_meta_path,
+              opts
+            )
+
+          {:error, _reason} = error ->
+            meta_cleanup = rm_optional(target_meta_path)
+            temp_cleanup = rm_optional(temp_jsonl_path)
+
+            if meta_cleanup == :ok and temp_cleanup == :ok do
+              error
+            else
+              {:error, {:adoption_publication_rollback_failed, error, meta_cleanup, temp_cleanup}}
+            end
+        end
+
+      {:error, _reason} = error ->
+        rm_optional(temp_jsonl_path)
+        rm_optional(temp_meta_path)
+        error
+    end
+  end
+
+  defp finish_published_adoption(
+         source_jsonl_path,
+         source_meta_path,
+         target_jsonl_path,
+         target_meta_path,
+         temp_jsonl_path,
+         temp_meta_path,
+         opts
+       ) do
+    result =
+      with :ok <- run_adopt_hook(opts, :before_adopt_source_cleanup, %{source: source_jsonl_path}),
+           :ok <- File.rm(source_jsonl_path),
+           :ok <- rm_optional(source_meta_path) do
+        :ok
+      end
+
+    case result do
+      :ok ->
+        :ok
+
+      {:error, _reason} = error ->
+        rollback_adoption(
+          source_jsonl_path,
+          source_meta_path,
+          target_jsonl_path,
+          target_meta_path,
+          temp_jsonl_path,
+          temp_meta_path,
+          error
+        )
+    end
+  end
+
+  defp rollback_adoption(
+         source_jsonl_path,
+         _source_meta_path,
+         target_jsonl_path,
+         target_meta_path,
+         temp_jsonl_path,
+         temp_meta_path,
+         error
+       ) do
+    restore_result =
+      if File.exists?(source_jsonl_path) do
+        :ok
+      else
+        File.cp(target_jsonl_path, source_jsonl_path)
+      end
+
+    cleanup_results =
+      Enum.map(
+        [target_jsonl_path, target_meta_path, temp_jsonl_path, temp_meta_path],
+        &rm_optional/1
+      )
+
+    if restore_result == :ok and Enum.all?(cleanup_results, &(&1 == :ok)) do
+      error
+    else
+      {:error, {:adoption_rollback_failed, error, restore_result, cleanup_results}}
+    end
+  end
+
+  defp run_adopt_hook(opts, event, paths) do
+    case Keyword.get(opts, :operation_hook) do
+      hook when is_function(hook, 2) -> hook.(event, paths)
+      nil -> :ok
+      _hook -> {:error, :invalid_operation_hook}
+    end
+  end
+
   defp fork_cwd(metadata, source_jsonl_path, opts) do
     case Keyword.get(opts, :rewrite_cwd) do
       cwd when is_binary(cwd) ->
@@ -304,8 +535,10 @@ defmodule Sigma.Session.SessionFiles do
         :ok
 
       {:error, _reason} = error ->
-        rm_optional(target_jsonl_path)
-        error
+        case rm_optional(target_jsonl_path) do
+          :ok -> error
+          cleanup_error -> {:error, {:fork_rollback_failed, error, cleanup_error}}
+        end
     end
   end
 

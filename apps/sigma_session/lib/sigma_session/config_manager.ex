@@ -15,6 +15,7 @@ defmodule Sigma.Session.ConfigManager do
   @max_session_key_component_bytes 255
 
   @default_system_prompt ""
+  @default_permissions %{"default" => "allow", "rules" => %{}}
   @known_model_metadata %{
     "MiniMax-M3" => %{"contextWindow" => 512_000, "maxTokens" => 128_000},
     "MiniMax-M2.7" => %{"contextWindow" => 204_800, "maxTokens" => 131_072},
@@ -102,6 +103,7 @@ defmodule Sigma.Session.ConfigManager do
       "active_provider_id" => active_provider_id,
       "system_prompt" => system_prompt,
       "disabled_global_skills" => disabled_global_skill_names(settings),
+      "permissions" => permission_settings(settings),
       "credentials" => credentials,
       "providers" => providers
     }
@@ -123,7 +125,12 @@ defmodule Sigma.Session.ConfigManager do
     settings =
       Map.merge(existing_settings, %{
         "defaultProvider" => config["active_provider_id"],
-        "defaultModel" => (active_provider && active_provider["model"]) || ""
+        "defaultModel" => (active_provider && active_provider["model"]) || "",
+        "permissions" =>
+          normalized_permission_settings(
+            config["permissions"],
+            permission_settings(existing_settings)
+          )
       })
 
     save_json(@settings_file, settings)
@@ -173,6 +180,34 @@ defmodule Sigma.Session.ConfigManager do
 
     {:ok, config}
   end
+
+  @doc "Returns the effective closed-set permission policy with atom actions."
+  def get_permissions do
+    settings = load_json(@settings_file, %{})
+
+    case parse_permissions(settings["permissions"]) do
+      {:ok, %{default: default, rules: rules}, _settings} ->
+        %{default: default, rules: rules}
+
+      {:error, _reason} ->
+        %{default: :allow, rules: %{}}
+    end
+  end
+
+  @doc "Validates and persists the permission policy in settings.json."
+  def update_permissions(config) when is_map(config) do
+    with {:ok, _policy, permission_settings} <- parse_permissions(config) do
+      settings =
+        @settings_file
+        |> load_json(%{})
+        |> Map.put("permissions", permission_settings)
+
+      :ok = save_json(@settings_file, settings)
+      {:ok, permission_settings}
+    end
+  end
+
+  def update_permissions(_config), do: {:error, :invalid_permission_config}
 
   # Credentials Management
 
@@ -741,6 +776,65 @@ defmodule Sigma.Session.ConfigManager do
     File.mkdir_p!(Path.dirname(path))
     File.write!(path, Jason.encode!(data, pretty: true))
   end
+
+  defp permission_settings(settings) do
+    case parse_permissions(settings["permissions"]) do
+      {:ok, _policy, permission_settings} -> permission_settings
+      {:error, _reason} -> @default_permissions
+    end
+  end
+
+  defp normalized_permission_settings(nil, fallback), do: fallback
+
+  defp normalized_permission_settings(config, fallback) do
+    case parse_permissions(config) do
+      {:ok, _policy, permission_settings} -> permission_settings
+      {:error, _reason} -> fallback
+    end
+  end
+
+  defp parse_permissions(nil), do: {:ok, %{default: :allow, rules: %{}}, @default_permissions}
+
+  defp parse_permissions(config) when is_map(config) do
+    default_value = Map.get(config, "default", Map.get(config, :default, "allow"))
+    rules_value = Map.get(config, "rules", Map.get(config, :rules, %{}))
+
+    with {:ok, default, default_string} <- permission_action(default_value),
+         {:ok, rules, string_rules} <- permission_rules(rules_value) do
+      {:ok, %{default: default, rules: rules}, %{"default" => default_string, "rules" => string_rules}}
+    end
+  end
+
+  defp parse_permissions(_config), do: {:error, :invalid_permission_config}
+
+  defp permission_rules(rules) when is_map(rules) do
+    Enum.reduce_while(rules, {:ok, %{}, %{}}, fn
+      {tool_name, action}, {:ok, parsed, strings}
+      when is_binary(tool_name) and tool_name != "" ->
+        case permission_action(action) do
+          {:ok, parsed_action, string_action} ->
+            {:cont,
+             {:ok, Map.put(parsed, tool_name, parsed_action),
+              Map.put(strings, tool_name, string_action)}}
+
+          {:error, _reason} = error ->
+            {:halt, error}
+        end
+
+      {_tool_name, _action}, _acc ->
+        {:halt, {:error, :invalid_permission_tool_name}}
+    end)
+  end
+
+  defp permission_rules(_rules), do: {:error, :invalid_permission_rules}
+
+  defp permission_action("allow"), do: {:ok, :allow, "allow"}
+  defp permission_action("ask"), do: {:ok, :ask, "ask"}
+  defp permission_action("deny"), do: {:ok, :deny, "deny"}
+  defp permission_action(:allow), do: {:ok, :allow, "allow"}
+  defp permission_action(:ask), do: {:ok, :ask, "ask"}
+  defp permission_action(:deny), do: {:ok, :deny, "deny"}
+  defp permission_action(action), do: {:error, {:invalid_permission_action, action}}
 
   defp load_text(filename, default) do
     path = Path.join(get_config_dir(), filename)

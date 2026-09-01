@@ -3,7 +3,8 @@ defmodule Sigma.Session.Log do
   Public API for session persistence and replay.
   """
 
-  alias Sigma.Session.{Journal, Storage.JsonlFile}
+  alias Sigma.Session.{EntryEncoder, Journal, Storage.JsonlFile}
+  alias Sigma.Session.Journal.Index
 
   @doc """
   Lists all session files in the given directory.
@@ -29,6 +30,21 @@ defmodule Sigma.Session.Log do
     else
       {:ok, []}
     end
+  end
+
+  @doc "Returns bounded session summaries without replaying complete journals."
+  def list_session_summaries(dir, opts \\ []) do
+    Sigma.Session.Operations.list_summaries(dir, opts)
+  end
+
+  @doc "Publishes a stable-length machine-readable session dump."
+  def dump(storage_id, output_path, opts \\ []) do
+    Sigma.Session.Operations.dump(storage_id, output_path, opts)
+  end
+
+  @doc "Publishes a stable-length Markdown export of the active branch."
+  def export(storage_id, output_path, opts \\ []) do
+    Sigma.Session.Operations.export(storage_id, output_path, opts)
   end
 
   @doc """
@@ -73,8 +89,11 @@ defmodule Sigma.Session.Log do
       {:ok, entry} ->
         storage_mod.append(storage_id, entry)
 
-      {:ignore} ->
+      :ignored ->
         :ok
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -105,13 +124,12 @@ defmodule Sigma.Session.Log do
          :ok <- validate_model_change_id(model_id, :model_id),
          {:ok, snapshot} <- mutation_snapshot(storage_id, storage_mod),
          :ok <- validate_model_change_snapshot(snapshot) do
-      entry = %{
-        "type" => "model_change",
-        "id" => generate_short_id(),
-        "parentId" => snapshot.active_leaf_id,
-        "timestamp" => DateTime.utc_now() |> DateTime.to_iso8601(),
-        "model" => "#{provider_id}/#{model_id}"
-      }
+      {:ok, entry} =
+        EntryEncoder.encode(
+          {:model_change, provider_id, model_id},
+          snapshot.active_leaf_id,
+          true
+        )
 
       case storage_mod.append(storage_id, entry) do
         :ok -> {:ok, entry["id"]}
@@ -127,18 +145,12 @@ defmodule Sigma.Session.Log do
     do: {:error, {:invalid_session_header, :cwd}}
 
   defp append_session_header(storage_id, cwd, storage_mod) do
-    header = %{
-      "type" => "session",
-      "version" => 3,
-      "id" => generate_session_id(),
-      "timestamp" => DateTime.utc_now() |> DateTime.to_iso8601(),
-      "cwd" => cwd
-    }
-
-    case storage_mod.append(storage_id, header) do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:storage_append_failed, reason}}
-      other -> {:error, {:storage_append_failed, other}}
+    with {:ok, header} <- EntryEncoder.encode({:agent_start, cwd}, nil, false) do
+      case storage_mod.append(storage_id, header) do
+        :ok -> :ok
+        {:error, reason} -> {:error, {:storage_append_failed, reason}}
+        other -> {:error, {:storage_append_failed, other}}
+      end
     end
   end
 
@@ -170,37 +182,26 @@ defmodule Sigma.Session.Log do
   @doc """
   Forks a session at the given index.
   """
-  def fork(source_storage_id, target_storage_id, message_count, cwd, storage_mod \\ JsonlFile) do
-    case storage_mod.read(source_storage_id) do
-      {:ok, entries} ->
-        # Take all non-message entries plus up to message_count message entries,
-        # preserving order. This correctly skips compaction and other entry types.
-        prefix = take_through_nth_message(entries, message_count)
+  def fork(source_storage_id, target_storage_id, message_count, cwd, storage_mod \\ JsonlFile)
 
-        # Find the session header to get the parent ID
-        parent_header = Enum.find(entries, fn e -> e["type"] == "session" end)
-        parent_id = if parent_header, do: parent_header["id"], else: nil
-
-        new_session_id = generate_session_id()
-
-        new_header = %{
-          "type" => "session",
-          "version" => 3,
-          "id" => new_session_id,
-          "timestamp" => DateTime.utc_now() |> DateTime.to_iso8601(),
-          "cwd" => cwd,
-          "parentSession" => parent_id
-        }
-
-        case write_fork_entries(target_storage_id, prefix ++ [new_header], storage_mod) do
-          :ok -> {:ok, new_session_id}
-          {:error, _reason} = error -> error
-        end
-
-      _ ->
-        {:error, "Could not fork session"}
+  def fork(source_storage_id, target_storage_id, message_count, cwd, storage_mod)
+      when is_integer(message_count) and message_count >= 0 do
+    with {:ok, entries, storage_diagnostics} <- read_entries(source_storage_id, storage_mod),
+         {:ok, index} <- fork_index(entries, storage_diagnostics),
+         {:ok, nodes} <- branch_for_message_count(index, message_count),
+         {:ok, header} <- fresh_fork_header(index.header, cwd),
+         :ok <-
+           write_fork_entries(
+             target_storage_id,
+             [header | Enum.map(nodes, & &1.entry)],
+             storage_mod
+           ) do
+      {:ok, header["id"]}
     end
   end
+
+  def fork(_source_storage_id, _target_storage_id, _message_count, _cwd, _storage_mod),
+    do: {:error, :invalid_message_count}
 
   defp write_fork_entries(target_storage_id, entries, storage_mod) do
     with :ok <- ensure_absent(target_storage_id),
@@ -292,26 +293,82 @@ defmodule Sigma.Session.Log do
         cwd,
         storage_mod \\ JsonlFile
       ) do
-    case storage_mod.read(source_storage_id) do
-      {:ok, entries} ->
-        msg_entries = Enum.filter(entries, fn e -> e["type"] == "message" end)
+    with {:ok, entries, storage_diagnostics} <- read_entries(source_storage_id, storage_mod),
+         {:ok, index} <- fork_index(entries, storage_diagnostics),
+         {:ok, nodes} <- branch_for_message(index, message_id),
+         {:ok, header} <- fresh_fork_header(index.header, cwd),
+         :ok <-
+           write_fork_entries(
+             target_storage_id,
+             [header | Enum.map(nodes, & &1.entry)],
+             storage_mod
+           ) do
+      {:ok, header["id"]}
+    end
+  end
 
-        count =
-          case message_id do
-            :all ->
-              length(msg_entries)
+  defp fork_index(entries, storage_diagnostics) do
+    index = Index.build(entries)
 
-            id ->
-              msg_entries
-              |> Enum.take_while(fn e -> get_in(e, ["message", "id"]) != id end)
-              |> length()
-              |> Kernel.+(1)
-          end
+    cond do
+      is_nil(index.header) ->
+        {:error, {:invalid_journal, :missing_session_header}}
 
-        fork(source_storage_id, target_storage_id, count, cwd, storage_mod)
+      true ->
+        {:ok, %{index | diagnostics: storage_diagnostics ++ index.diagnostics}}
+    end
+  end
 
-      _ ->
-        {:error, "Could not fork session"}
+  defp branch_for_message(index, :all) do
+    case Index.path(index, :latest) do
+      {:ok, {_leaf_id, nodes}} -> {:ok, nodes}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp branch_for_message(index, message_id) when is_binary(message_id) do
+    matches =
+      Enum.filter(index.ordered, fn node ->
+        get_in(node, [:entry, "message", "id"]) == message_id
+      end)
+
+    case matches do
+      [] ->
+        {:error, :message_not_found}
+
+      [%{entry: %{"id" => entry_id}}] ->
+        branch_for_entry(index, entry_id)
+
+      [_first, _second | _rest] ->
+        {:error, :ambiguous_message_id}
+    end
+  end
+
+  defp branch_for_message(_index, _message_id), do: {:error, :message_not_found}
+
+  defp branch_for_message_count(_index, 0), do: {:ok, []}
+
+  defp branch_for_message_count(index, message_count) do
+    with {:ok, {_leaf_id, nodes}} <- Index.path(index, :latest) do
+      message_nodes = Enum.filter(nodes, &match?(%{entry: %{"type" => "message"}}, &1))
+
+      case Enum.at(message_nodes, message_count - 1) do
+        nil -> {:ok, nodes}
+        %{entry: %{"id" => entry_id}} -> branch_for_entry(index, entry_id)
+      end
+    end
+  end
+
+  defp branch_for_entry(index, entry_id) do
+    case Index.path(index, entry_id) do
+      {:ok, {_leaf_id, nodes}} -> {:ok, nodes}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp fresh_fork_header(source_header, cwd) do
+    with {:ok, header} <- EntryEncoder.encode({:agent_start, cwd}, nil, false) do
+      {:ok, Map.put(header, "parentSession", source_header["id"])}
     end
   end
 
@@ -319,124 +376,64 @@ defmodule Sigma.Session.Log do
   Appends a compaction entry to the log.
   """
   def compact(storage_id, summary, first_kept_id, storage_mod \\ JsonlFile) do
-    parent_id =
-      case storage_mod.read(storage_id) do
-        {:ok, entries} -> find_leaf_id(entries)
-        _ -> nil
-      end
+    summary_message = %{content: summary}
 
-    entry = %{
-      "type" => "compaction",
-      "id" => generate_short_id(),
-      "parentId" => parent_id,
-      "timestamp" => DateTime.utc_now() |> DateTime.to_iso8601(),
-      "summary" => summary,
-      "firstKeptId" => first_kept_id
-    }
-
-    storage_mod.append(storage_id, entry)
+    with {:ok, snapshot} <- mutation_snapshot(storage_id, storage_mod),
+         :ok <- validate_model_change_snapshot(snapshot),
+         {:ok, entry} <-
+           EntryEncoder.encode(
+             {:compact, summary_message,
+              Map.get(snapshot.message_entry_ids, first_kept_id, first_kept_id)},
+             snapshot.active_leaf_id,
+             is_map(snapshot.header)
+           ) do
+      storage_mod.append(storage_id, entry)
+    end
   end
 
   defp event_to_entry(storage_id, event, storage_mod) do
     case event do
-      {:message_end, message} ->
-        # We need parent_id. For now we read the storage to find the last entry.
-        parent_id =
-          case storage_mod.read(storage_id) do
-            {:ok, entries} -> find_leaf_id(entries)
-            _ -> nil
-          end
+      {type, _rest} when type in [:agent_start, :message_end] ->
+        encode_event_from_snapshot(storage_id, event, storage_mod)
 
-        entry = %{
-          "type" => "message",
-          "id" => generate_short_id(),
-          "parentId" => parent_id,
-          "timestamp" => DateTime.utc_now() |> DateTime.to_iso8601(),
-          "message" => message_to_map(message)
-        }
-
-        {:ok, entry}
-
-      {:compact, summary_msg, first_kept_id} ->
-        parent_id =
-          case storage_mod.read(storage_id) do
-            {:ok, entries} -> find_leaf_id(entries)
-            _ -> nil
-          end
-
-        entry = %{
-          "type" => "compaction",
-          "id" => generate_short_id(),
-          "parentId" => parent_id,
-          "timestamp" => DateTime.utc_now() |> DateTime.to_iso8601(),
-          "summary" => summary_msg.content,
-          "firstKeptId" => first_kept_id
-        }
-
-        {:ok, entry}
-
-      {:agent_start, cwd} ->
-        case storage_mod.read(storage_id) do
-          {:ok, entries} ->
-            if Enum.any?(entries, fn e -> e["type"] == "session" end) do
-              {:ignore}
-            else
-              header = %{
-                "type" => "session",
-                "version" => 3,
-                "id" => generate_session_id(),
-                "timestamp" => DateTime.utc_now() |> DateTime.to_iso8601(),
-                "cwd" => cwd
-              }
-
-              {:ok, header}
-            end
-
-          _ ->
-            {:ignore}
-        end
+      {:compact, _summary_msg, _first_kept_id} ->
+        encode_event_from_snapshot(storage_id, event, storage_mod)
 
       _ ->
-        {:ignore}
+        :ignored
     end
   end
 
-  defp take_through_nth_message(entries, n) do
-    {prefix, _} =
-      Enum.reduce(entries, {[], 0}, fn entry, {acc, msg_count} ->
-        if msg_count >= n do
-          {acc, msg_count}
-        else
-          new_count = if entry["type"] == "message", do: msg_count + 1, else: msg_count
-          {[entry | acc], new_count}
-        end
+  defp encode_event_from_snapshot(storage_id, event, storage_mod) do
+    with {:ok, snapshot} <- mutation_snapshot(storage_id, storage_mod),
+         :ok <- validate_compatible_append_snapshot(snapshot),
+         result <-
+           EntryEncoder.encode(
+             normalize_compatible_event(event, snapshot),
+             snapshot.active_leaf_id,
+             is_map(snapshot.header)
+           ) do
+      result
+    end
+  end
+
+  defp normalize_compatible_event({:compact, summary, first_kept_id}, snapshot) do
+    {:compact, summary, Map.get(snapshot.message_entry_ids, first_kept_id, first_kept_id)}
+  end
+
+  defp normalize_compatible_event(event, _snapshot), do: event
+
+  defp validate_compatible_append_snapshot(%{header: nil, diagnostics: diagnostics}) do
+    blocking =
+      Enum.reject(diagnostics, fn
+        %{kind: :invalid_payload} -> true
+        %{kind: :invalid_header, reason: :missing_header} -> true
+        _diagnostic -> false
       end)
 
-    Enum.reverse(prefix)
+    if blocking == [], do: :ok, else: {:error, {:invalid_journal, blocking}}
   end
 
-  defp find_leaf_id(entries) do
-    entries
-    |> Enum.reverse()
-    |> Enum.find(fn e -> e["type"] != "session" end)
-    |> case do
-      nil -> nil
-      entry -> entry["id"]
-    end
-  end
+  defp validate_compatible_append_snapshot(snapshot), do: validate_model_change_snapshot(snapshot)
 
-  defp generate_short_id() do
-    :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
-  end
-
-  defp generate_session_id() do
-    :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
-  end
-
-  defp message_to_map(message) do
-    message
-    |> Map.from_struct()
-    |> Enum.reject(fn {_, v} -> is_nil(v) end)
-    |> Map.new(fn {k, v} -> {Atom.to_string(k), v} end)
-  end
 end

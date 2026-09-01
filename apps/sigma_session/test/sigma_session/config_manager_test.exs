@@ -20,6 +20,76 @@ defmodule Sigma.Session.ConfigManagerTest do
   end
 
   @tag :tmp_dir
+  test "permission configuration defaults to allow-all when missing or malformed" do
+    assert %{default: :allow, rules: %{}} = ConfigManager.get_permissions()
+
+    File.mkdir_p!(ConfigManager.agent_dir())
+
+    File.write!(
+      Path.join(ConfigManager.agent_dir(), "settings.json"),
+      Jason.encode!(%{
+        "permissions" => %{
+          "default" => "ask",
+          "rules" => %{"write" => "sometimes"}
+        }
+      })
+    )
+
+    assert %{default: :allow, rules: %{}} = ConfigManager.get_permissions()
+    assert %{"default" => "allow", "rules" => %{}} =
+             ConfigManager.get_config()["permissions"]
+  end
+
+  @tag :tmp_dir
+  test "parses and persists only the closed permission action set without creating atoms" do
+    unknown_action = "permission_action_#{System.unique_integer([:positive])}"
+    assert_raise ArgumentError, fn -> String.to_existing_atom(unknown_action) end
+
+    assert {:error, {:invalid_permission_action, ^unknown_action}} =
+             ConfigManager.update_permissions(%{
+               "default" => "allow",
+               "rules" => %{"write" => unknown_action}
+             })
+
+    assert_raise ArgumentError, fn -> String.to_existing_atom(unknown_action) end
+
+    assert {:ok, %{"default" => "allow", "rules" => rules}} =
+             ConfigManager.update_permissions(%{
+               "default" => "allow",
+               "rules" => %{
+                 "write" => "ask",
+                 "edit" => "ask",
+                 "bash" => "deny",
+                 "read" => "allow"
+               }
+             })
+
+    assert rules == %{
+             "write" => "ask",
+             "edit" => "ask",
+             "bash" => "deny",
+             "read" => "allow"
+           }
+
+    assert %{default: :allow, rules: atom_rules} = ConfigManager.get_permissions()
+
+    assert atom_rules == %{
+             "write" => :ask,
+             "edit" => :ask,
+             "bash" => :deny,
+             "read" => :allow
+           }
+
+    saved =
+      ConfigManager.agent_dir()
+      |> Path.join("settings.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert saved["permissions"] == %{"default" => "allow", "rules" => rules}
+  end
+
+  @tag :tmp_dir
   test "uses default model as active selection while preserving configured models" do
     File.mkdir_p!(ConfigManager.agent_dir())
 

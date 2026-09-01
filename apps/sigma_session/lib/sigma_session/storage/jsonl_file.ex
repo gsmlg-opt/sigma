@@ -12,7 +12,31 @@ defmodule Sigma.Session.Storage.JsonlFile do
   @impl Storage
   def append(path, entry) do
     with {:ok, json} <- Jason.encode(entry) do
-      File.write(path, json <> "\n", [:append])
+      append_line(path, json <> "\n")
+    end
+  end
+
+  defp append_line(path, line) do
+    case File.open(path, [:read, :append], fn io ->
+           with {:ok, size} <- :file.position(io, :eof),
+                :ok <- validate_append_position(io, size) do
+             IO.binwrite(io, line)
+           end
+         end) do
+      {:ok, result} -> result
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp validate_append_position(_io, 0), do: :ok
+
+  defp validate_append_position(io, size) do
+    with {:ok, _position} <- :file.position(io, size - 1),
+         "\n" <- IO.binread(io, 1) do
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
+      _not_terminated -> {:error, :trailing_incomplete_json}
     end
   end
 

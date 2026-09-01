@@ -219,6 +219,29 @@ defmodule Sigma.Session.SessionFilesTest do
     assert read_meta!(tmp_dir, "new") == %{"cwd" => "/tmp/raced"}
   end
 
+  test "rename reports a composite error when JSONL rollback loses a race", %{tmp_dir: tmp_dir} do
+    File.write!(jsonl_path(tmp_dir, "old"), "original\n")
+    write_meta!(tmp_dir, "old", %{"cwd" => "/tmp/old"})
+
+    with_session_file_hook(
+      fn
+        :before_meta_move, %{target: target} ->
+          File.write!(jsonl_path(tmp_dir, "old"), "racing owner\n")
+          File.write!(target, Jason.encode!(%{"cwd" => "/tmp/raced"}))
+
+        _event, _paths ->
+          :ok
+      end,
+      fn ->
+        assert {:error, {:rename_rollback_failed, {:error, :already_exists}, _rollback}} =
+                 SessionFiles.rename(tmp_dir, "old", "new")
+      end
+    )
+
+    assert File.read!(jsonl_path(tmp_dir, "old")) == "racing owner\n"
+    assert File.read!(jsonl_path(tmp_dir, "new")) == "original\n"
+  end
+
   test "delete removes jsonl and metadata together", %{tmp_dir: tmp_dir} do
     File.write!(jsonl_path(tmp_dir, "gone"), "log\n")
     write_meta!(tmp_dir, "gone", %{"cwd" => "/tmp/worktree"})
@@ -259,7 +282,10 @@ defmodule Sigma.Session.SessionFilesTest do
     assert read_meta!(tmp_dir, "target") == metadata
 
     assert {:ok, entries} = JsonlFile.read(jsonl_path(tmp_dir, "target"))
-    assert %{"type" => "session", "cwd" => "/tmp/project/.trees/feature"} = List.last(entries)
+    assert [%{"type" => "session", "cwd" => "/tmp/project/.trees/feature"} | _branch] =
+             entries
+
+    assert 1 == Enum.count(entries, &(&1["type"] == "session"))
 
     assert {:ok, [%Message{id: "msg_1"}]} = Log.replay(jsonl_path(tmp_dir, "target"))
   end
@@ -334,7 +360,118 @@ defmodule Sigma.Session.SessionFilesTest do
     assert read_meta!(tmp_dir, "target") == %{metadata | "cwd" => "/tmp/project"}
 
     assert {:ok, entries} = JsonlFile.read(jsonl_path(tmp_dir, "target"))
-    assert %{"type" => "session", "cwd" => "/tmp/project"} = List.last(entries)
+    assert [%{"type" => "session", "cwd" => "/tmp/project"} | _branch] = entries
+  end
+
+  test "adopt relocates conversation bytes and preserves structural metadata", %{tmp_dir: tmp_dir} do
+    source_dir = Path.join(tmp_dir, "source-sessions")
+    target_dir = Path.join(tmp_dir, "target-sessions")
+    replacement_cwd = Path.join(tmp_dir, "replacement-repo")
+    File.mkdir_p!(source_dir)
+    File.mkdir_p!(replacement_cwd)
+    source_jsonl = write_session!(source_dir, "orphan")
+
+    metadata = %{
+      "cwd" => "/missing/original",
+      "branch" => "feature/adopt",
+      "worktree" => true,
+      "mcp_server_ids" => ["local"]
+    }
+
+    write_meta!(source_dir, "orphan", metadata)
+    conversation_bytes = File.read!(source_jsonl)
+
+    assert :ok =
+             SessionFiles.adopt(
+               source_dir,
+               target_dir,
+               "orphan",
+               replacement_cwd
+             )
+
+    refute File.exists?(jsonl_path(source_dir, "orphan"))
+    refute File.exists?(meta_path(source_dir, "orphan"))
+    assert File.read!(jsonl_path(target_dir, "orphan")) == conversation_bytes
+
+    assert read_meta!(target_dir, "orphan") ==
+             %{metadata | "cwd" => Path.expand(replacement_cwd)}
+  end
+
+  test "adopt refuses target conflicts without changing the source", %{tmp_dir: tmp_dir} do
+    source_dir = Path.join(tmp_dir, "source-sessions")
+    target_dir = Path.join(tmp_dir, "target-sessions")
+    replacement_cwd = Path.join(tmp_dir, "replacement-repo")
+    File.mkdir_p!(source_dir)
+    File.mkdir_p!(target_dir)
+    File.mkdir_p!(replacement_cwd)
+    source_jsonl = write_session!(source_dir, "orphan")
+    write_meta!(source_dir, "orphan", %{"cwd" => "/missing/original"})
+    File.write!(jsonl_path(target_dir, "orphan"), "existing target\n")
+    source_before = File.read!(source_jsonl)
+
+    assert {:error, :already_exists} =
+             SessionFiles.adopt(source_dir, target_dir, "orphan", replacement_cwd)
+
+    assert File.read!(source_jsonl) == source_before
+    assert read_meta!(source_dir, "orphan") == %{"cwd" => "/missing/original"}
+    assert File.read!(jsonl_path(target_dir, "orphan")) == "existing target\n"
+  end
+
+  test "adopt rolls target publication back when source cleanup fails", %{tmp_dir: tmp_dir} do
+    source_dir = Path.join(tmp_dir, "source-sessions")
+    target_dir = Path.join(tmp_dir, "target-sessions")
+    replacement_cwd = Path.join(tmp_dir, "replacement-repo")
+    File.mkdir_p!(source_dir)
+    File.mkdir_p!(replacement_cwd)
+    source_jsonl = write_session!(source_dir, "orphan")
+    write_meta!(source_dir, "orphan", %{"cwd" => "/missing/original", "branch" => "main"})
+    source_before = File.read!(source_jsonl)
+
+    hook = fn
+      :before_adopt_source_cleanup, _paths -> {:error, :injected_cleanup_failure}
+      _event, _paths -> :ok
+    end
+
+    assert {:error, :injected_cleanup_failure} =
+             SessionFiles.adopt(source_dir, target_dir, "orphan", replacement_cwd,
+               operation_hook: hook
+             )
+
+    assert File.read!(source_jsonl) == source_before
+    assert read_meta!(source_dir, "orphan") == %{
+             "cwd" => "/missing/original",
+             "branch" => "main"
+           }
+
+    refute File.exists?(jsonl_path(target_dir, "orphan"))
+    refute File.exists?(meta_path(target_dir, "orphan"))
+    assert Path.wildcard(Path.join(target_dir, ".*.tmp")) == []
+  end
+
+  test "adopt never deletes a target created by a publication race", %{tmp_dir: tmp_dir} do
+    source_dir = Path.join(tmp_dir, "source-sessions")
+    target_dir = Path.join(tmp_dir, "target-sessions")
+    replacement_cwd = Path.join(tmp_dir, "replacement-repo")
+    File.mkdir_p!(source_dir)
+    File.mkdir_p!(replacement_cwd)
+    source_jsonl = write_session!(source_dir, "orphan")
+    write_meta!(source_dir, "orphan", %{"cwd" => "/missing/original"})
+    source_before = File.read!(source_jsonl)
+
+    with_session_file_hook(
+      fn
+        :before_jsonl_publish, %{target: target} -> File.write!(target, "racing owner\n")
+        _event, _paths -> :ok
+      end,
+      fn ->
+        assert {:error, :already_exists} =
+                 SessionFiles.adopt(source_dir, target_dir, "orphan", replacement_cwd)
+      end
+    )
+
+    assert File.read!(source_jsonl) == source_before
+    assert File.read!(jsonl_path(target_dir, "orphan")) == "racing owner\n"
+    refute File.exists?(meta_path(target_dir, "orphan"))
   end
 
   defp jsonl_path(dir, id), do: Path.join(dir, "#{id}.jsonl")
