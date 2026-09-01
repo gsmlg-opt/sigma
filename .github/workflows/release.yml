@@ -136,7 +136,8 @@ jobs:
       - name: Install dependencies
         run: |
           mix deps.get
-          mix assets.setup
+          mix npm.install --frozen
+          mix duskmoon.bundle
 
       - name: Check Elixir formatting
         run: mix format --check-formatted
@@ -231,7 +232,8 @@ jobs:
       - name: Install production dependencies
         run: |
           mix deps.get --only prod
-          mix assets.setup
+          mix npm.install --frozen
+          mix duskmoon.bundle
 
       - name: Rebuild release applications
         run: mix compile --force
@@ -479,6 +481,8 @@ jobs:
         run: |
           set -euo pipefail
           grep -Fq "version: \"${VERSION}\"" mix.exs
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "v${VERSION}" -m "Sigma v${VERSION}"
           git push --atomic origin \
             "${SOURCE_SHA}:refs/heads/${BRANCH}" \

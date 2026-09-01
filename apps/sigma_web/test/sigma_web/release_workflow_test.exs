@@ -60,4 +60,23 @@ defmodule Sigma.Web.ReleaseWorkflowTest do
     assert nif_offset < package_offset
     assert source =~ "mix compile --force"
   end
+
+  test "freezes web dependencies and configures the tag identity" do
+    source = File.read!(@workflow_path)
+
+    assert length(Regex.scan(~r/mix npm\.install --frozen/, source)) == 2
+    refute source =~ "mix assets.setup"
+
+    name_config = ~S|git config user.name "github-actions[bot]"|
+    email_config = ~S|git config user.email "41898282+github-actions[bot]@users.noreply.github.com"|
+
+    assert length(:binary.matches(source, name_config)) == 2
+    assert length(:binary.matches(source, email_config)) == 2
+
+    assert [{identity_offset, _length} | _rest] =
+             source |> :binary.matches(name_config) |> Enum.reverse()
+
+    assert {tag_offset, _length} = :binary.match(source, ~S|git tag -a "v${VERSION}"|)
+    assert identity_offset < tag_offset
+  end
 end
