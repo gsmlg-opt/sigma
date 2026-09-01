@@ -71,6 +71,20 @@ defmodule Sigma.Coding.Utils.PathUtilsTest do
       assert reason =~ "outside of the current working directory"
     end
 
+    test "rejects an intermediate directory symlink escaping cwd" do
+      tmp = Path.join(System.tmp_dir!(), "pi_path_components_#{System.unique_integer([:positive])}")
+      cwd = Path.join(tmp, "repo")
+      outside = Path.join(tmp, "outside")
+      File.mkdir_p!(cwd)
+      File.mkdir_p!(Path.join(outside, "nested"))
+      File.write!(Path.join(outside, "nested/file"), "outside")
+      File.ln_s!(outside, Path.join(cwd, "escape"))
+      on_exit(fn -> File.rm_rf!(tmp) end)
+
+      assert {:error, reason} = PathUtils.safe_resolve("escape/nested/file", cwd)
+      assert reason =~ "outside of the current working directory"
+    end
+
     test "allows symlink pointing within cwd" do
       tmp = System.tmp_dir!()
       cwd = Path.join(tmp, "pi_test_cwd_#{System.unique_integer([:positive])}")

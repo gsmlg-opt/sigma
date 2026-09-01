@@ -24,7 +24,7 @@ defmodule Sigma.Coding.Utils.PathUtils do
          {:ok, real_path} <- resolve_real_path(resolved_path) do
       if within_cwd?(real_path, real_cwd) or
            allowed_external_path?(resolved_path, real_path, opts) do
-        {:ok, resolved_path}
+        {:ok, real_path}
       else
         {:error,
          "Access denied: Path '#{path}' is outside of the current working directory '#{cwd}'."}
@@ -32,6 +32,14 @@ defmodule Sigma.Coding.Utils.PathUtils do
     else
       {:error, :symlink_loop} ->
         {:error, "Access denied: Path '#{path}' contains a symlink loop."}
+    end
+  end
+
+  @doc "Returns the symlink-resolved resource key used by access checks and scheduling."
+  def canonical_resource_key(path, cwd, opts \\ []) do
+    with {:ok, resolved_path} <- safe_resolve(path, cwd, opts),
+         {:ok, real_path} <- resolve_real_path(resolved_path) do
+      {:ok, Path.expand(real_path)}
     end
   end
 
@@ -44,31 +52,28 @@ defmodule Sigma.Coding.Utils.PathUtils do
   end
 
   defp resolve_real_path(path, depth) do
-    case File.read_link(path) do
-      {:ok, target} ->
-        target =
-          if Path.type(target) == :absolute,
-            do: target,
-            else: Path.expand(target, Path.dirname(path))
+    path
+    |> Path.expand()
+    |> Path.split()
+    |> Enum.reduce_while({:ok, ""}, fn segment, {:ok, resolved} ->
+      candidate = if resolved == "", do: segment, else: Path.join(resolved, segment)
 
-        resolve_real_path(target, depth + 1)
+      case File.read_link(candidate) do
+        {:ok, target} ->
+          target =
+            if Path.type(target) == :absolute,
+              do: target,
+              else: Path.expand(target, Path.dirname(candidate))
 
-      {:error, :enoent} ->
-        parent = Path.dirname(path)
-
-        if parent == path do
-          {:ok, path}
-        else
-          case resolve_real_path(parent, depth + 1) do
-            {:ok, real_parent} -> {:ok, Path.join(real_parent, Path.basename(path))}
-            error -> error
+          case resolve_real_path(target, depth + 1) do
+            {:ok, real_target} -> {:cont, {:ok, real_target}}
+            {:error, _reason} = error -> {:halt, error}
           end
-        end
 
-      {:error, _} ->
-        # Not a symlink — path is its own real location.
-        {:ok, path}
-    end
+        {:error, _reason} ->
+          {:cont, {:ok, candidate}}
+      end
+    end)
   end
 
   defp within_cwd?(path, cwd) do

@@ -67,7 +67,7 @@ defmodule Sigma.Coding.PermissionPolicy do
 
   @impl true
   def init(opts) do
-    default = Keyword.get(opts, :default, :ask)
+    default = Keyword.get(opts, :default, :allow)
     rules = Keyword.get(opts, :rules, %{})
     {:ok, %{default: default, rules: rules}}
   end

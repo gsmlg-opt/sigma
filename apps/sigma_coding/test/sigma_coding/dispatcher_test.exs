@@ -12,6 +12,8 @@ defmodule Sigma.Coding.DispatcherTest do
     def description, do: "A mock tool for testing"
     @impl true
     def schema, do: %{}
+    @impl true
+    def metadata, do: %{effect: :read, concurrency: :shared, default_deadline_ms: 1_000}
 
     @impl true
     def execute(id, params, _opts) do
@@ -81,6 +83,7 @@ defmodule Sigma.Coding.DispatcherTest do
     assert (end_time - start_time) < 350
   end
 
+  @tag :capture_log
   test "dispatch_batch/3 handles tool crashes", %{task_supervisor: ts} do
     tool_calls = [
       %{id: "1", name: "mock_tool", arguments: %{"action" => "crash"}},
@@ -91,7 +94,7 @@ defmodule Sigma.Coding.DispatcherTest do
     
     {tc1, res1} = Enum.at(results, 0)
     assert tc1.id == "1"
-    assert {:error, reason} = res1
+    assert {:error, %Sigma.Coding.ToolError{kind: :crash, message: reason}} = res1
     assert reason =~ "mock crash"
 
     {tc2, res2} = Enum.at(results, 1)

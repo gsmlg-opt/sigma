@@ -39,6 +39,9 @@ defmodule Sigma.Coding.Tool do
   """
   @callback schema() :: map()
 
+  @doc "Returns optional scheduling and effect metadata. Missing fields are derived."
+  @callback metadata() :: map() | keyword()
+
   @doc """
   Executes the tool with the given parameters and options.
 
@@ -53,6 +56,8 @@ defmodule Sigma.Coding.Tool do
   """
   @callback execute(tool_call_id :: String.t(), params :: map(), opts :: opts()) ::
               {:ok, result()} | {:error, any()}
+
+  @optional_callbacks metadata: 0
 
   def name(tool) when is_atom(tool), do: tool.name()
   def name(%{name: name}), do: name
@@ -69,6 +74,10 @@ defmodule Sigma.Coding.Tool do
       description: description(tool),
       parameters: schema(tool)
     }
+  end
+
+  def metadata(tool, tool_call, opts \\ []) do
+    Sigma.Coding.ToolMetadata.resolve(tool, tool_call, opts)
   end
 
   def execute(tool, tool_call_id, params, opts) when is_atom(tool) do

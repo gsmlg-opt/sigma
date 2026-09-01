@@ -10,6 +10,7 @@ defmodule Sigma.Coding do
   def start(_type, _args) do
     children = [
       Sigma.Coding.Dispatcher,
+      Sigma.Coding.PendingToolRegistry,
       {Registry, keys: :unique, name: Sigma.Coding.MCP.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: Sigma.Coding.MCP.ClientSupervisor}
     ]

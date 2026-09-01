@@ -33,7 +33,7 @@ defmodule Sigma.Coding.PermissionInterceptor do
         session_id: session_id,
         log_session_id: log_session_id,
         tool_name: tool_call.name,
-        result: inspect(result)
+        result: result_class(result)
       }
     )
 
@@ -53,16 +53,7 @@ defmodule Sigma.Coding.PermissionInterceptor do
             {:deny, "Permission denied by policy for tool: #{tool_call.name}"}
 
           :ask ->
-            case run_permission_request_hooks(tool_call, opts) do
-              :proceed ->
-                invoke_request_fn(tool_call, opts)
-
-              {:allow, patched_args} ->
-                {:allow, patched_args}
-
-              {:deny, reason} ->
-                {:deny, reason}
-            end
+            resolve_ask(tool_call, opts)
         end
 
       Keyword.has_key?(opts, :allow_tool) ->
@@ -174,9 +165,45 @@ defmodule Sigma.Coding.PermissionInterceptor do
     if request_fn do
       request_fn.(tool_call)
     else
-      {:deny, "Permission required for tool '#{tool_call.name}' but no request function provided"}
+      {:deny, {:approval_required, tool_call.name}}
     end
   end
+
+  defp resolve_ask(tool_call, opts) do
+    resolution =
+      case run_permission_request_hooks(tool_call, opts) do
+        :proceed -> invoke_request_fn(tool_call, opts)
+        other -> other
+      end
+
+    run_pre_tool_use_after_approval(resolution, tool_call, opts)
+  end
+
+  defp run_pre_tool_use_after_approval(:allow, tool_call, opts) do
+    run_pre_tool_use_hooks(tool_call, opts)
+  end
+
+  defp run_pre_tool_use_after_approval({:allow, approval_patch}, tool_call, opts)
+       when is_map(approval_patch) do
+    patched_call = %{tool_call | arguments: Map.merge(tool_call.arguments, approval_patch)}
+
+    case run_pre_tool_use_hooks(patched_call, opts) do
+      :allow -> {:allow, approval_patch}
+      {:allow, hook_patch} -> {:allow, Map.merge(approval_patch, hook_patch)}
+      {:deny, _reason} = denied -> denied
+    end
+  end
+
+  defp run_pre_tool_use_after_approval({:deny, _reason} = denied, _tool_call, _opts),
+    do: denied
+
+  defp run_pre_tool_use_after_approval(_other, tool_call, _opts),
+    do: {:deny, {:invalid_approval_response, tool_call.name}}
+
+  defp result_class(:allow), do: :allow
+  defp result_class({:allow, _patch}), do: :allow
+  defp result_class({:deny, {:approval_required, _tool_name}}), do: :approval_required
+  defp result_class({:deny, _reason}), do: :deny
 
   defp build_hook_ctx(opts) do
     %{
