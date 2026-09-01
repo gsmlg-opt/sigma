@@ -288,7 +288,7 @@ const ChatInputHook = {
     }
 
     this.pushEvent("send_prompt", { value, images: result.images }, (reply) => {
-      if (reply?.status === "accepted") {
+      if (["accepted", "queued_as_steering", "queued_as_follow_up"].includes(reply?.status)) {
         this._setValue("")
         this._chatInput.clearFiles?.()
       }

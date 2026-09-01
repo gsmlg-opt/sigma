@@ -12,6 +12,19 @@ defmodule Sigma.Web.SessionSupervisorTest do
     def stream(_params), do: []
   end
 
+  defmodule AppendFailureStorage do
+    @behaviour Sigma.Session.Storage
+
+    @impl true
+    def append(_storage_id, _entry), do: {:error, :disk_full}
+
+    @impl true
+    def read(_storage_id), do: {:ok, []}
+
+    @impl true
+    def read_with_diagnostics(_storage_id), do: {:ok, [], []}
+  end
+
   setup context do
     repo = Path.join([System.tmp_dir!(), "ex-pi-session-supervisor-test", "#{context.test}"])
     File.rm_rf!(repo)
@@ -178,6 +191,58 @@ defmodule Sigma.Web.SessionSupervisorTest do
     assert Process.alive?(handle.repository)
   end
 
+  test "session permission overrides are visible and isolated", %{repo: repo} do
+    guarded_id = unique_session_id()
+    default_id = unique_session_id()
+
+    {:ok, guarded} =
+      Sigma.Agent.Runtime.get_session(repo, guarded_id,
+        model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+        provider: EmptyProvider,
+        cwd: repo,
+        permission_config: %{default: :allow, rules: %{"bash" => :ask, "write" => :deny}}
+      )
+
+    {:ok, default} =
+      Sigma.Agent.Runtime.get_session(repo, default_id,
+        model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+        provider: EmptyProvider,
+        cwd: repo
+      )
+
+    assert :ask = Sigma.Coding.PermissionPolicy.check(guarded.policy, "bash")
+    assert :deny = Sigma.Coding.PermissionPolicy.check(guarded.policy, "write")
+    assert :allow = Sigma.Coding.PermissionPolicy.check(guarded.policy, "unknown_mcp_tool")
+
+    assert :allow = Sigma.Coding.PermissionPolicy.check(default.policy, "bash")
+    assert :allow = Sigma.Coding.PermissionPolicy.check(default.policy, "write")
+  end
+
+  test "a durable append failure leaves canonical agent state unchanged", %{repo: repo} do
+    session_id = unique_session_id()
+    test_pid = self()
+
+    {:ok, handle} =
+      Sigma.Agent.Runtime.get_session(repo, session_id,
+        model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+        provider: Sigma.Web.MockProvider,
+        cwd: repo,
+        transcript_path: Path.join(repo, "#{session_id}.jsonl"),
+        storage_mod: AppendFailureStorage,
+        on_event: &send(test_pid, &1)
+      )
+
+    assert {:accepted, _admission} = Sigma.Agent.prompt(handle.agent, "must be durable")
+
+    assert_receive {:turn_error,
+                    {:event_persistence_failed, :session, {:storage_append_failed, :disk_full}}},
+                   1_000
+
+    assert %{messages: [], current_turn_task: nil} = :sys.get_state(handle.agent)
+    assert %{message_count: 0} = Sigma.Agent.SessionProcess.status(handle.session)
+    refute_receive {:message_end, _message}, 100
+  end
+
   @tag :tmp_dir
   test "session supervisor, high-usage compaction, tolerant replay, and crash rebuild interact cleanly",
        %{tmp_dir: tmp_dir, repo: repo} do
@@ -204,8 +269,19 @@ defmodule Sigma.Web.SessionSupervisorTest do
 
     assert {:ok, entries_before_crash} = JsonlFile.read(storage_path)
 
+    first_kept_entry_id =
+      Enum.find_value(entries_before_crash, fn entry ->
+        if get_in(entry, ["message", "id"]) == first_kept_id, do: entry["id"]
+      end)
+
+    assert is_binary(first_kept_entry_id)
+
     assert Enum.any?(entries_before_crash, fn
-             %{"type" => "compaction", "summary" => summary, "firstKeptId" => ^first_kept_id} ->
+             %{
+               "type" => "compaction",
+               "summary" => summary,
+               "firstKeptEntryId" => ^first_kept_entry_id
+             } ->
                summary == compact_msg.content
 
              _ ->

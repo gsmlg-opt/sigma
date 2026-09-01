@@ -12,6 +12,10 @@ defmodule Sigma.Web.Endpoint do
     websocket: [connect_info: [session: @session_options], max_frame_size: 16 * 1024 * 1024],
     longpoll: [connect_info: [session: @session_options]]
 
+  socket "/agent", Sigma.Web.AgentSocket,
+    websocket: [max_frame_size: 1024 * 1024],
+    longpoll: false
+
   plug Plug.Static,
     at: "/",
     from: :sigma_web,

@@ -142,6 +142,7 @@ defmodule Sigma.Web.SessionLive do
 
     builtin_tools = Sigma.Tools.default_tools()
     mcp_servers = ConfigManager.mcp_servers_for(mcp_server_ids)
+    context_discovery = Sigma.Session.ContextFiles.discover(nil, effective_cwd)
 
     session_context =
       SessionContext.new(
@@ -149,7 +150,7 @@ defmodule Sigma.Web.SessionLive do
         agents_context: [
           global_agents,
           {"Worktree Context", worktree_context},
-          Sigma.Session.ContextFiles.assemble(nil, effective_cwd)
+          context_discovery.content
         ],
         current_date: Date.utc_today()
       )
@@ -169,8 +170,8 @@ defmodule Sigma.Web.SessionLive do
                  options: provider_options,
                  system_prompt: nil,
                  session_context: session_context,
-                 on_event: session_event_handler(storage_path, repo_key, session_id),
-                 on_state_change: session_state_change_handler(storage_path, effective_cwd),
+                 on_event: session_event_handler(repo_key, session_id),
+                 permission_config: ConfigManager.get_permissions(),
                  tools: builtin_tools,
                  mcp_servers: mcp_servers,
                  messages: initial_messages,
@@ -178,7 +179,7 @@ defmodule Sigma.Web.SessionLive do
                  transcript_path: storage_path,
                  log_session_id: log_session_id
                ),
-             {:ok, sessions} <- Sigma.Session.Log.list_sessions(sessions_dir) do
+             {:ok, sessions} <- Sigma.Session.Log.list_session_summaries(sessions_dir) do
           agent = runtime_session.agent
 
           pending_user_questions = load_pending_user_questions(agent)
@@ -194,6 +195,8 @@ defmodule Sigma.Web.SessionLive do
              context_window: model_context_window(selected_agent_model),
              current_model: model_id,
              current_model_value: current_model_value,
+             context_diagnostics: context_discovery.diagnostics,
+             context_trace: context_discovery.trace,
              effective_cwd: effective_cwd,
              mcp_server_ids: mcp_server_ids,
              model_options: ensure_model_option(model_options, provider_id, model_id),
@@ -225,6 +228,8 @@ defmodule Sigma.Web.SessionLive do
       |> assign(:context_window, session_data.context_window)
       |> assign(:current_model, session_data.current_model)
       |> assign(:current_model_value, session_data.current_model_value)
+      |> assign(:context_diagnostics, session_data.context_diagnostics)
+      |> assign(:context_trace, session_data.context_trace)
       |> assign(:effective_cwd, session_data.effective_cwd)
       |> assign(:mcp_server_ids, session_data.mcp_server_ids)
       |> assign(:model_options, session_data.model_options)
@@ -324,28 +329,42 @@ defmodule Sigma.Web.SessionLive do
           </div>
           <ul class="flex flex-col gap-0.5 px-2">
             <li :for={s <- @sessions} class="group relative flex items-center rounded-xl">
-              <% is_renaming = @renaming_session == s %>
-              <% menu_button_id = session_menu_button_id(s) %>
-              <% menu_id = session_menu_id(s) %>
+              <% session_id = s.session_id %>
+              <% is_renaming = @renaming_session == session_id %>
+              <% menu_button_id = session_menu_button_id(session_id) %>
+              <% menu_id = session_menu_id(session_id) %>
               <form :if={is_renaming} phx-submit="rename_session" class="flex-1 flex items-center gap-1 px-2 py-1">
-                <input type="hidden" name="old_id" value={s} />
+                <input type="hidden" name="old_id" value={session_id} />
                 <input
                   type="text"
                   name="new_name"
-                  value={s}
+                  value={session_id}
                   autofocus
                   class="flex-1 text-sm bg-surface text-on-surface rounded px-2 py-1 border border-primary focus:outline-none"
                 />
               </form>
               <.dm_link
-                :if={not is_renaming}
-                navigate={~p"/repository/#{@encoded_repository}/sessions/#{s}"}
+                :if={not is_renaming and session_id == @session_id}
+                navigate={~p"/repository/#{@encoded_repository}/sessions/#{session_id}"}
                 class={["flex min-w-0 flex-1 items-center gap-2 truncate rounded-lg px-3 py-2 text-secondary-content transition-colors",
-                  if(s == @session_id, do: "bg-primary text-primary-content font-bold", else: "hover:bg-secondary-content/10")]}
+                  "bg-primary text-primary-content font-bold"]}
               >
                 <.dm_mdi name="chat-outline" class="h-4 w-4 shrink-0 opacity-70" />
-                <span class="truncate text-xs font-mono">{s}</span>
+                <span class="truncate text-xs font-mono" title={session_id}>{s.title}</span>
               </.dm_link>
+              <.dm_btn
+                :if={not is_renaming and session_id != @session_id}
+                id={"switch-session-#{session_dom_id(session_id)}"}
+                type="button"
+                phx-click="switch_session"
+                phx-value-session={session_id}
+                phx-hook="WebComponentHook"
+                variant="ghost"
+                class="flex min-w-0 flex-1 items-center justify-start gap-2 truncate rounded-lg px-3 py-2 text-secondary-content transition-colors hover:bg-secondary-content/10"
+              >
+                <.dm_mdi name="chat-outline" class="h-4 w-4 shrink-0 opacity-70" />
+                <span class="truncate text-xs font-mono" title={session_id}>{s.title}</span>
+              </.dm_btn>
               <.dm_btn
                 :if={not is_renaming}
                 id={menu_button_id}
@@ -362,7 +381,7 @@ defmodule Sigma.Web.SessionLive do
                 anchor={"##{menu_button_id}"}
                 placement="bottom-end"
                 phx-hook="SessionMenuHook"
-                data-session={s}
+                data-session={session_id}
               >
                 <.dm_menu_item value="rename" icon="pencil-outline">Rename</.dm_menu_item>
                 <.dm_menu_item value="fork" icon="source-branch">Fork</.dm_menu_item>
@@ -512,6 +531,27 @@ defmodule Sigma.Web.SessionLive do
             <.pending_user_questions questions={@pending_user_questions} />
             <.pending_mcp_elicitations elicitations={@pending_mcp_elicitations} />
 
+            <details
+              :if={@context_diagnostics != []}
+              id="context-rule-diagnostics"
+              class="mb-3 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-on-surface-variant"
+            >
+              <summary class="cursor-pointer font-semibold text-warning">
+                Context rules: {length(@context_diagnostics)} diagnostic(s)
+              </summary>
+              <ul class="mt-2 space-y-1 font-mono">
+                <li :for={diagnostic <- @context_diagnostics}>
+                  {context_diagnostic_label(diagnostic)}
+                </li>
+              </ul>
+              <details :if={@context_trace != []} id="context-rule-trace" class="mt-2">
+                <summary class="cursor-pointer">Composition trace</summary>
+                <ol class="mt-1 space-y-1 font-mono">
+                  <li :for={entry <- @context_trace}>{context_trace_label(entry)}</li>
+                </ol>
+              </details>
+            </details>
+
             <div :if={@turn_in_flight} class="mb-3 flex items-center justify-between gap-3">
               <div class="flex items-center gap-3 text-sm text-on-surface-variant">
                 <.dm_chat_typing />
@@ -536,7 +576,7 @@ defmodule Sigma.Web.SessionLive do
                 id="prompt-input"
                 phx-update="ignore"
                 placeholder="Ask ∑ anything… (⌘/Ctrl+Enter to send)"
-                disabled={@turn_in_flight}
+                disabled={false}
                 clear_on_send={false}
               />
             </div>
@@ -1432,14 +1472,36 @@ defmodule Sigma.Web.SessionLive do
   defp submit_prompt(socket, prompt) do
     agent = socket.assigns.agent
 
-    Sigma.Agent.prompt(agent, prompt,
-      dispatcher_opts: [
-        ask_user_question_fn: fn request, tool_opts ->
-          Sigma.Agent.ask_user_question(agent, request, tool_opts)
-        end
-      ]
-    )
+    with {:ok, command} <-
+           Sigma.Protocol.Envelope.command("prompt.submit", socket.assigns.session_id, %{
+             "content" => prompt
+           }),
+         {:ok, %{payload: payload}} <-
+           Sigma.Agent.PublicRuntime.execute(command, %{
+             repo_path: socket.assigns.workdir,
+             sessions_dir: socket.assigns.sessions_dir,
+             interactive_approvals: true,
+             question_resolver: fn request, tool_opts ->
+               Sigma.Agent.ask_user_question(agent, request, tool_opts)
+             end
+           }) do
+      protocol_admission(payload)
+    else
+      {:error, %{error: error}} -> {:rejected, error.code}
+      {:error, reason} -> {:rejected, reason}
+    end
   end
+
+  defp protocol_admission(%{
+         "status" => status,
+         "messageId" => message_id,
+         "turnId" => turn_id
+       })
+       when status in ["accepted", "queued_as_steering", "queued_as_follow_up"] do
+    {String.to_existing_atom(status), %{message_id: message_id, turn_id: turn_id}}
+  end
+
+  defp protocol_admission(_payload), do: {:rejected, :invalid_protocol_admission}
 
   defp retry_message(socket, msg_id) do
     with {:ok, messages} <- Sigma.Session.Log.replay(socket.assigns.storage_path),
@@ -1521,6 +1583,34 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
+  def handle_event("switch_session", %{"session" => target_session_id}, socket) do
+    result =
+      Sigma.Agent.Runtime.switch_session(
+        socket.assigns.workdir,
+        socket.assigns.session_id,
+        target_session_id,
+        socket.assigns.sessions_dir
+      )
+
+    case result do
+      {:ok, %{session_id: session_id}} ->
+        {:noreply,
+         push_navigate(socket,
+           to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{session_id}"
+         )}
+
+      {:error, :session_busy} ->
+        {:noreply, put_flash(socket, :error, "Wait for the active turn to finish before switching sessions.")}
+
+      {:error, :invalid_session_id} ->
+        {:noreply, put_flash(socket, :error, "Invalid session id")}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "Unable to switch session")}
+    end
+  end
+
+  @impl true
   def handle_event("session_menu_action", %{"value" => action, "session" => s}, socket) do
     case action do
       "rename" ->
@@ -1533,9 +1623,14 @@ defmodule Sigma.Web.SessionLive do
         {:noreply, put_flash(socket, :info, "Archive not yet implemented")}
 
       "delete" ->
-        case SessionFiles.delete(socket.assigns.sessions_dir, s) do
-          :ok ->
-            {:ok, sessions} = Sigma.Session.Log.list_sessions(socket.assigns.sessions_dir)
+        case Sigma.Agent.Runtime.delete_session(
+               socket.assigns.workdir,
+               s,
+               socket.assigns.sessions_dir
+             ) do
+          {:ok, _deleted} ->
+            {:ok, sessions} =
+              Sigma.Session.Log.list_session_summaries(socket.assigns.sessions_dir)
             socket = assign(socket, :sessions, sessions)
 
             if s == socket.assigns.session_id do
@@ -1565,9 +1660,15 @@ defmodule Sigma.Web.SessionLive do
     if new_name == "" or new_name == old_id do
       {:noreply, socket}
     else
-      case SessionFiles.rename(socket.assigns.sessions_dir, old_id, new_name) do
-        :ok ->
-          {:ok, sessions} = Sigma.Session.Log.list_sessions(socket.assigns.sessions_dir)
+      case Sigma.Agent.Runtime.rename_session(
+             socket.assigns.workdir,
+             old_id,
+             new_name,
+             socket.assigns.sessions_dir
+           ) do
+        {:ok, _renamed} ->
+          {:ok, sessions} =
+            Sigma.Session.Log.list_session_summaries(socket.assigns.sessions_dir)
           socket = assign(socket, :sessions, sessions)
 
           if old_id == socket.assigns.session_id do
@@ -1582,6 +1683,9 @@ defmodule Sigma.Web.SessionLive do
         {:error, :invalid_session_id} ->
           {:noreply, put_flash(socket, :error, "Invalid session id")}
 
+        {:error, :session_busy} ->
+          {:noreply, put_flash(socket, :error, "Wait for the active turn to finish first.")}
+
         {:error, _reason} ->
           {:noreply, put_flash(socket, :error, "Unable to rename session")}
       end
@@ -1595,8 +1699,15 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def handle_event("cancel_turn", _, socket) do
-    if socket.assigns.agent do
-      Sigma.Agent.cancel(socket.assigns.agent)
+    with true <- is_pid(socket.assigns.agent),
+         {:ok, command} <-
+           Sigma.Protocol.Envelope.command("turn.cancel", socket.assigns.session_id),
+         {_status, _event} <-
+           Sigma.Agent.PublicRuntime.execute(command, %{
+             repo_path: socket.assigns.workdir,
+             sessions_dir: socket.assigns.sessions_dir
+           }) do
+      :ok
     end
 
     {:noreply, socket}
@@ -1645,9 +1756,6 @@ defmodule Sigma.Web.SessionLive do
       not session_ready?(socket) ->
         {:reply, %{status: "rejected"}, put_flash(socket, :info, "Session is still loading.")}
 
-      socket.assigns.turn_in_flight ->
-        {:reply, %{status: "rejected"}, put_flash(socket, :info, "Agent is still working.")}
-
       true ->
         case ImageAttachments.normalize(prompt, Map.get(params, "images", [])) do
           {:ok, :empty} ->
@@ -1655,7 +1763,7 @@ defmodule Sigma.Web.SessionLive do
 
           {:ok, content} ->
             case handle_prompt(content, socket) do
-              {:accepted, socket} -> {:reply, %{status: "accepted"}, socket}
+              {:accepted, status, socket} -> {:reply, %{status: status}, socket}
               {:rejected, socket} -> {:reply, %{status: "rejected"}, socket}
             end
 
@@ -1838,7 +1946,8 @@ defmodule Sigma.Web.SessionLive do
   defp handle_prompt(cmd, socket) when cmd in ["/reload-tools", "/reload_tools"] do
     case Sigma.Agent.reload_mcp_tools(socket.assigns.agent) do
       {:ok, count} ->
-        {:accepted, put_flash(socket, :info, "Reloaded MCP tools (#{count} available).")}
+        {:accepted, "accepted",
+         put_flash(socket, :info, "Reloaded MCP tools (#{count} available).")}
 
       _ ->
         {:rejected, put_flash(socket, :error, "Failed to reload MCP tools.")}
@@ -1846,23 +1955,42 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp handle_prompt(content, socket) when is_list(content) do
-    submit_prompt(socket, content)
-    {:accepted, assign(socket, :turn_in_flight, true)}
+    prompt_admission(socket, submit_prompt(socket, content))
   end
 
   defp handle_prompt(prompt, socket) do
     case SlashCommands.expand(prompt) do
       :not_command ->
-        submit_prompt(socket, prompt)
-        {:accepted, assign(socket, :turn_in_flight, true)}
+        prompt_admission(socket, submit_prompt(socket, prompt))
 
       {:ok, expanded_prompt} ->
-        submit_prompt(socket, expanded_prompt)
-        {:accepted, assign(socket, :turn_in_flight, true)}
+        prompt_admission(socket, submit_prompt(socket, expanded_prompt))
 
       {:error, reason} ->
         {:rejected, put_flash(socket, :error, reason)}
     end
+  end
+
+  defp prompt_admission(socket, {:accepted, _info}) do
+    {:accepted, "accepted", assign(socket, :turn_in_flight, true)}
+  end
+
+  defp prompt_admission(socket, {:queued_as_steering, _info}) do
+    {:accepted, "queued_as_steering",
+     socket
+     |> assign(:turn_in_flight, true)
+     |> put_flash(:info, "Prompt queued as steering input.")}
+  end
+
+  defp prompt_admission(socket, {:queued_as_follow_up, _info}) do
+    {:accepted, "queued_as_follow_up",
+     socket
+     |> assign(:turn_in_flight, true)
+     |> put_flash(:info, "Prompt queued as follow-up.")}
+  end
+
+  defp prompt_admission(socket, {:rejected, reason}) do
+    {:rejected, put_flash(socket, :error, "Prompt rejected: #{inspect(reason)}")}
   end
 
   defp start_web_shell(socket, cols, rows) do
@@ -2149,14 +2277,15 @@ defmodule Sigma.Web.SessionLive do
   defp fork_with_new_id(socket, source_id, message_id, attempts_left) do
     new_id = new_fork_id()
 
-    case SessionFiles.fork(
-           socket.assigns.sessions_dir,
+    case Sigma.Agent.Runtime.fork_session(
+           socket.assigns.workdir,
            source_id,
            new_id,
+           socket.assigns.sessions_dir,
            message_id,
            fallback_cwd: socket.assigns.workdir
          ) do
-      {:ok, _new_log_session_id} ->
+      {:ok, %{session_id: ^new_id}} ->
         {:ok, new_id}
 
       {:error, :already_exists} ->
@@ -2187,8 +2316,16 @@ defmodule Sigma.Web.SessionLive do
     put_flash(socket, :error, "Invalid session id")
   end
 
+  defp handle_fork_result(socket, {:error, :session_busy}) do
+    put_flash(socket, :error, "Wait for the active turn to finish before forking this session.")
+  end
+
   defp handle_fork_result(socket, {:error, _reason}) do
     put_flash(socket, :error, "Unable to fork session")
+  end
+
+  defp session_dom_id(session_id) do
+    Base.url_encode64(session_id, padding: false)
   end
 
   defp assign_session_defaults(
@@ -2223,6 +2360,8 @@ defmodule Sigma.Web.SessionLive do
     |> assign(:model_options, [])
     |> assign(:context_token_count, 0)
     |> assign(:context_window, nil)
+    |> assign(:context_diagnostics, [])
+    |> assign(:context_trace, [])
     |> assign(:pending_user_questions, [])
     |> assign(:pending_mcp_elicitations, [])
     |> assign(:logs_available, true)
@@ -2239,22 +2378,20 @@ defmodule Sigma.Web.SessionLive do
     |> assign(:session_load, AsyncResult.loading())
   end
 
-  defp session_event_handler(storage_path, repo_key, session_id) do
+  defp session_event_handler(repo_key, session_id) do
     fn event ->
-      Sigma.Session.Log.persist_event(storage_path, event)
       Phoenix.PubSub.broadcast(Sigma.Web.PubSub, session_topic(repo_key, session_id), event)
     end
   end
 
-  defp session_state_change_handler(storage_path, cwd) do
-    fn
-      {:model_change, provider_id, model_id} ->
-        with :ok <- Sigma.Session.Log.ensure_session_header(storage_path, cwd),
-             {:ok, entry_id} <-
-               Sigma.Session.Log.append_model_change(storage_path, provider_id, model_id) do
-          {:ok, entry_id}
-        end
-    end
+  defp context_diagnostic_label(diagnostic) do
+    kind = diagnostic.kind |> to_string() |> String.replace("_", " ")
+    source = diagnostic.source || "unknown source"
+    "#{kind}: #{source}"
+  end
+
+  defp context_trace_label(entry) do
+    "#{entry.action} #{entry.kind}: #{entry.source} (#{entry.reason})"
   end
 
   defp session_ready?(socket), do: Map.get(socket.assigns, :session_ready, false)

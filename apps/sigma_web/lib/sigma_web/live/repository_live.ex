@@ -3,7 +3,7 @@ defmodule Sigma.Web.RepositoryLive do
 
   import Sigma.Web.ProjectSidebar
 
-  alias Sigma.Session.{ConfigManager, RepoManager, SessionFiles}
+  alias Sigma.Session.{ConfigManager, RepoManager}
 
   @impl true
   def mount(%{"repository" => encoded_repository}, _session, socket) do
@@ -11,7 +11,7 @@ defmodule Sigma.Web.RepositoryLive do
       {:ok, workdir, _repo} ->
         sessions_dir = get_sessions_dir(workdir)
 
-        {:ok, sessions} = Sigma.Session.Log.list_sessions(sessions_dir)
+        {:ok, sessions} = Sigma.Session.Log.list_session_summaries(sessions_dir)
 
         socket =
           socket
@@ -83,12 +83,12 @@ defmodule Sigma.Web.RepositoryLive do
                     <div class="p-2 bg-primary/10 rounded-lg text-primary group-hover:bg-primary group-hover:text-primary-content transition-colors duration-300 shrink-0">
                       <.dm_mdi name="chat-processing-outline" class="w-5 h-5" />
                     </div>
-                    <span class="block min-w-0 truncate font-bold text-lg" title={s}>{s}</span>
+                    <span class="block min-w-0 truncate font-bold text-lg" title={s.session_id}>{s.title}</span>
                   </div>
                   <.dm_btn
-                    id={"delete-session-#{s}"}
+                    id={"delete-session-#{s.session_id}"}
                     phx-click="delete_session"
-                    phx-value-id={s}
+                    phx-value-id={s.session_id}
                     phx-hook="WebComponentHook"
                     variant="ghost"
                     size="sm"
@@ -103,13 +103,28 @@ defmodule Sigma.Web.RepositoryLive do
 
               <div class="py-6 px-1">
                 <p class="text-on-surface-variant text-sm italic opacity-60">
-                   Session log available
+                  {s.latest_user_preview || "Session log available"}
                 </p>
+                <p :if={s.cwd_missing?} class="mt-2 text-xs text-warning">
+                  Recorded working directory is missing; this session can be adopted.
+                </p>
+                <.dm_btn
+                  :if={s.cwd_missing?}
+                  id={"adopt-session-#{s.session_id}"}
+                  phx-click="adopt_session"
+                  phx-value-id={s.session_id}
+                  phx-hook="WebComponentHook"
+                  variant="ghost"
+                  size="sm"
+                  class="mt-3"
+                >
+                  Adopt into this repository
+                </.dm_btn>
               </div>
 
               <:action>
                 <.dm_link
-                  navigate={~p"/repository/#{@encoded_repository}/sessions/#{s}"}
+                  navigate={~p"/repository/#{@encoded_repository}/sessions/#{s.session_id}"}
                   class="btn btn-primary w-full"
                 >
                   Open Session
@@ -176,9 +191,13 @@ defmodule Sigma.Web.RepositoryLive do
   def handle_event("confirm_delete", _, socket) do
     session_id = socket.assigns.deleting_session
 
-    case SessionFiles.delete(socket.assigns.sessions_dir, session_id) do
-      :ok ->
-        {:ok, sessions} = Sigma.Session.Log.list_sessions(socket.assigns.sessions_dir)
+    case Sigma.Agent.Runtime.delete_session(
+           socket.assigns.workdir,
+           session_id,
+           socket.assigns.sessions_dir
+         ) do
+      {:ok, _deleted} ->
+        {:ok, sessions} = Sigma.Session.Log.list_session_summaries(socket.assigns.sessions_dir)
 
         {:noreply,
          socket
@@ -199,6 +218,35 @@ defmodule Sigma.Web.RepositoryLive do
      push_navigate(socket,
        to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/new"
      )}
+  end
+
+  @impl true
+  def handle_event("adopt_session", %{"id" => session_id}, socket) do
+    result =
+      Sigma.Agent.Runtime.adopt_session(
+        socket.assigns.workdir,
+        session_id,
+        socket.assigns.sessions_dir,
+        socket.assigns.sessions_dir,
+        socket.assigns.workdir
+      )
+
+    case result do
+      {:ok, _adopted} ->
+        {:ok, sessions} =
+          Sigma.Session.Log.list_session_summaries(socket.assigns.sessions_dir)
+
+        {:noreply,
+         socket
+         |> assign(:sessions, sessions)
+         |> put_flash(:info, "Session adopted into this repository.")}
+
+      {:error, :session_busy} ->
+        {:noreply, put_flash(socket, :error, "Wait for the active turn to finish before adopting this session.")}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "Could not adopt session.")}
+    end
   end
 
   @impl true

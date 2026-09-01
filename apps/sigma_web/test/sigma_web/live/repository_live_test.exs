@@ -149,6 +149,42 @@ defmodule Sigma.Web.RepositoryLiveTest do
   end
 
   @tag :tmp_dir
+  test "keeps an orphaned session visible and explicitly adopts it into the repository", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    workdir = tmp_workdir!("repository-adopt")
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+      File.mkdir_p!(sessions_dir)
+      :ok = Sigma.Session.Log.persist_event(Path.join(sessions_dir, "orphan.jsonl"), {:agent_start, "/missing/repository"})
+      File.write!(Path.join(sessions_dir, "orphan.meta.json"), Jason.encode!(%{"cwd" => "/missing/repository", "branch" => "main"}))
+
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      {:ok, view, html} = live(conn, "/repository/#{encoded_repository}")
+
+      assert html =~ "orphan"
+      assert html =~ "Recorded working directory is missing"
+      assert html =~ ~s(id="adopt-session-orphan")
+
+      html = render_click(view, "adopt_session", %{"id" => "orphan"})
+      assert html =~ "Session adopted into this repository."
+      refute html =~ "Recorded working directory is missing"
+
+      metadata =
+        sessions_dir
+        |> Path.join("orphan.meta.json")
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert metadata == %{"cwd" => Path.expand(workdir), "branch" => "main"}
+    end)
+  end
+
+  @tag :tmp_dir
   test "forged traversal delete id does not remove outside files and clears modal", %{
     conn: conn,
     tmp_dir: tmp_dir

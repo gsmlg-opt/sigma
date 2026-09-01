@@ -58,6 +58,82 @@ defmodule Sigma.Web.SessionLiveTest do
     end
   end
 
+  defmodule PermissionToolProvider do
+    @behaviour Sigma.Ai.Provider
+
+    @impl true
+    def stream(params) do
+      last_message = List.last(params.context.messages)
+
+      content =
+        if last_message && last_message.role == :tool_result do
+          [%{type: :text, text: "permission flow complete"}]
+        else
+          target = Application.fetch_env!(:sigma_web, :permission_test_path)
+
+          [
+            %{
+              type: :tool_call,
+              id: "permission_bash_call",
+              name: "bash",
+              arguments: %{"command" => "printf permitted > #{target}"}
+            }
+          ]
+        end
+
+      stop_reason = if last_message && last_message.role == :tool_result, do: :stop, else: :tool_use
+
+      message = %{
+        role: :assistant,
+        content: content,
+        model: "mock-model",
+        provider: "mock-provider",
+        api: "mock-api",
+        usage: %{
+          input: 1,
+          output: 1,
+          cache_read: 0,
+          cache_write: 0,
+          total_tokens: 2,
+          cost: %{total: 0.0, input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0}
+        },
+        stop_reason: stop_reason,
+        timestamp: System.system_time(:millisecond)
+      }
+
+      [{:start, message}, {:done, stop_reason, message}]
+    end
+  end
+
+  defmodule BlockingTurnProvider do
+    @behaviour Sigma.Ai.Provider
+
+    @impl true
+    def stream(params) do
+      test_pid = Application.fetch_env!(:sigma_web, :blocking_provider_pid)
+      cancellation_ref = Keyword.fetch!(params.options, :cancellation_ref)
+      prompt =
+        params.context.messages
+        |> List.last()
+        |> Map.fetch!(:content)
+        |> List.wrap()
+        |> Enum.reverse()
+        |> Enum.find_value(fn
+          %{type: :text, text: text} -> text
+          text when is_binary(text) -> text
+          _part -> nil
+        end)
+
+      send(test_pid, {:web_provider_waiting, self(), prompt})
+
+      receive do
+        :release_web_provider -> Sigma.Web.MockProvider.stream(params)
+        {:cancel, ^cancellation_ref} ->
+          [{:provider_error, Sigma.Ai.ProviderError.from_reason(:cancelled)}]
+      end
+    end
+  end
+
   setup do
     previous_agent_dir = Application.get_env(:sigma_session, :agent_dir)
 
@@ -775,44 +851,31 @@ defmodule Sigma.Web.SessionLiveTest do
     refute_receive {:agent_start, _}, 200
   end
 
-  test "rejects prompts while an agent turn is in flight", %{conn: conn} do
+  test "queues prompts while an agent turn is in flight", %{conn: conn} do
+    write_selectable_provider_configs()
     session_id = unique_session_id("hook-active-turn")
     Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
-    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    Application.put_env(:sigma_web, :blocking_provider_pid, self())
+    on_exit(fn -> Application.delete_env(:sigma_web, :blocking_provider_pid) end)
 
-    send(view.pid, {:agent_start, @workdir})
-    assert render(view) =~ "Agent is working"
+    with_mock_provider(BlockingTurnProvider, fn ->
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+      render_hook(view, "send_prompt", %{"value" => "first", "images" => []})
+      assert_reply(view, %{status: "accepted"})
+      assert_receive {:web_provider_waiting, first_provider, "first"}, 1_000
 
-    html = render_hook(view, "send_prompt", %{"value" => "hello", "images" => []})
+      html = render_hook(view, "send_prompt", %{"value" => "second", "images" => []})
+      assert_reply(view, %{status: "queued_as_follow_up"})
+      assert html =~ "Prompt queued as follow-up"
 
-    assert_reply(view, %{status: "rejected"})
-    assert html =~ "Agent is still working"
-    refute_receive {:agent_start, _}, 200
-    refute_receive {:message_start, %{role: :user}}, 200
+      send(first_provider, :release_web_provider)
+      assert_receive {:web_provider_waiting, second_provider, "second"}, 1_000
+      send(second_provider, :release_web_provider)
+    end)
   end
 
-  test "rejects an immediate second prompt while the first turn starts", %{conn: conn} do
-    session_id = unique_session_id("hook-double-submit")
-    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
-
-    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
-    agent = Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent)
-    :ok = :sys.suspend(agent)
-    on_exit(fn -> :sys.resume(agent) end)
-
-    render_hook(view, "send_prompt", %{"value" => "first", "images" => []})
-    assert_reply(view, %{status: "accepted"})
-
-    html = render_hook(view, "send_prompt", %{"value" => "second", "images" => []})
-    assert_reply(view, %{status: "rejected"})
-    assert html =~ "Agent is still working"
-
-    :ok = :sys.resume(agent)
-    assert_receive {:message_start, %{role: :user, content: "first"}}, 2000
-    refute_receive {:message_start, %{role: :user, content: "second"}}, 500
-  end
-
-  test "rejects a prompt while a retry is in flight", %{conn: conn} do
+  test "queues a prompt while a retry is in flight", %{conn: conn} do
+    write_selectable_provider_configs()
     session_id = unique_session_id("hook-retry-race")
     storage_path = session_storage_path(session_id)
     File.mkdir_p!(Path.dirname(storage_path))
@@ -825,22 +888,72 @@ defmodule Sigma.Web.SessionLiveTest do
 
     Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
 
+    Application.put_env(:sigma_web, :blocking_provider_pid, self())
+    on_exit(fn -> Application.delete_env(:sigma_web, :blocking_provider_pid) end)
+
+    with_mock_provider(BlockingTurnProvider, fn ->
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+      view
+      |> element("#retry-u_retry_race")
+      |> render_click()
+
+      assert_receive {:web_provider_waiting, retry_provider, "retry me"}, 1_000
+      html = render_hook(view, "send_prompt", %{"value" => "second", "images" => []})
+      assert_reply(view, %{status: "queued_as_follow_up"})
+      assert html =~ "Prompt queued as follow-up"
+      send(retry_provider, :release_web_provider)
+      assert_receive {:web_provider_waiting, second_provider, "second"}, 1_000
+      send(second_provider, :release_web_provider)
+    end)
+  end
+
+  test "shows busy errors for switch and fork without navigating or publishing a fork", %{
+    conn: conn
+  } do
+    write_selectable_provider_configs()
+    session_id = unique_session_id("busy-session-operation")
+    target_id = unique_session_id("switch-target")
+    target_path = session_storage_path(target_id)
+    File.mkdir_p!(Path.dirname(target_path))
+    :ok = Sigma.Session.Log.persist_event(target_path, {:agent_start, @workdir})
+
+    Application.put_env(:sigma_web, :blocking_provider_pid, self())
+    on_exit(fn -> Application.delete_env(:sigma_web, :blocking_provider_pid) end)
+
+    with_fork_id_generator(["busy_fork_target"], fn ->
+      with_mock_provider(BlockingTurnProvider, fn ->
+        {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+        render_hook(view, "send_prompt", %{"value" => "working", "images" => []})
+        assert_reply(view, %{status: "accepted"})
+        assert_receive {:web_provider_waiting, provider, "working"}, 1_000
+
+        html = render_hook(view, "switch_session", %{"session" => target_id})
+        assert html =~ "Wait for the active turn to finish before switching sessions."
+
+        html = render_hook(view, "fork_session", %{})
+        assert html =~ "Wait for the active turn to finish before forking this session."
+        refute File.exists?(session_storage_path("busy_fork_target"))
+
+        send(provider, :release_web_provider)
+      end)
+    end)
+  end
+
+  test "switches an idle session through the runtime operation boundary", %{conn: conn} do
+    session_id = unique_session_id("idle-session-operation")
+    target_id = unique_session_id("idle-switch-target")
+    target_path = session_storage_path(target_id)
+    File.mkdir_p!(Path.dirname(target_path))
+    :ok = Sigma.Session.Log.persist_event(target_path, {:agent_start, @workdir})
+
     {:ok, view, _html} = live_loaded(conn, session_path(session_id))
-    agent = Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent)
-    :ok = :sys.suspend(agent)
-    on_exit(fn -> :sys.resume(agent) end)
+    expected_path = "/repository/#{@encoded_workdir}/sessions/#{target_id}"
 
-    view
-    |> element("#retry-u_retry_race")
-    |> render_click()
-
-    html = render_hook(view, "send_prompt", %{"value" => "second", "images" => []})
-
-    assert_reply(view, %{status: "rejected"})
-    assert html =~ "Agent is still working"
-    :ok = :sys.resume(agent)
-    assert_receive {:message_start, %{role: :user, content: "retry me"}}, 2000
-    refute_receive {:message_start, %{role: :user, content: "second"}}, 500
+    assert {:error,
+            {:live_redirect,
+             %{to: ^expected_path}}} =
+             render_hook(view, "switch_session", %{"session" => target_id})
   end
 
   @tag :tmp_dir
@@ -1239,6 +1352,59 @@ defmodule Sigma.Web.SessionLiveTest do
     refute render(view) =~ "Which setup path should I use?"
   end
 
+  @tag :tmp_dir
+  test "guarded permission resolves exactly one LiveView approval for allow and deny", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    write_selectable_provider_configs()
+
+    assert {:ok, _permissions} =
+             ConfigManager.update_permissions(%{
+               "default" => "allow",
+               "rules" => %{"bash" => "ask"}
+             })
+
+    with_mock_provider(PermissionToolProvider, fn ->
+      allow_target = Path.join(tmp_dir, "allowed")
+      Application.put_env(:sigma_web, :permission_test_path, allow_target)
+      on_exit(fn -> Application.delete_env(:sigma_web, :permission_test_path) end)
+
+      allow_session_id = unique_session_id("permission-allow")
+      {:ok, allow_view, _html} = live_loaded(conn, session_path(allow_session_id))
+      render_submit(allow_view, "send_prompt", %{"value" => "run", "images" => []})
+
+      assert_permission_question(allow_view)
+
+      allow_view
+      |> form("#ask-user-questions form", %{
+        "selected_answer" => "allow_once"
+      })
+      |> render_submit()
+
+      assert_eventually(fn -> File.read(allow_target) == {:ok, "permitted"} end)
+      refute render(allow_view) =~ "Allow bash for this tool call?"
+
+      deny_target = Path.join(tmp_dir, "denied")
+      Application.put_env(:sigma_web, :permission_test_path, deny_target)
+      deny_session_id = unique_session_id("permission-deny")
+      {:ok, deny_view, _html} = live_loaded(conn, session_path(deny_session_id))
+      render_submit(deny_view, "send_prompt", %{"value" => "run", "images" => []})
+
+      assert_permission_question(deny_view)
+
+      deny_view
+      |> form("#ask-user-questions form", %{
+        "selected_answer" => "deny_once"
+      })
+      |> render_submit()
+
+      Process.sleep(50)
+      refute File.exists?(deny_target)
+      refute render(deny_view) =~ "Allow bash for this tool call?"
+    end)
+  end
+
   test "reopens a pending AskUserQuestion after refresh", %{conn: conn} do
     session_id = "ask_refresh_#{System.unique_integer([:positive])}"
     path = "/repository/#{@encoded_workdir}/sessions/#{session_id}"
@@ -1404,6 +1570,8 @@ defmodule Sigma.Web.SessionLiveTest do
     Map.merge(
       %{
         active_provider_id: nil,
+        context_diagnostics: [],
+        context_trace: [],
         context_token_count: 0,
         context_window: nil,
         current_model_value: nil,
@@ -1440,6 +1608,14 @@ defmodule Sigma.Web.SessionLiveTest do
   defp session_topic(workdir, session_id) do
     repo_key = ConfigManager.repository_key(workdir)
     "session:#{repo_key}:#{session_id}"
+  end
+
+  defp assert_permission_question(view) do
+    assert_eventually(fn -> render(view) =~ "Allow bash for this tool call?" end)
+    html = render(view)
+    assert html =~ "Allow once"
+    assert html =~ "Deny once"
+    assert [_one_form] = html |> Floki.parse_document!() |> Floki.find("#ask-user-questions form")
   end
 
   defp assert_eventually(fun),
