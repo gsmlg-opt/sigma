@@ -134,7 +134,9 @@ jobs:
           key: release-verify-${{ runner.os }}-${{ runner.arch }}-otp-28.5-elixir-1.18.4-bun-1.3.13-${{ hashFiles('mix.lock', 'package-lock.json', '**/package.json', '**/Cargo.lock') }}
 
       - name: Install dependencies
-        run: mix deps.get
+        run: |
+          mix deps.get
+          mix assets.setup
 
       - name: Check Elixir formatting
         run: mix format --check-formatted
@@ -160,10 +162,8 @@ jobs:
       - name: Run Rust tests
         run: cargo test --manifest-path apps/sigma_tools/native/sigma_tools_hashline/Cargo.toml
 
-      - name: Set up and build web assets
-        run: |
-          mix assets.setup
-          mix assets.build
+      - name: Build web assets
+        run: mix assets.build
 
   build:
     name: Build ${{ matrix.os }} ${{ matrix.arch }}
