@@ -23,7 +23,8 @@ defmodule Sigma.Protocol.MixProject do
 
   defp deps do
     [
-      {:sigma_ai, in_umbrella: true}
+      {:sigma_ai, in_umbrella: true},
+      {:jason, "~> 1.4"}
     ]
   end
 end
