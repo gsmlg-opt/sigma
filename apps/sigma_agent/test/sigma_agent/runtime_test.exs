@@ -20,6 +20,22 @@ defmodule Sigma.Agent.RuntimeTest do
     end
   end
 
+  defmodule BlockingProvider do
+    @behaviour Sigma.Ai.Provider
+
+    @impl true
+    def stream(params) do
+      test_pid = Keyword.fetch!(params.options, :test_pid)
+      cancellation_ref = Keyword.fetch!(params.options, :cancellation_ref)
+      send(test_pid, {:runtime_provider_waiting, self()})
+
+      receive do
+        {:cancel, ^cancellation_ref} ->
+          [{:provider_error, Sigma.Ai.ProviderError.from_reason(:cancelled)}]
+      end
+    end
+  end
+
   setup context do
     tmp_dir =
       Path.join([
@@ -333,13 +349,14 @@ defmodule Sigma.Agent.RuntimeTest do
 
     assert_receive {:state_change_started, owner, {:model_change, "anthropic", "opus"}}
 
-    Sigma.Agent.prompt(handle.agent, "use the committed model")
+    prompt = Task.async(fn -> Sigma.Agent.prompt(handle.agent, "use the committed model") end)
     refute_receive {:provider_model, _model_id}, 100
 
     assert nil == Task.yield(change, 5_100)
     send(owner, :release_state_change)
 
     assert {:error, :disk_full} = Task.await(change, 1_000)
+    assert {:accepted, _admission} = Task.await(prompt, 1_000)
     assert_receive {:provider_model, "mock-model"}, 1_000
   end
 
@@ -405,5 +422,240 @@ defmodule Sigma.Agent.RuntimeTest do
     assert_receive {:second_change_started, {:model_change, "anthropic", "opus"}}
     assert :ok = Task.await(second)
     assert %{event_count: 2} = Sigma.Agent.SessionProcess.status(handle.session)
+  end
+
+  test "runtime rejects switch and fork while the source turn is busy without mutation", context do
+    repo = tmp_repo!(context, "repo-operations-busy")
+    sessions_dir = Path.join(repo, "sessions")
+    File.mkdir_p!(sessions_dir)
+    source_path = Path.join(sessions_dir, "source.jsonl")
+    target_path = Path.join(sessions_dir, "target.jsonl")
+    fork_path = Path.join(sessions_dir, "fork.jsonl")
+    adopted_sessions_dir = Path.join(repo, "adopted-sessions")
+
+    :ok = Sigma.Session.Log.persist_event(source_path, {:agent_start, repo})
+    :ok = Sigma.Session.Log.persist_event(target_path, {:agent_start, repo})
+    target_before = File.read!(target_path)
+
+    assert {:ok, handle} =
+             Sigma.Agent.Runtime.get_session(
+               repo,
+               "source",
+               session_opts(
+                 cwd: repo,
+                 provider: BlockingProvider,
+                 options: [test_pid: self()],
+                 transcript_path: source_path
+               )
+             )
+
+    assert {:accepted, _admission} = Sigma.Agent.prompt(handle.agent, "stay busy")
+    assert_receive {:runtime_provider_waiting, _provider}, 1_000
+    source_before = File.read!(source_path)
+
+    assert {:error, :session_busy} =
+             Sigma.Agent.Runtime.switch_session(
+               repo,
+               "source",
+               "target",
+               sessions_dir
+             )
+
+    assert {:error, :session_busy} =
+             Sigma.Agent.Runtime.fork_session(repo, "source", "fork", sessions_dir)
+
+    assert {:error, :session_busy} =
+             Sigma.Agent.Runtime.adopt_session(
+               repo,
+               "source",
+               sessions_dir,
+               adopted_sessions_dir,
+               repo
+             )
+
+    assert File.read!(source_path) == source_before
+    assert File.read!(target_path) == target_before
+    refute File.exists?(fork_path)
+    refute File.exists?(Path.join(adopted_sessions_dir, "source.jsonl"))
+  end
+
+  test "idle runtime switch validates restored state and failed targets leave the source usable", context do
+    repo = tmp_repo!(context, "repo-operations-switch")
+    sessions_dir = Path.join(repo, "sessions")
+    File.mkdir_p!(sessions_dir)
+    source_path = Path.join(sessions_dir, "source.jsonl")
+    target_path = Path.join(sessions_dir, "target.jsonl")
+
+    :ok = Sigma.Session.Log.persist_event(source_path, {:agent_start, repo})
+    :ok = Sigma.Session.Log.persist_event(target_path, {:agent_start, repo})
+    {:ok, _entry_id} = Sigma.Session.Log.append_model_change(target_path, "anthropic", "opus")
+
+    assert {:ok, handle} =
+             Sigma.Agent.Runtime.get_session(
+               repo,
+               "source",
+               session_opts(cwd: repo, transcript_path: source_path)
+             )
+
+    assert {:ok,
+            %{
+              session_id: "target",
+              snapshot: %{provider_id: "anthropic", model_id: "opus"}
+            }} =
+             Sigma.Agent.Runtime.switch_session(
+               repo,
+               "source",
+               "target",
+               sessions_dir
+             )
+
+    assert {:error, {:switch_target_invalid, :missing_session_header}} =
+             Sigma.Agent.Runtime.switch_session(
+               repo,
+               "source",
+               "missing",
+               sessions_dir
+             )
+
+    assert Process.alive?(handle.agent)
+    assert {:accepted, _admission} = Sigma.Agent.prompt(handle.agent, "still usable")
+  end
+
+  test "idle runtime fork flushes the writer and publishes an independent target", context do
+    repo = tmp_repo!(context, "repo-operations-fork")
+    sessions_dir = Path.join(repo, "sessions")
+    File.mkdir_p!(sessions_dir)
+    source_path = Path.join(sessions_dir, "source.jsonl")
+    target_path = Path.join(sessions_dir, "fork.jsonl")
+
+    :ok = Sigma.Session.Log.persist_event(source_path, {:agent_start, repo})
+
+    assert {:ok, handle} =
+             Sigma.Agent.Runtime.get_session(
+               repo,
+               "source",
+               session_opts(cwd: repo, transcript_path: source_path)
+             )
+
+    message = Sigma.Agent.Message.user("persisted-before-fork", "accepted")
+    :ok = Sigma.Agent.SessionProcess.record_event(handle.session, {:message_end, message}, nil)
+    source_before = File.read!(source_path)
+
+    assert {:ok, %{session_id: "fork"}} =
+             Sigma.Agent.Runtime.fork_session(repo, "source", "fork", sessions_dir)
+
+    assert File.read!(source_path) == source_before
+    assert {:ok, fork_snapshot} = Sigma.Session.Log.snapshot(target_path)
+    assert Enum.map(fork_snapshot.messages, & &1.id) == ["persisted-before-fork"]
+
+    fork_message = Sigma.Agent.Message.user("fork-only", "independent")
+    :ok = Sigma.Session.Log.persist_event(target_path, {:message_end, fork_message})
+    assert {:ok, source_snapshot} = Sigma.Session.Log.snapshot(source_path)
+    refute Enum.any?(source_snapshot.messages, &(&1.id == "fork-only"))
+  end
+
+  test "session operation lock atomically rejects prompt admission until transition completes", context do
+    repo = tmp_repo!(context, "repo-operation-lock")
+    sessions_dir = Path.join(repo, "sessions")
+    File.mkdir_p!(sessions_dir)
+    source_path = Path.join(sessions_dir, "source.jsonl")
+    target_path = Path.join(sessions_dir, "target.jsonl")
+    :ok = Sigma.Session.Log.persist_event(source_path, {:agent_start, repo})
+    :ok = Sigma.Session.Log.persist_event(target_path, {:agent_start, repo})
+
+    assert {:ok, handle} =
+             Sigma.Agent.Runtime.get_session(
+               repo,
+               "source",
+               session_opts(cwd: repo, transcript_path: source_path)
+             )
+
+    test_pid = self()
+
+    transition =
+      Task.async(fn ->
+        Sigma.Agent.Runtime.switch_session(repo, "source", "target", sessions_dir,
+          validate: fn _snapshot ->
+            send(test_pid, {:transition_locked, self()})
+
+            receive do
+              :release_transition -> :ok
+            end
+          end
+        )
+      end)
+
+    assert_receive {:transition_locked, owner}, 1_000
+    assert {:rejected, :session_busy} = Sigma.Agent.prompt(handle.agent, "must not race")
+
+    assert {:error, :session_busy} =
+             Sigma.Agent.Runtime.change_model(
+               repo,
+               "source",
+               "anthropic",
+               "opus",
+               EmptyProvider,
+               %{id: "opus", api: "mock-api", provider: "anthropic"},
+               []
+             )
+
+    send(owner, :release_transition)
+    assert {:ok, %{session_id: "target"}} = Task.await(transition)
+    assert {:ok, %{provider_id: nil, model_id: nil}} = Sigma.Session.Log.snapshot(source_path)
+
+    assert {:error, {:switch_validation_exception, RuntimeError}} =
+             Sigma.Agent.Runtime.switch_session(repo, "source", "target", sessions_dir,
+               validate: fn _snapshot -> raise "injected validator failure" end
+             )
+
+    assert {:accepted, _admission} = Sigma.Agent.prompt(handle.agent, "lock was released")
+  end
+
+  test "repository process restart rediscovers a busy session from the registry", context do
+    repo = tmp_repo!(context, "repo-process-restart")
+    sessions_dir = Path.join(repo, "sessions")
+    File.mkdir_p!(sessions_dir)
+    source_path = Path.join(sessions_dir, "source.jsonl")
+    :ok = Sigma.Session.Log.persist_event(source_path, {:agent_start, repo})
+
+    assert {:ok, handle} =
+             Sigma.Agent.Runtime.get_session(
+               repo,
+               "source",
+               session_opts(
+                 cwd: repo,
+                 transcript_path: source_path,
+                 provider: BlockingProvider,
+                 options: [test_pid: self()]
+               )
+             )
+
+    assert {:accepted, _admission} = Sigma.Agent.prompt(handle.agent, "remain busy")
+    assert_receive {:runtime_provider_waiting, _provider}, 1_000
+    Process.exit(handle.repository, :kill)
+    assert :ok = await_repository_restarted(repo, handle.repository, 1_000)
+
+    assert {:error, :session_busy} =
+             Sigma.Agent.Runtime.fork_session(repo, "source", "fork", sessions_dir)
+
+    refute File.exists?(Path.join(sessions_dir, "fork.jsonl"))
+  end
+
+  defp await_repository_restarted(repo, old_pid, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_await_repository_restarted(repo, old_pid, deadline)
+  end
+
+  defp do_await_repository_restarted(repo, old_pid, deadline) do
+    case Sigma.Agent.Runtime.lookup(repo, :process) do
+      pid when is_pid(pid) and pid != old_pid -> :ok
+      _pid ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          {:error, :timeout}
+        else
+          Process.sleep(10)
+          do_await_repository_restarted(repo, old_pid, deadline)
+        end
+    end
   end
 end

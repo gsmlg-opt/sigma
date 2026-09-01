@@ -272,6 +272,41 @@ defmodule Sigma.AgentTest do
     end
   end
 
+  defmodule PartialPromptDispatcherTool do
+    @behaviour Sigma.Coding.Tool
+
+    @impl true
+    def name, do: "capture_prompt_opts"
+    @impl true
+    def description, do: "Streams partial output."
+    @impl true
+    def schema, do: %{}
+    @impl true
+    def metadata, do: %{effect: :read, concurrency: :shared, default_deadline_ms: 1_000}
+
+    @impl true
+    def execute(_tool_call_id, _params, opts) do
+      update = Keyword.fetch!(opts, :on_update)
+      update.(%{content: [%{type: :text, text: "first"}], details: %{}})
+      update.(%{content: [%{type: :text, text: "second"}], details: %{}})
+      {:ok, %{content: [%{type: :text, text: "done"}], details: %{}}}
+    end
+  end
+
+  defmodule CrashingPromptDispatcherTool do
+    @behaviour Sigma.Coding.Tool
+
+    @impl true
+    def name, do: "capture_prompt_opts"
+    @impl true
+    def description, do: "Crashes for isolation coverage."
+    @impl true
+    def schema, do: %{}
+
+    @impl true
+    def execute(_tool_call_id, _params, _opts), do: raise("tool exploded")
+  end
+
   test "agent manages a turn and emits events" do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
@@ -322,7 +357,12 @@ defmodule Sigma.AgentTest do
     Sigma.Agent.subscribe(agent)
     Sigma.Agent.prompt(agent, "Hi")
 
-    assert_receive {:turn_error, "AI provider returned no response."}, 1000
+    assert_receive {:turn_error,
+                    %Sigma.Ai.ProviderError{
+                      kind: :malformed_stream,
+                      message: "stream_ended_without_terminal"
+                    }},
+                   1000
     assert_receive {:agent_end, [%Message{role: :user, content: "Hi"}]}, 1000
   end
 
@@ -435,6 +475,87 @@ defmodule Sigma.AgentTest do
              messages,
              &(&1.role == :tool_result and &1.tool_name == "capture_prompt_opts")
            )
+  end
+
+  test "an explicit ask policy uses the per-turn approval resolver before tool execution" do
+    model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
+    {:ok, policy} = Sigma.Coding.PermissionPolicy.start_link(default: :allow)
+    Sigma.Coding.PermissionPolicy.ask_tool(policy, "capture_prompt_opts")
+    test_pid = self()
+
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        model: model,
+        provider: PromptDispatcherProvider,
+        tools: [PromptDispatcherTool],
+        policy: policy
+      )
+
+    Sigma.Agent.subscribe(agent)
+
+    Sigma.Agent.prompt(agent, "Hi",
+      dispatcher_opts: [
+        test_pid: test_pid,
+        per_prompt_value: :approved,
+        permission_request_fn: fn tool_call ->
+          send(test_pid, {:permission_requested, tool_call.name})
+          :allow
+        end
+      ]
+    )
+
+    assert_receive {:permission_requested, "capture_prompt_opts"}, 1_000
+    assert_receive {:dispatcher_opts_seen, :approved}, 1_000
+    assert_receive {:agent_end, messages}, 1_000
+    assert Enum.any?(messages, &(&1.role == :tool_result))
+  end
+
+  test "normalized partial tool updates reach Agent subscribers in order" do
+    model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
+
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        model: model,
+        provider: PromptDispatcherProvider,
+        tools: [PartialPromptDispatcherTool]
+      )
+
+    Sigma.Agent.subscribe(agent)
+    Sigma.Agent.prompt(agent, "Hi")
+
+    assert_receive {:tool_execution_update, "tc_prompt_opts", "capture_prompt_opts", %{},
+                    %Sigma.Coding.ToolUpdate{sequence: 1, content: [%{text: "first"}]}}
+
+    assert_receive {:tool_execution_update, "tc_prompt_opts", "capture_prompt_opts", %{},
+                    %Sigma.Coding.ToolUpdate{sequence: 2, content: [%{text: "second"}]}}
+
+    assert_receive {:agent_end, _messages}, 1_000
+  end
+
+  @tag :capture_log
+  test "a crashing tool becomes an error result without crashing the Agent" do
+    model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
+
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        model: model,
+        provider: PromptDispatcherProvider,
+        tools: [CrashingPromptDispatcherTool]
+      )
+
+    Sigma.Agent.subscribe(agent)
+    Sigma.Agent.prompt(agent, "Hi")
+
+    assert_receive {:agent_end, messages}, 1_000
+    assert Process.alive?(agent)
+
+    assert Enum.any?(messages, fn
+             %Message{role: :tool_result, is_error: true, content: [%{text: text}]} ->
+               text =~ "tool exploded"
+
+             _message ->
+               false
+           end)
   end
 
   test "tool transcript path uses the provided transcript path" do

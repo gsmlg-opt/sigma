@@ -51,6 +51,83 @@ defmodule Sigma.Agent.Runtime do
     end
   end
 
+  def reload_context(repo_path, session_id, %Sigma.Agent.SessionContext{} = session_context) do
+    case lookup(repo_path, session_id, :agent) do
+      agent when is_pid(agent) -> Sigma.Agent.reload_context(agent, session_context)
+      nil -> {:error, :session_not_running}
+    end
+  catch
+    :exit, reason -> {:error, {:session_unavailable, reason}}
+  end
+
+  def context_preview(repo_path, session_id) do
+    case lookup(repo_path, session_id, :agent) do
+      agent when is_pid(agent) -> {:ok, Sigma.Agent.context_preview(agent)}
+      nil -> {:error, :session_not_running}
+    end
+  catch
+    :exit, reason -> {:error, {:session_unavailable, reason}}
+  end
+
+  @doc "Validates an idle transition from one running session to another journal."
+  def switch_session(repo_path, current_session_id, target_session_id, sessions_dir, opts \\ [])
+      when is_binary(repo_path) and is_binary(current_session_id) and
+             is_binary(target_session_id) and is_binary(sessions_dir) do
+    session_operation(
+      repo_path,
+      current_session_id,
+      {:switch, target_session_id, sessions_dir, opts}
+    )
+  end
+
+  @doc "Creates a fork through the repository-owned serialized operation boundary."
+  def fork_session(
+        repo_path,
+        source_session_id,
+        target_session_id,
+        sessions_dir,
+        message_id \\ :all,
+        opts \\ []
+      )
+      when is_binary(repo_path) and is_binary(source_session_id) and
+             is_binary(target_session_id) and is_binary(sessions_dir) do
+    session_operation(
+      repo_path,
+      source_session_id,
+      {:fork, target_session_id, sessions_dir, message_id, opts}
+    )
+  end
+
+  @doc "Relocates an idle session file set through the serialized operation boundary."
+  def adopt_session(
+        repo_path,
+        session_id,
+        source_sessions_dir,
+        target_sessions_dir,
+        replacement_cwd,
+        opts \\ []
+      )
+      when is_binary(repo_path) and is_binary(session_id) and
+             is_binary(source_sessions_dir) and is_binary(target_sessions_dir) and
+             is_binary(replacement_cwd) do
+    session_operation(
+      repo_path,
+      session_id,
+      {:adopt, source_sessions_dir, target_sessions_dir, replacement_cwd, opts}
+    )
+  end
+
+  def rename_session(repo_path, session_id, target_session_id, sessions_dir)
+      when is_binary(repo_path) and is_binary(session_id) and is_binary(target_session_id) and
+             is_binary(sessions_dir) do
+    session_operation(repo_path, session_id, {:rename, target_session_id, sessions_dir, []})
+  end
+
+  def delete_session(repo_path, session_id, sessions_dir)
+      when is_binary(repo_path) and is_binary(session_id) and is_binary(sessions_dir) do
+    session_operation(repo_path, session_id, {:delete, sessions_dir, []})
+  end
+
   @doc """
   Serializes and acknowledges a persisted model change for a running session.
   """
@@ -80,6 +157,14 @@ defmodule Sigma.Agent.Runtime do
     repo_path
     |> Path.expand()
     |> Path.absname()
+  end
+
+  defp session_operation(repo_path, source_session_id, operation) do
+    with {:ok, %{repository: repository}} <- ensure_repository(repo_path) do
+      Sigma.Agent.RepositoryProcess.session_operation(repository, source_session_id, operation)
+    end
+  catch
+    :exit, reason -> {:error, {:session_unavailable, reason}}
   end
 
   def via(repo_path, role) do

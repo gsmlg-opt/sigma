@@ -13,6 +13,7 @@ defmodule Sigma.Agent.SessionProcess do
     :last_activity_at,
     :session_context,
     :on_state_change,
+    :writer,
     messages: [],
     last_compaction: nil,
     compaction_count: 0,
@@ -30,7 +31,7 @@ defmodule Sigma.Agent.SessionProcess do
   end
 
   def record_event(pid_or_name, event, on_event) do
-    GenServer.cast(pid_or_name, {:record_event, event, on_event})
+    GenServer.call(pid_or_name, {:record_event, event, on_event}, :infinity)
   end
 
   @doc """
@@ -61,6 +62,7 @@ defmodule Sigma.Agent.SessionProcess do
       last_activity_at: now,
       session_context: Keyword.get(opts, :session_context),
       on_state_change: Keyword.get(opts, :on_state_change),
+      writer: Keyword.get(opts, :writer),
       messages: Keyword.get(opts, :messages, []),
       status: :active
     }
@@ -91,8 +93,8 @@ defmodule Sigma.Agent.SessionProcess do
       ) do
     event = {:model_change, provider_id, model_id}
 
-    if is_function(state.on_state_change, 1) do
-      persist = fn -> state.on_state_change.(event) end
+    case state_change_persist(state, event) do
+      {:ok, persist} ->
 
       case safely(fn -> Sigma.Agent.change_provider(agent, provider, model, options, persist) end) do
         :ok ->
@@ -104,21 +106,18 @@ defmodule Sigma.Agent.SessionProcess do
         {:error, _reason} = error ->
           {:reply, error, state}
       end
-    else
-      {:reply, {:error, :state_change_persistence_not_configured}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
   @impl true
-  def handle_cast({:record_event, event, on_event}, state) do
-    if is_function(on_event, 1), do: on_event.(event)
-
-    state =
-      state
-      |> apply_event(event)
-      |> Map.update!(:event_count, &(&1 + 1))
-
-    {:noreply, state}
+  def handle_call({:record_event, event, on_event}, _from, state) do
+    case persist_recorded_event(state, event, on_event) do
+      :ok -> {:reply, :ok, apply_recorded_event(state, event)}
+      {:error, _reason} = error -> {:reply, error, state}
+    end
   end
 
   @impl true
@@ -140,6 +139,63 @@ defmodule Sigma.Agent.SessionProcess do
   catch
     kind, reason -> {:error, {:state_change_failure, kind, reason}}
   end
+
+  defp state_change_persist(%{writer: writer}, event) when not is_nil(writer) do
+    {:ok,
+     fn ->
+       case apply(Sigma.Session.Writer, :append, [writer, event]) do
+         {:ok, _entry_id} = success -> success
+         {:error, _reason} = error -> error
+         :ignored -> {:error, :state_change_not_durable}
+       end
+     end}
+  end
+
+  defp state_change_persist(%{on_state_change: on_state_change}, event)
+       when is_function(on_state_change, 1) do
+    {:ok, fn -> on_state_change.(event) end}
+  end
+
+  defp state_change_persist(_state, _event),
+    do: {:error, :state_change_persistence_not_configured}
+
+  defp persist_recorded_event(%{writer: writer}, event, on_event) when not is_nil(writer) do
+    case safely_writer_append(writer, event) do
+      {:ok, _entry_id} ->
+        notify_event(on_event, event)
+        :ok
+
+      :ignored ->
+        notify_event(on_event, event)
+        :ok
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp persist_recorded_event(_state, event, on_event) do
+    case notify_event(on_event, event) do
+      {:error, _reason} = error -> error
+      _result -> :ok
+    end
+  end
+
+  defp safely_writer_append(writer, event) do
+    apply(Sigma.Session.Writer, :append, [writer, event])
+  catch
+    :exit, reason -> {:error, {:session_writer_unavailable, reason}}
+  end
+
+  defp notify_event(on_event, event) when is_function(on_event, 1) do
+    on_event.(event)
+  rescue
+    exception -> {:error, {:event_callback_exception, exception.__struct__}}
+  catch
+    kind, reason -> {:error, {:event_callback_failure, kind, reason}}
+  end
+
+  defp notify_event(_on_event, _event), do: :ok
 
   defp apply_recorded_event(state, event) do
     state
@@ -176,6 +232,15 @@ defmodule Sigma.Agent.SessionProcess do
 
   defp apply_event(state, {:message_start, %{role: :user}}) do
     touch(%{state | status: :turn_running})
+  end
+
+  defp apply_event(state, {:message_end, message}) do
+    messages =
+      if Enum.any?(state.messages, &(&1.id == message.id)),
+        do: state.messages,
+        else: state.messages ++ [message]
+
+    %{state | messages: messages}
   end
 
   defp apply_event(state, _event), do: state
