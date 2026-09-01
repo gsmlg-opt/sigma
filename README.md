@@ -9,7 +9,7 @@ The original TypeScript `pi` project is [earendil-works/pi](https://github.com/e
 | App | Module prefix | Role |
 | --- | --- | --- |
 | `sigma_ai` | `Sigma.Ai` | Provider behaviour plus Anthropic and OpenAI-compatible streaming parsers |
-| `sigma_protocol` | `Sigma.Agent.Message` | Shared message structs and protocol types used across apps |
+| `sigma_protocol` | `Sigma.Protocol`, `Sigma.Agent.Message` | Versioned command/event envelopes, bounded JSON codec, and shared message types |
 | `sigma_agent` | `Sigma.Agent` | Repository/session supervisors, turn loop, context building, compaction, and tool-call orchestration |
 | `sigma_session` | `Sigma.Session` | pi-compatible config, repository list, context files, skills, slash commands, and JSONL replay/persistence |
 | `sigma_coding` | `Sigma.Coding` | Tool behaviour, dispatcher, permissions, MCP, and hooks |
@@ -22,9 +22,9 @@ The original TypeScript `pi` project is [earendil-works/pi](https://github.com/e
 - Phoenix LiveView UI for repositories, sessions, global settings, project settings, skills, hooks, MCP servers, interactive permission prompts, and a session debug-log drawer.
 - Per-repository and per-session OTP processes for agent runtime lifecycle.
 - Streaming Anthropic and OpenAI-compatible chat providers.
-- Append-only JSONL session journals with replay, compaction entries, and session forking.
+- Append-only JSONL session journals with deterministic branch replay, compaction, serialized switch/fork operations, stable dump/export, and explicit relocation.
 - New sessions can run in the project directory, an existing git worktree, or a newly created worktree.
-- Context-file assembly from `AGENTS.md`/`CLAUDE.md`, ordered from filesystem root to the active workdir. `AGENTS.md` wins when both files exist in the same directory.
+- Context-file assembly from `AGENTS.md`/`CLAUDE.md`, ordered from filesystem root to the active workdir. `AGENTS.md` wins when both files exist in the same directory. Bounded imports, path scopes, sticky rules, provenance, diagnostics, preview traces, and explicit idle-only reload are supported by [Context Rules V2](docs/context-rules-v2.md).
 - Built-in tools: `ask`, `read`, `write`, `bash`, `search`, `find`, and hashline-only `edit` (`[path#TAG]` sections).
 - Global and project MCP server selection, plus hook discovery for Pi, Codex, and Claude-style hook files.
 - Skills from `~/.agents/skills` and `<repo>/.agents/skills`.
@@ -45,7 +45,7 @@ mix setup
 mix phx.server
 ```
 
-`mix setup` runs `deps.get`, `deps.patch`, `assets.setup`, and `assets.build`. `mix sigma.run` is an alias for `mix phx.server`.
+`mix setup` runs `deps.get`, `assets.setup`, and `assets.build`. It does not modify installed dependency source. `mix sigma.run` is an alias for `mix phx.server`.
 
 `mix sigma.rel-run` builds the frontend assets, overwrites the `sigma` release for the current Mix environment, and runs it in the foreground.
 
@@ -67,6 +67,40 @@ Provider settings are managed in the UI under `/settings/providers` and are save
 - `hooks.json`
 - `AGENTS.md`
 
+Sigma intentionally uses an allow-all permission policy by default. Missing or
+legacy settings resolve to:
+
+```json
+{
+  "permissions": {
+    "default": "allow",
+    "rules": {}
+  }
+}
+```
+
+This YOLO-style mode runs built-in and newly discovered MCP tools without an
+approval prompt. Guarded mode is opt-in through per-tool `ask` or `deny` rules:
+
+```json
+{
+  "permissions": {
+    "default": "allow",
+    "rules": {
+      "write": "ask",
+      "edit": "ask",
+      "bash": "ask",
+      "dangerous_mcp_tool": "deny"
+    }
+  }
+}
+```
+
+Only `allow`, `ask`, and `deny` are valid actions. An `ask` rule blocks that
+tool call until the LiveView user allows or denies it. Headless callers without
+an approval resolver receive a typed `approval_required` error; the default
+allow-all path remains non-interactive.
+
 Direct provider calls can also read environment fallbacks, but the LiveView flow resolves credentials from the saved settings above:
 
 - Anthropic: `ANTHROPIC_AUTH_TOKEN`, optional `ANTHROPIC_BASE_URL`
@@ -80,7 +114,32 @@ Direct provider calls can also read environment fallbacks, but the LiveView flow
 4. Prompt the agent; tool calls stream back through LiveView and may request approval depending on policy.
 5. Fork a session when you want a new branch of the same conversation history.
 
+Prompt admission remains available while a turn is active. Additional prompts
+receive an explicit queued follow-up result instead of being silently dropped;
+steering is consumed only at a provider or tool safe boundary. Cancelling a turn
+cooperatively reaches provider transports and interruptible tools without
+terminating the session Agent.
+
+Session lifecycle changes are serialized through `Sigma.Agent.Runtime`.
+Switching, forking, or adopting a session during an active provider, tool,
+permission, or MCP elicitation phase returns `session_busy` and mutates nothing.
+The repository session list uses bounded journal summaries and keeps sessions
+whose recorded working directory is missing visible with an explicit adoption
+action.
+
+For programmatic read-only artifacts, `Sigma.Session.Log.dump/3` publishes a
+versioned JSON document and `Sigma.Session.Log.export/3` publishes Markdown.
+Both capture the accepted journal length at operation start, publish atomically,
+and refuse to overwrite an output unless `replace: true` is supplied.
+
 The session input supports `/init`, which expands into the built-in setup prompt for creating or updating project/user `AGENTS.md` files and related Sigma Agent setup.
+
+Headless clients use the same command boundary as LiveView. Protocol V1 supports
+direct Elixir integration through `Sigma.Agent.PublicRuntime`, JSON Lines through
+`Sigma.Agent.Stdio`, and Phoenix WebSockets at `/agent/websocket`. See the
+[Protocol V1 guide](docs/protocol-v1.md) for the envelope and adapter contracts.
+The WebSocket is disabled unless `SIGMA_PROTOCOL_TOKEN` is configured with a
+capability token of at least 32 bytes.
 
 Repository routes use a Base64 URL-encoded absolute path without padding:
 
