@@ -39,6 +39,7 @@
 | [domain.md](agents/domain.md) | 领域文档与 ADR 阅读约定 |
 | [issue-tracker.md](agents/issue-tracker.md) | GitHub Issues 操作约定 |
 | [triage-labels.md](agents/triage-labels.md) | Triage 标签映射 |
+| [cursor-commit-attribution.md](agents/cursor-commit-attribution.md) | 禁止 Cursor `Co-authored-by` trailer：根因与 `.githooks` 修复 |
 
 ## 归档（archive/）
 

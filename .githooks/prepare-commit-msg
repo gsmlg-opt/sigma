@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# prepare-commit-msg: strip Cursor attribution before the editor / finalization.
+# Args: $1 = commit message file, $2 = source, $3 = SHA1 (optional)
+set -euo pipefail
+hook_dir="$(cd "$(dirname "$0")" && pwd)"
+exec "$hook_dir/strip-cursor-coauthor.sh" "$1"

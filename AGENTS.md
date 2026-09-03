@@ -31,6 +31,7 @@ mix compile --warnings-as-errors
 
 ## Collaboration Defaults
 
+- Never add `Co-authored-by: Cursor <cursoragent@cursor.com>` (or similar Cursor attribution) to commits. Run `./scripts/install-git-hooks.sh` once per clone so `.githooks` strips it; see `docs/agents/cursor-commit-attribution.md`.
 - Keep responses concise and assume Elixir/BEAM, Phoenix, LiveView, and OTP familiarity.
 - Prefer architecture, protocol, process, and technical-principle explanations over beginner walkthroughs.
 - Default code examples to Elixir when examples are explicitly requested.

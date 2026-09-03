@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# commit-msg: last chance to strip Cursor attribution (covers `git commit --trailer`).
+# Args: $1 = commit message file
+set -euo pipefail
+hook_dir="$(cd "$(dirname "$0")" && pwd)"
+exec "$hook_dir/strip-cursor-coauthor.sh" "$1"
