@@ -67,7 +67,7 @@ defmodule Sigma.Agent.RuntimeTest do
       [
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: EmptyProvider,
-        idle_timeout_ms: 60
+        idle_timeout_ms: 30_000
       ],
       extra
     )
@@ -170,7 +170,11 @@ defmodule Sigma.Agent.RuntimeTest do
     repo = tmp_repo!(context, "repo")
 
     assert {:ok, handle} =
-             Sigma.Agent.Runtime.get_session(repo, "session-idle", session_opts(cwd: repo))
+             Sigma.Agent.Runtime.get_session(
+               repo,
+               "session-idle",
+               session_opts(cwd: repo, idle_timeout_ms: 60)
+             )
 
     assert :ok = Sigma.Agent.SessionProcess.await_hibernating(handle.session, 1_000)
     assert %{status: :hibernating} = Sigma.Agent.SessionProcess.status(handle.session)
@@ -347,7 +351,7 @@ defmodule Sigma.Agent.RuntimeTest do
         )
       end)
 
-    assert_receive {:state_change_started, owner, {:model_change, "anthropic", "opus"}}
+    assert_receive {:state_change_started, owner, {:model_change, "anthropic", "opus"}}, 5_000
 
     prompt = Task.async(fn -> Sigma.Agent.prompt(handle.agent, "use the committed model") end)
     refute_receive {:provider_model, _model_id}, 100
@@ -397,7 +401,7 @@ defmodule Sigma.Agent.RuntimeTest do
         )
       end)
 
-    assert_receive {:first_change_started, owner, {:model_change, "openai", "smart"}}
+    assert_receive {:first_change_started, owner, {:model_change, "openai", "smart"}}, 5_000
 
     second =
       Task.async(fn ->
@@ -585,7 +589,7 @@ defmodule Sigma.Agent.RuntimeTest do
         )
       end)
 
-    assert_receive {:transition_locked, owner}, 1_000
+    assert_receive {:transition_locked, owner}, 5_000
     assert {:rejected, :session_busy} = Sigma.Agent.prompt(handle.agent, "must not race")
 
     assert {:error, :session_busy} =

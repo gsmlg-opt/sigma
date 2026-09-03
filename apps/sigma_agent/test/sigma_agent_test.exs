@@ -67,9 +67,9 @@ defmodule Sigma.AgentTest do
     Sigma.Agent.subscribe(agent)
     Sigma.Agent.prompt(agent, [%{type: :text, text: "Describe"}, image])
 
-    assert_receive {:provider_params, %{context: %{messages: [%{content: content}]}}}, 1000
+    assert_receive {:provider_params, %{context: %{messages: [%{content: content}]}}}
     assert content == [%{type: :text, text: "Describe"}, image]
-    assert_receive {:agent_end, [%{role: :user, content: ^content} | _]}, 1000
+    assert_receive {:agent_end, [%{role: :user, content: ^content} | _]}
   end
 
   test "hook context is leading text while preserving rich content" do
@@ -96,7 +96,7 @@ defmodule Sigma.AgentTest do
       %{type: :text, text: "more"}
     ])
 
-    assert_receive {:provider_params, %{context: %{messages: [%{content: content}]}}}, 1000
+    assert_receive {:provider_params, %{context: %{messages: [%{content: content}]}}}
 
     assert content == [
              %{type: :text, text: "Describe\n\nmore\n\n[Additional context from hook]\nextra"},
@@ -104,7 +104,7 @@ defmodule Sigma.AgentTest do
              malformed
            ]
 
-    assert_receive {:agent_end, _}, 1000
+    assert_receive {:agent_end, _}
 
     {:ok, image_only_agent} =
       Sigma.Agent.start_link(
@@ -116,7 +116,7 @@ defmodule Sigma.AgentTest do
     :sys.replace_state(image_only_agent, &%{&1 | hook_specs: [spec]})
     Sigma.Agent.prompt(image_only_agent, [image])
 
-    assert_receive {:provider_params, %{context: %{messages: [%{content: image_only}]}}}, 1000
+    assert_receive {:provider_params, %{context: %{messages: [%{content: image_only}]}}}
 
     assert image_only == [
              %{type: :text, text: "[Additional context from hook]\nextra"},
@@ -140,9 +140,9 @@ defmodule Sigma.AgentTest do
     Sigma.Agent.subscribe(agent)
     Sigma.Agent.prompt(agent, [%{type: :text, text: "Describe"}, image])
 
-    assert_receive {:turn_blocked, _}, 1000
+    assert_receive {:turn_blocked, _}
     refute_receive {:provider_params, _}, 100
-    assert_receive {:agent_end, []}, 1000
+    assert_receive {:agent_end, []}
   end
 
   defp hook_spec(cmd) do
@@ -361,9 +361,8 @@ defmodule Sigma.AgentTest do
                     %Sigma.Ai.ProviderError{
                       kind: :malformed_stream,
                       message: "stream_ended_without_terminal"
-                    }},
-                   1000
-    assert_receive {:agent_end, [%Message{role: :user, content: "Hi"}]}, 1000
+                    }}
+    assert_receive {:agent_end, [%Message{role: :user, content: "Hi"}]}
   end
 
   test "injects project context into the first user message sent to the provider" do
@@ -407,8 +406,7 @@ defmodule Sigma.AgentTest do
                           }
                         ]
                       }
-                    }},
-                   1000
+                    }}
 
     assert system_identity == "You are Sigma, an Elixir-based AI coding agent."
     assert system_policy =~ "You are an interactive agent"
@@ -440,10 +438,10 @@ defmodule Sigma.AgentTest do
 
     Sigma.Agent.prompt(agent, "First")
     # Wait for turn to complete
-    assert_receive {:agent_end, _}, 1000
+    assert_receive {:agent_end, _}
 
     Sigma.Agent.prompt(agent, "Second")
-    assert_receive {:agent_end, messages}, 1000
+    assert_receive {:agent_end, messages}
 
     # Should have 4 messages: User, Assistant, User, Assistant
     assert length(messages) == 4
@@ -468,8 +466,8 @@ defmodule Sigma.AgentTest do
       dispatcher_opts: [test_pid: self(), per_prompt_value: :current_turn]
     )
 
-    assert_receive {:dispatcher_opts_seen, :current_turn}, 1000
-    assert_receive {:agent_end, messages}, 1000
+    assert_receive {:dispatcher_opts_seen, :current_turn}
+    assert_receive {:agent_end, messages}
 
     assert Enum.any?(
              messages,
@@ -504,9 +502,9 @@ defmodule Sigma.AgentTest do
       ]
     )
 
-    assert_receive {:permission_requested, "capture_prompt_opts"}, 1_000
-    assert_receive {:dispatcher_opts_seen, :approved}, 1_000
-    assert_receive {:agent_end, messages}, 1_000
+    assert_receive {:permission_requested, "capture_prompt_opts"}
+    assert_receive {:dispatcher_opts_seen, :approved}
+    assert_receive {:agent_end, messages}
     assert Enum.any?(messages, &(&1.role == :tool_result))
   end
 
@@ -529,7 +527,7 @@ defmodule Sigma.AgentTest do
     assert_receive {:tool_execution_update, "tc_prompt_opts", "capture_prompt_opts", %{},
                     %Sigma.Coding.ToolUpdate{sequence: 2, content: [%{text: "second"}]}}
 
-    assert_receive {:agent_end, _messages}, 1_000
+    assert_receive {:agent_end, _messages}
   end
 
   @tag :capture_log
@@ -546,7 +544,7 @@ defmodule Sigma.AgentTest do
     Sigma.Agent.subscribe(agent)
     Sigma.Agent.prompt(agent, "Hi")
 
-    assert_receive {:agent_end, messages}, 1_000
+    assert_receive {:agent_end, messages}
     assert Process.alive?(agent)
 
     assert Enum.any?(messages, fn
@@ -582,7 +580,7 @@ defmodule Sigma.AgentTest do
     Sigma.Agent.subscribe(agent)
     Sigma.Agent.prompt(agent, "Hi")
 
-    assert_receive {:agent_end, messages}, 1000
+    assert_receive {:agent_end, messages}
     refute_received {:dispatcher_opts_seen, _}
     refute_received {:turn_error, _}
 
@@ -856,8 +854,8 @@ defmodule Sigma.AgentTest do
     Sigma.Agent.subscribe(agent)
     Sigma.Agent.prompt(agent, "Hi")
 
-    assert_receive {:transcript_path_seen, transcript_path}, 1_000
-    assert_receive {:agent_end, _messages}, 1_000
+    assert_receive {:transcript_path_seen, transcript_path}
+    assert_receive {:agent_end, _messages}
 
     transcript_path
   end

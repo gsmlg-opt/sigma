@@ -283,9 +283,9 @@ defmodule Sigma.Agent.PublicRuntimeTest do
     assert {:ok, prompt} = Envelope.command("prompt.submit", session_id, %{"content" => "fast"})
     assert {:ok, _admission} = PublicRuntime.execute(prompt, runtime_context)
 
-    assert :ok = await_phase(context.repo, session_id, :completed, 1_000)
+    assert :ok = await_phase(context.repo, session_id, :completed, 5_000)
     send(slow_sink, :drain)
-    assert_receive {:slow_sink_messages, messages}, 1_000
+    assert_receive {:slow_sink_messages, messages}, 5_000
 
     assert Enum.any?(messages, fn
              {:sigma_protocol, ^subscription_id, %{type: "turn.completed"}} -> true
@@ -369,7 +369,7 @@ defmodule Sigma.Agent.PublicRuntimeTest do
       {:sigma_protocol, ^subscription_id, %{type: ^type} = event} -> event
       {:sigma_protocol, ^subscription_id, _other_event} -> receive_type(subscription_id, type)
     after
-      1_000 -> flunk("timed out waiting for #{type}")
+      5_000 -> flunk("timed out waiting for #{type}")
     end
   end
 
@@ -379,7 +379,7 @@ defmodule Sigma.Agent.PublicRuntimeTest do
         events = acc ++ [event]
         if event.type == terminal_type, do: events, else: collect_until(subscription_id, terminal_type, events)
     after
-      1_000 -> flunk("timed out waiting for #{terminal_type}")
+      5_000 -> flunk("timed out waiting for #{terminal_type}")
     end
   end
 

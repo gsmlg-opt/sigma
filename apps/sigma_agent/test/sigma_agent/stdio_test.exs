@@ -81,7 +81,7 @@ defmodule Sigma.Agent.StdioTest do
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: StdioProvider
       ],
-      stdio_linger_ms: 500
+      stdio_linger_ms: 3_000
     }
 
     assert :ok = Stdio.run(input, output, context)

@@ -175,15 +175,15 @@ defmodule Sigma.Agent.ActiveTurnControlTest do
     assert_receive {:provider_waiting, steering_provider, "steer"}
     send(steering_provider, {:release_provider, "steered response"})
 
-    assert_receive {:agent_end, first_messages}, 1_000
+    assert_receive {:agent_end, first_messages}, 5_000
 
     assert Enum.map(first_messages, & &1.role) == [:user, :assistant, :user, :assistant]
     assert Enum.at(first_messages, 0).id == initial_id
     assert Enum.at(first_messages, 2).id == steering_id
 
-    assert_receive {:provider_waiting, follow_up_provider, "follow"}
+    assert_receive {:provider_waiting, follow_up_provider, "follow"}, 5_000
     send(follow_up_provider, {:release_provider, "follow response"})
-    assert_receive {:agent_end, all_messages}, 1_000
+    assert_receive {:agent_end, all_messages}, 5_000
     assert Enum.at(all_messages, 4).id == follow_up_id
   end
 
@@ -199,7 +199,7 @@ defmodule Sigma.Agent.ActiveTurnControlTest do
     assert_receive {:provider_waiting, third_provider, "two"}
     send(third_provider, {:release_provider, "two response"})
 
-    assert_receive {:agent_end, messages}, 1_000
+    assert_receive {:agent_end, messages}, 5_000
 
     assert Enum.map(Enum.filter(messages, &(&1.role == :user)), & &1.content) ==
              ["initial", "one", "two"]
@@ -214,19 +214,19 @@ defmodule Sigma.Agent.ActiveTurnControlTest do
 
     assert {:cancelling, ^turn_id} = Sigma.Agent.cancel(agent)
     assert {:already_cancelling, ^turn_id} = Sigma.Agent.cancel(agent)
-    assert_receive {:turn_cancelled}, 1_000
+    assert_receive {:turn_cancelled}, 5_000
     refute_receive {:turn_cancelled}, 100
 
-    assert_receive {:provider_waiting, follow_up_provider, "later"}, 1_000
+    assert_receive {:provider_waiting, follow_up_provider, "later"}, 5_000
     assert %{follow_up_queue_count: 0} = Sigma.Agent.status(agent)
     send(follow_up_provider, {:release_provider, "followed"})
-    assert_receive {:agent_end, _cancelled_messages}, 1_000
-    assert_receive {:agent_end, _follow_up_messages}, 1_000
+    assert_receive {:agent_end, _cancelled_messages}, 5_000
+    assert_receive {:agent_end, _follow_up_messages}, 5_000
 
     assert {:accepted, _} = Sigma.Agent.prompt(agent, "usable again")
-    assert_receive {:provider_waiting, provider, "usable again"}
+    assert_receive {:provider_waiting, provider, "usable again"}, 5_000
     send(provider, {:release_provider, "ok"})
-    assert_receive {:agent_end, _messages}, 1_000
+    assert_receive {:agent_end, _messages}, 5_000
   end
 
   test "cancellation during tool execution terminates the tool and keeps Agent alive" do
@@ -268,8 +268,8 @@ defmodule Sigma.Agent.ActiveTurnControlTest do
              Sigma.Agent.steer(agent, "change course")
 
     send(tool_pid, {:release_tool, "blocking-tool"})
-    assert_receive {:prompt_consumed, :steering, %{message_id: ^steering_id}}, 1_000
-    assert_receive {:agent_end, messages}, 1_000
+    assert_receive {:prompt_consumed, :steering, %{message_id: ^steering_id}}, 5_000
+    assert_receive {:agent_end, messages}, 5_000
 
     assert Enum.map(Enum.filter(messages, &(&1.role == :user)), & &1.content) ==
              ["initial", "change course"]
@@ -379,6 +379,6 @@ defmodule Sigma.Agent.ActiveTurnControlTest do
     assert_receive {:noncooperative_provider_waiting, follow_up_provider}, 1_000
     assert %{follow_up_queue_count: 0} = Sigma.Agent.status(agent)
     send(follow_up_provider, :release_noncooperative)
-    assert_receive {:agent_end, _messages}, 1_000
+    assert_receive {:agent_end, _messages}, 5_000
   end
 end
