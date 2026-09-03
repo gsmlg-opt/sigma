@@ -107,13 +107,22 @@ const ModalHook = {
     this._show()
   },
   _show() {
-    if (typeof this.el.show === 'function') {
-      this.el.show();
+    if (typeof this.el.showModal === 'function') {
+      if (!this.el.open) {
+        this.el.showModal()
+      } else if (!this.el.matches?.(':modal')) {
+        this.el.close()
+        this.el.showModal()
+      }
+    } else if (typeof this.el.show === 'function') {
+      if (!this.el.open) {
+        this.el.show()
+      }
     } else {
-      this.el.setAttribute('open', '');
+      this.el.setAttribute('open', '')
     }
   }
-};
+}
 
 // Drives el-dm-menu open/close from an anchor button and forwards select events to LiveView.
 // Use: phx-hook="SessionMenuHook" data-session="session_id" anchor="#btn-id"
