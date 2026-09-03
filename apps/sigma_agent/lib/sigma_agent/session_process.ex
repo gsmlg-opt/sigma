@@ -95,17 +95,16 @@ defmodule Sigma.Agent.SessionProcess do
 
     case state_change_persist(state, event) do
       {:ok, persist} ->
+        case safely(fn -> Sigma.Agent.change_provider(agent, provider, model, options, persist) end) do
+          :ok ->
+            {:reply, :ok, apply_recorded_event(state, event)}
 
-      case safely(fn -> Sigma.Agent.change_provider(agent, provider, model, options, persist) end) do
-        :ok ->
-          {:reply, :ok, apply_recorded_event(state, event)}
+          {:ok, _result} = success ->
+            {:reply, success, apply_recorded_event(state, event)}
 
-        {:ok, _result} = success ->
-          {:reply, success, apply_recorded_event(state, event)}
-
-        {:error, _reason} = error ->
-          {:reply, error, state}
-      end
+          {:error, _reason} = error ->
+            {:reply, error, state}
+        end
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -140,6 +139,11 @@ defmodule Sigma.Agent.SessionProcess do
     kind, reason -> {:error, {:state_change_failure, kind, reason}}
   end
 
+  defp state_change_persist(%{on_state_change: on_state_change}, event)
+       when is_function(on_state_change, 1) do
+    {:ok, fn -> on_state_change.(event) end}
+  end
+
   defp state_change_persist(%{writer: writer}, event) when not is_nil(writer) do
     {:ok,
      fn ->
@@ -149,11 +153,6 @@ defmodule Sigma.Agent.SessionProcess do
          :ignored -> {:error, :state_change_not_durable}
        end
      end}
-  end
-
-  defp state_change_persist(%{on_state_change: on_state_change}, event)
-       when is_function(on_state_change, 1) do
-    {:ok, fn -> on_state_change.(event) end}
   end
 
   defp state_change_persist(_state, _event),
