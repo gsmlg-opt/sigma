@@ -17,6 +17,7 @@ defmodule Sigma.Coding.Hooks.Runner do
   alias Sigma.Coding.Hooks.Outcome
   alias Sigma.Coding.Hooks.Payload
   alias Sigma.Coding.Hooks.Trust
+  alias Sigma.Coding.Hooks.Matcher
 
   @max_output_chars 10_000
 
@@ -69,8 +70,6 @@ defmodule Sigma.Coding.Hooks.Runner do
   # ---------------------------------------------------------------------------
 
   defp filter_specs(specs, event, ctx) do
-    alias Sigma.Coding.Hooks.Matcher
-
     Enum.reduce(specs, {[], []}, fn spec, {run_acc, warn_acc} ->
       cond do
         spec.event != event ->
