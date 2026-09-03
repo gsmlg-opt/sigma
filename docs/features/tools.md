@@ -1,5 +1,8 @@
 # PRD: Build `sigma_tools` as the Elixir Port of oh-my-pi Tools
 
+- Status: **Initial surface shipped**（`ask/read/write/bash/edit/search/find` + Catalog）；planned tools 见 [S9 Phase 1](../contracts/s9-phase1-plan.md)
+- Kept for: oh-my-pi tool surface target, catalog gating, and follow-up PR sequencing
+
 ## 1. Summary
 
 Create a new umbrella app, `apps/sigma_tools`, as the home for **oh-my-pi-style built-in tools** in `sigma`.

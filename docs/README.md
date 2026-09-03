@@ -22,6 +22,7 @@
 | [session-journal-and-operations-v2-prd.md](contracts/session-journal-and-operations-v2-prd.md) | Session journal / 会话操作 V2 PRD |
 | [contract-stabilization-v2-execution-report.md](contracts/contract-stabilization-v2-execution-report.md) | 合约稳定化 V2 **完成报告** |
 | [sigma-contract-stabilization-plan-for-codex-v2.md](contracts/sigma-contract-stabilization-plan-for-codex-v2.md) | 稳定化执行计划（**Historical / Complete**，保留作对照） |
+| [s9-phase1-plan.md](contracts/s9-phase1-plan.md) | S9 Extension / feature expansion **Phase 1** 执行计划（Active） |
 
 对应 ADR：[adr/0001-session-journal-and-operations-v2.md](adr/0001-session-journal-and-operations-v2.md)
 
