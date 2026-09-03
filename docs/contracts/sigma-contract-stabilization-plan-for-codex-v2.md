@@ -1,5 +1,8 @@
 # Sigma Contract Stabilization and Pi-Parity Improvement Plan
 
+- Status: **Historical / Complete** (execution finished; see [contract-stabilization-v2-execution-report.md](contract-stabilization-v2-execution-report.md))
+- Kept for: work-order mapping and acceptance criteria reference
+
 > Execution document for Codex
 >
 > Repository: `https://github.com/gsmlg-opt/sigma`
@@ -391,7 +394,7 @@ Implement this as three PRs rather than one large change.
 
 ### Acceptance criteria
 
-- All acceptance criteria in `docs/session-journal-and-operations-v2-prd.md` pass.
+- All acceptance criteria in `docs/contracts/session-journal-and-operations-v2-prd.md` pass.
 - New forks no longer use the legacy double-header layout.
 - Busy operations return visible errors and mutate nothing.
 - Dump/export are byte-for-byte non-mutating to source files.

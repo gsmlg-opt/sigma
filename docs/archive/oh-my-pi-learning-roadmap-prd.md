@@ -1,5 +1,8 @@
 # Sigma oh-my-pi Learning Roadmap - PRD
 
+- Status: **Archived** (parent roadmap; durable child PRDs live under `docs/contracts/`)
+- Successor docs: [session-journal-and-operations-v2-prd.md](../contracts/session-journal-and-operations-v2-prd.md), [contract-stabilization-v2-execution-report.md](../contracts/contract-stabilization-v2-execution-report.md)
+
 > Product requirements for translating durable oh-my-pi design contracts into
 > Sigma's OTP/Phoenix architecture without wholesale TypeScript porting.
 

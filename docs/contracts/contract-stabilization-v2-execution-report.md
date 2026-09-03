@@ -4,7 +4,7 @@
 - Date: 2026-09-01
 - Integration: locally fast-forwarded into `main` at `48d9ecc`
 - Base: `03a8ca0e8e320b1ef1a608027505a81ca25ab664`
-- Plan: `docs/sigma-contract-stabilization-plan-for-codex-v2.md`
+- Plan: `docs/contracts/sigma-contract-stabilization-plan-for-codex-v2.md`
 
 ## Work orders
 

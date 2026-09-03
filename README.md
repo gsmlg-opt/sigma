@@ -24,7 +24,7 @@ The original TypeScript `pi` project is [earendil-works/pi](https://github.com/e
 - Streaming Anthropic and OpenAI-compatible chat providers.
 - Append-only JSONL session journals with deterministic branch replay, compaction, serialized switch/fork operations, stable dump/export, and explicit relocation.
 - New sessions can run in the project directory, an existing git worktree, or a newly created worktree.
-- Context-file assembly from `AGENTS.md`/`CLAUDE.md`, ordered from filesystem root to the active workdir. `AGENTS.md` wins when both files exist in the same directory. Bounded imports, path scopes, sticky rules, provenance, diagnostics, preview traces, and explicit idle-only reload are supported by [Context Rules V2](docs/context-rules-v2.md).
+- Context-file assembly from `AGENTS.md`/`CLAUDE.md`, ordered from filesystem root to the active workdir. `AGENTS.md` wins when both files exist in the same directory. Bounded imports, path scopes, sticky rules, provenance, diagnostics, preview traces, and explicit idle-only reload are supported by [Context Rules V2](docs/contracts/context-rules-v2.md).
 - Built-in tools: `ask`, `read`, `write`, `bash`, `search`, `find`, and hashline-only `edit` (`[path#TAG]` sections).
 - Global and project MCP server selection, plus hook discovery for Pi, Codex, and Claude-style hook files.
 - Skills from `~/.agents/skills` and `<repo>/.agents/skills`.
@@ -137,7 +137,7 @@ The session input supports `/init`, which expands into the built-in setup prompt
 Headless clients use the same command boundary as LiveView. Protocol V1 supports
 direct Elixir integration through `Sigma.Agent.PublicRuntime`, JSON Lines through
 `Sigma.Agent.Stdio`, and Phoenix WebSockets at `/agent/websocket`. See the
-[Protocol V1 guide](docs/protocol-v1.md) for the envelope and adapter contracts.
+[Protocol V1 guide](docs/contracts/protocol-v1.md) for the envelope and adapter contracts.
 The WebSocket is disabled unless `SIGMA_PROTOCOL_TOKEN` is configured with a
 capability token of at least 32 bytes.
 
@@ -190,6 +190,8 @@ mix test apps/sigma_web/test/sigma_web/live/session_live_test.exs
 ```
 
 The web app uses DuskMoon UI. Keep UI work on `phoenix_duskmoon` components and the configured Tailwind/DuskMoon pipeline; do not add DaisyUI or Phoenix `core_components.ex`.
+
+Architecture contracts, ADRs, feature plans, and archived historical docs live under [docs/](docs/README.md).
 
 ## License
 

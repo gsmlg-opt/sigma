@@ -1,5 +1,8 @@
 # sigma — Port Instructions for Claude Code
 
+- Status: **Archived** (early study-port guide; not current product roadmap)
+- See: [docs/README.md](../README.md)
+
 ## Context
 
 Port [earendil-works/pi](https://github.com/earendil-works/pi) (TypeScript) to Elixir. The umbrella `sigma` is already scaffolded with five apps and stub modules.

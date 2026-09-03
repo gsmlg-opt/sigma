@@ -1,6 +1,7 @@
 # Sigma Session Journal and Session Operations v2 - PRD
 
-> First child PRD of `oh-my-pi-learning-roadmap-prd.md`.
+> First child PRD of the archived oh-my-pi learning roadmap
+> (`docs/archive/oh-my-pi-learning-roadmap-prd.md`).
 > Defines durable session semantics before provider, tool-runtime, or context-rule expansion.
 
 ## Problem Statement

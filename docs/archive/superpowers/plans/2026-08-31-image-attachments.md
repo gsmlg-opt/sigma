@@ -36,7 +36,7 @@
 - `apps/sigma_ai/test/sigma_ai/providers/anthropic_test.exs` — capture and assert Anthropic request JSON.
 - `apps/sigma_ai/lib/sigma_ai/providers/openai.ex` — encode canonical images as OpenAI data URLs.
 - `apps/sigma_ai/test/sigma_ai/providers/openai_test.exs` — capture and assert OpenAI request JSON.
-- `docs/superpowers/specs/2026-08-29-image-attachments-design.md` — record final approval and the bounded slash-command error code.
+- `docs/archive/superpowers/specs/2026-08-29-image-attachments-design.md` — record final approval and the bounded slash-command error code.
 
 ### Generated and committed
 
