@@ -52,7 +52,7 @@ defmodule Sigma.Coding.Tools.Glob do
         full_pattern = Path.join(abs_dir, pattern)
         all_matches = Path.wildcard(full_pattern, match_dot: false)
         truncated = length(all_matches) > limit
-        matches = all_matches |> Enum.take(limit) |> Enum.map(&Path.relative_to(&1, cwd))
+        matches = all_matches |> Enum.take(limit) |> Enum.map(&PathUtils.relative_to(&1, cwd))
 
         text =
           case matches do

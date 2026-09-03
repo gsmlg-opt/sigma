@@ -128,7 +128,7 @@ defmodule Sigma.Coding.Tools.Grep do
       else
         case File.read(file) do
           {:ok, content} ->
-            rel = Path.relative_to(file, cwd)
+            rel = PathUtils.relative_to(file, cwd)
             new_matches = grep_file(content, re, rel, context_lines, remaining)
             new_acc = acc ++ new_matches
             reached = length(new_acc) >= limit

@@ -37,7 +37,9 @@ defmodule Sigma.Coding.Utils.PathUtilsTest do
 
       assert {:error, reason} = PathUtils.safe_resolve(skill_path, cwd)
       assert reason =~ "outside of the current working directory"
-      assert {:ok, ^skill_path} = PathUtils.safe_resolve(skill_path, cwd, allow_skill_files?: true)
+      assert {:ok, resolved} = PathUtils.safe_resolve(skill_path, cwd, allow_skill_files?: true)
+      assert String.ends_with?(resolved, "/SKILL.md")
+      assert File.read!(resolved) == "skill"
     end
 
     test "rejects relative path going out of cwd" do

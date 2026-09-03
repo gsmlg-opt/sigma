@@ -43,6 +43,24 @@ defmodule Sigma.Coding.Utils.PathUtils do
     end
   end
 
+  @doc """
+  Returns `path` relative to `cwd`, accounting for symlink resolutions in either path.
+  """
+  def relative_to(path, cwd) do
+    expanded_cwd = Path.expand(cwd)
+
+    case resolve_real_path(expanded_cwd) do
+      {:ok, real_cwd} ->
+        case Path.relative_to(path, real_cwd) do
+          ^path -> Path.relative_to(path, expanded_cwd)
+          rel -> rel
+        end
+
+      _ ->
+        Path.relative_to(path, expanded_cwd)
+    end
+  end
+
   @symlink_depth_limit 40
 
   defp resolve_real_path(path, depth \\ 0)
