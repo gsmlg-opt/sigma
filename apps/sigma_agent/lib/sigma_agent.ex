@@ -215,7 +215,12 @@ defmodule Sigma.Agent do
       end
 
     cwd = opts[:cwd] || File.cwd!()
-    hook_specs = Sigma.Coding.Hooks.Discovery.load(cwd)
+
+    hook_specs =
+      case Keyword.fetch(opts, :hook_specs) do
+        {:ok, specs} when is_list(specs) -> specs
+        :error -> Sigma.Coding.Hooks.Discovery.load(cwd)
+      end
 
     state = %__MODULE__{
       task_supervisor: task_supervisor,
@@ -327,7 +332,8 @@ defmodule Sigma.Agent do
   @impl true
   def handle_call(:begin_session_operation, _from, state) do
     if is_nil(state.current_turn_task) and state.turn_state.phase != :session_operation do
-      {:reply, :ok, %{state | turn_state: TurnState.transition(state.turn_state, :session_operation)}}
+      {:reply, :ok,
+       %{state | turn_state: TurnState.transition(state.turn_state, :session_operation)}}
     else
       {:reply, {:error, :session_busy}, state}
     end
@@ -456,6 +462,7 @@ defmodule Sigma.Agent do
     }
 
     state = put_pending_user_question(state, question_id, pending_question)
+
     state =
       if request[:kind] == :permission,
         do: %{state | turn_state: TurnState.transition(state.turn_state, :waiting_permission)},
@@ -513,7 +520,12 @@ defmodule Sigma.Agent do
         }
 
         state = put_pending_mcp_elicitation(state, elicitation_id, pending)
-        state = %{state | turn_state: TurnState.transition(state.turn_state, :waiting_elicitation)}
+
+        state = %{
+          state
+          | turn_state: TurnState.transition(state.turn_state, :waiting_elicitation)
+        }
+
         emit(state, {:mcp_elicitation, elicitation_id, public_mcp_elicitation(pending)})
 
         {:reply, {:ok, elicitation_id}, state}
@@ -646,7 +658,9 @@ defmodule Sigma.Agent do
           |> finish_turn(if(cancelling?, do: :cancelled, else: :failed))
 
         unless cancelling?, do: emit(new_state, {:turn_error, reason})
-        {:noreply, maybe_start_follow_up(new_state, if(cancelling?, do: :cancelled, else: :failed))}
+
+        {:noreply,
+         maybe_start_follow_up(new_state, if(cancelling?, do: :cancelled, else: :failed))}
 
       _ ->
         {:noreply, state}
@@ -1011,7 +1025,10 @@ defmodule Sigma.Agent do
         case run_user_prompt_submit_hook(state, user_msg) do
           {:block, reason} ->
             emit(state, {:prompt_rejected, item.message_id, reason})
-            :ok = GenServer.call(control_pid, {:ack_steering, turn_id, item.message_id}, :infinity)
+
+            :ok =
+              GenServer.call(control_pid, {:ack_steering, turn_id, item.message_id}, :infinity)
+
             {:none, state}
 
           {:ok, user_msg, state} ->
@@ -1019,7 +1036,10 @@ defmodule Sigma.Agent do
             emit(state, {:message_start, user_msg})
             emit(state, {:message_end, user_msg})
             acknowledge_canonical(state)
-            :ok = GenServer.call(control_pid, {:ack_steering, turn_id, item.message_id}, :infinity)
+
+            :ok =
+              GenServer.call(control_pid, {:ack_steering, turn_id, item.message_id}, :infinity)
+
             emit(state, {:prompt_consumed, :steering, prompt_info(item, turn_id)})
             {:consumed, state}
         end
@@ -1143,8 +1163,12 @@ defmodule Sigma.Agent do
        }),
        do: {:thinking_delta, index, delta, message}
 
-  defp legacy_stream_event(%ProviderEvent{type: :tool_call_started, index: index, message: message}),
-    do: {:toolcall_start, index, message}
+  defp legacy_stream_event(%ProviderEvent{
+         type: :tool_call_started,
+         index: index,
+         message: message
+       }),
+       do: {:toolcall_start, index, message}
 
   defp legacy_stream_event(%ProviderEvent{
          type: :tool_call_arguments_delta,
@@ -1209,7 +1233,8 @@ defmodule Sigma.Agent do
       |> Keyword.put(:tool_state, state.tool_state)
       |> Keyword.put(:on_tool_update, fn update ->
         case Map.get(tool_calls_by_id, update.tool_call_id) do
-          nil -> :ok
+          nil ->
+            :ok
 
           tool_call ->
             emit(
@@ -1227,7 +1252,9 @@ defmodule Sigma.Agent do
 
         {content, is_error} =
           case result do
-            {:ok, %{content: content} = result} -> {content, Map.get(result, :is_error, false)}
+            {:ok, %{content: content} = result} ->
+              {content, Map.get(result, :is_error, false)}
+
             {:error, %ToolError{message: message}} ->
               maybe_emit_approval_required(acc_state, result, tool_call)
               {[%{type: :text, text: "Error: #{message}"}], true}

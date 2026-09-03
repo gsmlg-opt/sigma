@@ -45,10 +45,13 @@ defmodule Sigma.AgentReconstructionTest do
   end
 
   test "performs 3 turns and reconstructs state from events" do
+    # Isolate from user-global Stop/SessionStart hooks (e.g. ~/.pi/agent) that
+    # otherwise stall turns long enough to trip the agent_end wait.
     opts = [
       model: %{id: "mock-model", api: "mock", provider: "mock"},
       provider: MockProvider,
-      system_prompt: "You are a helpful assistant."
+      system_prompt: "You are a helpful assistant.",
+      hook_specs: []
     ]
 
     {:ok, agent} = Sigma.Agent.start_link(opts)
@@ -85,6 +88,8 @@ defmodule Sigma.AgentReconstructionTest do
     end)
   end
 
+  @agent_end_timeout_ms 5_000
+
   defp collect_until_agent_end(acc) do
     receive do
       {:agent_end, _} = event ->
@@ -93,8 +98,10 @@ defmodule Sigma.AgentReconstructionTest do
       event ->
         collect_until_agent_end([event | acc])
     after
-      2000 ->
-        flunk("Timed out waiting for agent_end event. Collected so far: #{inspect(Enum.reverse(acc))}")
+      @agent_end_timeout_ms ->
+        flunk(
+          "Timed out waiting for agent_end event. Collected so far: #{inspect(Enum.reverse(acc))}"
+        )
     end
   end
 

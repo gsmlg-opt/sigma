@@ -131,6 +131,9 @@ jobs:
       - name: Build web assets
         run: mix assets.build
 
+      - name: Run asset-dependent ExUnit checks
+        run: mix test --only assets apps/sigma_web/test/sigma_web/assets_build_test.exs
+
   release_smoke:
     name: Installed release agent smoke
     runs-on: ubuntu-24.04

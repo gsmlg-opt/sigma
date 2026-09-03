@@ -405,10 +405,14 @@ defmodule Sigma.Ai.Providers.OpenAITest do
     :telemetry.attach_many(
       handler_id,
       [[:sigma, :llm, :request, :start], [:sigma, :llm, :request, :stop]],
-      fn event, measurements, metadata, _config ->
-        Agent.update(telemetry_events, &[{event, measurements, metadata} | &1])
+      fn event, measurements, metadata, config ->
+        # Filter by this test's session_id so concurrent async LLM tests cannot
+        # pollute the collected event list (Enum.find would otherwise pick them).
+        if metadata[:session_id] == config.session_id do
+          Agent.update(config.events, &[{event, measurements, metadata} | &1])
+        end
       end,
-      nil
+      %{session_id: session_id, events: telemetry_events}
     )
 
     on_exit(fn ->

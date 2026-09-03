@@ -29,6 +29,7 @@ defmodule Sigma.Web.BuildContractTest do
     assert source =~ "mix compile --warnings-as-errors"
     assert source =~ "cargo test --manifest-path"
     assert source =~ "mix assets.setup"
+    assert source =~ "mix test --only assets"
     assert source =~ "verify-release-agent-smoke.exs"
   end
 

@@ -3,6 +3,9 @@ defmodule Sigma.Web.AssetsBuildTest do
 
   @repo_root Path.expand("../../../../", __DIR__)
 
+  # Requires node_modules / Bun from `mix assets.setup`. Excluded from the core
+  # ExUnit job (see BuildContractTest); exercised by the CI assets job.
+  @tag :assets
   test "assets build keeps DuskMoon utilities and xterm terminal CSS in app.css" do
     temp_outdir = Path.join(@repo_root, "_build/test_assets_build")
     File.rm_rf!(temp_outdir)
