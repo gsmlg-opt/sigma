@@ -42,10 +42,10 @@
 
 ## 归档（archive/）
 
-见 [archive/README.md](archive/README.md)。含早期 port 说明、oh-my-pi 学习路线图父 PRD，以及已落地的 superpowers plans/specs。
+见 [archive/README.md](archive/README.md)。含早期 Stage 决策日志 [archive/PLAN.md](archive/PLAN.md)、port 说明、oh-my-pi 学习路线图父 PRD，以及已落地的 superpowers plans/specs。
 
 ## 仓库根目录说明
 
-- 根目录 **无** 现行 `PLAN.md`。早期 port 工作曾要求把决策写入根 `PLAN.md`；该文件若重新出现，应视为 historical，并以本索引与 `contracts/` 为准。
+- 根目录 **无** 现行 `PLAN.md`。早期 port 决策日志已归档为 [archive/PLAN.md](archive/PLAN.md)（Historical）；现行权威以本索引与 `contracts/` 为准。
 - 产品概览与运行说明见根 [README.md](../README.md)。
 - Agent 仓库约定见根 [AGENTS.md](../AGENTS.md)。

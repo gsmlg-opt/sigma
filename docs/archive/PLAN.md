@@ -1,5 +1,8 @@
 # sigma Implementation Plan
 
+- Status: **Historical** (early Stage decision log from the study port; not current product roadmap)
+- See: [docs/README.md](../README.md), [port_plan.md](port_plan.md)
+
 ## Decision log
 
 ### Stage 1 — sigma_ai

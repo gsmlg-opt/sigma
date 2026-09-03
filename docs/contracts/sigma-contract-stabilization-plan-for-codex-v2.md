@@ -98,7 +98,7 @@ The following foundations are already present and should not be rewritten from s
 | Provider contract | `Sigma.Ai.Provider` exposes only `stream/1` | Add normalized events, capabilities, errors, usage, stop reasons, and cancellation |
 | External control | LiveView is effectively the only product client | Add a versioned command/event protocol and headless runtime |
 
-`PLAN.md` is historical documentation, not the implementation source of truth. When it conflicts with current code or tests, follow current code and repair the missing behavior.
+[`docs/archive/PLAN.md`](../archive/PLAN.md) is historical documentation, not the implementation source of truth. When it conflicts with current code or tests, follow current code and repair the missing behavior.
 
 ## 4. Architectural decisions
 

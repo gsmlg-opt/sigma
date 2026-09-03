@@ -9,7 +9,7 @@ Port [earendil-works/pi](https://github.com/earendil-works/pi) (TypeScript) to E
 
 **This is a study port, not a product.** Goal is *understanding*, measured by ability to explain pi's design choices. [Synapsis](https://github.com/gsmlg-opt/Synapsis) already covers production agent management — do not duplicate it.
 
-"Done" with a stage means: matching code, passing tests, **and** a written explanation appended to `PLAN.md`'s decision log.
+"Done" with a stage means: matching code, passing tests, **and** a written explanation appended to `PLAN.md`'s decision log (now archived at [PLAN.md](PLAN.md)).
 
 ## Setup
 
