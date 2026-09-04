@@ -138,7 +138,7 @@ content?: string
 status?: pending | in_progress | completed
 ```
 
-### WO-3 — Extension SDK ADR（设计）+ 可选 thin 注册 façade
+### WO-3 — Extension SDK ADR（设计）+ 可选 thin 注册 façade ✅
 
 | | |
 | --- | --- |
@@ -148,6 +148,7 @@ status?: pending | in_progress | completed
 | **Apps** | 文档：`docs/adr/`；可选代码：`sigma_coding` 或新建极薄模块（优先不新建 umbrella app） |
 | **验收** | ADR Accepted；明确 Phase 2 MVP 范围；若有 registry，有单元测试且默认路径行为不变 |
 | **PR 拆分** | PR-A：`docs(adr): define BEAM extension SDK boundary`；PR-B（可选）：`feat(coding): add extension tool registry façade` |
+| **Status** | **Done** — ADR [`0002-beam-extension-sdk.md`](../adr/0002-beam-extension-sdk.md)；`Sigma.Coding.ExtensionRegistry`（`register_tool/1` + `list_tools/0`）；默认仍 `Sigma.Tools.default_tools/0` |
 
 ### WO-4 — Provider 扩展路径
 
@@ -246,7 +247,7 @@ WO-1 docs ───────────────────────�
 
 ```text
 [x] WO-2: implement Sigma.Tools.Todo + tests + catalog/default_tools
-[ ] WO-3: ADR 0002 BEAM extension SDK boundary (+ optional registry)
+[x] WO-3: ADR 0002 BEAM extension SDK boundary (+ optional registry)
 [ ] WO-4: provider extension playbook (+ optional single adapter)
 [ ] WO-5: PublicRuntime integration notes for Synapsis/Samgita
 [ ] Do NOT start: LSP, AST, task, github, worktree pools, distributed BEAM

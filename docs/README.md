@@ -24,7 +24,12 @@
 | [sigma-contract-stabilization-plan-for-codex-v2.md](contracts/sigma-contract-stabilization-plan-for-codex-v2.md) | 稳定化执行计划（**Historical / Complete**，保留作对照） |
 | [s9-phase1-plan.md](contracts/s9-phase1-plan.md) | S9 Extension / feature expansion **Phase 1** 执行计划（Active） |
 
-对应 ADR：[adr/0001-session-journal-and-operations-v2.md](adr/0001-session-journal-and-operations-v2.md)
+对应 ADR：
+
+| ADR | 说明 |
+| --- | --- |
+| [0001-session-journal-and-operations-v2.md](adr/0001-session-journal-and-operations-v2.md) | Session journal / 会话操作 V2 |
+| [0002-beam-extension-sdk.md](adr/0002-beam-extension-sdk.md) | BEAM-native Extension SDK 边界与薄注册 façade |
 
 ## 功能文档（features/）
 

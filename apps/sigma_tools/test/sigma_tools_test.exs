@@ -1,6 +1,22 @@
 defmodule Sigma.ToolsTest do
   use ExUnit.Case, async: true
 
+  defmodule ExtProbe do
+    @behaviour Sigma.Coding.Tool
+
+    @impl true
+    def name, do: "ext_probe"
+
+    @impl true
+    def description, do: "probe"
+
+    @impl true
+    def schema, do: %{}
+
+    @impl true
+    def execute(_id, _params, _opts), do: {:ok, %{content: [], details: %{}}}
+  end
+
   test "default tools expose oh-my-pi canonical names only" do
     assert Enum.map(Sigma.Tools.default_tools(), &Sigma.Coding.Tool.name/1) == [
              "ask",
@@ -12,6 +28,15 @@ defmodule Sigma.ToolsTest do
              "find",
              "todo"
            ]
+  end
+
+  test "extension registry does not alter default_tools/0" do
+    before = Enum.map(Sigma.Tools.default_tools(), &Sigma.Coding.Tool.name/1)
+    assert {:ok, "ext_probe"} = Sigma.Coding.ExtensionRegistry.register_tool(ExtProbe)
+    assert Enum.map(Sigma.Tools.default_tools(), &Sigma.Coding.Tool.name/1) == before
+    refute "ext_probe" in before
+  after
+    Sigma.Coding.ExtensionRegistry.reset!()
   end
 
   test "catalog includes planned tools without exposing them" do

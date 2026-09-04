@@ -11,6 +11,7 @@ defmodule Sigma.Coding do
     children = [
       Sigma.Coding.Dispatcher,
       Sigma.Coding.PendingToolRegistry,
+      Sigma.Coding.ExtensionRegistry,
       {Registry, keys: :unique, name: Sigma.Coding.MCP.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: Sigma.Coding.MCP.ClientSupervisor}
     ]
