@@ -42,6 +42,21 @@ defmodule Sigma.Web.BuildContractTest do
     refute source =~ "mix assets.setup"
   end
 
+  test "the core ExUnit job force-rebuilds cached applications before testing" do
+    source = File.read!(@test_path)
+
+    assert {cache_offset, _length} =
+             :binary.match(source, "- name: Restore exact test cache")
+
+    assert {compile_offset, _length} =
+             :binary.match(source, "mix compile --force --warnings-as-errors")
+
+    assert {test_offset, _length} = :binary.match(source, "- name: Run unit tests")
+
+    assert cache_offset < compile_offset
+    assert compile_offset < test_offset
+  end
+
   test "workflow caches never fall back across lockfile revisions" do
     sources = Enum.map_join([@ci_path, @test_path, @release_path], "\n", &File.read!/1)
 
