@@ -44,7 +44,7 @@ S9 在稳定化计划中刻意延期，涵盖 extension SDK、更多 providers�
 | --- | --- | --- |
 | BEAM-native Extension SDK | **无**独立 behaviour / 注册表 / 加载器。仅有 `Sigma.Coding.Tool`、hooks command/http | 需 ADR + 分阶段 SDK（tools / commands / providers / context / events / render） |
 | 更多 providers | 仅 `Providers.Anthropic`、`Providers.OpenAI` | 缺 first-class 适配器与验证矩阵；OpenAI-compat 网关可部分覆盖但未产品化文档 |
-| `job` / `todo` / `task` / LSP / AST / `web_search` / `github` | `Catalog` 中 `status: :planned`；**无对应 `.ex` 实现模块** | 全部未实现；`eval` 在 PRD 出现但 catalog 未列 |
+| `job` / `todo` / `task` / LSP / AST / `web_search` / `github` | `todo` **implemented**（Store-backed）；其余 Catalog 仍为 `status: :planned` | `job`/`task`/LSP/AST/`web_search`/`github` 未实现；`eval` 在 PRD 出现但 catalog 未列 |
 | Worktree agent pools | 单会话 worktree UI | 无 pool supervisor、无跨 worktree 调度 |
 | Background sessions / multi-client | Protocol 多客户端订阅已有 | 无「后台会话」产品契约、无客户端仲裁策略文档化 |
 | Samgita / Synapsis 集成 | `PublicRuntime` 可作为直接 Elixir API | 无官方集成包 / 示例 / 契约测试指向外部产品 |
@@ -113,7 +113,7 @@ S9 在稳定化计划中刻意延期，涵盖 extension SDK、更多 providers�
 | **验收** | `docs/README.md` 链到本文件；`tools.md` 有 Status；本文件结构可供后续 PR 引用 |
 | **PR** | `docs: add S9 phase-1 execution plan`（本提交） |
 
-### WO-2 — `todo` 工具 MVP
+### WO-2 — `todo` 工具 MVP ✅
 
 | | |
 | --- | --- |
@@ -127,6 +127,7 @@ S9 在稳定化计划中刻意延期，涵盖 extension SDK、更多 providers�
 | | 3. 单元测试：增删改查、非法 id、空列表、与 Store 同寿命 |
 | | 4. 计划中工具仍不暴露；`mix test` 相关 app 绿 |
 | **PR 拆分** | 单 PR：`feat(tools): add session-scoped todo tool` |
+| **Status** | **Done** — `Sigma.Tools.Todo` + Store `get/put_todo_state`；schema `add\|update\|complete\|remove\|list\|clear` |
 
 **Schema 建议（可微调，保持窄）：**
 
@@ -244,7 +245,7 @@ WO-1 docs ───────────────────────�
 ## 9. Codex / Cursor 执行清单（可复制）
 
 ```text
-[ ] WO-2: implement Sigma.Tools.Todo + tests + catalog/default_tools
+[x] WO-2: implement Sigma.Tools.Todo + tests + catalog/default_tools
 [ ] WO-3: ADR 0002 BEAM extension SDK boundary (+ optional registry)
 [ ] WO-4: provider extension playbook (+ optional single adapter)
 [ ] WO-5: PublicRuntime integration notes for Synapsis/Samgita

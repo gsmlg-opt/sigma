@@ -9,15 +9,18 @@ defmodule Sigma.ToolsTest do
              "bash",
              "edit",
              "search",
-             "find"
+             "find",
+             "todo"
            ]
   end
 
   test "catalog includes planned tools without exposing them" do
     planned_names = Sigma.Tools.Catalog.planned() |> Enum.map(& &1.name)
+    implemented_names = Sigma.Tools.Catalog.implemented() |> Enum.map(& &1.name)
 
     assert "job" in planned_names
-    assert "todo" in planned_names
+    assert "todo" in implemented_names
+    refute "todo" in planned_names
     assert "task" in planned_names
     assert "lsp" in planned_names
     assert "ast_grep" in planned_names
@@ -27,6 +30,7 @@ defmodule Sigma.ToolsTest do
 
     exposed_names = Sigma.Tools.default_tools() |> Enum.map(&Sigma.Coding.Tool.name/1)
 
+    assert "todo" in exposed_names
     refute "job" in exposed_names
     refute "lsp" in exposed_names
     refute "ast_grep" in exposed_names

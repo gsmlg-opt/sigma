@@ -15,7 +15,12 @@ to the model.
 - `edit`
 - `search`
 - `find`
+- `todo`
 
 `edit` is hashline-only. It accepts an `input` string with `[path#TAG]`
 sections and `replace`, `delete`, or `insert` operations. Tags are produced by
 `read`, `search`, `write`, and `edit` from session-scoped snapshots.
+
+`todo` is session-scoped and Store-backed (agent-owned ETS). It supports
+`add` / `update` / `complete` / `remove` / `list` / `clear` and is not
+persisted to JSONL.

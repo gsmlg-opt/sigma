@@ -11,7 +11,8 @@ defmodule Sigma.Tools do
       Sigma.Tools.Bash,
       Sigma.Tools.Edit,
       Sigma.Tools.Search,
-      Sigma.Tools.Find
+      Sigma.Tools.Find,
+      Sigma.Tools.Todo
     ]
   end
 

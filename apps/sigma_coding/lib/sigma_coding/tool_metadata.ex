@@ -107,6 +107,18 @@ defmodule Sigma.Coding.ToolMetadata do
     }
   end
 
+  defp defaults(_tool, "todo") do
+    %{
+      effect: :write,
+      concurrency: :sequential,
+      interruptible: true,
+      default_deadline_ms: 5_000,
+      approval_tier: :standard,
+      discoverable: true,
+      render_hint: :structured
+    }
+  end
+
   defp defaults(_tool, "url_fetch") do
     %{
       effect: :network,

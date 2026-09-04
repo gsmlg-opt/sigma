@@ -1,6 +1,6 @@
 # PRD: Build `sigma_tools` as the Elixir Port of oh-my-pi Tools
 
-- Status: **Initial surface shipped**（`ask/read/write/bash/edit/search/find` + Catalog）；planned tools 见 [S9 Phase 1](../contracts/s9-phase1-plan.md)
+- Status: **Initial surface shipped**（`ask/read/write/bash/edit/search/find/todo` + Catalog）；其余 planned tools 见 [S9 Phase 1](../contracts/s9-phase1-plan.md)
 - Kept for: oh-my-pi tool surface target, catalog gating, and follow-up PR sequencing
 
 ## 1. Summary
@@ -56,6 +56,7 @@ The first PR includes oh-my-pi hashline edit directly. `edit` is not a port of t
    find
    bash
    ask
+   todo
    ```
 
 5. Keep current `Sigma.Coding.Tools.*` modules in place for existing tests and internal callers, but do not expose legacy names in the default dashboard/session tool list.
@@ -253,7 +254,8 @@ defmodule Sigma.Tools do
       Sigma.Tools.Bash,
       Sigma.Tools.Edit,
       Sigma.Tools.Search,
-      Sigma.Tools.Find
+      Sigma.Tools.Find,
+      Sigma.Tools.Todo
     ]
   end
 
@@ -295,7 +297,7 @@ defmodule Sigma.Tools.Catalog do
     %{name: "ast_edit", category: :code_intel, module: Sigma.Tools.ASTEdit, status: :planned},
 
     %{name: "ask", category: :coordination, module: Sigma.Tools.Ask, status: :implemented},
-    %{name: "todo", category: :coordination, module: Sigma.Tools.Todo, status: :planned},
+    %{name: "todo", category: :coordination, module: Sigma.Tools.Todo, status: :implemented},
     %{name: "task", category: :coordination, module: Sigma.Tools.Task, status: :planned},
 
     %{name: "resolve", category: :state, module: Sigma.Tools.Resolve, status: :planned},
@@ -614,6 +616,7 @@ oh-my-pi-style:
 - edit
 - search
 - find
+- todo
 
 legacy compatibility:
 
@@ -627,7 +630,6 @@ legacy compatibility:
 
 - job
 - resolve
-- todo
 - task
 - lsp
 - ast_grep
@@ -638,6 +640,10 @@ legacy compatibility:
 
 Do not expose planned tools to the model until implemented or explicitly enabled.
 ```
+
+### Todo (shipped)
+
+`Sigma.Tools.Todo` is session-scoped and backed by `Sigma.Tools.Store` (agent-owned ETS). Actions: `add`, `update`, `complete`, `remove`, `list`, `clear`. Status values: `pending`, `in_progress`, `completed`. Not persisted to JSONL; state ends with the agent process.
 
 ## 13. Tests
 
@@ -663,16 +669,19 @@ defmodule Sigma.ToolsTest do
              "bash",
              "edit",
              "search",
-             "find"
+             "find",
+             "todo"
            ]
   end
 
   test "catalog includes planned oh-my-pi tool surface without exposing planned tools" do
     planned_names = Sigma.Tools.Catalog.planned() |> Enum.map(& &1.name)
+    implemented_names = Sigma.Tools.Catalog.implemented() |> Enum.map(& &1.name)
 
     assert "job" in planned_names
     assert "resolve" in planned_names
-    assert "todo" in planned_names
+    assert "todo" in implemented_names
+    refute "todo" in planned_names
     assert "task" in planned_names
     assert "lsp" in planned_names
     assert "ast_grep" in planned_names
@@ -682,6 +691,7 @@ defmodule Sigma.ToolsTest do
 
     exposed_names = Sigma.Tools.default_tools() |> Enum.map(&Sigma.Coding.Tool.name/1)
 
+    assert "todo" in exposed_names
     refute "job" in exposed_names
     refute "lsp" in exposed_names
     refute "ast_grep" in exposed_names
@@ -750,7 +760,7 @@ This PR is complete when:
 2. `Sigma.Tools.default_tools()` exposes:
 
    ```text
-   ask, read, write, bash, edit, search, find
+   ask, read, write, bash, edit, search, find, todo
    ```
 
 3. `Sigma.Tools.Edit` is hashline-only, input-only, and backed by the Rust NIF hashline core.
@@ -862,7 +872,7 @@ After this lands, use separate PRs:
 8. **Coordination**
 
    ```text
-   todo
+   todo (shipped — Store-backed, session-scoped)
    task subagents
    ```
 

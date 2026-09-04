@@ -27,7 +27,10 @@ defmodule Sigma.Tools.Store do
       next_history =
         case Enum.find(history, &(&1.hash == hash)) do
           nil ->
-            [%{path: path, text: text, hash: hash, recorded_at: System.system_time(:millisecond)} | history]
+            [
+              %{path: path, text: text, hash: hash, recorded_at: System.system_time(:millisecond)}
+              | history
+            ]
             |> Enum.take(@max_versions_per_path)
 
           existing ->
@@ -73,6 +76,30 @@ defmodule Sigma.Tools.Store do
   end
 
   def canonical_path(absolute_path), do: Path.expand(absolute_path)
+
+  @doc """
+  Returns the session-scoped todo list state.
+
+  Missing store yields an empty list with `next_id: 1` (not persisted).
+  """
+  def get_todo_state(nil), do: %{items: [], next_id: 1}
+
+  def get_todo_state(store) do
+    lookup(store, :todo_state, %{items: [], next_id: 1})
+  end
+
+  @doc """
+  Replaces the session-scoped todo list state.
+
+  Returns `:error` when no store is available.
+  """
+  def put_todo_state(nil, _state), do: :error
+
+  def put_todo_state(store, %{items: items, next_id: next_id} = state)
+      when is_list(items) and is_integer(next_id) and next_id >= 1 do
+    :ets.insert(store, {:todo_state, state})
+    :ok
+  end
 
   defp lookup(store, key, default) do
     case :ets.lookup(store, key) do
