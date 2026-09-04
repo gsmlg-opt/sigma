@@ -1,6 +1,6 @@
 # S9 Phase 1 — Extension / Feature Expansion 执行计划
 
-- Status: **Active**（S0–S8 已完成；本文件是 S9 第一阶段 work order）
+- Status: **Complete**（S0–S8 已完成；Phase 1 WO-1–WO-5 已交付）
 - Date: 2026-09-04
 - Depends on: [contract-stabilization-v2-execution-report.md](contract-stabilization-v2-execution-report.md)（Complete）
 - Deferred source: [sigma-contract-stabilization-plan-for-codex-v2.md](sigma-contract-stabilization-plan-for-codex-v2.md) §S9
@@ -47,7 +47,7 @@ S9 在稳定化计划中刻意延期，涵盖 extension SDK、更多 providers�
 | `job` / `todo` / `task` / LSP / AST / `web_search` / `github` | `todo` **implemented**（Store-backed）；其余 Catalog 仍为 `status: :planned` | `job`/`task`/LSP/AST/`web_search`/`github` 未实现；`eval` 在 PRD 出现但 catalog 未列 |
 | Worktree agent pools | 单会话 worktree UI | 无 pool supervisor、无跨 worktree 调度 |
 | Background sessions / multi-client | Protocol 多客户端订阅已有 | 无「后台会话」产品契约、无客户端仲裁策略文档化 |
-| Samgita / Synapsis 集成 | `PublicRuntime` 可作为直接 Elixir API | 无官方集成包 / 示例 / 契约测试指向外部产品 |
+| Samgita / Synapsis 集成 | `PublicRuntime` 可作为直接 Elixir API；[集成笔记](public-runtime-integration.md)（WO-5）已写 | Phase 2：官方契约测试夹具 / 更深 cookbook；无产品内嵌 |
 | Backplane 更深集成 | MCP protocol 依赖已在用 | 非 MCP 的 Backplane provider 面未接 |
 | Distributed BEAM | 单节点 umbrella | 无 cluster / remote session 设计 |
 
@@ -162,7 +162,7 @@ status?: pending | in_progress | completed
 | **PR 拆分** | PR-A：`docs: provider extension playbook`；PR-B（可选）：`feat(ai): add <provider> adapter` |
 | **Status** | **Done** — playbook [`providers.md`](../features/providers.md)；无新适配器（OpenAI-compat 配置面已覆盖；差异未确认） |
 
-### WO-5 — PublicRuntime 集成笔记（轻量）
+### WO-5 — PublicRuntime 集成笔记（轻量） ✅
 
 | | |
 | --- | --- |
@@ -170,6 +170,7 @@ status?: pending | in_progress | completed
 | **非目标** | 发布 Hex 包、实现对方仓库代码、多集群 |
 | **验收** | 外部集成者只读该文档即可写出最小 prompt→stream→cancel 客户端草图 |
 | **PR** | 可与 WO-3 合并，或独立小 PR |
+| **Status** | **Done** — [`public-runtime-integration.md`](public-runtime-integration.md)（命令子集、订阅/重连、审批、边界、推荐调用面；无产品内嵌） |
 
 ### Phase 1 建议时间盒
 
@@ -250,8 +251,10 @@ WO-1 docs ───────────────────────�
 [x] WO-2: implement Sigma.Tools.Todo + tests + catalog/default_tools
 [x] WO-3: ADR 0002 BEAM extension SDK boundary (+ optional registry)
 [x] WO-4: provider extension playbook (+ optional single adapter) — playbook only, no new adapter
-[ ] WO-5: PublicRuntime integration notes for Synapsis/Samgita
+[x] WO-5: PublicRuntime integration notes for Synapsis/Samgita
 [ ] Do NOT start: LSP, AST, task, github, worktree pools, distributed BEAM
 [ ] Keep: allow-all permission default; Tool Runtime V2 metadata; Protocol V1 envelopes
 [ ] Verify: mix format --check-formatted && mix compile --warnings-as-errors && mix test
 ```
+
+**Phase 1 完成：** WO-1–WO-5 均已勾选；后续见 §8 Phase 2。

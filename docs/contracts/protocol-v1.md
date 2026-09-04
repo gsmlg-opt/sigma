@@ -3,7 +3,8 @@
 Sigma Protocol V1 is the stable command/event boundary for LiveView, direct
 Elixir integrations, JSON Lines automation, and remote WebSocket clients. All
 adapters call `Sigma.Agent.PublicRuntime`; transports do not own Agent lifecycle
-rules.
+rules. Synapsis / Samgita integration cookbook:
+[public-runtime-integration.md](public-runtime-integration.md).
 
 ## Envelope
 

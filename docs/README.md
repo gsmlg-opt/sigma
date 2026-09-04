@@ -17,12 +17,13 @@
 | 文档 | 说明 |
 | --- | --- |
 | [protocol-v1.md](contracts/protocol-v1.md) | Protocol V1：命令/事件信封与适配器边界 |
+| [public-runtime-integration.md](contracts/public-runtime-integration.md) | PublicRuntime 集成笔记：Synapsis/Samgita 命令子集、订阅/审批边界 |
 | [context-rules-v2.md](contracts/context-rules-v2.md) | Context Rules V2：AGENTS/CLAUDE 装配与指令 |
 | [build-api-session-context.md](contracts/build-api-session-context.md) | 会话上下文如何组装并送入 provider |
 | [session-journal-and-operations-v2-prd.md](contracts/session-journal-and-operations-v2-prd.md) | Session journal / 会话操作 V2 PRD |
 | [contract-stabilization-v2-execution-report.md](contracts/contract-stabilization-v2-execution-report.md) | 合约稳定化 V2 **完成报告** |
 | [sigma-contract-stabilization-plan-for-codex-v2.md](contracts/sigma-contract-stabilization-plan-for-codex-v2.md) | 稳定化执行计划（**Historical / Complete**，保留作对照） |
-| [s9-phase1-plan.md](contracts/s9-phase1-plan.md) | S9 Extension / feature expansion **Phase 1** 执行计划（Active） |
+| [s9-phase1-plan.md](contracts/s9-phase1-plan.md) | S9 Extension / feature expansion **Phase 1** 执行计划（Complete） |
 
 对应 ADR：
 
