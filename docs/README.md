@@ -8,7 +8,7 @@
 | --- | --- |
 | [adr/](adr/) | 已接受的架构决策记录 |
 | [contracts/](contracts/) | 当前有效的协议、合约、PRD 与稳定化报告 |
-| [features/](features/) | 功能域设计与实现计划（hooks、tools） |
+| [features/](features/) | 功能域设计与实现计划（hooks、tools、providers） |
 | [agents/](agents/) | Agent/技能协作约定（领域、issue、triage） |
 | [archive/](archive/) | 已完成或被取代的历史计划与规格 |
 
@@ -37,6 +37,7 @@
 | --- | --- |
 | [hooks/](features/hooks/) | Hook 系统设计、PRD、实现与生命周期计划 |
 | [tools.md](features/tools.md) | `sigma_tools` / oh-my-pi 风格工具面 PRD |
+| [providers.md](features/providers.md) | Provider 扩展 playbook：OpenAI-compat 配置、`stream_normalized`、错误/取消/fixture 清单 |
 
 ## Agent 协作（agents/）
 

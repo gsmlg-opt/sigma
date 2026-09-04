@@ -38,7 +38,7 @@ loading, remote download, or eval-as-extension are forbidden.
 | --- | --- | --- | --- |
 | Tools (`Sigma.Coding.Tool`) | boundary + thin registry façade | external OTP app `register_tool` | — |
 | Context sources | listed only | register + assemble hook | — |
-| Providers (`Sigma.Ai.Provider`) | playbook (WO-4) | thin adapters | more vendors |
+| Providers (`Sigma.Ai.Provider`) | [playbook](../features/providers.md) (WO-4) | thin adapters | more vendors |
 | Commands / slash | out of scope | TBD ADR | — |
 | Events / render hints | out of scope | TBD | UI-facing hints |
 | Hooks | orthogonal; unchanged | still not Elixir plugins | — |

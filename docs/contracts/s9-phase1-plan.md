@@ -150,7 +150,7 @@ status?: pending | in_progress | completed
 | **PR 拆分** | PR-A：`docs(adr): define BEAM extension SDK boundary`；PR-B（可选）：`feat(coding): add extension tool registry façade` |
 | **Status** | **Done** — ADR [`0002-beam-extension-sdk.md`](../adr/0002-beam-extension-sdk.md)；`Sigma.Coding.ExtensionRegistry`（`register_tool/1` + `list_tools/0`）；默认仍 `Sigma.Tools.default_tools/0` |
 
-### WO-4 — Provider 扩展路径
+### WO-4 — Provider 扩展路径 ✅
 
 | | |
 | --- | --- |
@@ -160,6 +160,7 @@ status?: pending | in_progress | completed
 | **Apps** | `sigma_ai`（若写适配器）；文档可放 `docs/features/providers.md` 或 ADR 附录 |
 | **验收** | 贡献者按文档能接 compat 端点；若有新适配器：归一化事件测试 + fake transport 绿 |
 | **PR 拆分** | PR-A：`docs: provider extension playbook`；PR-B（可选）：`feat(ai): add <provider> adapter` |
+| **Status** | **Done** — playbook [`providers.md`](../features/providers.md)；无新适配器（OpenAI-compat 配置面已覆盖；差异未确认） |
 
 ### WO-5 — PublicRuntime 集成笔记（轻量）
 
@@ -248,7 +249,7 @@ WO-1 docs ───────────────────────�
 ```text
 [x] WO-2: implement Sigma.Tools.Todo + tests + catalog/default_tools
 [x] WO-3: ADR 0002 BEAM extension SDK boundary (+ optional registry)
-[ ] WO-4: provider extension playbook (+ optional single adapter)
+[x] WO-4: provider extension playbook (+ optional single adapter) — playbook only, no new adapter
 [ ] WO-5: PublicRuntime integration notes for Synapsis/Samgita
 [ ] Do NOT start: LSP, AST, task, github, worktree pools, distributed BEAM
 [ ] Keep: allow-all permission default; Tool Runtime V2 metadata; Protocol V1 envelopes
