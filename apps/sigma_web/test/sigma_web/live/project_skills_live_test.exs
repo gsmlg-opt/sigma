@@ -82,7 +82,6 @@ defmodule Sigma.Web.ProjectSkillsLiveTest do
 
       assert html =~ "Settings"
       assert html =~ "Skills"
-      assert html =~ "New Session"
       assert html =~ "Session List"
       refute html =~ "All Repositories"
       assert html =~ ~s(href="/repository/#{encoded_repository}/settings")

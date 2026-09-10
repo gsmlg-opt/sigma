@@ -32,8 +32,10 @@ defmodule Sigma.Web.ProjectSkillsLive do
      |> assign(:tab, tab)
      |> assign(:skills_query, "")
      |> assign(:selected_skill_names, [])
-     |> assign(:project_skill_count, results |> Map.get(:project) |> count_skills())
-     |> assign(:global_skill_count, results |> Map.get(:global) |> count_skills())
+     |> assign(:project_skill_count, results |> Map.get(:project) |> count_enabled_skills())
+     |> assign(:project_skill_total, results |> Map.get(:project) |> count_skills())
+     |> assign(:global_skill_count, results |> Map.get(:global) |> count_enabled_skills())
+     |> assign(:global_skill_total, results |> Map.get(:global) |> count_skills())
      |> assign(:skills_result, Map.fetch!(results, tab))}
   end
 
@@ -64,7 +66,9 @@ defmodule Sigma.Web.ProjectSkillsLive do
               <div class="flex items-center gap-2">
                 <.dm_mdi name="folder-code-outline" class="w-4 h-4" />
                 <span>Project Skills</span>
-                <span class="badge badge-sm badge-ghost">{@project_skill_count}</span>
+                <span class="badge badge-sm badge-ghost">
+                  {@project_skill_count} / {@project_skill_total}
+                </span>
               </div>
             </.dm_link>
             <.dm_link
@@ -74,7 +78,9 @@ defmodule Sigma.Web.ProjectSkillsLive do
               <div class="flex items-center gap-2">
                 <.dm_mdi name="earth" class="w-4 h-4" />
                 <span>Global Skills</span>
-                <span class="badge badge-sm badge-ghost">{@global_skill_count}</span>
+                <span class="badge badge-sm badge-ghost">
+                  {@global_skill_count} / {@global_skill_total}
+                </span>
               </div>
             </.dm_link>
           </div>
@@ -250,7 +256,6 @@ defmodule Sigma.Web.ProjectSkillsLive do
               Description
             </th>
             <th role="columnheader" scope="col" class="min-w-96">Path</th>
-            <th role="columnheader" scope="col" class="min-w-44">New Session</th>
           </tr>
         </thead>
         <tbody role="row-group">
@@ -337,15 +342,6 @@ defmodule Sigma.Web.ProjectSkillsLive do
               <code class="block text-[11px] font-mono text-on-surface-variant break-all">
                 {skill.path}
               </code>
-            </td>
-            <td data-label="New Session" role="cell" class="min-w-44">
-              <.dm_link
-                navigate={~p"/repository/#{@encoded_repository}/sessions/new?skill=#{skill.name}"}
-                class="btn btn-ghost btn-sm whitespace-nowrap"
-              >
-                <.dm_mdi name="message-text-outline" class="w-4 h-4" />
-                Use in new session
-              </.dm_link>
             </td>
           </tr>
         </tbody>
@@ -478,6 +474,8 @@ defmodule Sigma.Web.ProjectSkillsLive do
   defp load_skills(workdir, _tab), do: Skills.list_repository(workdir)
 
   defp count_skills(%{skills: skills}), do: length(skills)
+
+  defp count_enabled_skills(%{skills: skills}), do: Enum.count(skills, & &1.enabled?)
 
   defp normalize_tab("global"), do: :global
   defp normalize_tab(_), do: :project
