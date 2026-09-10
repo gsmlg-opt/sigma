@@ -1,6 +1,8 @@
 defmodule Sigma.Session.SkillsTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
+  alias Sigma.Session.RepoManager
+  alias Sigma.Session.RepoManager
   alias Sigma.Session.Skills
   alias Sigma.Session.Skills.Catalog
   alias Sigma.Session.Skills.Snapshot
@@ -208,5 +210,98 @@ defmodule Sigma.Session.SkillsTest do
              Skills.list_dir(Path.join([tmp_dir, ".agents", "skills"]), :repository)
 
     assert {:error, :unsafe_archive} = Snapshot.prepare(skill)
+  end
+
+  # --- project-level disabled skills ---
+
+  @tag :tmp_dir
+  test "list_repository marks project-disabled repository skills", %{tmp_dir: tmp_dir} do
+    with_agent_dir(tmp_dir, fn ->
+      skill_dir = Path.join([tmp_dir, ".agents", "skills", "turn-off"])
+      File.mkdir_p!(skill_dir)
+
+      File.write!(
+        Path.join(skill_dir, "SKILL.md"),
+        "---\nname: turn-off\ndescription: Off\n---\nBody"
+      )
+
+      keep_dir = Path.join([tmp_dir, ".agents", "skills", "keep-on"])
+      File.mkdir_p!(keep_dir)
+
+      File.write!(
+        Path.join(keep_dir, "SKILL.md"),
+        "---\nname: keep-on\ndescription: On\n---\nBody"
+      )
+
+      RepoManager.add_repo(tmp_dir)
+      RepoManager.set_disabled_skills(tmp_dir, ["turn-off"])
+
+      assert %{skills: skills} = Skills.list_repository(tmp_dir)
+      assert Enum.map(skills, &{&1.name, &1.enabled?}) == [{"keep-on", true}, {"turn-off", false}]
+    end)
+  end
+
+  @tag :tmp_dir
+  test "list_global_for_repository applies global setting and project disables", %{
+    tmp_dir: tmp_dir
+  } do
+    with_agent_dir(tmp_dir, fn ->
+      for name <- ["global-a", "global-b", "global-c"] do
+        dir = Path.join([tmp_dir, "global", name])
+        File.mkdir_p!(dir)
+
+        File.write!(
+          Path.join(dir, "SKILL.md"),
+          "---\nname: #{name}\ndescription: #{name}\n---\nBody"
+        )
+      end
+
+      File.mkdir_p!(Path.join(tmp_dir, "agent"))
+      settings_path = Path.join([tmp_dir, "agent", "settings.json"])
+
+      File.write!(
+        settings_path,
+        Jason.encode!(%{"disabledSkills" => %{"global" => ["global-a"]}})
+      )
+
+      Application.put_env(:sigma_session, :global_skills_dir, Path.join(tmp_dir, "global"))
+      on_exit(fn -> Application.delete_env(:sigma_session, :global_skills_dir) end)
+      RepoManager.add_repo(tmp_dir)
+      RepoManager.set_disabled_skills(tmp_dir, ["global-c"])
+
+      assert %{skills: skills} = Skills.list_global_for_repository(tmp_dir)
+
+      assert Enum.map(skills, &{&1.name, &1.enabled?}) == [
+               {"global-a", false},
+               {"global-b", true},
+               {"global-c", false}
+             ]
+
+      # Catalog.build reflects the same enabled flags
+      catalog = Catalog.build(tmp_dir)
+      automatic = catalog |> Catalog.automatic() |> Enum.map(& &1.name)
+      assert "global-a" not in automatic
+      assert "global-b" in automatic
+      assert "global-c" not in automatic
+
+      assert {:error, :skill_disabled} = Catalog.resolve(catalog, "global:global-a")
+      assert {:error, :skill_disabled} = Catalog.resolve(catalog, "global:global-c")
+      assert {:ok, _} = Catalog.resolve(catalog, "global:global-b")
+    end)
+  end
+
+  defp with_agent_dir(tmp_dir, fun) do
+    previous = Application.get_env(:sigma_session, :agent_dir)
+    Application.put_env(:sigma_session, :agent_dir, Path.join(tmp_dir, "agent"))
+
+    try do
+      fun.()
+    after
+      if previous do
+        Application.put_env(:sigma_session, :agent_dir, previous)
+      else
+        Application.delete_env(:sigma_session, :agent_dir)
+      end
+    end
   end
 end

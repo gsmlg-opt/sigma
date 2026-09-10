@@ -53,7 +53,7 @@ defmodule Sigma.Web.ProjectSkillsLiveTest do
   end
 
   @tag :tmp_dir
-  test "shows repository skills on the project skills page", %{
+  test "shows project skills tab with repository skills", %{
     conn: conn,
     tmp_dir: tmp_dir
   } do
@@ -89,10 +89,104 @@ defmodule Sigma.Web.ProjectSkillsLiveTest do
       assert html =~ ~s(href="/repository/#{encoded_repository}/sessions/new")
       assert html =~ ~s(href="/repository/#{encoded_repository}")
 
-      assert html =~ "Repository Skills"
+      assert html =~ "Project Skills"
       assert html =~ "repo-only"
       assert html =~ "Repository scoped skill"
-      assert html =~ ~s(href="/settings/skills")
+      assert html =~ ~s(href="/repository/#{encoded_repository}/skills?tab=global")
+    end)
+  end
+
+  @tag :tmp_dir
+  test "global tab lists global skills and toggle persists to repos.jsonl", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    with_agent_dir(tmp_dir, fn ->
+      workdir = Path.join(tmp_dir, "registered")
+      File.mkdir_p!(workdir)
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+
+      global_dir = Path.join([tmp_dir, "global-skills", "global-only"])
+      File.mkdir_p!(global_dir)
+
+      File.write!(
+        Path.join(global_dir, "SKILL.md"),
+        """
+        ---
+        name: global-only
+        description: Global scoped skill
+        ---
+        Use this skill.
+        """
+      )
+
+      Application.put_env(:sigma_session, :global_skills_dir, Path.join(tmp_dir, "global-skills"))
+
+      try do
+        encoded_repository = Base.url_encode64(workdir, padding: false)
+        {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/skills?tab=global")
+
+        html = render(view)
+        assert html =~ "Global Skills"
+        assert html =~ "global-only"
+        assert html =~ "Global scoped skill"
+
+        assert RepoManager.disabled_skills(workdir) == []
+
+        view
+        |> element("input[aria-label='Enable global-only']")
+        |> render_click(%{"name" => "global-only", "enabled" => "false"})
+
+        assert RepoManager.disabled_skills(workdir) == ["global-only"]
+
+        html = render(view)
+        assert html =~ "global-only disabled for this project"
+
+        view
+        |> element("input[aria-label='Enable global-only']")
+        |> render_click(%{"name" => "global-only", "enabled" => "true"})
+
+        assert RepoManager.disabled_skills(workdir) == []
+      after
+        Application.delete_env(:sigma_session, :global_skills_dir)
+      end
+    end)
+  end
+
+  @tag :tmp_dir
+  test "project tab toggle disables a repository skill", %{conn: conn, tmp_dir: tmp_dir} do
+    with_agent_dir(tmp_dir, fn ->
+      workdir = Path.join(tmp_dir, "registered")
+      File.mkdir_p!(workdir)
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+
+      skill_dir = Path.join([workdir, ".agents", "skills", "repo-only"])
+      File.mkdir_p!(skill_dir)
+
+      File.write!(
+        Path.join(skill_dir, "SKILL.md"),
+        """
+        ---
+        name: repo-only
+        description: Repository scoped skill
+        ---
+        Use this skill.
+        """
+      )
+
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/skills")
+
+      assert RepoManager.disabled_skills(workdir) == []
+
+      view
+      |> element("input[aria-label='Enable repo-only']")
+      |> render_click(%{"name" => "repo-only", "enabled" => "false"})
+
+      assert RepoManager.disabled_skills(workdir) == ["repo-only"]
+
+      html = render(view)
+      assert html =~ "repo-only disabled for this project"
     end)
   end
 

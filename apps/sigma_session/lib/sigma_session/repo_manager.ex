@@ -38,7 +38,8 @@ defmodule Sigma.Session.RepoManager do
       "path" => path,
       "added_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
       "name" => name,
-      "mcp_server_ids" => []
+      "mcp_server_ids" => [],
+      "disabled_skills" => []
     }
 
     # Append if not already present
@@ -130,6 +131,35 @@ defmodule Sigma.Session.RepoManager do
   def set_mcp_server_ids(path, ids) when is_list(ids) do
     update_repo(path, %{"mcp_server_ids" => Enum.uniq(ids)})
   end
+
+  def disabled_skills(path) do
+    path
+    |> get_repo()
+    |> case do
+      %{"disabled_skills" => names} when is_list(names) ->
+        Enum.filter(names, &is_binary/1)
+
+      _ ->
+        []
+    end
+  end
+
+  @doc """
+  Persists the per-project disabled skill names for the repo at `path`.
+  Names are deduplicated and sorted. Returns `{:ok, new_entry}` on success.
+  """
+  def set_disabled_skills(path, names) when is_list(names) do
+    names =
+      names
+      |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
+      |> Enum.map(&String.trim/1)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    update_repo(path, %{"disabled_skills" => names})
+  end
+
+  def set_disabled_skills(_path, _names), do: {:error, :invalid_names}
 
   defp write_repos(repos) do
     root = get_repos_root()

@@ -11,7 +11,7 @@ defmodule Sigma.Session.Skills.Catalog do
 
   @spec build(binary()) :: t()
   def build(workdir) when is_binary(workdir) do
-    global = Skills.list_global()
+    global = Skills.list_global_for_repository(workdir)
     repository = Skills.list_repository(workdir)
 
     skills =
@@ -41,7 +41,9 @@ defmodule Sigma.Session.Skills.Catalog do
 
     candidates =
       skills
-      |> Enum.filter(fn skill -> skill.name == name and (is_nil(scope) or skill.source == scope) end)
+      |> Enum.filter(fn skill ->
+        skill.name == name and (is_nil(scope) or skill.source == scope)
+      end)
       |> prioritize(scope)
 
     case candidates do

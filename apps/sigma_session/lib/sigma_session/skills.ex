@@ -1,7 +1,7 @@
 defmodule Sigma.Session.Skills do
   @moduledoc "Discovers Agent Skills from user and repository skill directories."
 
-  alias Sigma.Session.{ConfigManager, Skills.Parser}
+  alias Sigma.Session.{ConfigManager, RepoManager, Skills.Parser}
 
   defmodule Skill do
     @moduledoc false
@@ -40,7 +40,28 @@ defmodule Sigma.Session.Skills do
     global_skills_dir() |> list_dir(:global) |> mark_enabled(disabled)
   end
 
-  def list_repository(workdir), do: workdir |> repository_skills_dir() |> list_dir(:repository)
+  def list_repository(workdir),
+    do:
+      workdir
+      |> repository_skills_dir()
+      |> list_dir(:repository)
+      |> mark_enabled(MapSet.new(RepoManager.disabled_skills(workdir)))
+
+  @doc """
+  Global skills with the project-level disabled names for `workdir` applied
+  on top of the global `disabledSkills` setting. A global skill is enabled
+  only when it is enabled globally and not disabled for this project.
+  """
+  def list_global_for_repository(workdir) do
+    disabled = disabled_global_and_project(workdir)
+    global_skills_dir() |> list_dir(:global) |> mark_enabled(disabled)
+  end
+
+  defp disabled_global_and_project(workdir) do
+    ConfigManager.disabled_global_skills()
+    |> Enum.concat(RepoManager.disabled_skills(workdir))
+    |> MapSet.new()
+  end
 
   def list_dir(root_dir, source) do
     if File.dir?(root_dir) do
