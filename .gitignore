@@ -30,6 +30,7 @@ erl_crash.dump
 /apps/*/_build/
 /apps/*/priv/native/
 /apps/*/native/*/target/
+/native/*/target/
 /apps/*/priv/sessions/
 /apps/*/lib/priv/sessions/
 

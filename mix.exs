@@ -42,6 +42,7 @@ defmodule Sigma.MixProject do
 
   defp build_release([]) do
     mix = System.find_executable("mix") || Mix.raise("mix executable not found")
+    helper_builder = Path.expand("scripts/build-terminal-helper.sh", __DIR__)
     release_build_path = Path.join(Mix.Project.build_path(), "sigma_rel")
 
     env = [
@@ -50,12 +51,18 @@ defmodule Sigma.MixProject do
       {"SIGMA_RELEASE", "true"}
     ]
 
-    case Mix.shell().cmd({mix, ["release", "sigma", "--overwrite", "--force"]},
-           env: env,
-           use_stdio: true
-         ) do
-      0 -> :ok
-      status -> Mix.raise("Failed to build Sigma release (status #{status})")
+    case Mix.shell().cmd({helper_builder, ["release"]}, use_stdio: true) do
+      0 ->
+        case Mix.shell().cmd({mix, ["release", "sigma", "--overwrite", "--force"]},
+               env: env,
+               use_stdio: true
+             ) do
+          0 -> :ok
+          status -> Mix.raise("Failed to build Sigma release (status #{status})")
+        end
+
+      status ->
+        Mix.raise("Failed to build terminal helper (status #{status})")
     end
   end
 

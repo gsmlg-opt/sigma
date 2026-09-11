@@ -43,6 +43,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             apps/sigma_tools/native/sigma_tools_hashline/target
+            native/sigma_terminal_helper/target
           key: ci-elixir-${{ runner.os }}-${{ runner.arch }}-otp-28.5-elixir-1.18.4-${{ hashFiles('mix.lock', '**/mix.exs', '**/Cargo.lock') }}
 
       - name: Install dependencies
@@ -89,7 +90,15 @@ jobs:
           -A clippy::type-complexity
 
       - name: Run Rust tests
-        run: cargo test --manifest-path apps/sigma_tools/native/sigma_tools_hashline/Cargo.toml
+        run: |
+          cargo test --manifest-path apps/sigma_tools/native/sigma_tools_hashline/Cargo.toml
+          cargo test --locked --manifest-path native/sigma_terminal_helper/Cargo.toml
+
+      - name: Check terminal helper formatting
+        run: cargo fmt --manifest-path native/sigma_terminal_helper/Cargo.toml -- --check
+
+      - name: Lint terminal helper
+        run: cargo clippy --locked --manifest-path native/sigma_terminal_helper/Cargo.toml --all-targets -- -D warnings
 
   assets:
     name: Web asset setup and build
