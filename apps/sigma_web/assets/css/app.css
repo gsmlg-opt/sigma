@@ -344,6 +344,266 @@ el-dm-chat.sigma-chat-with-actions::part(actions) {
   overflow: hidden;
 }
 
+.sigma-terminal-panel {
+  display: flex;
+  flex-direction: column;
+  height: var(--sigma-terminal-height, 22rem);
+  min-height: 12rem;
+  max-height: 80vh;
+  overflow: hidden;
+  border-top: 1px solid var(--color-outline-variant);
+  background: var(--color-surface);
+  color: var(--color-on-surface);
+}
+
+.sigma-terminal-panel.is-collapsed {
+  display: none;
+}
+
+.sigma-terminal-panel.is-maximized {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  width: 100vw;
+  height: 100vh;
+  max-height: none;
+}
+
+.sigma-terminal-toolbar,
+.sigma-terminal-run-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.sigma-terminal-toolbar {
+  min-height: 2.75rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--color-outline-variant);
+}
+
+.sigma-terminal-title,
+.sigma-terminal-actions,
+.sigma-terminal-run-actions,
+.sigma-terminal-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.sigma-terminal-title {
+  min-width: 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.sigma-terminal-summary,
+.sigma-terminal-meta,
+.sigma-terminal-path {
+  color: var(--color-on-surface-variant);
+  font-family: monospace;
+  font-size: 0.6875rem;
+}
+
+.sigma-terminal-summary,
+.sigma-terminal-tab-label,
+.sigma-terminal-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sigma-terminal-trigger {
+  position: relative;
+}
+
+.sigma-terminal-count,
+.sigma-terminal-unavailable {
+  display: grid;
+  place-items: center;
+  min-width: 1rem;
+  height: 1rem;
+  padding: 0 0.1875rem;
+  border-radius: 999px;
+  background: var(--color-primary);
+  color: var(--color-primary-content);
+  font: 700 0.625rem/1 monospace;
+}
+
+.sigma-terminal-unavailable {
+  background: var(--color-error);
+  color: var(--color-error-content);
+}
+
+.sigma-terminal-tabbar {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-height: 2.5rem;
+  padding: 0.375rem 0.5rem;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--color-outline-variant);
+}
+
+.sigma-terminal-tab {
+  display: inline-flex;
+  flex: 0 1 13rem;
+  align-items: center;
+  gap: 0.375rem;
+  min-width: 7rem;
+  height: 1.875rem;
+  padding: 0 0.5rem;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-on-surface-variant);
+  font: 0.75rem/1 monospace;
+  text-align: left;
+}
+
+.sigma-terminal-tab:hover,
+.sigma-terminal-tab.is-selected {
+  border-color: var(--color-outline-variant);
+  background: var(--color-surface-container);
+  color: var(--color-on-surface);
+}
+
+.sigma-terminal-tab:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.sigma-terminal-state {
+  width: 0.5rem;
+  height: 0.5rem;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--color-outline);
+}
+
+.sigma-terminal-state.is-running {
+  background: var(--color-success);
+}
+
+.sigma-terminal-state.is-starting,
+.sigma-terminal-state.is-stopping {
+  background: var(--color-warning);
+}
+
+.sigma-terminal-state.is-failed,
+.sigma-terminal-state.is-cleanup_failed,
+.sigma-terminal-state.is-unavailable {
+  background: var(--color-error);
+}
+
+.sigma-terminal-unread {
+  margin-left: auto;
+  color: var(--color-primary);
+  font-size: 0.625rem;
+  font-weight: 700;
+}
+
+.sigma-terminal-empty,
+.sigma-terminal-notice {
+  margin: 0.75rem;
+  color: var(--color-on-surface-variant);
+  font-size: 0.75rem;
+}
+
+.sigma-terminal-empty {
+  display: grid;
+  justify-items: start;
+  gap: 0.75rem;
+}
+
+.sigma-terminal-notice.is-error {
+  color: var(--color-error);
+}
+
+.sigma-terminal-run {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.sigma-terminal-run[hidden] {
+  display: none;
+}
+
+.sigma-terminal-run-header {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--color-outline-variant);
+}
+
+.sigma-terminal-run-header > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 0.125rem;
+}
+
+.sigma-terminal-run-identity {
+  display: grid;
+  min-width: 0;
+  gap: 0.125rem;
+}
+
+.sigma-terminal-rename-form {
+  display: grid;
+  grid-template-columns: minmax(10rem, 1fr) auto;
+  align-items: start;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.sigma-terminal-rename-field {
+  min-width: 0;
+}
+
+.sigma-terminal-rename-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding-top: 1.25rem;
+}
+
+.sigma-terminal-rename-error {
+  grid-column: 1 / -1;
+  color: var(--color-error);
+  font-size: 0.6875rem;
+}
+
+.sigma-terminal-run .web-shell-terminal-host {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  background: var(--color-inverse-surface);
+}
+
+@media (max-width: 767px) {
+  .sigma-terminal-panel {
+    max-height: 72vh;
+  }
+
+  .sigma-terminal-summary,
+  .sigma-terminal-path {
+    display: none;
+  }
+
+  .sigma-terminal-run-header {
+    align-items: flex-start;
+  }
+
+  .sigma-terminal-run-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+}
+
 .web-shell-terminal .xterm {
   height: 100%;
 }

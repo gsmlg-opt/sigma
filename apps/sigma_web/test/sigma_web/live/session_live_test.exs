@@ -1,6 +1,7 @@
 defmodule Sigma.Web.SessionLiveTest do
   use Sigma.Web.ConnCase, async: false
   import Phoenix.LiveViewTest
+  import ExUnit.CaptureLog
 
   alias Sigma.Agent.Message
   alias Sigma.Session.{ConfigManager, Log, RepoManager}
@@ -229,7 +230,7 @@ defmodule Sigma.Web.SessionLiveTest do
     assert html =~ "Skills"
     assert html =~ "New Session"
     assert html =~ "Terminal"
-    assert html =~ ~s(id="web-shell-open-btn")
+    assert html =~ ~s(id="session-terminal-open-btn")
     assert html =~ ~s(id="session-observability-open-btn")
     assert html =~ ~s(href="/repository/#{@encoded_workdir}/skills")
     assert_session_sidebar_order(html)
@@ -436,25 +437,145 @@ defmodule Sigma.Web.SessionLiveTest do
     refute_eventually(fn -> render(other_view) =~ "from repo one" end)
   end
 
-  test "opens a web shell panel from the session workspace", %{conn: conn} do
+  test "opens one session-owned terminal and closes it explicitly", %{conn: conn} do
     {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("terminal")))
 
     html =
       view
-      |> element("#web-shell-open-btn")
+      |> element("#session-terminal-open-btn")
       |> render_click()
 
-    assert html =~ ~s(id="web-shell-panel")
-    assert html =~ "h-[48vh]"
-    assert html =~ "max-h-full"
-    assert html =~ "overflow-hidden"
-    assert html =~ ~s(phx-hook="WebShellTerminal")
-    assert html =~ ~s(data-cwd="#{@workdir}")
-    assert html =~ "Starting shell..."
+    assert html =~ ~s(id="session-terminal-panel")
+    assert html =~ ~s(phx-hook="SessionTerminals")
 
-    html = render_hook(view, "web_shell_resize", %{"cols" => 132, "rows" => 31})
+    assert_eventually(fn -> render(view) =~ "1 retained terminals" end)
+    html = render(view)
 
-    assert html =~ "Shell ready"
+    [terminal_id] =
+      html
+      |> Floki.parse_document!()
+      |> Floki.find("[role=tab]")
+      |> Floki.attribute("data-terminal-id")
+
+    render_hook(view, "terminal_close", %{"terminal_id" => terminal_id})
+    assert_eventually(fn -> render(view) =~ "No retained terminals." end)
+  end
+
+  test "two windows share the catalog while keeping terminal selection local", %{conn: conn} do
+    session_id = unique_session_id("terminal-windows")
+    path = session_path(session_id)
+    {:ok, first, _html} = live_loaded(conn, path)
+    {:ok, second, _html} = live_loaded(conn, path)
+
+    render_hook(first, "terminal_open", %{})
+    render_hook(second, "terminal_open", %{})
+
+    assert_eventually(fn -> terminal_ids(render(first)) |> length() == 1 end)
+    assert_eventually(fn -> terminal_ids(render(second)) == terminal_ids(render(first)) end)
+
+    render_hook(first, "terminal_create", %{})
+    assert_eventually(fn -> terminal_ids(render(first)) |> length() == 2 end)
+    assert_eventually(fn -> terminal_ids(render(second)) == terminal_ids(render(first)) end)
+    [first_id, second_id] = terminal_ids(render(first))
+
+    render_hook(first, "terminal_select", %{"terminal_id" => first_id})
+    render_hook(second, "terminal_select", %{"terminal_id" => second_id})
+    assert selected_terminal_id(render(first)) == first_id
+    assert selected_terminal_id(render(second)) == second_id
+
+    render_hook(first, "terminal_rename_submit", %{
+      "terminal_id" => first_id,
+      "label" => "Shared terminal"
+    })
+
+    assert_eventually(fn -> render(second) =~ "Shared terminal" end)
+
+    Enum.each([first_id, second_id], fn terminal_id ->
+      render_hook(first, "terminal_close", %{"terminal_id" => terminal_id})
+    end)
+
+    assert_eventually(fn -> terminal_ids(render(first)) == [] end)
+    assert_eventually(fn -> terminal_ids(render(second)) == [] end)
+  end
+
+  test "disabled terminal gate is explicit and never creates a fallback shell", %{conn: conn} do
+    previous = Application.get_env(:sigma_web, :session_terminals_enabled)
+    Application.put_env(:sigma_web, :session_terminals_enabled, false)
+
+    on_exit(fn ->
+      if is_nil(previous),
+        do: Application.delete_env(:sigma_web, :session_terminals_enabled),
+        else: Application.put_env(:sigma_web, :session_terminals_enabled, previous)
+    end)
+
+    {:ok, view, html} = live_loaded(conn, session_path(unique_session_id("terminal-disabled")))
+    assert html =~ "Terminals disabled"
+
+    html = render_hook(view, "terminal_open", %{})
+    assert html =~ "Terminals are disabled by the deployment configuration."
+    assert html =~ "Terminal is unavailable: disabled"
+    refute html =~ ~s(data-terminal-host="true")
+  end
+
+  test "takeover fences the old window and forged browser scope is rejected", %{conn: conn} do
+    session_id = unique_session_id("terminal-fence")
+    path = session_path(session_id)
+    {:ok, first, _html} = live_loaded(conn, path)
+    {:ok, second, _html} = live_loaded(conn, path)
+
+    render_hook(first, "terminal_open", %{})
+    assert_eventually(fn -> terminal_ids(render(first)) |> length() == 1 end)
+    [terminal_id] = terminal_ids(render(first))
+
+    render_hook(second, "terminal_open", %{})
+    assert_eventually(fn -> render(second) =~ "sigma-terminal-state is-running" end)
+    render_hook(second, "terminal_select", %{"terminal_id" => terminal_id})
+
+    assert_eventually(fn ->
+      terminal_fence(render(second), terminal_id)["attachment_id"] != nil
+    end)
+
+    render_hook(second, "terminal_take_control", %{"terminal_id" => terminal_id})
+    assert render(second) =~ "You control input"
+
+    old_fence = terminal_fence(render(first), terminal_id)
+    render_hook(first, "terminal_heartbeat", old_fence)
+    assert render(first) =~ "Read only"
+
+    forged = Map.put(terminal_fence(render(second), terminal_id), "repository_id", "forged")
+    html = render_hook(second, "terminal_input", Map.put(forged, "data_base64", "QQ=="))
+    assert html =~ "Terminal request failed: session_scope_mismatch"
+
+    render_hook(second, "terminal_close", %{"terminal_id" => terminal_id})
+    assert_eventually(fn -> terminal_ids(render(second)) == [] end)
+  end
+
+  test "terminal bytes stay out of the session journal and default logs", %{conn: conn} do
+    session_id = unique_session_id("terminal-content")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    render_hook(view, "terminal_open", %{})
+    assert_eventually(fn -> render(view) =~ "sigma-terminal-state is-running" end)
+    [terminal_id] = terminal_ids(render(view))
+
+    assert_eventually(fn -> terminal_fence(render(view), terminal_id)["attachment_id"] != nil end)
+    fence = terminal_fence(render(view), terminal_id)
+    sentinel = "terminal-secret-#{System.unique_integer([:positive])}"
+
+    logs =
+      capture_log(fn ->
+        render_hook(
+          view,
+          "terminal_input",
+          Map.put(fence, "data_base64", Base.encode64("printf '#{sentinel}\\n'\n"))
+        )
+      end)
+
+    refute logs =~ sentinel
+    storage_path = session_storage_path(session_id)
+    refute File.exists?(storage_path) and File.read!(storage_path) =~ sentinel
+
+    render_hook(view, "terminal_close", %{"terminal_id" => terminal_id})
+    assert_eventually(fn -> terminal_ids(render(view)) == [] end)
   end
 
   @tag :tmp_dir
@@ -1950,13 +2071,26 @@ defmodule Sigma.Web.SessionLiveTest do
         sessions: [],
         show_logs: false,
         show_observability: false,
-        show_web_shell: false,
+        terminal_attachments: %{},
+        terminal_capability: %{status: :available, reason: nil, details: %{}},
+        terminal_catalog: %{
+          status: :available,
+          entries: [],
+          retained_count: 0,
+          state_counts: %{},
+          revision: 0,
+          selected_id: nil
+        },
+        terminal_panel_open: false,
+        terminal_pending_creators: MapSet.new(),
+        terminal_selected_id: nil,
+        terminal_session:
+          Sigma.Agent.Terminals.Identity.session(@workdir, "render_session", "test"),
         storage_path: session_storage_path("render_session"),
         streaming_message_id: nil,
         streams: %{messages: []},
         tool_results: %{},
         turn_in_flight: false,
-        web_shell_status: "Shell ready",
         workdir: @workdir
       },
       Map.new(overrides)
@@ -2226,6 +2360,40 @@ defmodule Sigma.Web.SessionLiveTest do
     |> Floki.text()
     |> String.trim()
   end
+
+  defp terminal_ids(html) do
+    html
+    |> Floki.parse_document!()
+    |> Floki.find("[role=tab][data-terminal-id]")
+    |> Floki.attribute("data-terminal-id")
+  end
+
+  defp selected_terminal_id(html) do
+    html
+    |> Floki.parse_document!()
+    |> Floki.find(~s([role=tab][aria-selected="true"]))
+    |> Floki.attribute("data-terminal-id")
+    |> List.first()
+  end
+
+  defp terminal_fence(html, terminal_id) do
+    document = Floki.parse_document!(html)
+    [root] = Floki.find(document, "#session-terminal-panel")
+    [panel] = Floki.find(document, ~s([role=tabpanel][data-terminal-id="#{terminal_id}"]))
+
+    %{
+      "repository_id" => attr(root, "data-terminal-repository"),
+      "session_id" => attr(root, "data-terminal-session"),
+      "incarnation_id" => attr(root, "data-terminal-incarnation"),
+      "terminal_id" => terminal_id,
+      "generation" => attr(panel, "data-terminal-generation"),
+      "catalog_revision" => attr(root, "data-terminal-catalog-revision"),
+      "attachment_id" => attr(panel, "data-terminal-attachment"),
+      "control_epoch" => attr(panel, "data-terminal-control-epoch")
+    }
+  end
+
+  defp attr(node, name), do: node |> Floki.attribute(name) |> List.first()
 
   defp selected?({_tag, attrs, _children}) do
     Enum.any?(attrs, fn

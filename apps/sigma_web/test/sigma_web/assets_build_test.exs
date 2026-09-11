@@ -24,16 +24,23 @@ defmodule Sigma.Web.AssetsBuildTest do
     assert css =~ ".xterm"
   end
 
-  test "web shell terminal preserves raw pty line endings and fits its container" do
+  test "session terminal hook preserves PTY bytes, fits its container, and is registered" do
     app_js = File.read!(Path.join(@repo_root, "apps/sigma_web/assets/js/app.js"))
 
-    assert app_js =~ "convertEol: false"
-    assert app_js =~ ~s|import { FitAddon } from "@xterm/addon-fit"|
-    assert app_js =~ "this._terminal.open(this._terminalHost)"
-    assert app_js =~ "this._resizeObserver.observe(this._terminalHost)"
-    assert app_js =~ "this._terminal.loadAddon(this._fitAddon)"
-    assert app_js =~ "this._fitAddon.fit()"
-    refute app_js =~ "Math.floor(rect.height / 17.5)"
+    hook_js =
+      File.read!(Path.join(@repo_root, "apps/sigma_web/assets/js/hooks/session_terminals.js"))
+
+    assert app_js =~ ~s|import { SessionTerminals } from "./hooks/session_terminals.js"|
+    assert app_js =~ "ElapsedTime, SessionTerminals"
+    refute app_js =~ "WebShellTerminal"
+    assert hook_js =~ "convertEol: false"
+    assert hook_js =~ ~s|import { FitAddon } from "@xterm/addon-fit"|
+    assert hook_js =~ "terminal.open(host)"
+    assert hook_js =~ "this.resizeObserver.observe(this.el)"
+    assert hook_js =~ "terminal.loadAddon(fit)"
+    assert hook_js =~ "instance.fit.fit()"
+    assert hook_js =~ "decodeTerminalBytes(frame.data_base64)"
+    refute hook_js =~ "Math.floor(rect.height / 17.5)"
   end
 
   test "auto appearance resolves the OS preference to an explicit theme" do
@@ -48,7 +55,7 @@ defmodule Sigma.Web.AssetsBuildTest do
     refute app_js =~ ~s|removeAttribute("data-theme")|
   end
 
-  test "web shell terminal can shrink within its viewport panel" do
+  test "session terminal can shrink within its viewport panel" do
     css = File.read!(Path.join(@repo_root, "apps/sigma_web/assets/css/app.css"))
 
     assert css =~

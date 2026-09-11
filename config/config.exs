@@ -33,4 +33,6 @@ config :duskmoon_bundler,
 
 config :sigma_logs, pubsub: Sigma.Web.PubSub
 
+config :sigma_web, session_terminals_enabled: true
+
 import_config "#{config_env()}.exs"

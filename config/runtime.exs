@@ -1,5 +1,10 @@
 import Config
 
+if value = System.get_env("SIGMA_SESSION_TERMINALS_ENABLED") do
+  config :sigma_web,
+    session_terminals_enabled: String.downcase(value) in ["1", "true", "yes", "on"]
+end
+
 if System.get_env("RELEASE_NAME") do
   config :sigma_web, Sigma.Web.Endpoint,
     server: System.get_env("PHX_SERVER", "true") in ["1", "true", "TRUE"],

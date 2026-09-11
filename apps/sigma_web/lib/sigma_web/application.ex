@@ -6,7 +6,6 @@ defmodule Sigma.Web.Application do
   def start(_type, _args) do
     children = [
       {Phoenix.PubSub, name: Sigma.Web.PubSub},
-      {DynamicSupervisor, name: Sigma.Web.WebShellSupervisor, strategy: :one_for_one},
       Sigma.Web.Endpoint
     ]
 
