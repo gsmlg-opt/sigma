@@ -51,6 +51,18 @@ defmodule Sigma.Agent.Runtime do
     end
   end
 
+  @doc "Reports whether an automatic stop may proceed without abandoning terminal resources."
+  def can_stop_session(repo_path, session_id)
+      when is_binary(repo_path) and is_binary(session_id) do
+    Sigma.Agent.Terminals.can_stop(repo_path, session_id)
+  end
+
+  @doc "Rejects a stale client session incarnation without creating a runtime."
+  def validate_session_incarnation(repo_path, session_id, incarnation_id)
+      when is_binary(repo_path) and is_binary(session_id) and is_binary(incarnation_id) do
+    Sigma.Agent.Terminals.validate_incarnation(repo_path, session_id, incarnation_id)
+  end
+
   def reload_context(repo_path, session_id, %Sigma.Agent.SessionContext{} = session_context) do
     case lookup(repo_path, session_id, :agent) do
       agent when is_pid(agent) -> Sigma.Agent.reload_context(agent, session_context)

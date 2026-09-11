@@ -10,6 +10,7 @@ defmodule Sigma.Agent.Application do
       {Registry, keys: :unique, name: Sigma.Agent.ProtocolSubscriptionRegistry},
       {DynamicSupervisor,
        name: Sigma.Agent.ProtocolSubscriptionSupervisor, strategy: :one_for_one},
+      Sigma.Agent.Terminals.ResourceLedger,
       {DynamicSupervisor, name: Sigma.Agent.DynamicSupervisor, strategy: :one_for_one}
     ]
 

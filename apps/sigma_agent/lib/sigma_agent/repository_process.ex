@@ -122,7 +122,13 @@ defmodule Sigma.Agent.RepositoryProcess do
               with :ok <- flush_session(handle),
                    :ok <- validate_operation_checkpoint(source_session_id, operation),
                    :ok <- persist_operation_started(handle, source_session_id, operation) do
-                performed = perform_operation(source_session_id, operation, handle)
+                performed =
+                  perform_with_terminal_drain(
+                    state.repo_path,
+                    source_session_id,
+                    operation,
+                    fn -> perform_operation(source_session_id, operation, handle) end
+                  )
 
                 case persist_operation_result(handle, source_session_id, operation, performed) do
                   :ok ->
@@ -246,7 +252,7 @@ defmodule Sigma.Agent.RepositoryProcess do
   defp release_operation(_handle), do: :ok
 
   defp release_after_operation(_handle, operation, {:ok, _result})
-       when elem(operation, 0) in [:rename, :delete],
+       when elem(operation, 0) in [:rename, :delete, :adopt],
        do: :ok
 
   defp release_after_operation(handle, _operation, _result), do: release_operation(handle)
@@ -271,6 +277,46 @@ defmodule Sigma.Agent.RepositoryProcess do
   catch
     :exit, reason -> {:error, {:session_flush_failed, reason}}
   end
+
+  defp perform_with_terminal_drain(repo_path, source_session_id, operation, perform) do
+    case terminal_drain_policy(source_session_id, operation) do
+      nil ->
+        perform.()
+
+      {mode, opts} ->
+        with {:ok, token} <-
+               Sigma.Agent.Terminals.begin_drain(repo_path, source_session_id, mode, opts) do
+          result =
+            with :ok <-
+                   Sigma.Agent.Terminals.cleanup_all(
+                     token,
+                     Keyword.get(opts, :terminal_cleanup_timeout_ms, 15_000)
+                   ) do
+              perform.()
+            end
+
+          if match?({:error, _reason}, result),
+            do: Sigma.Agent.Terminals.release_drain(token)
+
+          result
+        end
+    end
+  end
+
+  defp terminal_drain_policy(_source_session_id, {:delete, _sessions_dir, opts}),
+    do: {:delete, opts}
+
+  defp terminal_drain_policy(source_session_id, {:rename, target_session_id, _dir, opts})
+       when source_session_id != target_session_id,
+       do: {:identity_change, opts}
+
+  defp terminal_drain_policy(
+         _source_session_id,
+         {:adopt, _source_dir, _target_dir, _cwd, opts}
+       ),
+       do: {:identity_change, opts}
+
+  defp terminal_drain_policy(_source_session_id, _operation), do: nil
 
   defp perform_switch_operation(target_session_id, sessions_dir, opts) do
     with {:ok, target_path} <-
@@ -918,7 +964,7 @@ defmodule Sigma.Agent.RepositoryProcess do
   defp operation_effect_result(result), do: result
 
   defp finalize_file_operation(state, session_id, operation, {:ok, _result}, handle)
-       when elem(operation, 0) in [:rename, :delete] do
+       when elem(operation, 0) in [:rename, :delete, :adopt] do
     if handle && is_pid(handle[:session_supervisor]) do
       sessions_supervisor = Sigma.Agent.Runtime.lookup(state.repo_path, :sessions)
 

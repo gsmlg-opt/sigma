@@ -30,6 +30,10 @@ defmodule Sigma.Agent.SessionProcess do
     GenServer.call(pid_or_name, :status)
   end
 
+  def can_stop(pid_or_name) do
+    GenServer.call(pid_or_name, :can_stop)
+  end
+
   def record_event(pid_or_name, event, on_event) do
     GenServer.call(pid_or_name, {:record_event, event, on_event}, :infinity)
   end
@@ -82,8 +86,14 @@ defmodule Sigma.Agent.SessionProcess do
        message_count: length(state.messages),
        session_context?: not is_nil(state.session_context),
        compaction_count: state.compaction_count,
-       last_compaction: state.last_compaction
+       last_compaction: state.last_compaction,
+       terminal_resources:
+         Sigma.Agent.Terminals.resource_summary(state.repo_path, state.session_id)
      }, state}
+  end
+
+  def handle_call(:can_stop, _from, state) do
+    {:reply, Sigma.Agent.Terminals.can_stop(state.repo_path, state.session_id), state}
   end
 
   def handle_call(
@@ -95,7 +105,9 @@ defmodule Sigma.Agent.SessionProcess do
 
     case state_change_persist(state, event) do
       {:ok, persist} ->
-        case safely(fn -> Sigma.Agent.change_provider(agent, provider, model, options, persist) end) do
+        case safely(fn ->
+               Sigma.Agent.change_provider(agent, provider, model, options, persist)
+             end) do
           :ok ->
             {:reply, :ok, apply_recorded_event(state, event)}
 

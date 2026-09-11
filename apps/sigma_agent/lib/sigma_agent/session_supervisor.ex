@@ -50,6 +50,7 @@ defmodule Sigma.Agent.SessionSupervisor do
       end)
 
     writer_children = writer_children(opts, writer_name, transcript_path, session_id)
+    terminal_children = terminal_children(opts, repo_path, session_id)
 
     children =
       writer_children ++
@@ -95,10 +96,49 @@ defmodule Sigma.Agent.SessionSupervisor do
             start: {Sigma.Agent, :start_link, [agent_opts]},
             restart: :transient
           }
-        ]
+        ] ++ terminal_children
 
     Supervisor.init(children, strategy: :one_for_all, max_restarts: 0)
   end
+
+  defp terminal_children(opts, repo_path, session_id) do
+    incarnation_id =
+      Keyword.get_lazy(opts, :terminal_incarnation_id, fn ->
+        Integer.to_string(System.unique_integer([:positive, :monotonic]), 36)
+      end)
+
+    session =
+      Sigma.Agent.Terminals.Identity.session(
+        Sigma.Agent.Runtime.normalize_repo_path(repo_path),
+        session_id,
+        incarnation_id
+      )
+
+    {backend, backend_opts} = terminal_backend(Keyword.get(opts, :terminal_backend))
+
+    [
+      {Sigma.Agent.Terminals.Subsystem,
+       id: :terminal_subsystem,
+       name: Sigma.Agent.Runtime.via(repo_path, session_id, :terminal_subsystem),
+       manager_name: Sigma.Agent.Runtime.via(repo_path, session_id, :terminal_manager),
+       worker_supervisor: Sigma.Agent.Runtime.via(repo_path, session_id, :terminal_workers),
+       session: session,
+       ledger: Keyword.get(opts, :terminal_resource_ledger, Sigma.Agent.Terminals.ResourceLedger),
+       limits: Keyword.get(opts, :terminal_limits, Sigma.Agent.Terminals.Limits.new()),
+       backend: backend,
+       backend_opts: backend_opts,
+       id_generator:
+         Keyword.get(opts, :terminal_id_generator, fn ->
+           Integer.to_string(System.unique_integer([:positive, :monotonic]), 36)
+         end)}
+    ]
+  end
+
+  defp terminal_backend({backend, backend_opts}) when is_atom(backend) and is_list(backend_opts),
+    do: {backend, backend_opts}
+
+  defp terminal_backend(backend) when is_atom(backend), do: {backend, []}
+  defp terminal_backend(_backend), do: {nil, []}
 
   defp writer_children(_opts, nil, nil, _session_id), do: []
 
