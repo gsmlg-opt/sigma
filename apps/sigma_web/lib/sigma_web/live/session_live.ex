@@ -484,7 +484,7 @@ defmodule Sigma.Web.SessionLive do
         </div>
       </aside>
 
-      <section class="sigma-session-main grid min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)_auto] bg-surface-container-lowest">
+      <section class="sigma-session-main grid min-w-0 flex-1 bg-surface-container-lowest">
         <header class="sigma-session-header border-b border-outline-variant bg-surface px-4 py-2">
           <div class="flex min-w-0 flex-wrap items-center justify-between gap-3">
             <div class="flex min-w-0 items-center gap-3">
@@ -685,6 +685,13 @@ defmodule Sigma.Web.SessionLive do
             </div>
           </div>
         </footer>
+
+        <SessionTerminalComponents.terminal_panel
+          :if={@terminal_panel_open}
+          catalog={terminal_catalog_view(assigns)}
+          session={@terminal_session}
+          panel_open?={@terminal_panel_open}
+        />
       </section>
 
       <aside class="sigma-session-rail hidden w-72 shrink-0 flex-col border-l border-outline-variant bg-surface-container-low p-4 xl:flex">
@@ -880,13 +887,6 @@ defmodule Sigma.Web.SessionLive do
           </form>
         </:body>
       </.dm_modal>
-
-      <SessionTerminalComponents.terminal_panel
-        :if={@terminal_panel_open}
-        catalog={terminal_catalog_view(assigns)}
-        session={@terminal_session}
-        panel_open?={@terminal_panel_open}
-      />
 
       <.live_component
         :if={@show_logs}

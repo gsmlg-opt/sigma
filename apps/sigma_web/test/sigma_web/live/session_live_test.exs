@@ -461,6 +461,26 @@ defmodule Sigma.Web.SessionLiveTest do
     assert_eventually(fn -> render(view) =~ "No retained terminals." end)
   end
 
+  test "terminal docks after the composer inside the central workspace", %{conn: conn} do
+    {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("terminal-layout")))
+
+    render_hook(view, "terminal_open", %{})
+
+    assert has_element?(
+             view,
+             ".sigma-session-main > .sigma-session-composer + #session-terminal-panel"
+           )
+
+    refute has_element?(view, ".sigma-session-shell > #session-terminal-panel")
+    assert has_element?(view, ".sigma-session-shell > aside")
+    assert has_element?(view, ".sigma-session-shell > .sigma-session-rail")
+
+    render_hook(view, "terminal_collapse", %{})
+    refute has_element?(view, "#session-terminal-panel")
+    assert has_element?(view, ".sigma-session-main > .sigma-session-transcript")
+    assert has_element?(view, ".sigma-session-main > .sigma-session-composer")
+  end
+
   test "two windows share the catalog while keeping terminal selection local", %{conn: conn} do
     session_id = unique_session_id("terminal-windows")
     path = session_path(session_id)

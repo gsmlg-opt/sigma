@@ -61,6 +61,87 @@ describe("session terminal presentation storage", () => {
 })
 
 describe("session terminal authority and rendering", () => {
+  test("tab activation refits the newly visible terminal", () => {
+    let listener
+    const selections = []
+    const context = {
+      presentation: presentation(),
+      el: { addEventListener: (_event, callback) => { listener = callback } },
+      persistPresentation() {},
+      applyPresentation() {},
+      syncHosts() { selections.push(this.presentation.selectedId) }
+    }
+    SessionTerminals.installPresentationControls.call(context)
+    listener({ target: { closest: (selector) => selector.includes('role="tab"') ? { dataset: { terminalId: "terminal-2" } } : null } })
+    expect(selections).toEqual(["terminal-2"])
+  })
+
+  test("fits a visible observer locally without issuing a PTY resize", () => {
+    let fits = 0
+    const events = []
+    const instance = {
+      controller: false, resynced: true, disposed: false,
+      host: { getBoundingClientRect: () => ({ width: 800, height: 320 }) },
+      fit: { fit() { fits += 1 } },
+      terminal: { cols: 100, rows: 30 }
+    }
+    const context = { pushEvent: (event) => events.push(event) }
+    SessionTerminals.fit.call(context, { hidden: false }, instance)
+    expect(fits).toBe(1)
+    expect(events).toEqual([])
+    SessionTerminals.fit.call(context, { hidden: true }, instance)
+    instance.disposed = true
+    SessionTerminals.fit.call(context, { hidden: false }, instance)
+    expect(fits).toBe(1)
+  })
+
+  test("height and maximize/restore controls synchronize hosts after applying layout", () => {
+    let listener
+    const layouts = []
+    let applied
+    const context = {
+      presentation: presentation(),
+      el: { addEventListener: (_event, callback) => { listener = callback } },
+      persistPresentation() {},
+      applyPresentation() { applied = { height: this.presentation.height, maximized: this.presentation.maximized } },
+      syncHosts() { layouts.push(applied) }
+    }
+    SessionTerminals.installPresentationControls.call(context)
+    for (const action of ["height", "maximize", "maximize"]) {
+      listener({ target: { closest: (selector) => selector === "[data-terminal-action]" ? { dataset: { terminalAction: action } } : null } })
+    }
+    expect(layouts).toEqual([
+      { height: 240, maximized: false },
+      { height: 240, maximized: true },
+      { height: 240, maximized: false }
+    ])
+  })
+
+  test("host synchronization fits after layout settles without replacing the instance", () => {
+    const originalWindow = globalThis.window
+    const frames = []
+    const fits = []
+    const panel = { dataset: { terminalId: "terminal-1", terminalGeneration: "1" } }
+    const host = { closest: () => panel }
+    const instance = { host, terminal: {} }
+    const context = {
+      el: { dataset: {}, querySelectorAll: () => [host] },
+      instances: new Map([["terminal-1:1", instance]]),
+      presentation: presentation(),
+      fit: (_panel, value) => fits.push(value)
+    }
+    globalThis.window = { requestAnimationFrame: (callback) => frames.push(callback) }
+    try {
+      SessionTerminals.syncHosts.call(context)
+      expect(fits).toEqual([])
+      frames.forEach((callback) => callback())
+      expect(fits).toEqual([instance])
+      expect(context.instances.get("terminal-1:1")).toBe(instance)
+    } finally {
+      globalThis.window = originalWindow
+    }
+  })
+
   test("round trips arbitrary PTY bytes through base64 without UTF-8 coercion", () => {
     const bytes = new Uint8Array([0, 27, 128, 255, 10])
     expect(decodeTerminalBytes(encodeTerminalBytes(bytes))).toEqual(bytes)

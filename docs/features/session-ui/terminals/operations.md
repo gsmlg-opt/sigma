@@ -47,3 +47,14 @@ content, input content, screen snapshots, or command text.
 Terminal bytes travel between the browser and LiveView as base64 and go only to
 the bounded attachment stream. They are not agent messages and are not persisted
 to session JSONL.
+
+## Panel layout
+
+The session terminal is bottom-docked in the central workspace, below the chat
+composer. Opening it uses transcript height without changing chat width; collapse
+returns that space to the transcript. Dock height is bounded by workspace space. Long composers scroll internally
+to keep the input and send controls accessible on short viewports.
+Maximize is an explicit viewport mode, and restore returns to the bottom dock.
+Opening an empty catalog retains the existing first-terminal creation behavior;
+height changes, tab selection, and maximize/restore do not create or restart runs.
+Only the controller sends PTY resize requests; every visible client refits xterm.

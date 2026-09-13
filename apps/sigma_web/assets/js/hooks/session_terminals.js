@@ -100,7 +100,11 @@ export function canSendInput(instance) {
 }
 
 export function canResize(panel, instance) {
-  if (!canSendInput(instance) || panel?.hidden) return false
+  return canSendInput(instance) && canFit(panel, instance)
+}
+
+function canFit(panel, instance) {
+  if (!instance || instance.disposed || panel?.hidden) return false
   const rect = instance.host?.getBoundingClientRect()
   return Boolean(rect && rect.width > 0 && rect.height > 0)
 }
@@ -218,6 +222,7 @@ export const SessionTerminals = {
         this.presentation.unread[tab.dataset.terminalId] = false
         this.persistPresentation()
         this.applyPresentation()
+        this.syncHosts()
       }
 
       const action = event.target.closest?.("[data-terminal-action]")?.dataset.terminalAction
@@ -325,7 +330,7 @@ export const SessionTerminals = {
       instance.resynced = panel.dataset.terminalResynced === "true"
       const scrollPosition = this.presentation.scroll[instance.terminalId]
       if (Number.isInteger(scrollPosition)) instance.terminal.scrollToLine(scrollPosition)
-      this.fit(panel, instance)
+      afterPaint(() => this.fit(instance.panel, instance))
     })
     this.instances.forEach((instance, key) => {
       if (!seen.has(key)) {
@@ -378,8 +383,9 @@ export const SessionTerminals = {
     if (instance) instance.resynced = frame.resynced === true
   },
   fit(panel, instance) {
-    if (!canResize(panel, instance)) return
+    if (!canFit(panel, instance)) return
     instance.fit.fit()
+    if (!canResize(panel, instance)) return
     const size = { cols: instance.terminal.cols, rows: instance.terminal.rows }
     if (size.cols <= 0 || size.rows <= 0 || (instance.lastSize && size.cols === instance.lastSize.cols && size.rows === instance.lastSize.rows)) return
     instance.lastSize = size
