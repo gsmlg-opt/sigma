@@ -38,7 +38,8 @@ defmodule Sigma.Web.AssetsBuildTest do
     assert hook_js =~ "terminal.open(host)"
     assert hook_js =~ "this.resizeObserver.observe(this.el)"
     assert hook_js =~ "terminal.loadAddon(fit)"
-    assert hook_js =~ "instance.fit.fit()"
+    assert hook_js =~ "instance.fit.proposeDimensions?.()"
+    refute hook_js =~ "instance.fit.fit()"
     assert hook_js =~ "decodeTerminalBytes(frame.data_base64)"
     refute hook_js =~ "Math.floor(rect.height / 17.5)"
   end

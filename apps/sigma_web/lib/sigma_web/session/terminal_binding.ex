@@ -308,6 +308,9 @@ defmodule Sigma.Web.Session.TerminalBinding do
       control_epoch: Map.get(attachment, :control_epoch, 0),
       controller?: Map.get(attachment, :controller?, false),
       resynced?: Map.get(attachment, :resynced?, false),
+      recovery_id: Map.get(attachment, :recovery_id),
+      recovery_boundary: Map.get(attachment, :recovery_boundary),
+      dimensions: Map.get(attachment, :dimensions, {120, 24}),
       renaming?: Map.get(attachment, :renaming?, false),
       rename_value: Map.get(attachment, :rename_value),
       rename_error: Map.get(attachment, :rename_error)
@@ -332,6 +335,7 @@ defmodule Sigma.Web.Session.TerminalBinding do
 
   def attachment(result, cwd) do
     run = result.run
+    recovery_boundary = Map.get(result, :recovery_boundary, 0)
 
     %{
       terminal_id: run.terminal.terminal_id,
@@ -340,7 +344,10 @@ defmodule Sigma.Web.Session.TerminalBinding do
       attachment_id: result.attachment_id,
       control_epoch: result.control_epoch,
       controller?: result.controller,
-      resynced?: true,
+      resynced?: Map.get(result, :resynced, not Map.get(result, :requires_render, true)),
+      recovery_id: Map.get(result, :recovery_id),
+      recovery_boundary: recovery_boundary,
+      dimensions: Map.get(result, :dimensions, {120, 24}),
       rendered_sequence: 0,
       startup_directory: cwd
     }

@@ -8,7 +8,11 @@ defmodule Sigma.Agent.Terminals.Attachment do
   def deliver(relay, events), do: GenServer.cast(relay, {:deliver, List.wrap(events)})
   def deliver_snapshot(relay, snapshot), do: GenServer.cast(relay, {:deliver_snapshot, snapshot})
   def require_resync(relay, reason), do: GenServer.cast(relay, {:require_resync, reason})
-  def reset(relay), do: GenServer.call(relay, :reset)
+  def reset(relay, recovery_id), do: GenServer.call(relay, {:reset, recovery_id})
+
+  def recover(relay, recovery_id, boundary, delivery),
+    do: GenServer.call(relay, {:recover, recovery_id, boundary, delivery})
+
   def touch(relay), do: GenServer.call(relay, :touch)
   def acknowledge(relay, sequence), do: GenServer.call(relay, {:acknowledge, sequence})
   def stop(relay), do: GenServer.stop(relay, :normal)
@@ -24,6 +28,7 @@ defmodule Sigma.Agent.Terminals.Attachment do
         owner: Keyword.fetch!(opts, :owner),
         owner_ref: Process.monitor(Keyword.fetch!(opts, :owner)),
         run: Keyword.fetch!(opts, :run),
+        recovery_id: Keyword.fetch!(opts, :recovery_id),
         observer: observer,
         observer_ref: Process.monitor(observer),
         maximum: Keyword.fetch!(opts, :maximum),
@@ -32,6 +37,8 @@ defmodule Sigma.Agent.Terminals.Attachment do
         delivered_sequence: 0,
         rendered_sequence: Keyword.get(opts, :rendered_sequence, 0),
         paused?: false,
+        oversized_recovery?: false,
+        missed_output?: false,
         inactivity_ms: Keyword.fetch!(opts, :inactivity_ms),
         inactivity_timer: nil,
         activity_epoch: 0
@@ -42,11 +49,16 @@ defmodule Sigma.Agent.Terminals.Attachment do
 
   @impl true
   def handle_cast({:deliver_snapshot, snapshot}, state) do
+    snapshot = delivery_context(snapshot, state)
     event = %{sequence: snapshot.sequence, bytes: snapshot.bytes, snapshot: true}
     bytes = event_bytes(event)
 
     if state.pending_bytes + bytes > state.maximum do
-      send(state.observer, {:terminal_stream, state.id, {:resync_required, :slow_observer}})
+      send(
+        state.observer,
+        {:terminal_stream, state.id, {:resync_required, state.recovery_id, :slow_observer}}
+      )
+
       {:noreply, %{state | paused?: true, pending: [], pending_bytes: 0}}
     else
       send(state.observer, {:terminal_stream, state.id, {:snapshot, snapshot}})
@@ -64,17 +76,29 @@ defmodule Sigma.Agent.Terminals.Attachment do
   end
 
   def handle_cast({:require_resync, reason}, state) do
-    send(state.observer, {:terminal_stream, state.id, {:resync_required, reason}})
+    send(
+      state.observer,
+      {:terminal_stream, state.id, {:resync_required, state.recovery_id, reason}}
+    )
+
     {:noreply, %{state | paused?: true, pending: [], pending_bytes: 0}}
   end
+
+  def handle_cast({:deliver, _events}, %{paused?: true, oversized_recovery?: true} = state),
+    do: {:noreply, %{state | missed_output?: true}}
 
   def handle_cast({:deliver, _events}, %{paused?: true} = state), do: {:noreply, state}
 
   def handle_cast({:deliver, events}, state) do
+    events = Enum.map(events, &delivery_context(&1, state))
     bytes = Enum.reduce(events, 0, &(event_bytes(&1) + &2))
 
     if state.pending_bytes + bytes > state.maximum do
-      send(state.observer, {:terminal_stream, state.id, {:resync_required, :slow_observer}})
+      send(
+        state.observer,
+        {:terminal_stream, state.id, {:resync_required, state.recovery_id, :slow_observer}}
+      )
+
       {:noreply, %{state | paused?: true, pending: [], pending_bytes: 0}}
     else
       Enum.each(events, &send(state.observer, {:terminal_stream, state.id, {:event, &1}}))
@@ -93,8 +117,55 @@ defmodule Sigma.Agent.Terminals.Attachment do
   end
 
   @impl true
-  def handle_call(:reset, _from, state) do
-    {:reply, :ok, touch_state(%{state | pending: [], pending_bytes: 0, paused?: false})}
+  def handle_call({:reset, recovery_id}, _from, state) do
+    {:reply, :ok,
+     touch_state(%{
+       state
+       | recovery_id: recovery_id,
+         pending: [],
+         pending_bytes: 0,
+         paused?: false,
+         oversized_recovery?: false,
+         missed_output?: false
+     })}
+  end
+
+  def handle_call({:recover, recovery_id, boundary, delivery}, _from, state) do
+    state =
+      touch_state(%{
+        state
+        | recovery_id: recovery_id,
+          pending: [],
+          pending_bytes: 0,
+          paused?: false,
+          oversized_recovery?: false,
+          missed_output?: false
+      })
+
+    {messages, pending} = recovery_messages(delivery, state)
+    requires_render? = messages != []
+
+    send(
+      state.observer,
+      {:terminal_recovery, state.id, recovery_id, boundary, requires_render?}
+    )
+
+    bytes = Enum.reduce(pending, 0, &(event_bytes(&1) + &2))
+
+    Enum.each(messages, &send(state.observer, {:terminal_stream, state.id, &1}))
+    delivered = Enum.reduce(pending, state.rendered_sequence, &max(&1.sequence, &2))
+
+    state = %{
+      state
+      | pending: pending,
+        pending_bytes: bytes,
+        delivered_sequence: delivered,
+        paused?: bytes > state.maximum,
+        oversized_recovery?: bytes > state.maximum
+    }
+
+    emit_buffered(state)
+    {:reply, :ok, state}
   end
 
   def handle_call(:touch, _from, state), do: {:reply, :ok, touch_state(state)}
@@ -112,12 +183,25 @@ defmodule Sigma.Agent.Terminals.Attachment do
         {acked, pending} = Enum.split_while(state.pending, &(&1.sequence <= sequence))
         bytes = Enum.reduce(acked, 0, &(event_bytes(&1) + &2))
 
+        recovery_acked? = acked != [] and pending == [] and state.oversized_recovery?
+
+        if recovery_acked? and state.missed_output? do
+          send(
+            state.observer,
+            {:terminal_stream, state.id, {:resync_required, state.recovery_id, :slow_observer}}
+          )
+        end
+
         state =
           touch_state(%{
             state
             | pending: pending,
               pending_bytes: state.pending_bytes - bytes,
-              rendered_sequence: sequence
+              rendered_sequence: sequence,
+              paused?: if(recovery_acked?, do: state.missed_output?, else: state.paused?),
+              oversized_recovery?:
+                if(recovery_acked?, do: false, else: state.oversized_recovery?),
+              missed_output?: if(recovery_acked?, do: false, else: state.missed_output?)
           })
 
         emit_buffered(state)
@@ -166,6 +250,29 @@ defmodule Sigma.Agent.Terminals.Attachment do
 
   defp event_bytes(%{bytes: bytes}), do: byte_size(bytes)
   defp event_bytes(_event), do: 0
+
+  defp delivery_context(event, state) do
+    event
+    |> Map.put(:run, state.run)
+    |> Map.put(:attachment_id, state.id)
+    |> Map.put(:recovery_id, state.recovery_id)
+  end
+
+  defp recovery_messages(%{snapshot: snapshot, events: events}, state) do
+    snapshot = delivery_context(snapshot, state)
+    snapshot_event = %{sequence: snapshot.sequence, bytes: snapshot.bytes, snapshot: true}
+    events = Enum.map(events, &delivery_context(&1, state))
+
+    {
+      [{:snapshot, snapshot} | Enum.map(events, &{:event, &1})],
+      [snapshot_event | events]
+    }
+  end
+
+  defp recovery_messages(%{events: events}, state) do
+    events = Enum.map(events, &delivery_context(&1, state))
+    {Enum.map(events, &{:event, &1}), events}
+  end
 
   defp emit_buffered(state) do
     run = state.run

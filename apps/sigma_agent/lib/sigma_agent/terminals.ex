@@ -20,7 +20,12 @@ defmodule Sigma.Agent.Terminals do
         try do
           Manager.resource_summary(manager)
         catch
-          :exit, _reason -> unavailable_summary(repo_path, session_id, :ledger_unavailable)
+          :exit, _reason ->
+            unavailable_summary(
+              repo_path,
+              session_id,
+              Error.new(:catalog_unavailable, %{}, retryable: true)
+            )
         end
 
       {:error, error} ->

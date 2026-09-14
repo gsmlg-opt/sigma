@@ -11,6 +11,7 @@ defmodule Sigma.Agent.Terminals.StreamControlTest do
     Limits,
     Manager,
     ResourceLedger,
+    Attachment,
     Worker
   }
 
@@ -233,7 +234,10 @@ defmodule Sigma.Agent.Terminals.StreamControlTest do
     terminal = create(runtime)
     run = run(terminal)
     terminal_id = terminal.identity.terminal_id
-    {:ok, %{attachment_id: slow}} = Manager.attach(runtime.manager, terminal_id, 1, self())
+
+    {:ok, %{attachment_id: slow, recovery_id: slow_recovery}} =
+      Manager.attach(runtime.manager, terminal_id, 1, self())
+
     {:ok, %{attachment_id: healthy}} = Manager.attach(runtime.manager, terminal_id, 1, self())
 
     assert {:ok, %{sequence: 1}} = Manager.output(runtime.manager, run, "1234")
@@ -242,7 +246,7 @@ defmodule Sigma.Agent.Terminals.StreamControlTest do
     assert :ok = Manager.acknowledge(runtime.manager, terminal_id, 1, healthy, 1)
 
     assert {:ok, %{sequence: 2}} = Manager.output(runtime.manager, run, "abcd")
-    assert_receive {:terminal_stream, ^slow, {:resync_required, :slow_observer}}
+    assert_receive {:terminal_stream, ^slow, {:resync_required, ^slow_recovery, :slow_observer}}
     assert_receive {:terminal_stream, ^healthy, {:event, %{sequence: 2, bytes: "abcd"}}}
 
     assert {:ok, %{paused?: true, pending_bytes: 0}} =
@@ -331,6 +335,101 @@ defmodule Sigma.Agent.Terminals.StreamControlTest do
                %{run | generation: 2},
                "old"
              )
+  end
+
+  test "attachment deliveries carry immutable attachment, recovery, run, and dimensions context" do
+    runtime = start_runtime()
+    terminal = create(runtime)
+    run = run(terminal)
+    terminal_id = terminal.identity.terminal_id
+    assert {:ok, %{sequence: 1}} = Manager.output(runtime.manager, run, "frame")
+
+    assert {:ok,
+            %{
+              attachment_id: attachment,
+              recovery_id: recovery,
+              recovery_boundary: 1,
+              dimensions: {120, 24},
+              resynced: false
+            }} = Manager.attach(runtime.manager, terminal_id, 1, self())
+
+    assert_receive {:terminal_stream, ^attachment,
+                    {:event,
+                     %{
+                       attachment_id: ^attachment,
+                       recovery_id: ^recovery,
+                       run: ^run,
+                       sequence: 1,
+                       bytes: "frame"
+                     }}}
+
+    assert {:ok, %{recovery_id: next_recovery, recovery_boundary: 1}} =
+             Manager.resync(runtime.manager, terminal_id, 1, attachment, 1)
+
+    assert next_recovery != recovery
+  end
+
+  test "relay emits a recovery marker before its matching snapshot" do
+    run =
+      Identity.session("repo", "session", unique_id())
+      |> Identity.terminal("terminal")
+      |> Identity.run(1)
+
+    {:ok, relay} =
+      start_supervised(
+        {Attachment,
+         id: "attachment",
+         owner: self(),
+         run: run,
+         recovery_id: "old",
+         observer: self(),
+         maximum: 1_024,
+         inactivity_ms: 10_000,
+         rendered_sequence: 3}
+      )
+
+    snapshot = %{sequence: 3, bytes: "screen", dimensions: {80, 24}}
+    assert :ok = Attachment.recover(relay, "new", 3, %{snapshot: snapshot, events: []})
+    assert_receive {:terminal_recovery, "attachment", "new", 3, true}
+    assert_receive {:terminal_stream, "attachment", {:snapshot, %{recovery_id: "new"}}}
+  end
+
+  test "oversized coherent recovery reaches acknowledgement without resync churn" do
+    run =
+      Identity.session("repo", "session", unique_id())
+      |> Identity.terminal("terminal")
+      |> Identity.run(1)
+
+    {:ok, relay} =
+      start_supervised(
+        {Attachment,
+         id: "attachment",
+         owner: self(),
+         run: run,
+         recovery_id: "old",
+         observer: self(),
+         maximum: 4,
+         inactivity_ms: 10_000,
+         rendered_sequence: 0}
+      )
+
+    snapshot = %{sequence: 3, bytes: "oversized snapshot", dimensions: {80, 24}}
+    assert :ok = Attachment.recover(relay, "new", 3, %{snapshot: snapshot, events: []})
+    assert_receive {:terminal_recovery, "attachment", "new", 3, true}
+    assert_receive {:terminal_stream, "attachment", {:snapshot, %{sequence: 3}}}
+    refute_receive {:terminal_stream, "attachment", {:resync_required, _, _}}
+    assert %{paused?: true, pending_bytes: bytes} = Attachment.status(relay)
+    assert bytes > 4
+    assert :ok = Attachment.acknowledge(relay, 3)
+    assert %{paused?: false, pending_bytes: 0, rendered_sequence: 3} = Attachment.status(relay)
+
+    assert :ok = Attachment.recover(relay, "next", 3, %{snapshot: snapshot, events: []})
+    assert_receive {:terminal_recovery, "attachment", "next", 3, true}
+    assert_receive {:terminal_stream, "attachment", {:snapshot, %{sequence: 3}}}
+    Attachment.deliver(relay, [%{sequence: 4, bytes: "missed while paused"}])
+    assert :ok = Attachment.acknowledge(relay, 3)
+
+    assert_receive {:terminal_stream, "attachment", {:resync_required, "next", :slow_observer}}
   end
 
   defp start_runtime(opts \\ []) do

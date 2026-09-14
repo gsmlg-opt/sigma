@@ -58,6 +58,8 @@ defmodule Sigma.Web.SessionTerminalComponentsTest do
               state: :running,
               controller?: true,
               resynced?: true,
+              recovery_id: "recovery-a",
+              dimensions: {91, 37},
               startup_directory: "/very/long/path",
               unread?: true,
               renaming?: true,
@@ -87,6 +89,7 @@ defmodule Sigma.Web.SessionTerminalComponentsTest do
     assert html =~ "Retry cleanup"
     assert html =~ "Restart Terminal 2; prior screen will be cleared"
     assert html =~ "commands will not be replayed"
+    refute html =~ ~s(id="terminal-control-b")
     assert html =~ "Close this live terminal?"
     assert html =~ "aria-label=\"Unread terminal output\""
     assert html =~ ~s(data-terminal-action="height")
@@ -103,5 +106,12 @@ defmodule Sigma.Web.SessionTerminalComponentsTest do
     assert html =~ ~s(data-max-bytes="80")
     assert html =~ "Save terminal name"
     assert html =~ ~s(phx-update="ignore")
+    assert html =~ ~s(data-terminal-recovery="recovery-a")
+    assert html =~ ~s(data-terminal-columns="91")
+    assert html =~ ~s(data-terminal-rows="37")
+
+    assert html
+           |> Floki.parse_fragment!()
+           |> Floki.find(~s|[phx-hook="WebComponentHook"]:not([id])|) == []
   end
 end

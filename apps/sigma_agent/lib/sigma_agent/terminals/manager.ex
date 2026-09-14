@@ -320,6 +320,7 @@ defmodule Sigma.Agent.Terminals.Manager do
                operation.id,
                state.limits
              ) do
+        state = drop_worker(state, terminal_id)
         state = replace_terminal(state, restarted)
         start_run(state, restarted, attrs)
       else
@@ -390,7 +391,8 @@ defmodule Sigma.Agent.Terminals.Manager do
          opts
        ), state}
     else
-      {:error, error} -> {:reply, {:error, error}, state}
+      {:error, error} ->
+        {:reply, {:error, error}, state}
     end
   end
 
@@ -488,26 +490,31 @@ defmodule Sigma.Agent.Terminals.Manager do
   end
 
   def handle_call({:await_cleanup, terminal_id, generation}, from, state) do
-    case fetch_run(state, terminal_id, generation) do
-      {:error, %Error{code: :terminal_not_found}} ->
-        {:reply, {:ok, :closed}, state}
+    key = {terminal_id, generation}
 
-      {:error, error} ->
-        {:reply, {:error, error}, state}
+    if Map.has_key?(state.cleanups, terminal_id) do
+      waiters = Map.get(state.cleanup_waiters, key, [])
+      {:noreply, put_in(state.cleanup_waiters[key], [from | waiters])}
+    else
+      case fetch_run(state, terminal_id, generation) do
+        {:error, %Error{code: :terminal_not_found}} ->
+          {:reply, {:ok, :closed}, state}
 
-      {:ok, %{state: state_name} = terminal} when state_name in [:exited, :failed] ->
-        {:reply, {:ok, terminal}, state}
+        {:error, error} ->
+          {:reply, {:error, error}, state}
 
-      {:ok, %{state: :cleanup_failed} = terminal} ->
-        {:reply, cleanup_error(terminal), state}
+        {:ok, %{state: state_name} = terminal} when state_name in [:exited, :failed] ->
+          {:reply, {:ok, terminal}, state}
 
-      {:ok, %{state: :stopping}} ->
-        key = {terminal_id, generation}
-        waiters = Map.get(state.cleanup_waiters, key, [])
-        {:noreply, put_in(state.cleanup_waiters[key], [from | waiters])}
+        {:ok, %{state: :cleanup_failed} = terminal} ->
+          {:reply, cleanup_error(terminal), state}
 
-      {:ok, terminal} ->
-        {:reply, {:error, Error.new(:invalid_transition, %{state: terminal.state})}, state}
+        {:ok, %{state: :stopping}} ->
+          {:reply, {:error, Error.new(:cleanup_unconfirmed)}, state}
+
+        {:ok, terminal} ->
+          {:reply, {:error, Error.new(:invalid_transition, %{state: terminal.state})}, state}
+      end
     end
   end
 
@@ -855,35 +862,48 @@ defmodule Sigma.Agent.Terminals.Manager do
     run = run(terminal)
 
     cleanup =
-      case state.workers[terminal_id] do
-        %{pid: pid} ->
-          Worker.begin_cleanup(pid, self(), token)
+      if terminal.resource_state == :released and terminal.cleanup_disposition == :close do
+        send(self(), {:terminal_cleanup_result, nil, run, token, {:ok, :confirmed}})
 
-          %{
-            pid: pid,
-            run: run,
-            token: token,
-            remove_after?: remove_after?,
-            operation_id: operation_id,
-            started_at_ms: System.monotonic_time(:millisecond)
-          }
+        %{
+          pid: nil,
+          run: run,
+          token: token,
+          remove_after?: true,
+          operation_id: operation_id,
+          started_at_ms: System.monotonic_time(:millisecond)
+        }
+      else
+        case state.workers[terminal_id] do
+          %{pid: pid} ->
+            Worker.begin_cleanup(pid, self(), token)
 
-        nil ->
-          result =
-            if terminal.resource_state == :released,
-              do: {:ok, :confirmed},
-              else: {:error, :cleanup_unconfirmed}
+            %{
+              pid: pid,
+              run: run,
+              token: token,
+              remove_after?: remove_after?,
+              operation_id: operation_id,
+              started_at_ms: System.monotonic_time(:millisecond)
+            }
 
-          send(self(), {:terminal_cleanup_result, nil, run, token, result})
+          nil ->
+            result =
+              if terminal.resource_state == :released,
+                do: {:ok, :confirmed},
+                else: {:error, :cleanup_unconfirmed}
 
-          %{
-            pid: nil,
-            run: run,
-            token: token,
-            remove_after?: remove_after?,
-            operation_id: operation_id,
-            started_at_ms: System.monotonic_time(:millisecond)
-          }
+            send(self(), {:terminal_cleanup_result, nil, run, token, result})
+
+            %{
+              pid: nil,
+              run: run,
+              token: token,
+              remove_after?: remove_after?,
+              operation_id: operation_id,
+              started_at_ms: System.monotonic_time(:millisecond)
+            }
+        end
       end
 
     {{:ok, :stopping}, put_in(state.cleanups[terminal_id], cleanup)}
@@ -897,12 +917,16 @@ defmodule Sigma.Agent.Terminals.Manager do
         :ok = ResourceLedger.mark_released(state.ledger, run(terminal))
         :ok = ResourceLedger.remove(state.ledger, run(terminal))
         state = state |> drop_worker(terminal_id) |> remove_terminal(terminal_id)
+
         {{:ok, :closed}, state}
 
       {:ok, :confirmed} ->
         {:ok, retained} = Catalog.transition(terminal, :cleanup_confirmed)
         :ok = ResourceLedger.mark_released(state.ledger, run(terminal))
-        state = state |> drop_worker(terminal_id) |> replace_terminal(retained)
+
+        :ok = retain_worker(state, terminal_id)
+        state = replace_terminal(state, retained)
+
         {{:ok, retained}, state}
 
       {:error, reason} ->
@@ -914,32 +938,38 @@ defmodule Sigma.Agent.Terminals.Manager do
   end
 
   defp retain_worker_loss(state, terminal, reason) do
-    terminal =
-      case terminal.state do
-        :starting ->
-          {:ok, stopping} =
-            Catalog.transition(terminal, {:startup_failed, {:worker_down, reason}})
+    if terminal.state in [:exited, :failed] and terminal.resource_state == :released do
+      replace_terminal(state, terminal)
+    else
+      terminal =
+        case terminal.state do
+          :starting ->
+            {:ok, stopping} =
+              Catalog.transition(terminal, {:startup_failed, {:worker_down, reason}})
 
-          stopping
+            stopping
 
-        :running ->
-          {:ok, stopping} = Catalog.transition(terminal, {:shell_exited, {:worker_down, reason}})
-          stopping
+          :running ->
+            {:ok, stopping} =
+              Catalog.transition(terminal, {:shell_exited, {:worker_down, reason}})
 
-        _ ->
+            stopping
+
+          _ ->
+            terminal
+        end
+
+      terminal =
+        if terminal.state == :stopping do
+          {:ok, failed} = Catalog.transition(terminal, {:cleanup_failed, :cleanup_unconfirmed})
+          failed
+        else
           terminal
-      end
+        end
 
-    terminal =
-      if terminal.state == :stopping do
-        {:ok, failed} = Catalog.transition(terminal, {:cleanup_failed, :cleanup_unconfirmed})
-        failed
-      else
-        terminal
-      end
-
-    :ok = ResourceLedger.mark_unconfirmed(state.ledger, run(terminal))
-    replace_terminal(state, terminal)
+      :ok = ResourceLedger.mark_unconfirmed(state.ledger, run(terminal))
+      replace_terminal(state, terminal)
+    end
   end
 
   defp execute_operation(state, operation, expected_kind, function) do
@@ -1157,6 +1187,19 @@ defmodule Sigma.Agent.Terminals.Manager do
           do: DynamicSupervisor.terminate_child(state.worker_supervisor, pid)
 
         %{state | workers: workers}
+    end
+  end
+
+  defp retain_worker(state, terminal_id) do
+    case state.workers[terminal_id] do
+      %{pid: pid} ->
+        case safe_worker_call(fn -> Worker.retain(pid) end) do
+          :ok -> :ok
+          {:worker_exit, _reason} -> :ok
+        end
+
+      nil ->
+        :ok
     end
   end
 

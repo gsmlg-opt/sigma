@@ -5,6 +5,7 @@ defmodule Sigma.Agent.Terminals.NativeStreamIntegrationTest do
   alias Sigma.Coding.Terminal.Native
 
   @helper Path.expand("../../../priv/native/sigma-terminal-helper", __DIR__)
+  @cat System.find_executable("cat") || raise("cat executable is required for native tests")
 
   test "native output watermark and vt100 checkpoint restore alternate-screen state" do
     run = native_run("checkpoint")
@@ -17,7 +18,7 @@ defmodule Sigma.Agent.Terminals.NativeStreamIntegrationTest do
          backend_opts: [helper_path: @helper],
          attrs: %{
            cwd: System.tmp_dir!(),
-           command: ["/bin/cat"]
+           command: [@cat]
          },
          limits: Limits.new()}
       )
@@ -52,7 +53,7 @@ defmodule Sigma.Agent.Terminals.NativeStreamIntegrationTest do
     assert :binary.match(bytes, "full screen") != :nomatch
 
     send(worker, {:terminal_backend, backend, {:output, native_sequence + 2, "gap"}})
-    assert_receive {:terminal_stream, ^attachment, {:resync_required, :sequence_gap}}
+    assert_receive {:terminal_stream, ^attachment, {:resync_required, _recovery, :sequence_gap}}
 
     assert_receive {:terminal_stream, ^attachment,
                     {:snapshot, %{source_sequence: ^native_sequence}}},
@@ -67,7 +68,7 @@ defmodule Sigma.Agent.Terminals.NativeStreamIntegrationTest do
     )
 
     assert_receive {:terminal_stream, ^attachment,
-                    {:resync_required,
+                    {:resync_required, _recovery,
                      %Sigma.Agent.Terminals.Error{
                        code: :snapshot_unavailable,
                        details: %{reason: :snapshot_too_large, maximum_bytes: 2_097_152}
@@ -88,7 +89,7 @@ defmodule Sigma.Agent.Terminals.NativeStreamIntegrationTest do
     runtime =
       start_runtime(
         limits,
-        command: ["/bin/sh", "-c", "stty raw -echo; printf READY; exec /bin/cat"]
+        command: ["/bin/sh", "-c", "stty raw -echo; printf READY; exec #{@cat}"]
       )
 
     terminal = create(runtime)
@@ -113,7 +114,7 @@ defmodule Sigma.Agent.Terminals.NativeStreamIntegrationTest do
 
     assert :ok = Native.input(backend, "abcd")
 
-    assert_receive {:terminal_stream, ^slow, {:resync_required, :slow_observer}}, 1_000
+    assert_receive {:terminal_stream, ^slow, {:resync_required, _recovery, :slow_observer}}, 1_000
     assert_receive {:terminal_stream, ^healthy, {:event, %{sequence: second, bytes: "abcd"}}}
     assert second > first
     assert :ok = Manager.acknowledge(runtime.manager, terminal_id, 1, healthy, second)

@@ -1,7 +1,15 @@
 defmodule Sigma.Agent.Terminals.ManagerTest do
   use ExUnit.Case, async: true
 
-  alias Sigma.Agent.Terminals.{Error, FakeBackend, Identity, Limits, Manager, ResourceLedger}
+  alias Sigma.Agent.Terminals.{
+    Error,
+    FakeBackend,
+    Identity,
+    Limits,
+    Manager,
+    ResourceLedger,
+    Worker
+  }
 
   defmodule BlockingCleanupBackend do
     defstruct [:test_pid]
@@ -158,6 +166,122 @@ defmodule Sigma.Agent.Terminals.ManagerTest do
     assert running.state == :running
     assert running.run_generation == 2
     assert running.identity == terminal.identity
+  end
+
+  test "confirmed natural exit retains a read-only replay until explicit close" do
+    runtime = start_runtime()
+    create = Manager.issue_operation(runtime.manager, "history-create", :create)
+    assert {:ok, terminal} = Manager.create(runtime.manager, create)
+    run = Identity.run(terminal.identity, 1)
+    assert {:ok, _frame} = Manager.output(runtime.manager, run, "final-marker")
+
+    assert {:ok, :stopping} =
+             Manager.shell_exited(runtime.manager, terminal.identity.terminal_id, 7)
+
+    assert {:ok, %{state: :exited, exit_status: 7}} =
+             Manager.await_cleanup(runtime.manager, terminal.identity.terminal_id, 1)
+
+    assert %{managed_run_count: 0, retained_count: 1} = Manager.resource_summary(runtime.manager)
+
+    assert {:ok, %{attachment_id: attachment_id, controller: false}} =
+             Manager.attach(runtime.manager, terminal.identity.terminal_id, 1, self())
+
+    assert {:error, %Error{code: :session_unavailable}} =
+             Manager.takeover_control(
+               runtime.manager,
+               terminal.identity.terminal_id,
+               1,
+               attachment_id,
+               0
+             )
+
+    assert {:error, %Error{code: :session_unavailable}} =
+             Manager.renew_control(
+               runtime.manager,
+               terminal.identity.terminal_id,
+               1,
+               attachment_id,
+               0
+             )
+
+    assert {:error,
+            %Error{code: :session_unavailable, details: %{reason: :terminal_exited}}} =
+             runtime.manager
+             |> Manager.worker_pid(terminal.identity.terminal_id)
+             |> Worker.request_checkpoint("retained-checkpoint")
+
+    assert_receive {:terminal_stream, ^attachment_id, {:event, %{bytes: "final-marker"}}}
+
+    close = Manager.issue_operation(runtime.manager, "history-close", :close)
+
+    assert {:ok, :stopping} =
+             Manager.close(runtime.manager, terminal.identity.terminal_id, 1, close)
+
+    assert {:ok, :closed} =
+             Manager.await_cleanup(runtime.manager, terminal.identity.terminal_id, 1)
+
+    assert %{retained_count: 0, managed_run_count: 0} = Manager.resource_summary(runtime.manager)
+  end
+
+  test "retained worker loss does not recreate a released resource pin" do
+    runtime = start_runtime()
+    create = Manager.issue_operation(runtime.manager, "retained-loss", :create)
+    assert {:ok, terminal} = Manager.create(runtime.manager, create)
+
+    assert {:ok, :stopping} =
+             Manager.shell_exited(runtime.manager, terminal.identity.terminal_id, 0)
+
+    assert {:ok, %{state: :exited}} =
+             Manager.await_cleanup(runtime.manager, terminal.identity.terminal_id, 1)
+
+    worker = Manager.worker_pid(runtime.manager, terminal.identity.terminal_id)
+    ref = Process.monitor(worker)
+    Process.exit(worker, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^worker, _reason}
+
+    assert %{managed_run_count: 0, resource_pin?: false} =
+             Manager.resource_summary(runtime.manager)
+
+    assert {:error, %Error{code: :terminal_not_found}} =
+             Manager.attach(runtime.manager, terminal.identity.terminal_id, 1, self())
+
+    close = Manager.issue_operation(runtime.manager, "retained-loss-close", :close)
+
+    assert {:ok, :stopping} =
+             Manager.close(runtime.manager, terminal.identity.terminal_id, 1, close)
+
+    assert {:ok, :closed} =
+             Manager.await_cleanup(runtime.manager, terminal.identity.terminal_id, 1)
+  end
+
+  test "worker death after confirmed cleanup cannot crash retention finalization" do
+    runtime = start_runtime(backend: BlockingCleanupBackend, backend_opts: [test_pid: self()])
+    create = Manager.issue_operation(runtime.manager, "retain-race", :create)
+    assert {:ok, terminal} = Manager.create(runtime.manager, create)
+    terminal_id = terminal.identity.terminal_id
+    worker = Manager.worker_pid(runtime.manager, terminal_id)
+
+    assert {:ok, :stopping} = Manager.shell_exited(runtime.manager, terminal_id, 0)
+    assert_receive {:cleanup_started, ^worker}
+
+    :ok = :sys.suspend(runtime.manager)
+    send(worker, :finish_cleanup)
+    _worker_state = :sys.get_state(worker)
+    ref = Process.monitor(worker)
+    Process.exit(worker, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^worker, _reason}
+    :ok = :sys.resume(runtime.manager)
+
+    eventually(fn ->
+      Process.alive?(runtime.manager) and
+        match?(
+          {:ok, %{entries: [%{state: :exited, resource_state: :released}]}},
+          Manager.list(runtime.manager)
+        )
+    end)
+
+    assert %{retained_count: 1, managed_run_count: 0, resource_pin?: false} =
+             Manager.resource_summary(runtime.manager)
   end
 
   test "blocked cleanup does not block catalog operations for other terminals" do

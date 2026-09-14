@@ -1,10 +1,10 @@
 # ADR: Session terminal PTY backend
 
-Status: Accepted for implementation behind the terminal backend behaviour; production UI cutover remains gated on Linux/NixOS native verification.
+Status: Accepted and verified on NixOS x86_64; other declared release platforms remain gated on their native jobs.
 
-Date: 2026-09-11
+Date: 2026-09-14
 
-Baseline: `85a810075fb5f30360c8dea6a5c90d54202a6c7d`
+Tested source: `bba9564a09a04b6903b728fdc8ce144da8b68eb6` plus the uncommitted terminal-correctness repair.
 
 ## Decision
 
@@ -53,19 +53,26 @@ The release workflow builds the helper on Linux amd64/arm64 and macOS amd64/arm6
 
 ## Capability evidence
 
-| Capability | macOS 15.7.9 x86_64 | Linux x86_64 (Docker/Debian) | NixOS | Required follow-up |
+| Capability | macOS 15.7.9 x86_64 | Linux x86_64 (Docker/Debian) | NixOS 26.05 x86_64 | Required follow-up |
 | --- | --- | --- | --- | --- |
-| Real PTY, controlling TTY, PID/SID identity | Passed | Passed | Unverified | Run locked native suite in required platform jobs. |
-| Byte preservation including NUL/non-UTF-8/control bytes | Passed | Passed | Unverified | Same suite; no text conversion is allowed. |
-| Kernel resize observed by `stty size` | Passed (`41 132`) | Passed (`41 132`) | Unverified | Same suite plus packaged TUI smoke. |
-| Cleanup across distinct job-control PGIDs | Passed | Passed | Unverified | Same suite, foreground pipeline coverage in T2. |
-| HUP/TERM-resistant cleanup after control EOF | Passed | Passed | Unverified | Same suite plus BEAM worker/session-kill tests in T2. |
-| Detached alternate-screen checkpoint restoration | Passed | Passed | Unverified | Same suite; T4 adds fragmented UTF-8/CSI and ordering cases. |
-| Packaged release contains executable | Verified locally after release assembly | CI configured, not run here | Unverified | Required platform release jobs must pass. |
+| Real PTY, controlling TTY, PID/SID identity | Passed | Passed | Passed | Run locked native suite in remaining platform jobs. |
+| Byte preservation including NUL/non-UTF-8/control bytes | Passed | Passed | Passed | Same suite; no text conversion is allowed. |
+| Kernel resize observed by `stty size` | Passed (`41 132`) | Passed (`41 132`) | Passed (`4 80` browser/release; native resize cases also pass) | Same suite plus packaged TUI smoke on remaining platforms. |
+| Cleanup across distinct job-control PGIDs | Passed | Passed | Passed | Repeat in remaining platform jobs. |
+| HUP/TERM-resistant cleanup after control EOF | Passed | Passed | Passed | Repeat in remaining platform jobs. |
+| Detached alternate-screen checkpoint restoration | Passed | Passed | Passed | Repeat in remaining platform jobs. |
+| Packaged release contains executable | Verified locally after release assembly | CI configured, not run here | Passed | Required remaining-platform release jobs must pass. |
 | Deliberate `setsid` descendant containment | Not supported | Not supported by SID boundary | Not supported by SID boundary | Keep the limitation visible; do not claim cleanup outside the SID. |
 | Abrupt helper `SIGKILL` cleanup | Not guaranteed | Not yet verified; no guarantee selected | Not yet verified | Report as capability limit; never silently fall back. |
 
-The local evidence was produced on Darwin kernel `24.6.0`, macOS `15.7.9`, x86_64, Rust `1.97.0`, Cargo `1.97.0`. Linux evidence was produced by Docker Engine `28.4.0` on its real Linux/x86_64 VM using `rust:1.88-bookworm` image digest `sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0`. No NixOS builder was configured (`nix show-config` reported no builders or extra platforms), so NixOS execution remains unverified and was not simulated.
+The original local evidence was produced on Darwin kernel `24.6.0`, macOS
+`15.7.9`, x86_64, with additional Linux evidence from a real Docker Linux/x86_64
+VM. The 2026-09-14 repair acceptance reran the locked native suite directly on
+NixOS 26.05, Linux kernel `6.18.48`, x86_64, with Rust/Cargo `1.95.0`; all 14
+native cases passed. It also booted the assembled release, exercised its embedded
+helper through a real two-window browser workflow, and verified the embedded,
+app-priv, and Cargo-release binaries share SHA-256
+`392bf163c35fab4d1730fe70ab31dfb76947d63daf34efc8b81a571fcc0c3f93`.
 
 ## Verification
 
@@ -73,11 +80,14 @@ The following commands completed with exit status 0 on the current platform:
 
 ```sh
 cargo test --locked --manifest-path native/sigma_terminal_helper/Cargo.toml
-# 5 passed; 0 failed
+# 14 passed; 0 failed on NixOS x86_64
 
 cargo clippy --locked --manifest-path native/sigma_terminal_helper/Cargo.toml --all-targets -- -D warnings
 
 scripts/build-terminal-helper.sh release
+mix sigma.rel-build
+_build/dev/sigma_rel/rel/sigma/bin/sigma eval 'IO.puts(:release_boot_ok)'
+# release_boot_ok
 
 docker run --rm --platform linux/amd64 -v "$PWD:/workspace:ro" -w /tmp \
   rust:1.88-bookworm sh -c \

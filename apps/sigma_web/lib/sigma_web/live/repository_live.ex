@@ -3,7 +3,8 @@ defmodule Sigma.Web.RepositoryLive do
 
   import Sigma.Web.ProjectSidebar
 
-  alias Sigma.Session.{ConfigManager, RepoManager}
+  alias Sigma.Session.{ConfigManager, RepoManager, SessionFiles}
+  alias Sigma.Web.OperationError
 
   @impl true
   def mount(%{"repository" => encoded_repository}, _session, socket) do
@@ -178,8 +179,14 @@ defmodule Sigma.Web.RepositoryLive do
   end
 
   @impl true
-  def handle_event("delete_session", %{"id" => id}, socket) do
-    {:noreply, assign(socket, deleting_session: id)}
+  def handle_event("delete_session", params, socket) do
+    id = Map.get(params, "id")
+
+    if SessionFiles.valid_session_id?(id) do
+      {:noreply, assign(socket, deleting_session: id)}
+    else
+      {:noreply, put_flash(socket, :error, OperationError.message(:invalid_session_id))}
+    end
   end
 
   @impl true
@@ -191,24 +198,31 @@ defmodule Sigma.Web.RepositoryLive do
   def handle_event("confirm_delete", _, socket) do
     session_id = socket.assigns.deleting_session
 
-    case Sigma.Agent.Runtime.delete_session(
-           socket.assigns.workdir,
-           session_id,
-           socket.assigns.sessions_dir
-         ) do
-      {:ok, _deleted} ->
-        {:ok, sessions} = Sigma.Session.Log.list_session_summaries(socket.assigns.sessions_dir)
+    if SessionFiles.valid_session_id?(session_id) do
+      case Sigma.Agent.Runtime.delete_session(
+             socket.assigns.workdir,
+             session_id,
+             socket.assigns.sessions_dir
+           ) do
+        {:ok, _deleted} ->
+          {:ok, sessions} = Sigma.Session.Log.list_session_summaries(socket.assigns.sessions_dir)
 
-        {:noreply,
-         socket
-         |> assign(sessions: sessions, deleting_session: nil)
-         |> put_flash(:info, "Session deleted successfully.")}
+          {:noreply,
+           socket
+           |> assign(sessions: sessions, deleting_session: nil)
+           |> put_flash(:info, "Session deleted successfully.")}
 
-      {:error, reason} ->
-        {:noreply,
-         socket
-         |> assign(deleting_session: nil)
-         |> put_flash(:error, "Could not delete session: #{reason}")}
+        {:error, reason} ->
+          {:noreply,
+           socket
+           |> assign(deleting_session: nil)
+           |> put_flash(:error, OperationError.message(reason))}
+      end
+    else
+      {:noreply,
+       socket
+       |> assign(deleting_session: nil)
+       |> put_flash(:error, OperationError.message(:invalid_session_id))}
     end
   end
 
@@ -221,31 +235,34 @@ defmodule Sigma.Web.RepositoryLive do
   end
 
   @impl true
-  def handle_event("adopt_session", %{"id" => session_id}, socket) do
-    result =
-      Sigma.Agent.Runtime.adopt_session(
-        socket.assigns.workdir,
-        session_id,
-        socket.assigns.sessions_dir,
-        socket.assigns.sessions_dir,
-        socket.assigns.workdir
-      )
+  def handle_event("adopt_session", params, socket) do
+    session_id = Map.get(params, "id")
 
-    case result do
-      {:ok, _adopted} ->
-        {:ok, sessions} =
-          Sigma.Session.Log.list_session_summaries(socket.assigns.sessions_dir)
+    if SessionFiles.valid_session_id?(session_id) do
+      result =
+        Sigma.Agent.Runtime.adopt_session(
+          socket.assigns.workdir,
+          session_id,
+          socket.assigns.sessions_dir,
+          socket.assigns.sessions_dir,
+          socket.assigns.workdir
+        )
 
-        {:noreply,
-         socket
-         |> assign(:sessions, sessions)
-         |> put_flash(:info, "Session adopted into this repository.")}
+      case result do
+        {:ok, _adopted} ->
+          {:ok, sessions} =
+            Sigma.Session.Log.list_session_summaries(socket.assigns.sessions_dir)
 
-      {:error, :session_busy} ->
-        {:noreply, put_flash(socket, :error, "Wait for the active turn to finish before adopting this session.")}
+          {:noreply,
+           socket
+           |> assign(:sessions, sessions)
+           |> put_flash(:info, "Session adopted into this repository.")}
 
-      {:error, _reason} ->
-        {:noreply, put_flash(socket, :error, "Could not adopt session.")}
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, OperationError.message(reason))}
+      end
+    else
+      {:noreply, put_flash(socket, :error, OperationError.message(:invalid_session_id))}
     end
   end
 

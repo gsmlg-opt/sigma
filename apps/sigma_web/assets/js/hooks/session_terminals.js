@@ -57,6 +57,28 @@ export function terminalKey(id, generation) {
   return `${id}:${generation}`
 }
 
+function instanceIdentity(panel, root) {
+  return {
+    repository_id: root?.dataset.terminalRepository,
+    session_id: root?.dataset.terminalSession,
+    incarnation_id: root?.dataset.terminalIncarnation,
+    terminal_id: panel?.dataset.terminalId,
+    generation: integer(panel?.dataset.terminalGeneration)
+  }
+}
+
+function matchesServerFrame(instance, frame) {
+  const identity = instance?.identity
+  return Boolean(identity && frame &&
+    frame.repository_id === identity.repository_id &&
+    frame.session_id === identity.session_id &&
+    frame.incarnation_id === identity.incarnation_id &&
+    frame.terminal_id === identity.terminal_id &&
+    integer(frame.generation) === identity.generation &&
+    frame.attachment_id === instance.fence?.attachment_id &&
+    frame.recovery_id === instance.recoveryId)
+}
+
 export function encodeTerminalBytes(value) {
   const bytes = value instanceof Uint8Array ? value : new TextEncoder().encode(value)
   let binary = ""
@@ -88,6 +110,12 @@ function createInstance(host) {
     terminalId: null,
     generation: null,
     lastSize: null,
+    canonicalSize: null,
+    renderedSequence: 0,
+    receivedSequence: 0,
+    recoveryId: null,
+    frameQueue: [],
+    rendering: false,
     controller: false,
     resynced: false,
     disposed: false,
@@ -123,7 +151,8 @@ export function commandFence(panel, root) {
     generation: integer(panel?.dataset.terminalGeneration),
     catalog_revision: integer(root?.dataset.terminalCatalogRevision),
     attachment_id: panel?.dataset.terminalAttachment,
-    control_epoch: integer(panel?.dataset.terminalControlEpoch)
+    control_epoch: integer(panel?.dataset.terminalControlEpoch),
+    recovery_id: panel?.dataset.terminalRecovery
   }
 }
 
@@ -178,10 +207,12 @@ export const SessionTerminals = {
     this.installHeartbeat()
     this.applyPresentation()
     this.syncHosts()
+    this.synchronizeSelection()
   },
   updated() {
     this.applyPresentation()
     this.syncHosts()
+    this.synchronizeSelection()
   },
   destroyed() {
     this.resizeObserver?.disconnect()
@@ -197,6 +228,8 @@ export const SessionTerminals = {
     this.eventRefs = [
       this.handleEvent("terminal_output", (frame) => this.write(frame)),
       this.handleEvent("terminal_snapshot", (frame) => this.write(frame, { reset: true })),
+      this.handleEvent("terminal_resize", (frame) => this.write(frame)),
+      this.handleEvent("terminal_selection", (frame) => this.selectFromServer(frame)),
       this.handleEvent("terminal_control", (frame) => this.setControl(frame)),
       this.handleEvent("terminal_resync", (frame) => this.setResynced(frame))
     ]
@@ -223,6 +256,7 @@ export const SessionTerminals = {
         this.persistPresentation()
         this.applyPresentation()
         this.syncHosts()
+        SessionTerminals.requestSelection.call(this, tab.dataset.terminalId)
       }
 
       const action = event.target.closest?.("[data-terminal-action]")?.dataset.terminalAction
@@ -254,10 +288,50 @@ export const SessionTerminals = {
   persistPresentation() {
     writePresentation(this.storageIdentity, this.presentation)
   },
+  requestSelection(terminalId) {
+    if (typeof this.el.querySelectorAll !== "function") return
+    const tab = [...this.el.querySelectorAll('[role="tab"][data-terminal-id]')]
+      .find((candidate) => candidate.dataset.terminalId === terminalId)
+    if (!tab) return
+    const generation = integer(tab.dataset.terminalGeneration)
+    const instance = this.instances.get(terminalKey(terminalId, generation))
+    this.selectionRequest = `${terminalId}:${generation}`
+    this.pushEvent("terminal_select", {
+      terminal_id: terminalId,
+      generation,
+      rendered_sequence: Number.isInteger(instance?.renderedSequence) ? instance.renderedSequence : 0
+    })
+  },
+  synchronizeSelection() {
+    const terminalId = this.presentation.selectedId
+    if (!terminalId || terminalId === this.el.dataset.terminalSelected) return
+    const tab = [...this.el.querySelectorAll('[role="tab"][data-terminal-id]')]
+      .find((candidate) => candidate.dataset.terminalId === terminalId)
+    if (!tab) return
+    const generation = integer(tab.dataset.terminalGeneration)
+    const signature = `${terminalId}:${generation}`
+    if (this.selectionRequest === signature) return
+    SessionTerminals.requestSelection.call(this, terminalId)
+  },
+  selectFromServer(frame) {
+    if (typeof frame?.terminal_id !== "string") return
+    this.forcedSelection = { terminal_id: frame.terminal_id, generation: integer(frame.generation) }
+    this.presentation.selectedId = frame.terminal_id
+    this.presentation.unread[frame.terminal_id] = false
+    this.selectionRequest = `${frame.terminal_id}:${integer(frame.generation)}`
+    this.persistPresentation()
+    this.applyPresentation()
+    this.syncHosts()
+  },
   applyPresentation() {
     const tabs = [...this.el.querySelectorAll('[role="tab"][data-terminal-id]')]
-    const validSelection = tabs.find((tab) => tab.dataset.terminalId === this.presentation.selectedId)
+    const forcedSelection = tabs.find((tab) =>
+      tab.dataset.terminalId === this.forcedSelection?.terminal_id &&
+      integer(tab.dataset.terminalGeneration) === this.forcedSelection?.generation
+    )
+    const validSelection = forcedSelection || tabs.find((tab) => tab.dataset.terminalId === this.presentation.selectedId)
     this.presentation.selectedId = validSelection?.dataset.terminalId || tabs[0]?.dataset.terminalId || null
+    if (forcedSelection) this.forcedSelection = null
 
     this.el.classList.toggle("is-collapsed", !this.presentation.panelOpen)
     this.el.classList.toggle("is-maximized", this.presentation.maximized)
@@ -301,6 +375,13 @@ export const SessionTerminals = {
       const key = terminalKey(panel.dataset.terminalId, panel.dataset.terminalGeneration)
       seen.add(key)
       let instance = this.instances.get(key)
+      const identity = instanceIdentity(panel, this.el)
+      if (instance && instance.identity &&
+          JSON.stringify(instance.identity) !== JSON.stringify(identity)) {
+        this.disposeInstance(instance)
+        this.instances.delete(key)
+        instance = null
+      }
       if (instance && instance.host !== host) {
         this.disposeInstance(instance)
         this.instances.delete(key)
@@ -323,11 +404,18 @@ export const SessionTerminals = {
         }))
       }
       instance.panel = panel
+      instance.identity = identity
       instance.terminalId = panel.dataset.terminalId
       instance.generation = panel.dataset.terminalGeneration
       instance.fence = commandFence(panel, this.el)
       instance.controller = panel.dataset.terminalController === "true"
       instance.resynced = panel.dataset.terminalResynced === "true"
+      instance.recoveryId = panel.dataset.terminalRecovery || instance.recoveryId
+      const canonicalSize = {
+        cols: integer(panel.dataset.terminalColumns),
+        rows: integer(panel.dataset.terminalRows)
+      }
+      SessionTerminals.applyCanonicalSize.call(this, instance, canonicalSize)
       const scrollPosition = this.presentation.scroll[instance.terminalId]
       if (Number.isInteger(scrollPosition)) instance.terminal.scrollToLine(scrollPosition)
       afterPaint(() => this.fit(instance.panel, instance))
@@ -341,9 +429,40 @@ export const SessionTerminals = {
   },
   write(frame, options = {}) {
     const instance = this.instances.get(terminalKey(frame.terminal_id, frame.generation))
+    if (!matchesServerFrame(instance, frame) || instance.disposed) return
+
+    instance.frameQueue ||= []
+    instance.renderedSequence ||= 0
+    instance.receivedSequence ||= 0
+    if (options.reset) {
+      instance.frameQueue = []
+      instance.renderedSequence = 0
+      instance.receivedSequence = 0
+    }
+    const sequence = integer(frame.sequence)
+    if (!Number.isInteger(sequence) || (!options.reset && sequence <= instance.receivedSequence)) return
+    if (!options.reset && instance.receivedSequence > 0 && sequence > instance.receivedSequence + 1) {
+      this.pushEvent("terminal_resync_request", {
+        ...instance.fence,
+        recovery_id: instance.recoveryId,
+        rendered_sequence: instance.renderedSequence
+      })
+      return
+    }
+    instance.receivedSequence = Math.max(instance.receivedSequence, sequence)
+    instance.frameQueue.push({ frame, options })
+    SessionTerminals.drainFrames.call(this, instance)
+  },
+  drainFrames(instance) {
+    if (instance.rendering || instance.disposed) return
+    const queued = instance.frameQueue.shift()
+    if (!queued) return
+    instance.rendering = true
+    const { frame, options } = queued
     const data = frame.data_base64 ? decodeTerminalBytes(frame.data_base64) : frame.data
     const validData = typeof data === "string" || data instanceof Uint8Array
-    if (!instance || !validData) return
+    const fence = { ...instance.fence }
+    const recoveryId = frame.recovery_id || instance.recoveryId
 
     const visible = this.presentation.panelOpen && !instance.panel?.hidden
     if (!visible) {
@@ -352,8 +471,23 @@ export const SessionTerminals = {
       this.applyPresentation()
     }
 
+    SessionTerminals.applyCanonicalSize.call(this, instance, { cols: integer(frame.columns), rows: integer(frame.rows) })
     if (options.reset) instance.terminal.reset()
-    instance.terminal.write(data, () => afterPaint(() => {
+
+    const rendered = () => afterPaint(() => {
+      instance.rendering = false
+      const current = !instance.disposed &&
+        instance.fence?.attachment_id === fence.attachment_id &&
+        instance.recoveryId === recoveryId
+      if (!current) {
+        instance.frameQueue = instance.frameQueue.filter(({ frame: pending }) =>
+          (!pending.attachment_id || pending.attachment_id === instance.fence?.attachment_id) &&
+          (!pending.recovery_id || pending.recovery_id === instance.recoveryId)
+        )
+        SessionTerminals.drainFrames.call(this, instance)
+        return
+      }
+      instance.renderedSequence = Math.max(instance.renderedSequence, integer(frame.sequence))
       if (this.presentation.panelOpen && !instance.panel?.hidden) {
         this.presentation.unread[instance.terminalId] = false
         this.persistPresentation()
@@ -362,14 +496,19 @@ export const SessionTerminals = {
       this.pushEvent("terminal_rendered", {
         terminal_id: frame.terminal_id,
         generation: frame.generation,
-        ...instance.fence,
+        ...fence,
+        recovery_id: recoveryId,
         sequence: frame.sequence
       })
-    }))
+      SessionTerminals.drainFrames.call(this, instance)
+    })
+
+    if (validData) instance.terminal.write(data, rendered)
+    else rendered()
   },
   setControl(frame) {
     const instance = this.instances.get(terminalKey(frame.terminal_id, frame.generation))
-    if (instance) {
+    if (matchesServerFrame(instance, frame)) {
       instance.controller = frame.controller === true
       instance.fence = {
         ...instance.fence,
@@ -380,16 +519,26 @@ export const SessionTerminals = {
   },
   setResynced(frame) {
     const instance = this.instances.get(terminalKey(frame.terminal_id, frame.generation))
-    if (instance) instance.resynced = frame.resynced === true
+    if (matchesServerFrame(instance, frame)) {
+      instance.resynced = frame.resynced === true
+      instance.recoveryId = frame.recovery_id || instance.recoveryId
+    }
   },
   fit(panel, instance) {
-    if (!canFit(panel, instance)) return
-    instance.fit.fit()
     if (!canResize(panel, instance)) return
-    const size = { cols: instance.terminal.cols, rows: instance.terminal.rows }
+    const proposed = instance.fit.proposeDimensions?.()
+    const size = proposed && { cols: proposed.cols, rows: proposed.rows }
+    if (!size) return
     if (size.cols <= 0 || size.rows <= 0 || (instance.lastSize && size.cols === instance.lastSize.cols && size.rows === instance.lastSize.rows)) return
     instance.lastSize = size
     this.pushEvent("terminal_resize", { ...instance.fence, ...size })
+  },
+  applyCanonicalSize(instance, size) {
+    if (!Number.isInteger(size?.cols) || !Number.isInteger(size?.rows) || size.cols <= 0 || size.rows <= 0) return
+    if (instance.canonicalSize?.cols === size.cols && instance.canonicalSize?.rows === size.rows &&
+        instance.terminal.cols === size.cols && instance.terminal.rows === size.rows) return
+    instance.canonicalSize = size
+    instance.terminal.resize(size.cols, size.rows)
   },
   disposeInstance(instance) {
     if (instance.disposed) return

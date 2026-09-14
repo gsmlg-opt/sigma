@@ -27,10 +27,13 @@ managed Unix-session boundary.
 
 ## Restart and recovery
 
-Terminal catalogs, screen checkpoints, attachments, and controller leases are
-volatile. An application restart loses that state and never replays terminal
-commands. Browser state is presentation-only; a stale incarnation, generation,
-attachment, catalog revision, or control epoch is rejected by the server.
+Terminal catalogs, retained screen checkpoints, attachments, and controller
+leases are volatile. After confirmed OS cleanup, an exited or failed tab keeps
+its bounded screen in a read-only session-owned state holder until explicit
+close or restart. An application restart loses that state and never replays
+terminal commands. Browser state is presentation-only; a stale incarnation,
+generation, attachment, recovery, catalog revision, or control epoch is
+rejected by the server.
 
 If the terminal subsystem is unavailable, retain unresolved resource accounting
 and investigate the scoped repository/session identity. Never infer that an empty
@@ -57,4 +60,8 @@ to keep the input and send controls accessible on short viewports.
 Maximize is an explicit viewport mode, and restore returns to the bottom dock.
 Opening an empty catalog retains the existing first-terminal creation behavior;
 height changes, tab selection, and maximize/restore do not create or restart runs.
-Only the controller sends PTY resize requests; every visible client refits xterm.
+Only the visible, synchronized controller measures its host with FitAddon and
+proposes a fenced PTY resize. The confirmed resize event is canonical: every
+renderer applies those columns and rows in stream order. Observers never refit
+their character grid to their own viewport; their host clips or scrolls the
+canonical grid without changing the PTY size.

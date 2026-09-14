@@ -59,8 +59,22 @@ defmodule Sigma.Agent.Terminals.SupervisionTest do
   end
 
   test "resource summary returns explicit unknown counts while the ledger is down", %{repo: repo} do
-    assert {:ok, _handle} = Sigma.Agent.Runtime.get_session(repo, "session", session_opts(repo))
-    assert :ok = Supervisor.terminate_child(Sigma.Agent.Supervisor, ResourceLedger)
+    persistence_key = {__MODULE__, make_ref()}
+    {:ok, ledger} = ResourceLedger.start_link(name: nil, persistence_key: persistence_key)
+
+    on_exit(fn ->
+      if Process.alive?(ledger), do: GenServer.stop(ledger)
+      :persistent_term.erase(persistence_key)
+    end)
+
+    assert {:ok, _handle} =
+             Sigma.Agent.Runtime.get_session(
+               repo,
+               "session",
+               session_opts(repo, terminal_resource_ledger: ledger)
+             )
+
+    assert :ok = GenServer.stop(ledger)
 
     assert {:error, %Error{code: :session_unavailable}, summary} =
              Terminals.resource_summary(repo, "session")
@@ -76,8 +90,6 @@ defmodule Sigma.Agent.Terminals.SupervisionTest do
 
     manager = Sigma.Agent.Runtime.lookup(repo, "session", :terminal_manager)
     assert Process.alive?(manager)
-
-    assert {:ok, _ledger} = Supervisor.restart_child(Sigma.Agent.Supervisor, ResourceLedger)
   end
 
   test "a core agent crash still tears down the terminal branch and session subtree", %{
@@ -95,14 +107,17 @@ defmodule Sigma.Agent.Terminals.SupervisionTest do
     assert Process.alive?(handle.repository)
   end
 
-  defp session_opts(repo) do
-    [
-      model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
-      provider: EmptyProvider,
-      cwd: repo,
-      idle_timeout_ms: 30_000,
-      terminal_backend: FakeBackend
-    ]
+  defp session_opts(repo, overrides \\ []) do
+    Keyword.merge(
+      [
+        model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+        provider: EmptyProvider,
+        cwd: repo,
+        idle_timeout_ms: 30_000,
+        terminal_backend: FakeBackend
+      ],
+      overrides
+    )
   end
 
   defp stop_repository(repo) do

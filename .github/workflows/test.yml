@@ -55,5 +55,8 @@ jobs:
       - name: Rebuild test applications
         run: mix compile --force --warnings-as-errors
 
+      - name: Build debug terminal helper for native tests
+        run: scripts/build-terminal-helper.sh debug
+
       - name: Run unit tests
         run: mix test

@@ -23,6 +23,7 @@ defmodule Sigma.Agent.Terminals.Worker do
     do: GenServer.cast(worker, {:begin_cleanup, reply_to, token})
 
   def backend_events(worker), do: GenServer.call(worker, :backend_events)
+  def retain(worker), do: GenServer.call(worker, :retain)
 
   def attach(worker, observer, attachment_id, catalog_revision, rendered_sequence, opts \\ []),
     do:
@@ -90,6 +91,7 @@ defmodule Sigma.Agent.Terminals.Worker do
        stream: ScreenStream.new(Keyword.fetch!(opts, :run), limits),
        lease: ControllerLease.new(),
        attachments: %{},
+       retained?: false,
        clock: clock,
        clock_origin: clock.()
      }}
@@ -125,6 +127,11 @@ defmodule Sigma.Agent.Terminals.Worker do
     {:reply, BackendAdapter.events(state.backend_state), state}
   end
 
+  def handle_call(:retain, _from, state) do
+    state = set_lease(state, ControllerLease.new())
+    {:reply, :ok, %{state | retained?: true}}
+  end
+
   def handle_call(
         {:attach, observer, attachment_id, catalog_revision, rendered_sequence, opts},
         _from,
@@ -142,11 +149,14 @@ defmodule Sigma.Agent.Terminals.Worker do
         {:reply, {:error, Error.new(:capacity_exhausted, %{resource: :attachment_id})}, state}
 
       true ->
+        recovery_id = recovery_id(attachment_id)
+
         {:ok, relay} =
           Attachment.start(
             id: attachment_id,
             owner: self(),
             run: state.run,
+            recovery_id: recovery_id,
             observer: observer,
             maximum: state.limits.max_pending_output_bytes_per_attachment,
             inactivity_ms: state.limits.attachment_inactivity_ms,
@@ -164,7 +174,8 @@ defmodule Sigma.Agent.Terminals.Worker do
 
         case ScreenStream.delivery(state.stream, state.run, rendered_sequence) do
           {:ok, delivery} ->
-            deliver_initial(relay, delivery)
+            boundary = delivery_boundary(delivery)
+            :ok = Attachment.recover(relay, recovery_id, boundary, delivery)
 
             reply =
               Map.merge(control, %{
@@ -172,6 +183,10 @@ defmodule Sigma.Agent.Terminals.Worker do
                 run: state.run,
                 catalog_revision: catalog_revision,
                 dimensions: state.stream.dimensions,
+                recovery_id: recovery_id,
+                recovery_boundary: boundary,
+                requires_render: delivery_requires_render?(delivery),
+                resynced: not delivery_requires_render?(delivery),
                 delivery: delivery
               })
 
@@ -190,18 +205,24 @@ defmodule Sigma.Agent.Terminals.Worker do
   end
 
   def handle_call({:acquire_control, attachment_id}, _from, state) do
-    with :ok <- attachment_exists(state, attachment_id),
+    with false <- state.retained?,
+         :ok <- attachment_exists(state, attachment_id),
          {:ok, lease} <-
            ControllerLease.acquire(state.lease, attachment_id, now_ms(state), state.limits) do
       state = set_lease(state, lease)
       {:reply, {:ok, control_status(state, attachment_id)}, state}
     else
-      {:error, error} -> {:reply, {:error, error}, state}
+      true ->
+        {:reply, {:error, Error.new(:session_unavailable, %{reason: :terminal_exited})}, state}
+
+      {:error, error} ->
+        {:reply, {:error, error}, state}
     end
   end
 
   def handle_call({:takeover_control, attachment_id, expected_epoch}, _from, state) do
-    with :ok <- attachment_exists(state, attachment_id),
+    with false <- state.retained?,
+         :ok <- attachment_exists(state, attachment_id),
          {:ok, lease} <-
            ControllerLease.takeover(
              state.lease,
@@ -213,18 +234,27 @@ defmodule Sigma.Agent.Terminals.Worker do
       state = set_lease(state, lease)
       {:reply, {:ok, control_status(state, attachment_id)}, state}
     else
-      {:error, error} -> {:reply, {:error, error}, state}
+      true ->
+        {:reply, {:error, Error.new(:session_unavailable, %{reason: :terminal_exited})}, state}
+
+      {:error, error} ->
+        {:reply, {:error, error}, state}
     end
   end
 
   def handle_call({:renew_control, attachment_id, epoch}, _from, state) do
-    with :ok <- attachment_exists(state, attachment_id),
+    with false <- state.retained?,
+         :ok <- attachment_exists(state, attachment_id),
          {:ok, lease} <-
            ControllerLease.renew(state.lease, attachment_id, epoch, now_ms(state), state.limits) do
       {:reply, {:ok, control_status(%{state | lease: lease}, attachment_id)},
        set_lease(state, lease)}
     else
-      {:error, error} -> {:reply, {:error, error}, state}
+      true ->
+        {:reply, {:error, Error.new(:session_unavailable, %{reason: :terminal_exited})}, state}
+
+      {:error, error} ->
+        {:reply, {:error, error}, state}
     end
   end
 
@@ -238,13 +268,17 @@ defmodule Sigma.Agent.Terminals.Worker do
   def handle_call({:input, request, catalog_revision, bytes}, _from, state) do
     current = %{run: state.run, catalog_revision: catalog_revision, lease: state.lease}
 
-    with true <- is_binary(bytes) and byte_size(bytes) <= state.limits.max_input_frame_bytes,
+    with false <- state.retained?,
+         true <- is_binary(bytes) and byte_size(bytes) <= state.limits.max_input_frame_bytes,
          :ok <- attachment_exists(state, request.attachment_id),
          :ok <- ControllerLease.authorize(current, request, now_ms(state)),
          {:ok, backend_state} <- BackendAdapter.input(state.backend_state, state.run, bytes),
          :ok <- touch_relay(state, request.attachment_id) do
       {:reply, :ok, %{state | backend_state: backend_state}}
     else
+      true ->
+        {:reply, {:error, Error.new(:session_unavailable, %{reason: :terminal_exited})}, state}
+
       false ->
         {:reply, {:error, Error.new(:capacity_exhausted, %{resource: :input_frame})}, state}
 
@@ -259,7 +293,8 @@ defmodule Sigma.Agent.Terminals.Worker do
   def handle_call({:resize, request, catalog_revision, columns, rows}, _from, state) do
     current = %{run: state.run, catalog_revision: catalog_revision, lease: state.lease}
 
-    with true <- Limits.valid_dimensions?(state.limits, columns, rows),
+    with false <- state.retained?,
+         true <- Limits.valid_dimensions?(state.limits, columns, rows),
          :ok <- attachment_exists(state, request.attachment_id),
          :ok <- ControllerLease.authorize(current, request, now_ms(state)),
          {:ok, backend_state} <-
@@ -273,6 +308,9 @@ defmodule Sigma.Agent.Terminals.Worker do
         {:reply, {:ok, event}, %{state | backend_state: backend_state, stream: stream}}
       end
     else
+      true ->
+        {:reply, {:error, Error.new(:session_unavailable, %{reason: :terminal_exited})}, state}
+
       false ->
         {:reply, {:error, Error.new(:invalid_dimensions)}, state}
 
@@ -285,12 +323,16 @@ defmodule Sigma.Agent.Terminals.Worker do
   end
 
   def handle_call({:output, run, bytes}, _from, %{run: run} = state) do
-    with {:ok, frame, responses, stream} <- ScreenStream.append_output(state.stream, bytes),
-         {:ok, backend_state} <- send_device_responses(state, responses) do
-      broadcast(state, frame)
-      {:reply, {:ok, frame}, %{state | stream: stream, backend_state: backend_state}}
+    if state.retained? do
+      {:reply, {:error, Error.new(:session_unavailable, %{reason: :terminal_exited})}, state}
     else
-      {:error, error} -> {:reply, {:error, error}, state}
+      with {:ok, frame, responses, stream} <- ScreenStream.append_output(state.stream, bytes),
+           {:ok, backend_state} <- send_device_responses(state, responses) do
+        broadcast(state, frame)
+        {:reply, {:ok, frame}, %{state | stream: stream, backend_state: backend_state}}
+      else
+        {:error, error} -> {:reply, {:error, error}, state}
+      end
     end
   end
 
@@ -298,9 +340,13 @@ defmodule Sigma.Agent.Terminals.Worker do
     do: {:reply, {:error, Error.new(:stale_run_generation)}, state}
 
   def handle_call({:checkpoint, run, snapshot}, _from, %{run: run} = state) do
-    case ScreenStream.checkpoint(state.stream, snapshot) do
-      {:ok, stream} -> {:reply, {:ok, stream.checkpoint}, %{state | stream: stream}}
-      {:error, error} -> {:reply, {:error, error}, state}
+    if state.retained? do
+      {:reply, {:error, Error.new(:session_unavailable, %{reason: :terminal_exited})}, state}
+    else
+      case ScreenStream.checkpoint(state.stream, snapshot) do
+        {:ok, stream} -> {:reply, {:ok, stream.checkpoint}, %{state | stream: stream}}
+        {:error, error} -> {:reply, {:error, error}, state}
+      end
     end
   end
 
@@ -308,9 +354,13 @@ defmodule Sigma.Agent.Terminals.Worker do
     do: {:reply, {:error, Error.new(:stale_run_generation)}, state}
 
   def handle_call({:request_checkpoint, request_id}, _from, state) when is_binary(request_id) do
-    case BackendAdapter.checkpoint(state.backend_state, request_id) do
-      :ok -> {:reply, :ok, %{state | pending_checkpoint: request_id}}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+    if state.retained? do
+      {:reply, {:error, Error.new(:session_unavailable, %{reason: :terminal_exited})}, state}
+    else
+      case BackendAdapter.checkpoint(state.backend_state, request_id) do
+        :ok -> {:reply, :ok, %{state | pending_checkpoint: request_id}}
+        {:error, reason} -> {:reply, {:error, reason}, state}
+      end
     end
   end
 
@@ -331,11 +381,22 @@ defmodule Sigma.Agent.Terminals.Worker do
   end
 
   def handle_call({:resync, attachment_id, rendered_sequence}, _from, state) do
+    recovery_id = recovery_id(attachment_id)
+
     with {:ok, relay} <- attachment_pid(state, attachment_id),
-         :ok <- Attachment.reset(relay),
          {:ok, delivery} <- ScreenStream.delivery(state.stream, state.run, rendered_sequence) do
-      deliver_initial(relay, delivery)
-      {:reply, {:ok, delivery}, state}
+      boundary = delivery_boundary(delivery)
+      :ok = Attachment.recover(relay, recovery_id, boundary, delivery)
+
+      {:reply,
+       {:ok,
+        Map.merge(delivery, %{
+          recovery_id: recovery_id,
+          recovery_boundary: boundary,
+          dimensions: state.stream.dimensions,
+          requires_render: delivery_requires_render?(delivery),
+          resynced: not delivery_requires_render?(delivery)
+        })}, state}
     else
       {:error, error} -> {:reply, {:error, error}, state}
     end
@@ -593,13 +654,6 @@ defmodule Sigma.Agent.Terminals.Worker do
     end
   end
 
-  defp deliver_initial(relay, %{snapshot: snapshot, events: events}) do
-    Attachment.deliver_snapshot(relay, snapshot)
-    Attachment.deliver(relay, events)
-  end
-
-  defp deliver_initial(relay, %{events: events}), do: Attachment.deliver(relay, events)
-
   defp broadcast(state, event) do
     Enum.each(state.attachments, fn {_id, attachment} ->
       Attachment.deliver(attachment.pid, event)
@@ -640,10 +694,29 @@ defmodule Sigma.Agent.Terminals.Worker do
   end
 
   defp deliver_recovery(state, checkpoint) do
-    Enum.each(state.attachments, fn {_id, attachment} ->
-      :ok = Attachment.reset(attachment.pid)
-      Attachment.deliver_snapshot(attachment.pid, checkpoint)
+    Enum.each(state.attachments, fn {attachment_id, attachment} ->
+      recovery_id = recovery_id(attachment_id)
+      delivery = %{snapshot: checkpoint, events: []}
+      :ok = Attachment.recover(attachment.pid, recovery_id, checkpoint.sequence, delivery)
     end)
+  end
+
+  defp recovery_id(attachment_id),
+    do: "#{attachment_id}:#{System.unique_integer([:positive, :monotonic])}"
+
+  defp delivery_requires_render?(%{snapshot: _snapshot}), do: true
+  defp delivery_requires_render?(%{events: events}), do: events != []
+
+  defp delivery_boundary(%{events: events, snapshot: snapshot}) do
+    Enum.reduce(events, snapshot.sequence, &max(&1.sequence, &2))
+  end
+
+  defp delivery_boundary(%{events: events, next_sequence: next}) do
+    Enum.reduce(events, next - 1, &max(&1.sequence, &2))
+  end
+
+  defp delivery_boundary(%{events: events}) do
+    Enum.reduce(events, 0, &max(&1.sequence, &2))
   end
 
   defp clear_request(%{pending_checkpoint: request_id}, request_id), do: nil

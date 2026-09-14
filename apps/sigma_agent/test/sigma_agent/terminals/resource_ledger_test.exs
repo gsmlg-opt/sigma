@@ -25,6 +25,23 @@ defmodule Sigma.Agent.Terminals.ResourceLedgerTest do
              ResourceLedger.summary(ledger, run2.terminal.session)
   end
 
+  test "atomically reserves bounded retained-screen capacity across runs" do
+    {ledger, key} = start_ledger()
+    on_exit(fn -> :persistent_term.erase(key) end)
+
+    limits =
+      Limits.new(
+        max_raw_replay_bytes: 4,
+        max_snapshot_bytes: 6,
+        max_aggregate_retention_bytes: 10
+      )
+
+    assert :ok = ResourceLedger.reserve_new(ledger, run("session-1", "terminal-1"), "one", limits)
+
+    assert {:error, %Error{code: :capacity_exhausted, details: %{resource: :retention_bytes}}} =
+             ResourceLedger.reserve_new(ledger, run("session-2", "terminal-2"), "two", limits)
+  end
+
   test "remove refuses reserved, managed, and unconfirmed occupancy" do
     {ledger, key} = start_ledger()
     on_exit(fn -> :persistent_term.erase(key) end)

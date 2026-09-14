@@ -57,6 +57,7 @@ defmodule Sigma.Web.SessionTerminalComponents do
       data-terminal-session={value(@session, :session_id)}
       data-terminal-incarnation={value(@session, :incarnation_id)}
       data-terminal-catalog-revision={value(@catalog, :revision)}
+      data-terminal-selected={@selected_id}
       aria-label="Session terminals"
     >
       <div class="sigma-terminal-toolbar">
@@ -87,8 +88,7 @@ defmodule Sigma.Web.SessionTerminalComponents do
           aria-controls={panel_id(entry)}
           tabindex={if selected?(entry, @selected_id), do: "0", else: "-1"}
           data-terminal-id={value(entry, :terminal_id)}
-          phx-click="terminal_select"
-          phx-value-terminal_id={value(entry, :terminal_id)}
+          data-terminal-generation={value(entry, :generation)}
         >
           <span class={"sigma-terminal-state is-#{state(entry)}"} aria-hidden="true"></span>
           <span class="sigma-terminal-tab-label">{value(entry, :label, "Terminal")}</span>
@@ -118,6 +118,9 @@ defmodule Sigma.Web.SessionTerminalComponents do
         data-terminal-resynced={to_string(value(entry, :resynced?) == true)}
         data-terminal-attachment={value(entry, :attachment_id)}
         data-terminal-control-epoch={value(entry, :control_epoch)}
+        data-terminal-recovery={value(entry, :recovery_id)}
+        data-terminal-columns={entry |> value(:dimensions, {120, 24}) |> elem(0)}
+        data-terminal-rows={entry |> value(:dimensions, {120, 24}) |> elem(1)}
       >
         <header class="sigma-terminal-run-header">
           <div class="min-w-0">
@@ -176,7 +179,7 @@ defmodule Sigma.Web.SessionTerminalComponents do
           </div>
           <div class="sigma-terminal-run-actions">
             <.terminal_icon_button :if={not renaming?(entry)} id={"terminal-rename-#{value(entry, :terminal_id)}"} event="terminal_rename" label={"Rename #{value(entry, :label, "terminal")}"} icon="pencil" value={value(entry, :terminal_id)} />
-            <.terminal_icon_button :if={value(entry, :controller?) != true} id={"terminal-control-#{value(entry, :terminal_id)}"} event="terminal_take_control" label={"Take control of #{value(entry, :label, "terminal")}"} icon="keyboard" value={value(entry, :terminal_id)} />
+            <.terminal_icon_button :if={state(entry) == "running" and value(entry, :controller?) != true} id={"terminal-control-#{value(entry, :terminal_id)}"} event="terminal_take_control" label={"Take control of #{value(entry, :label, "terminal")}"} icon="keyboard" value={value(entry, :terminal_id)} />
             <.terminal_icon_button :if={restartable?(entry)} id={"terminal-restart-#{value(entry, :terminal_id)}"} event="terminal_restart" label={"Restart #{value(entry, :label, "terminal")}; prior screen will be cleared"} icon="restart" value={value(entry, :terminal_id)} confirm="Restart this terminal? The prior run's visible screen will be cleared and commands will not be replayed." />
             <.terminal_icon_button :if={state(entry) == "cleanup_failed"} id={"terminal-cleanup-retry-#{value(entry, :terminal_id)}"} event="terminal_cleanup_retry" label={"Retry cleanup for #{value(entry, :label, "terminal")}"} icon="refresh" value={value(entry, :terminal_id)} />
             <.terminal_icon_button id={"terminal-close-#{value(entry, :terminal_id)}"} event="terminal_close" label={"Close #{value(entry, :label, "terminal")}"} icon="close" value={value(entry, :terminal_id)} confirm={close_confirmation(entry)} />
@@ -201,8 +204,12 @@ defmodule Sigma.Web.SessionTerminalComponents do
   attr(:confirm, :string, default: "")
 
   defp terminal_icon_button(assigns) do
+    # WORKAROUND(upstream): duskmoon-dev/phoenix-duskmoon-ui#165
+    # Confirm buttons render as native buttons; forwarding this hook creates an id-less hooked action.
+    assigns = assign(assigns, :web_component_hook, if(assigns.confirm == "", do: "WebComponentHook"))
+
     ~H"""
-    <.dm_btn id={@id} type="button" phx-click={@event} phx-value-terminal_id={@value} phx-hook="WebComponentHook" data-terminal-action={@action} data-terminal-action-value={@action_value} variant="ghost" size="xs" shape="square" aria-label={@label} aria-pressed={@pressed} title={@label} confirm={@confirm} confirm_title="Confirm terminal action">
+    <.dm_btn id={@id} type="button" phx-click={@event} phx-value-terminal_id={@value} phx-hook={@web_component_hook} data-terminal-action={@action} data-terminal-action-value={@action_value} variant="ghost" size="xs" shape="square" aria-label={@label} aria-pressed={@pressed} title={@label} confirm={@confirm} confirm_title="Confirm terminal action">
       <.dm_mdi name={@icon} class="h-4 w-4" />
       <span class="sr-only" data-terminal-action-label={@action != nil}>{@label}</span>
     </.dm_btn>

@@ -30,6 +30,29 @@ const presentation = (overrides = {}) => ({
   ...overrides
 })
 
+const serverIdentity = {
+  repository_id: "repo",
+  session_id: "session",
+  incarnation_id: "incarnation",
+  terminal_id: "terminal-1",
+  generation: 1
+}
+
+const serverFrame = (overrides = {}) => ({
+  ...serverIdentity,
+  attachment_id: "attachment-1",
+  recovery_id: "recovery-1",
+  ...overrides
+})
+
+const fencedInstance = (overrides = {}) => ({
+  identity: serverIdentity,
+  terminalId: "terminal-1",
+  fence: { attachment_id: "attachment-1", control_epoch: 1 },
+  recoveryId: "recovery-1",
+  ...overrides
+})
+
 describe("session terminal presentation storage", () => {
   test("keys browser presentation by repository session incarnation without output, authority, or server-owned visibility", () => {
     const local = storage()
@@ -61,6 +84,49 @@ describe("session terminal presentation storage", () => {
 })
 
 describe("session terminal authority and rendering", () => {
+  test("ignores control, resync, and output from an old incarnation with reused terminal ids", () => {
+    let writes = 0
+    const identity = {
+      repository_id: "repo",
+      session_id: "session",
+      incarnation_id: "new-incarnation",
+      terminal_id: "terminal-1",
+      generation: 1
+    }
+    const instance = {
+      identity,
+      terminalId: "terminal-1",
+      controller: false,
+      resynced: false,
+      recoveryId: "recovery-new",
+      fence: { attachment_id: "attachment-new" },
+      terminal: { write: () => { writes += 1 } }
+    }
+    const context = {
+      instances: new Map([[terminalKey("terminal-1", 1), instance]]),
+      presentation: presentation(),
+      pushEvent() {},
+      persistPresentation() {},
+      applyPresentation() {}
+    }
+    const stale = {
+      ...identity,
+      incarnation_id: "old-incarnation",
+      attachment_id: "attachment-new",
+      recovery_id: "recovery-new"
+    }
+
+    SessionTerminals.setControl.call(context, { ...stale, controller: true, control_epoch: 9 })
+    SessionTerminals.setResynced.call(context, { ...stale, resynced: true })
+    SessionTerminals.write.call(context, { ...stale, sequence: 1, data: "stale" })
+
+    expect({ controller: instance.controller, resynced: instance.resynced, writes }).toEqual({
+      controller: false,
+      resynced: false,
+      writes: 0
+    })
+  })
+
   test("tab activation refits the newly visible terminal", () => {
     let listener
     const selections = []
@@ -76,23 +142,27 @@ describe("session terminal authority and rendering", () => {
     expect(selections).toEqual(["terminal-2"])
   })
 
-  test("fits a visible observer locally without issuing a PTY resize", () => {
+  test("renders a visible observer at confirmed canonical dimensions without fitting its viewport", () => {
     let fits = 0
+    const sizes = []
     const events = []
     const instance = {
       controller: false, resynced: true, disposed: false,
       host: { getBoundingClientRect: () => ({ width: 800, height: 320 }) },
       fit: { fit() { fits += 1 } },
-      terminal: { cols: 100, rows: 30 }
+      terminal: { cols: 100, rows: 30, resize: (cols, rows) => sizes.push([cols, rows]) },
+      canonicalSize: { cols: 120, rows: 24 }
     }
     const context = { pushEvent: (event) => events.push(event) }
     SessionTerminals.fit.call(context, { hidden: false }, instance)
-    expect(fits).toBe(1)
+    SessionTerminals.applyCanonicalSize.call(context, instance, instance.canonicalSize)
+    expect(fits).toBe(0)
+    expect(sizes).toEqual([[120, 24]])
     expect(events).toEqual([])
     SessionTerminals.fit.call(context, { hidden: true }, instance)
     instance.disposed = true
     SessionTerminals.fit.call(context, { hidden: false }, instance)
-    expect(fits).toBe(1)
+    expect(fits).toBe(0)
   })
 
   test("height and maximize/restore controls synchronize hosts after applying layout", () => {
@@ -154,7 +224,7 @@ describe("session terminal authority and rendering", () => {
 
   test("builds the complete typed command fence from the mounted scope", () => {
     const root = { dataset: { terminalRepository: "repo", terminalSession: "session", terminalIncarnation: "incarnation", terminalCatalogRevision: "8" } }
-    const panel = { dataset: { terminalId: "terminal-1", terminalGeneration: "3", terminalAttachment: "attachment-1", terminalControlEpoch: "5" } }
+    const panel = { dataset: { terminalId: "terminal-1", terminalGeneration: "3", terminalAttachment: "attachment-1", terminalControlEpoch: "5", terminalRecovery: "recovery-1" } }
 
     expect(commandFence(panel, root)).toEqual({
       repository_id: "repo",
@@ -164,7 +234,8 @@ describe("session terminal authority and rendering", () => {
       generation: 3,
       catalog_revision: 8,
       attachment_id: "attachment-1",
-      control_epoch: 5
+      control_epoch: 5,
+      recovery_id: "recovery-1"
     })
   })
 
@@ -255,11 +326,11 @@ describe("session terminal authority and rendering", () => {
   test("acknowledges output only after xterm completes rendering and tracks hidden output as unread", () => {
     let rendered
     const events = []
-    const instance = {
+    const instance = fencedInstance({
       terminalId: "terminal-1",
       panel: { hidden: true },
       terminal: { write: (_data, callback) => { rendered = callback } }
-    }
+    })
     const context = {
       instances: new Map([[terminalKey("terminal-1", 1), instance]]),
       presentation: presentation(),
@@ -268,26 +339,228 @@ describe("session terminal authority and rendering", () => {
       pushEvent: (event, payload) => events.push([event, payload])
     }
 
-    SessionTerminals.write.call(context, { terminal_id: "terminal-1", generation: 1, sequence: 9, data: "output" })
+    SessionTerminals.write.call(context, serverFrame({ sequence: 9, data: "output" }))
     expect(events).toEqual([])
     expect(context.presentation.unread["terminal-1"]).toBe(true)
 
     rendered()
-    expect(events).toEqual([["terminal_rendered", { terminal_id: "terminal-1", generation: 1, sequence: 9 }]])
+    expect(events).toEqual([["terminal_rendered", expect.objectContaining({ terminal_id: "terminal-1", generation: 1, sequence: 9 })]])
     expect(context.presentation.unread["terminal-1"]).toBe(true)
+  })
+
+  test("captures attachment and recovery identity before an asynchronous render callback", () => {
+    let rendered
+    const events = []
+    const instance = fencedInstance({
+      terminalId: "terminal-1",
+      panel: { hidden: false },
+      fence: { attachment_id: "attachment-old", control_epoch: 1 },
+      recoveryId: "recovery-old",
+      terminal: { write: (_data, callback) => { rendered = callback } }
+    })
+    const context = {
+      instances: new Map([[terminalKey("terminal-1", 1), instance]]),
+      presentation: presentation(),
+      persistPresentation() {},
+      applyPresentation() {},
+      pushEvent: (event, payload) => events.push([event, payload])
+    }
+
+    SessionTerminals.write.call(context, serverFrame({
+      sequence: 4,
+      attachment_id: "attachment-old",
+      recovery_id: "recovery-old",
+      data: "old"
+    }))
+    instance.fence = { attachment_id: "attachment-new", control_epoch: 2 }
+    instance.recoveryId = "recovery-new"
+    rendered()
+
+    expect(events).toEqual([])
+  })
+
+  test("a stale callback cannot discard a newer attachment recovery queued behind it", () => {
+    const callbacks = []
+    const writes = []
+    const events = []
+    const instance = fencedInstance({
+      terminalId: "terminal-1",
+      panel: { hidden: false },
+      fence: { attachment_id: "attachment-old", control_epoch: 1 },
+      recoveryId: "recovery-old",
+      terminal: {
+        reset() {},
+        write: (data, callback) => { writes.push(data); callbacks.push(callback) }
+      }
+    })
+    const context = {
+      instances: new Map([[terminalKey("terminal-1", 1), instance]]),
+      presentation: presentation(),
+      persistPresentation() {},
+      applyPresentation() {},
+      pushEvent: (event, payload) => events.push([event, payload])
+    }
+
+    SessionTerminals.write.call(context, serverFrame({ sequence: 1,
+      attachment_id: "attachment-old", recovery_id: "recovery-old", data: "old"
+    }))
+    instance.fence = { attachment_id: "attachment-new", control_epoch: 2 }
+    instance.recoveryId = "recovery-new"
+    SessionTerminals.write.call(context, serverFrame({ sequence: 2,
+      attachment_id: "attachment-new", recovery_id: "recovery-new", data: "new"
+    }), { reset: true })
+
+    callbacks.shift()()
+    expect(writes).toEqual(["old", "new"])
+    callbacks.shift()()
+    expect(events).toEqual([["terminal_rendered", expect.objectContaining({
+      attachment_id: "attachment-new",
+      recovery_id: "recovery-new",
+      sequence: 2
+    })]])
+  })
+
+  test("applies snapshot dimensions before resetting and rendering bytes", () => {
+    const order = []
+    const instance = fencedInstance({
+      terminalId: "terminal-1",
+      panel: { hidden: false },
+      fence: { attachment_id: "attachment-1" },
+      recoveryId: "recovery-1",
+      terminal: {
+        resize: (cols, rows) => order.push(["resize", cols, rows]),
+        reset: () => order.push(["reset"]),
+        write: (_data, callback) => { order.push(["write"]); callback() }
+      }
+    })
+    const context = {
+      instances: new Map([[terminalKey("terminal-1", 1), instance]]),
+      presentation: presentation(),
+      persistPresentation() {},
+      applyPresentation() {},
+      pushEvent() {},
+      applyCanonicalSize: SessionTerminals.applyCanonicalSize
+    }
+
+    SessionTerminals.write.call(context, serverFrame({
+      sequence: 7,
+      attachment_id: "attachment-1",
+      recovery_id: "recovery-1",
+      columns: 90,
+      rows: 31,
+      data: "screen"
+    }), { reset: true })
+
+    expect(order).toEqual([["resize", 90, 31], ["reset"], ["write"]])
+  })
+
+  test("deduplicates a frame queued during rendering", () => {
+    const callbacks = []
+    const writes = []
+    const instance = fencedInstance({
+      terminalId: "terminal-1",
+      panel: { hidden: false },
+      fence: { attachment_id: "attachment-1" },
+      recoveryId: "recovery-1",
+      terminal: { write: (data, callback) => { writes.push(data); callbacks.push(callback) } }
+    })
+    const context = {
+      instances: new Map([[terminalKey("terminal-1", 1), instance]]),
+      presentation: presentation(),
+      persistPresentation() {},
+      applyPresentation() {},
+      pushEvent() {}
+    }
+    const frame = serverFrame({ sequence: 1, data: "once" })
+
+    SessionTerminals.write.call(context, frame)
+    SessionTerminals.write.call(context, frame)
+    callbacks.shift()()
+
+    expect(writes).toEqual(["once"])
+  })
+
+  test("a coherent snapshot replaces an unreliable cursor even when its sequence is older", () => {
+    const order = []
+    const instance = fencedInstance({
+      terminalId: "terminal-1",
+      panel: { hidden: false },
+      fence: { attachment_id: "attachment-1" },
+      recoveryId: "recovery-2",
+      renderedSequence: 12,
+      receivedSequence: 12,
+      terminal: {
+        reset: () => order.push("reset"),
+        write: (_data, callback) => { order.push("snapshot"); callback() }
+      }
+    })
+    const context = {
+      instances: new Map([[terminalKey("terminal-1", 1), instance]]),
+      presentation: presentation(),
+      persistPresentation() {},
+      applyPresentation() {},
+      pushEvent() {}
+    }
+
+    SessionTerminals.write.call(context, serverFrame({
+      sequence: 8,
+      recovery_id: "recovery-2",
+      data: "baseline"
+    }), { reset: true })
+
+    expect(order).toEqual(["reset", "snapshot"])
+    expect(instance.renderedSequence).toBe(8)
+  })
+
+  test("restores a valid local selection with its confirmed same-run render cursor", () => {
+    const events = []
+    const context = {
+      presentation: presentation({ selectedId: "terminal-2" }),
+      el: {
+        dataset: { terminalSelected: "terminal-1" },
+        querySelectorAll: (selector) => selector.includes('role="tab"') ? [
+          { dataset: { terminalId: "terminal-1", terminalGeneration: "1" } },
+          { dataset: { terminalId: "terminal-2", terminalGeneration: "3" } }
+        ] : []
+      },
+      instances: new Map([["terminal-2:3", { renderedSequence: 42 }]]),
+      pushEvent: (event, payload) => events.push([event, payload])
+    }
+
+    SessionTerminals.synchronizeSelection.call(context)
+
+    expect(events).toEqual([["terminal_select", {
+      terminal_id: "terminal-2",
+      generation: 3,
+      rendered_sequence: 42
+    }]])
+  })
+
+  test("keeps a creator selection pending until the new tab arrives in the DOM", () => {
+    const context = {
+      presentation: presentation({ selectedId: "terminal-1" }),
+      persistPresentation() {},
+      applyPresentation() {},
+      syncHosts() {}
+    }
+
+    SessionTerminals.selectFromServer.call(context, { terminal_id: "terminal-2", generation: 1 })
+
+    expect(context.forcedSelection).toEqual({ terminal_id: "terminal-2", generation: 1 })
   })
 
   test("resets xterm for a snapshot and clears unread only after the visible screen renders", () => {
     let rendered
     let resets = 0
-    const instance = {
+    const instance = fencedInstance({
+      identity: { ...serverIdentity, generation: 2 },
       terminalId: "terminal-1",
       panel: { hidden: false },
       terminal: {
         reset: () => { resets += 1 },
         write: (_data, callback) => { rendered = callback }
       }
-    }
+    })
     const context = {
       instances: new Map([[terminalKey("terminal-1", 2), instance]]),
       presentation: presentation({ unread: { "terminal-1": true } }),
@@ -296,7 +569,7 @@ describe("session terminal authority and rendering", () => {
       pushEvent() {}
     }
 
-    SessionTerminals.write.call(context, { terminal_id: "terminal-1", generation: 2, sequence: 3, data: new Uint8Array([65]) }, { reset: true })
+    SessionTerminals.write.call(context, serverFrame({ generation: 2, sequence: 3, data: new Uint8Array([65]) }), { reset: true })
     expect(resets).toBe(1)
     expect(context.presentation.unread["terminal-1"]).toBe(true)
     rendered()
@@ -313,7 +586,7 @@ describe("session terminal authority and rendering", () => {
       lastSize: null,
       fence: { terminal_id: "terminal-1", generation: 3, catalog_revision: 8, attachment_id: "attachment-1", control_epoch: 5 },
       host: { getBoundingClientRect: () => ({ width: 800, height: 320 }) },
-      fit: { fit() {} },
+      fit: { proposeDimensions: () => ({ cols: 100, rows: 30 }) },
       terminal: { cols: 100, rows: 30 }
     }
     const context = { pushEvent: (event, payload) => events.push([event, payload]) }

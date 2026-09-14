@@ -331,9 +331,10 @@ defmodule Sigma.Web.SessionLive do
 
   def handle_async(:agent_status, {:ok, %{phase: phase} = status}, socket) do
     phase =
-      if active_runtime_phase?(socket.assigns.runtime_status) and not active_runtime_phase?(phase),
-        do: socket.assigns.runtime_status,
-        else: phase
+      if active_runtime_phase?(socket.assigns.runtime_status) and
+           not active_runtime_phase?(phase),
+         do: socket.assigns.runtime_status,
+         else: phase
 
     {:noreply, apply_agent_status(socket, %{status | phase: phase})}
   end
@@ -2207,8 +2208,16 @@ defmodule Sigma.Web.SessionLive do
     {:noreply, socket |> detach_all_terminals() |> assign(:terminal_panel_open, false)}
   end
 
-  def handle_event("terminal_select", %{"terminal_id" => terminal_id}, socket),
-    do: {:noreply, select_terminal(socket, terminal_id)}
+  def handle_event("terminal_select", %{"terminal_id" => terminal_id} = params, socket) do
+    with {:ok, entry} <- terminal_entry(socket, terminal_id),
+         generation when generation == entry.generation <- parse_integer(params["generation"]),
+         sequence when is_integer(sequence) and sequence >= 0 <-
+           parse_integer(params["rendered_sequence"]) do
+      {:noreply, select_terminal(socket, terminal_id, sequence)}
+    else
+      _stale -> {:noreply, socket}
+    end
+  end
 
   def handle_event("terminal_take_control", %{"terminal_id" => terminal_id}, socket) do
     with {:ok, attachment} <- terminal_attachment(socket, terminal_id),
@@ -2222,6 +2231,16 @@ defmodule Sigma.Web.SessionLive do
       {:noreply,
        put_terminal_attachment(socket, terminal_id, control_attachment(attachment, control))}
     else
+      {:error, :stale_browser_frame} ->
+        {:noreply, socket}
+
+      {:error,
+       %Sigma.Agent.Terminals.Error{
+         code: :session_unavailable,
+         details: %{reason: :terminal_exited}
+       } = error} ->
+        {:noreply, revoke_terminal_authority(socket, terminal_id, error)}
+
       {:error, error} ->
         {:noreply,
          socket
@@ -2243,6 +2262,16 @@ defmodule Sigma.Web.SessionLive do
            ) do
       {:noreply, socket}
     else
+      {:error, :stale_browser_frame} ->
+        {:noreply, socket}
+
+      {:error,
+       %Sigma.Agent.Terminals.Error{
+         code: :session_unavailable,
+         details: %{reason: :terminal_exited}
+       } = error} ->
+        {:noreply, revoke_terminal_authority(socket, params["terminal_id"], error)}
+
       {:error, error} ->
         {:noreply,
          socket
@@ -2265,6 +2294,16 @@ defmodule Sigma.Web.SessionLive do
            ) do
       {:noreply, socket}
     else
+      {:error, :stale_browser_frame} ->
+        {:noreply, socket}
+
+      {:error,
+       %Sigma.Agent.Terminals.Error{
+         code: :session_unavailable,
+         details: %{reason: :terminal_exited}
+       } = error} ->
+        {:noreply, revoke_terminal_authority(socket, params["terminal_id"], error)}
+
       {:error, error} ->
         {:noreply,
          socket
@@ -2282,14 +2321,42 @@ defmodule Sigma.Web.SessionLive do
              attachment,
              parse_integer(sequence)
            ) do
+      rendered_sequence = parse_integer(sequence)
+
+      resynced? =
+        params["recovery_id"] == attachment.recovery_id and
+          rendered_sequence >= attachment.recovery_boundary
+
+      attachment = %{attachment | rendered_sequence: rendered_sequence, resynced?: resynced?}
+      socket = put_terminal_attachment(socket, attachment.terminal_id, attachment)
+
       {:noreply,
-       put_terminal_attachment(socket, attachment.terminal_id, %{
-         attachment
-         | rendered_sequence: parse_integer(sequence)
-       })}
+       if(resynced?,
+         do: push_terminal_authority(socket, attachment),
+         else: socket
+       )}
     else
-      {:error, error} ->
-        {:noreply, revoke_terminal_authority(socket, params["terminal_id"], error)}
+      {:error, _error} -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("terminal_resync_request", params, socket) do
+    with {:ok, attachment} <- terminal_request_attachment(socket, params),
+         {:ok, recovery} <-
+           TerminalBinding.resync(
+             socket.assigns.workdir,
+             socket.assigns.session_id,
+             attachment,
+             attachment.rendered_sequence
+           ) do
+      attachment = recovery_attachment(attachment, recovery)
+
+      {:noreply,
+       socket
+       |> put_terminal_attachment(attachment.terminal_id, attachment)
+       |> push_terminal_authority(attachment)}
+    else
+      {:error, _error} -> {:noreply, socket}
     end
   end
 
@@ -2300,6 +2367,9 @@ defmodule Sigma.Web.SessionLive do
          {:ok, control} <- maybe_renew_terminal(socket, attachment) do
       {:noreply, put_terminal_attachment(socket, attachment.terminal_id, control)}
     else
+      {:error, :stale_browser_frame} ->
+        {:noreply, socket}
+
       {:error, error} ->
         {:noreply, revoke_terminal_authority(socket, params["terminal_id"], error)}
     end
@@ -2807,16 +2877,24 @@ defmodule Sigma.Web.SessionLive do
     if run.terminal.session == socket.assigns.terminal_session do
       attachment = TerminalBinding.attachment(result, socket.assigns.effective_cwd)
 
-      {:noreply,
-       socket
-       |> put_terminal_attachment(attachment.terminal_id, attachment)
-       |> assign(
-         :terminal_pending_creators,
-         MapSet.delete(socket.assigns.terminal_pending_creators, attachment.terminal_id)
-       )
-       |> assign(:terminal_selected_id, attachment.terminal_id)
-       |> push_terminal_authority(attachment)
-       |> refresh_terminal_catalog()}
+      socket =
+        assign(
+          socket,
+          :terminal_pending_creators,
+          MapSet.delete(socket.assigns.terminal_pending_creators, attachment.terminal_id)
+        )
+
+      if socket.assigns.terminal_panel_open and
+           socket.assigns.terminal_selected_id == attachment.terminal_id do
+        {:noreply,
+         socket
+         |> put_terminal_attachment(attachment.terminal_id, attachment)
+         |> push_terminal_authority(attachment)
+         |> refresh_terminal_catalog()}
+      else
+        _ = TerminalBinding.detach(socket.assigns.workdir, socket.assigns.session_id, attachment)
+        {:noreply, refresh_terminal_catalog(socket)}
+      end
     else
       {:noreply, socket}
     end
@@ -2829,20 +2907,56 @@ defmodule Sigma.Web.SessionLive do
     do: {:noreply, push_terminal_frame(socket, attachment_id, snapshot, "terminal_snapshot")}
 
   def handle_info({:terminal_stream, attachment_id, {:event, event}}, socket),
-    do: {:noreply, push_terminal_frame(socket, attachment_id, event, "terminal_output")}
+    do: {:noreply, push_terminal_frame(socket, attachment_id, event, nil)}
 
-  def handle_info({:terminal_stream, attachment_id, {:resync_required, reason}}, socket) do
+  def handle_info({:terminal_control, attachment_id, control}, socket) do
     case attachment_by_id(socket, attachment_id) do
       {:ok, attachment} ->
+        attachment = control_attachment(attachment, control)
+
+        {:noreply,
+         socket
+         |> put_terminal_attachment(attachment.terminal_id, attachment)
+         |> push_terminal_authority(attachment)}
+
+      :error ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_info(
+        {:terminal_recovery, attachment_id, recovery_id, boundary, requires_render?},
+        socket
+      ) do
+    case attachment_by_id(socket, attachment_id) do
+      {:ok, attachment} ->
+        attachment = %{
+          attachment
+          | recovery_id: recovery_id,
+            recovery_boundary: boundary,
+            resynced?: not requires_render?
+        }
+
+        {:noreply,
+         socket
+         |> put_terminal_attachment(attachment.terminal_id, attachment)
+         |> push_terminal_authority(attachment)}
+
+      :error ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_info(
+        {:terminal_stream, attachment_id, {:resync_required, recovery_id, _reason}},
+        socket
+      ) do
+    case attachment_by_id(socket, attachment_id) do
+      {:ok, %{recovery_id: ^recovery_id} = attachment} ->
         socket =
           socket
           |> put_terminal_attachment(attachment.terminal_id, %{attachment | resynced?: false})
-          |> push_event("terminal_resync", %{
-            terminal_id: attachment.terminal_id,
-            generation: attachment.generation,
-            resynced: false,
-            reason: terminal_reason(reason)
-          })
+          |> push_terminal_authority(%{attachment | resynced?: false})
 
         case TerminalBinding.resync(
                socket.assigns.workdir,
@@ -2850,23 +2964,19 @@ defmodule Sigma.Web.SessionLive do
                attachment,
                attachment.rendered_sequence
              ) do
-          {:ok, _delivery} ->
-            attachment = %{attachment | resynced?: true}
+          {:ok, recovery} ->
+            attachment = recovery_attachment(attachment, recovery)
 
             {:noreply,
              socket
              |> put_terminal_attachment(attachment.terminal_id, attachment)
-             |> push_event("terminal_resync", %{
-               terminal_id: attachment.terminal_id,
-               generation: attachment.generation,
-               resynced: true
-             })}
+             |> push_terminal_authority(attachment)}
 
           {:error, error} ->
             {:noreply, terminal_error(socket, error)}
         end
 
-      :error ->
+      _stale_or_missing ->
         {:noreply, socket}
     end
   end
@@ -3117,14 +3227,20 @@ defmodule Sigma.Web.SessionLive do
              self()
            ) do
         {:ok, terminal} ->
+          terminal_id = terminal.identity.terminal_id
+
           {:noreply,
            socket
-           |> assign(:terminal_selected_id, terminal.identity.terminal_id)
+           |> assign(:terminal_selected_id, terminal_id)
            |> assign(
              :terminal_pending_creators,
-             MapSet.put(socket.assigns.terminal_pending_creators, terminal.identity.terminal_id)
+             MapSet.put(socket.assigns.terminal_pending_creators, terminal_id)
            )
-           |> refresh_terminal_catalog()}
+           |> refresh_terminal_catalog()
+           |> push_event("terminal_selection", %{
+             terminal_id: terminal_id,
+             generation: terminal.run_generation
+           })}
 
         {:error, error} ->
           {:noreply, terminal_error(socket, error)}
@@ -3149,7 +3265,7 @@ defmodule Sigma.Web.SessionLive do
     end
   end
 
-  defp select_terminal(socket, terminal_id) do
+  defp select_terminal(socket, terminal_id, rendered_sequence \\ 0) do
     socket =
       case socket.assigns.terminal_selected_id do
         nil -> socket
@@ -3163,12 +3279,14 @@ defmodule Sigma.Web.SessionLive do
       {{:ok, _attachment}, _entry} ->
         socket
 
-      {{:error, _}, {:ok, %{state: state} = entry}} when state in [:running, :stopping] ->
+      {{:error, _}, {:ok, %{state: state} = entry}}
+      when state in [:running, :stopping, :exited, :failed] ->
         case TerminalBinding.attach(
                socket.assigns.workdir,
                socket.assigns.session_id,
                entry,
-               self()
+               self(),
+               rendered_sequence
              ) do
           {:ok, result} ->
             attachment = TerminalBinding.attachment(result, socket.assigns.effective_cwd)
@@ -3274,18 +3392,27 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp terminal_request_attachment(socket, params) do
-    with true <- params["repository_id"] == socket.assigns.terminal_session.repository_id,
-         true <- params["session_id"] == socket.assigns.terminal_session.session_id,
-         true <- params["incarnation_id"] == socket.assigns.terminal_session.incarnation_id,
-         {:ok, attachment} <- terminal_attachment(socket, params["terminal_id"]),
-         true <- parse_integer(params["generation"]) == attachment.generation,
-         true <- params["attachment_id"] == attachment.attachment_id,
-         true <- parse_integer(params["control_epoch"]) == attachment.control_epoch,
-         true <-
-           parse_integer(params["catalog_revision"]) == socket.assigns.terminal_catalog.revision do
-      {:ok, attachment}
+    session = socket.assigns.terminal_session
+
+    if params["repository_id"] == session.repository_id and
+         params["session_id"] == session.session_id and
+         params["incarnation_id"] == session.incarnation_id do
+      case terminal_attachment(socket, params["terminal_id"]) do
+        {:ok, attachment} ->
+          if parse_integer(params["generation"]) == attachment.generation and
+               params["attachment_id"] == attachment.attachment_id and
+               parse_integer(params["control_epoch"]) == attachment.control_epoch and
+               params["recovery_id"] == attachment.recovery_id and
+               parse_integer(params["catalog_revision"]) ==
+                 socket.assigns.terminal_catalog.revision,
+             do: {:ok, attachment},
+             else: {:error, :stale_browser_frame}
+
+        {:error, _missing} ->
+          {:error, :stale_browser_frame}
+      end
     else
-      _invalid -> {:error, Sigma.Agent.Terminals.Error.new(:session_scope_mismatch)}
+      {:error, Sigma.Agent.Terminals.Error.new(:session_scope_mismatch)}
     end
   end
 
@@ -3322,40 +3449,98 @@ defmodule Sigma.Web.SessionLive do
   defp maybe_renew_terminal(_socket, attachment), do: {:ok, attachment}
 
   defp push_terminal_authority(socket, attachment) do
-    socket
-    |> push_event("terminal_control", %{
+    scope = %{
+      repository_id: socket.assigns.terminal_session.repository_id,
+      session_id: socket.assigns.terminal_session.session_id,
+      incarnation_id: socket.assigns.terminal_session.incarnation_id,
       terminal_id: attachment.terminal_id,
       generation: attachment.generation,
       attachment_id: attachment.attachment_id,
-      control_epoch: attachment.control_epoch,
-      controller: attachment.controller?
-    })
-    |> push_event("terminal_resync", %{
-      terminal_id: attachment.terminal_id,
-      generation: attachment.generation,
-      resynced: attachment.resynced?
-    })
+      recovery_id: attachment.recovery_id
+    }
+
+    socket
+    |> push_event(
+      "terminal_control",
+      Map.merge(scope, %{
+        control_epoch: attachment.control_epoch,
+        controller: attachment.controller?
+      })
+    )
+    |> push_event(
+      "terminal_resync",
+      Map.merge(scope, %{
+        resynced: attachment.resynced?
+      })
+    )
   end
 
   defp push_terminal_frame(socket, attachment_id, frame, event) do
     case attachment_by_id(socket, attachment_id) do
-      {:ok, attachment} ->
+      {:ok, attachment}
+      when frame.attachment_id == attachment.attachment_id and
+             frame.recovery_id == attachment.recovery_id and
+             frame.run.generation == attachment.generation and
+             frame.run.terminal.session == socket.assigns.terminal_session and
+             frame.run.terminal.terminal_id == attachment.terminal_id ->
+        {columns, rows} =
+          Map.get(frame, :dimensions) || Map.get(frame, :resize) || attachment.dimensions
+
+        socket =
+          if (Map.has_key?(frame, :dimensions) or Map.has_key?(frame, :resize)) and
+               attachment.dimensions != {columns, rows} do
+            put_terminal_attachment(socket, attachment.terminal_id, %{
+              attachment
+              | dimensions: {columns, rows}
+            })
+          else
+            socket
+          end
+
         data = Map.get(frame, :bytes)
 
-        if is_binary(data) do
-          push_event(socket, event, %{
-            terminal_id: attachment.terminal_id,
-            generation: attachment.generation,
-            sequence: frame.sequence,
-            data_base64: Base.encode64(data)
-          })
-        else
-          socket
-        end
+        payload = %{
+          repository_id: socket.assigns.terminal_session.repository_id,
+          session_id: socket.assigns.terminal_session.session_id,
+          incarnation_id: socket.assigns.terminal_session.incarnation_id,
+          terminal_id: attachment.terminal_id,
+          generation: attachment.generation,
+          catalog_revision: socket.assigns.terminal_catalog.revision,
+          attachment_id: attachment.attachment_id,
+          control_epoch: attachment.control_epoch,
+          recovery_id: attachment.recovery_id,
+          sequence: frame.sequence,
+          columns: columns,
+          rows: rows
+        }
+
+        payload =
+          if is_binary(data),
+            do: Map.put(payload, :data_base64, Base.encode64(data)),
+            else: payload
+
+        event =
+          event ||
+            if(Map.has_key?(frame, :resize), do: "terminal_resize", else: "terminal_output")
+
+        push_event(socket, event, payload)
 
       :error ->
         socket
+
+      {:ok, _stale_attachment} ->
+        socket
     end
+  end
+
+  defp recovery_attachment(attachment, recovery) do
+    %{
+      attachment
+      | recovery_id: recovery.recovery_id,
+        recovery_boundary: recovery.recovery_boundary,
+        dimensions: recovery.dimensions,
+        resynced?: false
+    }
   end
 
   defp terminal_error(socket, %Sigma.Agent.Terminals.Error{code: code}),
@@ -3366,6 +3551,13 @@ defmodule Sigma.Web.SessionLive do
 
   defp terminal_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp terminal_reason(_reason), do: "unknown"
+
+  defp revoke_terminal_authority(socket, terminal_id, %Sigma.Agent.Terminals.Error{
+         code: :session_unavailable,
+         details: %{reason: :terminal_exited}
+       }) do
+    revoke_terminal_attachment(socket, terminal_id)
+  end
 
   defp revoke_terminal_authority(socket, terminal_id, %Sigma.Agent.Terminals.Error{
          code: code
@@ -3379,6 +3571,12 @@ defmodule Sigma.Web.SessionLive do
               :stale_run_generation,
               :stale_session_incarnation
             ] do
+    revoke_terminal_attachment(socket, terminal_id)
+  end
+
+  defp revoke_terminal_authority(socket, _terminal_id, _error), do: socket
+
+  defp revoke_terminal_attachment(socket, terminal_id) do
     case terminal_attachment(socket, terminal_id) do
       {:ok, attachment} ->
         attachment = %{attachment | controller?: false, resynced?: false}
@@ -3391,8 +3589,6 @@ defmodule Sigma.Web.SessionLive do
         socket
     end
   end
-
-  defp revoke_terminal_authority(socket, _terminal_id, _error), do: socket
 
   defp parse_integer(value) when is_integer(value), do: value
 
@@ -3725,7 +3921,8 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp default_auth_type(api_type)
-       when api_type in ["openai", "openai-responses", "openai-completions"], do: "bearer"
+       when api_type in ["openai", "openai-responses", "openai-completions"],
+       do: "bearer"
 
   defp default_auth_type(_api_type), do: "x-api-key"
 

@@ -461,6 +461,50 @@ defmodule Sigma.Web.SessionLiveTest do
     assert_eventually(fn -> render(view) =~ "No retained terminals." end)
   end
 
+  test "retained exited terminal reattaches read-only with its exit status", %{conn: conn} do
+    session_id = unique_session_id("terminal-history")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    render_hook(view, "terminal_open", %{})
+    assert_eventually(fn -> terminal_ids(render(view)) |> length() == 1 end)
+    [terminal_id] = terminal_ids(render(view))
+    manager = Sigma.Agent.Runtime.lookup(@workdir, session_id, :terminal_manager)
+
+    assert_eventually(fn ->
+      match?({:ok, %{entries: [%{state: :running}]}}, Sigma.Agent.Terminals.Manager.list(manager))
+    end)
+
+    assert_eventually(fn -> terminal_fence(render(view), terminal_id)["attachment_id"] != nil end)
+    original_fence = terminal_fence(render(view), terminal_id)
+
+    assert {:ok, :stopping} = Sigma.Agent.Terminals.Manager.shell_exited(manager, terminal_id, 7)
+
+    assert {:ok, %{state: :exited, exit_status: 7}} =
+             Sigma.Agent.Terminals.Manager.await_cleanup(manager, terminal_id, 1)
+
+    assert_eventually(fn ->
+      html = render(view)
+      html =~ "exit 7" and terminal_fence(html, terminal_id)["controller"] != true
+    end)
+
+    html =
+      render_hook(
+        view,
+        "terminal_resize",
+        Map.merge(original_fence, %{"cols" => 81, "rows" => 25})
+      )
+
+    refute html =~ "Terminal request failed"
+
+    render_hook(view, "terminal_select", %{
+      "terminal_id" => terminal_id,
+      "generation" => terminal_fence(render(view), terminal_id)["generation"],
+      "rendered_sequence" => 0
+    })
+
+    assert_eventually(fn -> terminal_fence(render(view), terminal_id)["attachment_id"] != nil end)
+    refute terminal_fence(render(view), terminal_id)["controller"]
+  end
+
   test "terminal docks after the composer inside the central workspace", %{conn: conn} do
     {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("terminal-layout")))
 
@@ -498,10 +542,31 @@ defmodule Sigma.Web.SessionLiveTest do
     assert_eventually(fn -> terminal_ids(render(second)) == terminal_ids(render(first)) end)
     [first_id, second_id] = terminal_ids(render(first))
 
-    render_hook(first, "terminal_select", %{"terminal_id" => first_id})
-    render_hook(second, "terminal_select", %{"terminal_id" => second_id})
+    render_hook(first, "terminal_select", %{
+      "terminal_id" => first_id,
+      "generation" => terminal_fence(render(first), first_id)["generation"],
+      "rendered_sequence" => 0
+    })
+
+    render_hook(second, "terminal_select", %{
+      "terminal_id" => second_id,
+      "generation" => terminal_fence(render(second), second_id)["generation"],
+      "rendered_sequence" => 0
+    })
+
     assert selected_terminal_id(render(first)) == first_id
     assert selected_terminal_id(render(second)) == second_id
+
+    stale_generation =
+      terminal_fence(render(first), first_id)["generation"] |> String.to_integer() |> Kernel.+(1)
+
+    render_hook(first, "terminal_select", %{
+      "terminal_id" => second_id,
+      "generation" => stale_generation,
+      "rendered_sequence" => 0
+    })
+
+    assert selected_terminal_id(render(first)) == first_id
 
     render_hook(first, "terminal_rename_submit", %{
       "terminal_id" => first_id,
@@ -549,7 +614,12 @@ defmodule Sigma.Web.SessionLiveTest do
 
     render_hook(second, "terminal_open", %{})
     assert_eventually(fn -> render(second) =~ "sigma-terminal-state is-running" end)
-    render_hook(second, "terminal_select", %{"terminal_id" => terminal_id})
+
+    render_hook(second, "terminal_select", %{
+      "terminal_id" => terminal_id,
+      "generation" => terminal_fence(render(second), terminal_id)["generation"],
+      "rendered_sequence" => 0
+    })
 
     assert_eventually(fn ->
       terminal_fence(render(second), terminal_id)["attachment_id"] != nil
@@ -565,6 +635,97 @@ defmodule Sigma.Web.SessionLiveTest do
     forged = Map.put(terminal_fence(render(second), terminal_id), "repository_id", "forged")
     html = render_hook(second, "terminal_input", Map.put(forged, "data_base64", "QQ=="))
     assert html =~ "Terminal request failed: session_scope_mismatch"
+
+    current_fence = terminal_fence(render(second), terminal_id)
+    stale_recovery = Map.put(current_fence, "recovery_id", "stale-recovery")
+
+    for {event, extra} <- [
+          {"terminal_heartbeat", %{}},
+          {"terminal_input", %{"data_base64" => "QQ=="}},
+          {"terminal_resize", %{"cols" => 81, "rows" => 25}},
+          {"terminal_rendered", %{"sequence" => 999}},
+          {"terminal_resync_request", %{"rendered_sequence" => 0}}
+        ] do
+      html = render_hook(second, event, Map.merge(stale_recovery, extra))
+      assert terminal_fence(html, terminal_id) == current_fence
+    end
+
+    send(
+      second.pid,
+      {:terminal_stream, current_fence["attachment_id"],
+       {:resync_required, "stale-recovery", :slow_observer}}
+    )
+
+    _ = render(second)
+    Process.sleep(20)
+    assert terminal_fence(render(second), terminal_id) == current_fence
+
+    stale_run =
+      current_fence["repository_id"]
+      |> Sigma.Agent.Terminals.Identity.session(
+        current_fence["session_id"],
+        current_fence["incarnation_id"]
+      )
+      |> Sigma.Agent.Terminals.Identity.terminal(terminal_id)
+      |> Sigma.Agent.Terminals.Identity.run(String.to_integer(current_fence["generation"]))
+
+    send(
+      second.pid,
+      {:terminal_stream, current_fence["attachment_id"],
+       {:event,
+        %{
+          attachment_id: current_fence["attachment_id"],
+          recovery_id: current_fence["recovery_id"],
+          run: stale_run,
+          sequence: 998,
+          resize: {81, 25}
+        }}}
+    )
+
+    assert_push_event(second, "terminal_resize", %{columns: 81, rows: 25})
+    assert render(second) =~ ~s(data-terminal-columns="81")
+    assert render(second) =~ ~s(data-terminal-rows="25")
+
+    send(
+      second.pid,
+      {:terminal_stream, current_fence["attachment_id"],
+       {:event,
+        %{
+          attachment_id: current_fence["attachment_id"],
+          recovery_id: "stale-recovery",
+          run: stale_run,
+          sequence: 999,
+          bytes: "stale"
+        }}}
+    )
+
+    refute_push_event(second, "terminal_output", %{sequence: 999}, 50)
+    assert Process.alive?(second.pid)
+
+    old_incarnation_run =
+      current_fence["repository_id"]
+      |> Sigma.Agent.Terminals.Identity.session(
+        current_fence["session_id"],
+        "old-incarnation"
+      )
+      |> Sigma.Agent.Terminals.Identity.terminal(terminal_id)
+      |> Sigma.Agent.Terminals.Identity.run(String.to_integer(current_fence["generation"]))
+
+    send(
+      second.pid,
+      {:terminal_stream, current_fence["attachment_id"],
+       {:event,
+        %{
+          attachment_id: current_fence["attachment_id"],
+          recovery_id: current_fence["recovery_id"],
+          run: old_incarnation_run,
+          sequence: 1000,
+          bytes: "old incarnation"
+        }}}
+    )
+
+    refute_push_event(second, "terminal_output", %{sequence: 1000}, 50)
+    assert Process.alive?(second.pid)
 
     render_hook(second, "terminal_close", %{"terminal_id" => terminal_id})
     assert_eventually(fn -> terminal_ids(render(second)) == [] end)
@@ -2409,7 +2570,8 @@ defmodule Sigma.Web.SessionLiveTest do
       "generation" => attr(panel, "data-terminal-generation"),
       "catalog_revision" => attr(root, "data-terminal-catalog-revision"),
       "attachment_id" => attr(panel, "data-terminal-attachment"),
-      "control_epoch" => attr(panel, "data-terminal-control-epoch")
+      "control_epoch" => attr(panel, "data-terminal-control-epoch"),
+      "recovery_id" => attr(panel, "data-terminal-recovery")
     }
   end
 

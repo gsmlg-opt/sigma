@@ -28,6 +28,7 @@ Input and resize commands carry all of:
 - run generation;
 - expected catalog revision;
 - server-established attachment ID;
+- server-established recovery ID;
 - control epoch.
 
 The final backend-dispatch boundary validates that complete fence. Validation rejects
@@ -46,6 +47,14 @@ badge. A session resource pin and managed-run capacity derive from `reserved`,
 `managed`, and `unconfirmed` resource states, not from retained count. Exited or
 failed records whose resources are confirmed `released` remain retained without
 holding a managed-run slot.
+
+Confirmed natural cleanup transitions the terminal worker into a read-only
+state holder. It retains the bounded `ScreenStream` and attachment relays but no
+controller or usable backend resource. Attach, replay, render acknowledgement,
+resync, and detach remain available; acquire, takeover, renewal, input, resize,
+new output, and new checkpoints are rejected. Explicit close removes that state
+without repeating OS cleanup. Explicit restart drops it before starting the
+next generation.
 
 Natural shell exit first enters `stopping` while descendant cleanup is checked.
 Confirmed cleanup retains an `exited` record and exit status. Failed or indeterminate
@@ -119,11 +128,23 @@ A run-generation mismatch is never replayable. Render acknowledgement means pars
 and rendered, not merely received. T4 owns queueing, checkpoint payloads, and
 backpressure, but must use these decisions and configured byte bounds.
 
+Each attachment recovery has a stable recovery ID and boundary watermark. A
+recovery marker and its snapshot/replay frames come from one ordered relay.
+Input is disabled until the browser acknowledges the matching recovery boundary.
+Frames, authority changes, acknowledgements, and resync notices from an older
+attachment, recovery, generation, or session incarnation are ignored. One
+coherent recovery may temporarily use the configured snapshot-plus-replay bound;
+incremental delivery stays attachment-bounded, pauses until the matching
+acknowledgement, and requests one fresh recovery if output arrived while paused.
+
 ## Limits and errors
 
 `Sigma.Agent.Terminals.Limits` contains the PRD defaults and allows small injected
 values in tests. It also defines a 64 KiB internal output-frame limit and a 64-entry
 catalog page limit; these are transport bounds, not measured capacity claims.
+The node-wide ResourceLedger atomically reserves each accepted run's configured
+snapshot-plus-replay history budget. Close releases that reservation; restart
+replaces the old generation's reservation rather than double-counting it.
 
 Internal failures use `Sigma.Agent.Terminals.Error` with a closed atom code set,
 details, and a retryable flag. External strings are resolved through a fixed lookup;

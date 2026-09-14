@@ -4,7 +4,7 @@ defmodule Sigma.Coding.Terminal.NativeTest do
   alias Sigma.Coding.Terminal.Native
 
   @helper Path.expand(
-            "../../../../../native/sigma_terminal_helper/target/debug/sigma-terminal-helper",
+            "../../../../sigma_agent/priv/native/sigma-terminal-helper",
             __DIR__
           )
 

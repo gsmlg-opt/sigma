@@ -91,8 +91,17 @@ defmodule Sigma.Agent.Terminals.ResourceLedger do
       managed_count(state) >= limits.max_managed_runs_per_node ->
         {:reply, {:error, Error.new(:capacity_exhausted, %{resource: :managed_runs})}, state}
 
+      retention_reserved(state) + history_budget(limits) > limits.max_aggregate_retention_bytes ->
+        {:reply, {:error, Error.new(:capacity_exhausted, %{resource: :retention_bytes})}, state}
+
       true ->
-        entry = %{operation_id: operation_id, resource_state: :reserved, retained?: true}
+        entry = %{
+          operation_id: operation_id,
+          resource_state: :reserved,
+          retained?: true,
+          history_budget: history_budget(limits)
+        }
+
         state = put_entry(state, run, entry)
         {:reply, :ok, state}
     end
@@ -116,8 +125,17 @@ defmodule Sigma.Agent.Terminals.ResourceLedger do
       managed_count(state) >= limits.max_managed_runs_per_node ->
         {:reply, {:error, Error.new(:capacity_exhausted, %{resource: :managed_runs})}, state}
 
+      retention_reserved(state) - Map.get(old_entry, :history_budget, 0) + history_budget(limits) >
+          limits.max_aggregate_retention_bytes ->
+        {:reply, {:error, Error.new(:capacity_exhausted, %{resource: :retention_bytes})}, state}
+
       true ->
-        new_entry = %{operation_id: operation_id, resource_state: :reserved, retained?: true}
+        new_entry = %{
+          operation_id: operation_id,
+          resource_state: :reserved,
+          retained?: true,
+          history_budget: history_budget(limits)
+        }
 
         state = %{
           state
@@ -243,6 +261,11 @@ defmodule Sigma.Agent.Terminals.ResourceLedger do
       entries: entries
     }
   end
+
+  defp retention_reserved(state),
+    do: Enum.sum_by(state.entries, fn {_run, entry} -> Map.get(entry, :history_budget, 0) end)
+
+  defp history_budget(limits), do: limits.max_raw_replay_bytes + limits.max_snapshot_bytes
 
   defp managed_count(state) do
     Enum.count(state.entries, fn {_run, entry} ->

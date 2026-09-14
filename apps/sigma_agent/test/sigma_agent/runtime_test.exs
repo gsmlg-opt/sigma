@@ -154,6 +154,14 @@ defmodule Sigma.Agent.RuntimeTest do
 
   test "restarts the agent application when the runtime supervisor is missing", context do
     repo = tmp_repo!(context, "repo-app-restart")
+    ledger = Sigma.Agent.Terminals.ResourceLedger
+    assert %{entries: %{}, trustworthy?: true} = :sys.get_state(ledger)
+
+    on_exit(fn ->
+      assert {:ok, _started} = Application.ensure_all_started(:sigma_agent)
+      assert %{entries: %{}} = :sys.get_state(ledger)
+      assert :ok = Sigma.Agent.Terminals.ResourceLedger.reconcile(ledger, %{})
+    end)
 
     assert :ok = Application.stop(:sigma_agent)
     refute Process.whereis(Sigma.Agent.DynamicSupervisor)
