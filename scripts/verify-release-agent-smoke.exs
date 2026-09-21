@@ -77,6 +77,7 @@ try do
 
           {:ok, %{run: %{state: :completed}}} =
             Sigma.Agent.Backplane.Store.load(store, turn_id)
+
           IO.puts("release agent smoke ok")
 
         message ->
