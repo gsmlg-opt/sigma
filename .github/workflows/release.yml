@@ -146,6 +146,9 @@ jobs:
       - name: Compile with warnings as errors
         run: mix compile --force --warnings-as-errors
 
+      - name: Build debug terminal helper for native tests
+        run: scripts/build-terminal-helper.sh debug
+
       - name: Run core tests
         run: mix test
 
