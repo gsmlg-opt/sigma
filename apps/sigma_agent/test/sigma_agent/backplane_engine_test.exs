@@ -237,10 +237,11 @@ defmodule Sigma.Agent.BackplaneEngineTest do
     {:ok, agent} = start_blocking_agent(dir)
     Sigma.Agent.subscribe(agent)
 
+    # Consume the payload before responding so the fixture cannot exit before Port.command/2.
     spec =
       hook_spec(
         :user_prompt_submit,
-        ~s(echo '{"hookSpecificOutput":{"additionalContext":"extra"}}')
+        ~S(sh -c 'dd bs=65536 count=1 of=/dev/null 2>/dev/null; echo "{\"hookSpecificOutput\":{\"additionalContext\":\"extra\"}}"')
       )
 
     :sys.replace_state(agent, &%{&1 | hook_specs: [spec]})
@@ -261,7 +262,13 @@ defmodule Sigma.Agent.BackplaneEngineTest do
   test "stop hook continuation is canonical and cannot block recursively", %{tmp_dir: dir} do
     {:ok, agent} = start_blocking_agent(dir)
     Sigma.Agent.subscribe(agent)
-    spec = hook_spec(:stop, "sh -c 'printf continue >&2; exit 2'")
+
+    spec =
+      hook_spec(
+        :stop,
+        "sh -c 'dd bs=65536 count=1 of=/dev/null 2>/dev/null; printf continue >&2; exit 2'"
+      )
+
     :sys.replace_state(agent, &%{&1 | hook_specs: [spec]})
     assert {:accepted, _} = Sigma.Agent.prompt(agent, "initial")
     assert_receive {:backplane_provider_waiting, first, "initial"}, 5_000

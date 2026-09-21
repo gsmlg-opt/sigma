@@ -290,13 +290,11 @@ defmodule Sigma.Agent.ActiveTurnControlTest do
       )
 
     Sigma.Agent.subscribe(agent)
-    test_pid = self()
 
     permission_request_fn = fn tool_call ->
-      send(test_pid, {:permission_waiting, self(), tool_call.name})
-
       request = %{
         kind: :permission,
+        permission_pid: self(),
         question: "Allow #{tool_call.name}?",
         options: [%{label: "Allow", value: "allow", description: "Run it"}]
       }
@@ -312,7 +310,10 @@ defmodule Sigma.Agent.ActiveTurnControlTest do
                dispatcher_opts: [permission_request_fn: permission_request_fn]
              )
 
-    assert_receive {:permission_waiting, permission_pid, "blocking"}, 1_000
+    assert_receive {:ask_user_question, _request_id,
+                    %{kind: :permission, permission_pid: permission_pid}},
+                   1_000
+
     assert %{phase: :waiting_permission} = Sigma.Agent.status(agent)
     assert {:cancelling, ^turn_id} = Sigma.Agent.cancel(agent)
     assert_receive {:turn_cancelled}, 1_000
