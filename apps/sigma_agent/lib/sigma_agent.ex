@@ -43,6 +43,10 @@ defmodule Sigma.Agent do
     :control_pid,
     :last_cancelled_turn_id,
     :policy,
+    :execution_engine,
+    :backplane_store,
+    :backplane_store_owned,
+    :backplane_request,
     messages: [],
     subscribers: [],
     current_turn_assistant_message: nil,
@@ -52,6 +56,7 @@ defmodule Sigma.Agent do
     turn_state: %TurnState{},
     hook_specs: [],
     stop_hook_active: false,
+    backplane_tool_results: [],
     resume_source: :startup,
     mcp_session: %{handles: [], subscriptions: [], clients: %{}}
   ]
@@ -71,9 +76,11 @@ defmodule Sigma.Agent do
   end
 
   def start_link(opts) do
-    {name, opts} = Keyword.pop(opts, :name)
-    gen_opts = if name, do: [name: name], else: []
-    GenServer.start_link(__MODULE__, opts, gen_opts)
+    with {:ok, engine} <- execution_engine(opts) do
+      {name, opts} = Keyword.pop(Keyword.put(opts, :execution_engine, engine), :name)
+      gen_opts = if name, do: [name: name], else: []
+      GenServer.start_link(__MODULE__, opts, gen_opts)
+    end
   end
 
   def subscribe(pid) do
@@ -215,6 +222,13 @@ defmodule Sigma.Agent do
 
   @impl true
   def init(opts) do
+    case init_backplane_store(opts) do
+      {:ok, store, owned?} -> init_agent(opts, store, owned?)
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  defp init_agent(opts, backplane_store, backplane_store_owned) do
     task_supervisor =
       case Keyword.get(opts, :task_supervisor) do
         nil ->
@@ -288,7 +302,10 @@ defmodule Sigma.Agent do
       hook_specs: hook_specs,
       prompt_queue: PromptQueue.new(),
       turn_state: TurnState.idle(),
-      resume_source: Keyword.get(opts, :resume_source, :startup)
+      resume_source: Keyword.get(opts, :resume_source, :startup),
+      execution_engine: Keyword.fetch!(opts, :execution_engine),
+      backplane_store: backplane_store,
+      backplane_store_owned: backplane_store_owned
     }
 
     {:ok, state, {:continue, :session_start}}
@@ -315,6 +332,7 @@ defmodule Sigma.Agent do
     end
 
     Sigma.Coding.MCP.stop(state.mcp_session)
+    stop_backplane_store(state)
 
     :ok
   end
@@ -1153,6 +1171,9 @@ defmodule Sigma.Agent do
   end
 
   defp notify_retry_admission(_item, _result), do: :ok
+
+  defp run_turn_loop(%{execution_engine: :backplane} = state, turn_id),
+    do: Sigma.Agent.Backplane.Engine.run(state, turn_id)
 
   defp run_turn_loop(state, turn_id) do
     set_turn_phase(state, turn_id, :streaming_provider)
@@ -2842,6 +2863,179 @@ defmodule Sigma.Agent do
         throw({:event_persistence_failed, persisted_event_type(event), reason})
     end
   end
+
+  @doc false
+  def __backplane_emit__(state, event), do: emit(state, event)
+
+  @doc false
+  def __backplane_acknowledge__(state), do: acknowledge_canonical(state)
+
+  @doc false
+  def __backplane_phase__(state, phase),
+    do: set_turn_phase(state, state.turn_state.turn_id, phase)
+
+  @doc false
+  def __backplane_build_context__(state, messages) do
+    ContextBuilder.build(
+      messages: messages,
+      session_context: state.session_context,
+      system_prompt: state.system_prompt,
+      tools: Enum.map(state.tools, &Sigma.Coding.Tool.ai_definition/1),
+      cwd: state.cwd,
+      model: state.model
+    )
+  end
+
+  @doc false
+  def __backplane_context_error__(state, context), do: context_budget_error(state, context)
+
+  @doc false
+  def __backplane_prompt_hook__(state, message), do: run_user_prompt_submit_hook(state, message)
+
+  @doc false
+  def __backplane_stop_hook__(state, _turn_id, messages, stop_hook_active) do
+    if Sigma.Coding.Hooks.any_for_event?(state.hook_specs, :stop) do
+      assistant = Enum.find(Enum.reverse(messages), &match?(%{role: :assistant}, &1))
+      ctx = hook_ctx(state)
+
+      event_data = %{
+        stop_hook_active: stop_hook_active,
+        last_assistant_message: message_text(assistant)
+      }
+
+      {outcome, _warnings} = Sigma.Coding.Hooks.dispatch(:stop, state.hook_specs, ctx, event_data)
+
+      case outcome do
+        {:block, reason} when not stop_hook_active ->
+          {:continue, Message.user("hook_stop_#{System.unique_integer([:positive])}", reason)}
+
+        _outcome ->
+          :stop
+      end
+    else
+      :stop
+    end
+  end
+
+  @doc false
+  def __backplane_request_started__(state, request, context) do
+    set_turn_phase(state, request.turn_id, :streaming_provider)
+    emit(state, {:turn_start})
+    state = refresh_context_from_assembly(state, context)
+    set_current_request(state, request.turn_id, request.request_id)
+    emit(state, {:metrics, :request_started, request_fact(request)})
+    %{state | current_request_id: request.request_id, backplane_request: request}
+  end
+
+  @doc false
+  def __backplane_request_finished__(
+        %{backplane_request: %{request_id: id}} = state,
+        %{request_id: id} = request
+      ) do
+    emit(state, {:metrics, :request_finished, request_fact(request)})
+    set_current_request(state, request.turn_id, nil)
+    state = refresh_context_after_request(state, request)
+    %{state | backplane_request: nil}
+  end
+
+  def __backplane_request_finished__(state, _request), do: state
+
+  @doc false
+  def __backplane_assistant_message__(message, id, turn_id),
+    do: ai_to_agent_message(message, id, turn_id)
+
+  @doc false
+  def __backplane_dispatch_tool__(state, turn_id, operation, owner) do
+    tool_call = %{
+      id: operation.tool_call_id,
+      name: operation.tool_name,
+      arguments: operation.arguments,
+      type: :tool_call
+    }
+
+    opts =
+      state.dispatcher_opts
+      |> Keyword.put(:cwd, state.cwd)
+      |> Keyword.put(:permission_policy, resolve_policy(state.policy))
+      |> Keyword.put(:session_id, state.session_id)
+      |> Keyword.put(:log_session_id, state.log_session_id)
+      |> Keyword.put(:turn_id, turn_id)
+      |> Keyword.put(:request_id, state.current_request_id)
+      |> Keyword.put(:skill_roots, skill_grant_roots(state.tool_state, turn_id))
+      |> Keyword.put(:transcript_path, transcript_path(state))
+      |> Keyword.put(:hook_specs, state.hook_specs)
+      |> Keyword.put(:tool_state, state.tool_state)
+      |> Keyword.put(:on_tool_fact, fn fact -> emit(state, {:metrics, :tool_finished, fact}) end)
+      |> Keyword.put(:on_tool_update, fn update ->
+        send(owner, {:backplane_tool_update, tool_call, update})
+      end)
+
+    case Sigma.Coding.Dispatcher.dispatch(tool_call, state.tools, opts) do
+      {:ok, result} ->
+        {:ok, Map.from_struct(result)}
+
+      {:error, %ToolError{} = error} ->
+        maybe_emit_approval_required(state, {:error, error}, tool_call)
+        {:error, error}
+
+      other ->
+        other
+    end
+  end
+
+  defp execution_engine(opts) do
+    case Keyword.get(
+           opts,
+           :execution_engine,
+           Application.get_env(:sigma_agent, :execution_engine, :backplane)
+         ) do
+      engine when engine in [:sigma, :backplane] -> {:ok, engine}
+      engine -> {:error, {:invalid_execution_engine, engine}}
+    end
+  end
+
+  defp init_backplane_store(opts) do
+    if Keyword.fetch!(opts, :execution_engine) == :sigma do
+      {:ok, nil, false}
+    else
+      case Keyword.get(opts, :backplane_store) do
+        pid when is_pid(pid) ->
+          if Process.alive?(pid),
+            do: {:ok, pid, false},
+            else: {:error, :backplane_store_unavailable}
+
+        nil ->
+          path =
+            Keyword.get(opts, :backplane_runtime_path) ||
+              backplane_runtime_path(opts[:transcript_path])
+
+          if is_nil(path) do
+            {:error, :backplane_runtime_path_required}
+          else
+            case Sigma.Agent.Backplane.Store.start_link(path: path) do
+              {:ok, pid} -> {:ok, pid, true}
+              {:error, {:already_started, _pid}} -> {:error, :backplane_runtime_path_in_use}
+              {:error, reason} -> {:error, {:backplane_store_unavailable, reason}}
+            end
+          end
+
+        _invalid ->
+          {:error, :invalid_backplane_store}
+      end
+    end
+  end
+
+  defp backplane_runtime_path(path) when is_binary(path) and path != "", do: path <> ".runtime"
+  defp backplane_runtime_path(_path), do: nil
+
+  defp stop_backplane_store(%{backplane_store_owned: true, backplane_store: pid})
+       when is_pid(pid) do
+    if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp stop_backplane_store(_state), do: :ok
 
   defp persist_event(nil, _event), do: :ok
 

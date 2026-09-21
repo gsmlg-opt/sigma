@@ -1,5 +1,9 @@
 import Config
 
+# Keep legacy runtime fixtures exercising the explicit Sigma fallback. The
+# synchronous Backplane public-runtime tests clear this override to test default selection.
+config :sigma_agent, execution_engine: :sigma
+
 config :sigma_web, Sigma.Web.Endpoint,
   http: [port: 4002],
   server: false

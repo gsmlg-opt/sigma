@@ -1,5 +1,16 @@
 import Config
 
+if engine = System.get_env("SIGMA_AGENT_ENGINE") do
+  execution_engine =
+    case engine do
+      "sigma" -> :sigma
+      "backplane" -> :backplane
+      _ -> raise "SIGMA_AGENT_ENGINE must be sigma or backplane"
+    end
+
+  config :sigma_agent, execution_engine: execution_engine
+end
+
 if value = System.get_env("SIGMA_SESSION_TERMINALS_ENABLED") do
   config :sigma_web,
     session_terminals_enabled: String.downcase(value) in ["1", "true", "yes", "on"]
