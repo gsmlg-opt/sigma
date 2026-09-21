@@ -56,13 +56,14 @@ try do
       smoke_root,
       session_id,
       cwd: smoke_root,
+      backplane_runtime_path: Path.join(smoke_root, "runtime"),
       model: %{id: "release-smoke-model", api: "fake", provider: "release-smoke"},
       provider: Sigma.ReleaseSmokeProvider,
       idle_timeout_ms: 5_000
     )
 
   :ok = Sigma.Agent.subscribe(handle.agent)
-  {:accepted, _admission} = Sigma.Agent.prompt(handle.agent, "release smoke prompt")
+  {:accepted, %{turn_id: turn_id}} = Sigma.Agent.prompt(handle.agent, "release smoke prompt")
 
   receive do
     {:agent_end, messages} ->
@@ -72,6 +73,10 @@ try do
             Sigma.Agent.SessionProcess.status(handle.session)
 
           true = event_count > 0
+          %{execution_engine: :backplane, backplane_store: store} = :sys.get_state(handle.agent)
+
+          {:ok, %{run: %{state: :completed}}} =
+            Sigma.Agent.Backplane.Store.load(store, turn_id)
           IO.puts("release agent smoke ok")
 
         message ->
