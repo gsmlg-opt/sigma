@@ -1,6 +1,7 @@
 defmodule Sigma.Agent.BackplaneEngineTest do
   use ExUnit.Case, async: true
 
+  alias Backplane.AgentRuntime.InputSchema
   alias Sigma.Agent.Message
 
   defmodule ToolProvider do
@@ -111,6 +112,40 @@ defmodule Sigma.Agent.BackplaneEngineTest do
 
     def execute(_id, arguments, _opts),
       do: raise("unexpected default insertion: #{inspect(arguments)}")
+  end
+
+  defmodule OneOfSchemaTool do
+    @behaviour Sigma.Coding.Tool
+
+    @impl true
+    def name, do: "backplane_one_of_schema"
+
+    @impl true
+    def description, do: "Exercises oneOf alongside object constraints"
+
+    @impl true
+    def schema do
+      %{
+        "type" => "object",
+        "required" => ["path", "item"],
+        "properties" => %{
+          "path" => %{"type" => "string"},
+          "item" => %{
+            "type" => "object",
+            "properties" => %{"kind" => %{"type" => "string"}},
+            "required" => ["kind"],
+            "additionalProperties" => false,
+            "oneOf" => [%{"type" => "object"}]
+          }
+        }
+      }
+    end
+
+    @impl true
+    def execute(_id, %{"path" => path, "item" => %{"kind" => "write"}}, _opts) do
+      :ok = File.write(path, "oneOf schema")
+      {:ok, %{content: [%{type: :text, text: "ok"}], details: %{path: path}}}
+    end
   end
 
   defmodule BlockingProvider do
@@ -305,6 +340,57 @@ defmodule Sigma.Agent.BackplaneEngineTest do
   end
 
   @tag :tmp_dir
+  test "oneOf object schemas retain sibling constraints through provider and tool execution", %{
+    tmp_dir: dir
+  } do
+    output_path = Path.join(dir, "one-of-schema.txt")
+    arguments = %{"path" => output_path, "item" => %{"kind" => "write"}}
+
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        session_id: "backplane-one-of-schema-test",
+        execution_engine: :backplane,
+        backplane_runtime_path: Path.join(dir, "runtime"),
+        model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+        provider: ToolProvider,
+        tools: [OneOfSchemaTool],
+        options: [
+          test_pid: self(),
+          path: output_path,
+          tool_call: %{
+            type: :tool_call,
+            id: "one-of-1",
+            name: "backplane_one_of_schema",
+            arguments: arguments
+          }
+        ]
+      )
+
+    Sigma.Agent.subscribe(agent)
+    assert {:accepted, _} = Sigma.Agent.prompt(agent, "write it")
+    assert_receive {:backplane_provider, _}, 5_000
+    assert_receive {:tool_execution_end, "one-of-1", "backplane_one_of_schema", _, false}, 5_000
+    assert_receive {:agent_end, _}, 5_000
+    assert File.read!(output_path) == "oneOf schema"
+    assert Sigma.Agent.status(agent).phase == :completed
+
+    assert {:error, %{class: :validation}} =
+             InputSchema.validate(OneOfSchemaTool.schema(), %{
+               "path" => output_path,
+               "item" => %{"kind" => "write", "unexpected" => true}
+             })
+
+    assert {:error, %{class: :validation}} =
+             InputSchema.validate(one_of_schema([kind_schema("other")]), arguments)
+
+    assert {:error, %{class: :validation}} =
+             InputSchema.validate(
+               one_of_schema([kind_schema("write"), kind_schema("write")]),
+               arguments
+             )
+  end
+
+  @tag :tmp_dir
   test "prompt hook context is applied once and preserves image content", %{tmp_dir: dir} do
     {:ok, agent} = start_blocking_agent(dir)
     Sigma.Agent.subscribe(agent)
@@ -459,6 +545,18 @@ defmodule Sigma.Agent.BackplaneEngineTest do
         tool_call: %{type: :tool_call, id: "todo-1", name: "todo", arguments: arguments}
       ]
     )
+  end
+
+  defp one_of_schema(branches) do
+    put_in(OneOfSchemaTool.schema(), ["properties", "item", "oneOf"], branches)
+  end
+
+  defp kind_schema(kind) do
+    %{
+      "type" => "object",
+      "properties" => %{"kind" => %{"type" => "string", "enum" => [kind]}},
+      "required" => ["kind"]
+    }
   end
 
   defp start_blocking_agent(dir, opts \\ []) do
