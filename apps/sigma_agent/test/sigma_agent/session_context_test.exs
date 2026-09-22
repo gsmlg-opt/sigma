@@ -43,17 +43,17 @@ defmodule Sigma.Agent.SessionContextTest do
   end
 
   describe "skills_context/1" do
-    test "renders skills as an available-skills block and skips disabled model invocation" do
+    test "renders the already-eligible skills supplied by the catalog consumer" do
       assert SessionContext.skills_context([
                %{
                  name: "global-skill",
                  description: "Global skill description",
                  path: "/skills/global/SKILL.md"
                },
-               %{name: "disabled-skill", description: "Disabled", enabled?: false},
+               %{name: "disabled-skill", description: "Already selected", enabled?: false},
                %{
                  name: "manual-skill",
-                 description: "Manual only",
+                 description: "Already selected",
                  disable_model_invocation?: true
                },
                %{
@@ -68,6 +68,14 @@ defmodule Sigma.Agent.SessionContextTest do
                    <name>global-skill</name>
                    <description>Global skill description</description>
                    <location>/skills/global/SKILL.md</location>
+                 </skill>
+                 <skill>
+                   <name>disabled-skill</name>
+                   <description>Already selected</description>
+                 </skill>
+                 <skill>
+                   <name>manual-skill</name>
+                   <description>Already selected</description>
                  </skill>
                  <skill>
                    <name>repo-skill</name>

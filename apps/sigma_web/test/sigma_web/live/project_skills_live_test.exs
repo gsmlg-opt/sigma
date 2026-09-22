@@ -61,6 +61,28 @@ defmodule Sigma.Web.ProjectSkillsLiveTest do
       workdir = Path.join(tmp_dir, "registered")
       File.mkdir_p!(workdir)
 
+      File.mkdir_p!(Path.join(tmp_dir, "agent"))
+
+      File.write!(
+        Path.join([tmp_dir, "agent", "settings.json"]),
+        Jason.encode!(%{
+          "skillSources" => %{
+            "remote-one" => %{
+              "kind" => "backplane",
+              "name" => "Remote One",
+              "baseUrl" => "https://skills.example.test",
+              "credentialId" => "remote-token",
+              "accessContextId" => "client:sigma"
+            }
+          }
+        })
+      )
+
+      File.write!(
+        Path.join([tmp_dir, "agent", "auth.json"]),
+        Jason.encode!(%{"remote-token" => %{"type" => "api_key", "key" => "token"}})
+      )
+
       {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
 
       skill_dir = Path.join([workdir, ".agents", "skills", "repo-only"])
@@ -91,6 +113,10 @@ defmodule Sigma.Web.ProjectSkillsLiveTest do
       assert html =~ "Project Skills"
       assert html =~ "repo-only"
       assert html =~ "Repository scoped skill"
+      assert html =~ ~s(id="remote-skill-sources")
+      assert html =~ "Remote One"
+      assert html =~ "configured"
+      refute html =~ "skills.example.test"
       assert html =~ ~s(href="/repository/#{encoded_repository}/skills?tab=global")
     end)
   end

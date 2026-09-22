@@ -39,10 +39,44 @@ defmodule Sigma.Session.SlashCommandsTest do
       "---\nname: example\ndescription: Example skill\n---\nDo $ARGUMENTS once."
     )
 
-    assert {:ok, "Do inspect this once."} =
+    assert {:ok, first} =
              SlashCommands.expand("/skill example inspect this", cwd: tmp_dir)
 
-    assert {:ok, "Do inspect this once."} =
+    assert first.content == "Do inspect this once."
+    assert first.skill.digest =~ ~r/^sha256:[0-9a-f]{64}$/
+    assert [%{root: root, release: release}] = first.prepared_resources
+    assert File.dir?(root)
+
+    File.write!(Path.join(skill_dir, "SKILL.md"), "changed mutable source")
+    assert first.content == "Do inspect this once."
+    assert :ok = release.()
+    refute File.exists?(root)
+
+    File.write!(
+      Path.join(skill_dir, "SKILL.md"),
+      "---\nname: example\ndescription: Example skill\n---\nDo $ARGUMENTS once."
+    )
+
+    assert {:ok, second} =
              SlashCommands.expand("/example inspect this", cwd: tmp_dir)
+
+    assert second.content == first.content
+    assert second.skill.digest =~ ~r/^sha256:[0-9a-f]{64}$/
+    assert [%{release: release_second}] = second.prepared_resources
+    assert :ok = release_second.()
+  end
+
+  @tag :tmp_dir
+  test "denies explicit invocation when the package document opts out", %{tmp_dir: tmp_dir} do
+    skill_dir = Path.join([tmp_dir, ".agents", "skills", "private"])
+    File.mkdir_p!(skill_dir)
+
+    File.write!(
+      Path.join(skill_dir, "SKILL.md"),
+      "---\nname: private\ndescription: Private skill\nuser-invocable: false\n---\nBody"
+    )
+
+    assert {:error, "Skill is not supported: private"} =
+             SlashCommands.expand("/skill private", cwd: tmp_dir)
   end
 end

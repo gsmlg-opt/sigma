@@ -333,6 +333,28 @@ defmodule Sigma.Web.SettingsLiveTest do
     end)
 
     with_agent_dir(tmp_dir, fn ->
+      File.mkdir_p!(Path.join(tmp_dir, "agent"))
+
+      File.write!(
+        Path.join([tmp_dir, "agent", "settings.json"]),
+        Jason.encode!(%{
+          "skillSources" => %{
+            "remote-one" => %{
+              "kind" => "backplane",
+              "name" => "Remote One",
+              "baseUrl" => "https://skills.example.test",
+              "credentialId" => "remote-token",
+              "accessContextId" => "client:sigma"
+            }
+          }
+        })
+      )
+
+      File.write!(
+        Path.join([tmp_dir, "agent", "auth.json"]),
+        Jason.encode!(%{"remote-token" => %{"type" => "api_key", "key" => "token"}})
+      )
+
       {:ok, view, html} = live(conn, "/settings/skills")
 
       assert html =~ "Loading settings data"
@@ -349,7 +371,12 @@ defmodule Sigma.Web.SettingsLiveTest do
       assert html =~ "global-skill"
       assert html =~ "Global skill description"
       assert html =~ "other-skill"
-      assert html =~ global_skills_dir
+      assert html =~ ~s(id="settings-remote-skill-sources")
+      assert html =~ "Remote One"
+      assert html =~ "configured"
+      refute html =~ "skills.example.test"
+      refute html =~ global_skills_dir
+      assert html =~ "global"
       assert_settings_table(html, "skills-table")
       assert_skill_enabled(html, "global-skill", true)
       assert_skill_selected(html, "global-skill", false)
@@ -391,7 +418,11 @@ defmodule Sigma.Web.SettingsLiveTest do
 
       html = render_async(view)
 
-      assert Sigma.Session.ConfigManager.disabled_global_skills() == ["global-skill", "other-skill"]
+      assert Sigma.Session.ConfigManager.disabled_global_skills() == [
+               "global-skill",
+               "other-skill"
+             ]
+
       assert html =~ "other-skill"
       refute html_has_id?(html, "skill-enabled-global-skill")
       assert_skill_enabled(html, "other-skill", false)
@@ -675,7 +706,10 @@ defmodule Sigma.Web.SettingsLiveTest do
     tree = Floki.parse_document!(html)
     popover_id = "skill-description-#{id}"
     [popover] = Floki.find(tree, "##{popover_id}")
-    assert Floki.find(tree, "p.settings-skills-description-trigger[interestfor='#{popover_id}']") != []
+
+    assert Floki.find(tree, "p.settings-skills-description-trigger[interestfor='#{popover_id}']") !=
+             []
+
     assert Floki.text(popover) =~ "Global skill description"
     assert Floki.attribute(popover, "popover") == ["auto"]
     assert html =~ "settings-skills-description-cell"

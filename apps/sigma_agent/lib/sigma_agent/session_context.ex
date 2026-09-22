@@ -95,8 +95,6 @@ defmodule Sigma.Agent.SessionContext do
   def skills_context(skills) when is_list(skills) do
     entries =
       skills
-      |> Enum.reject(&(Map.get(&1, :enabled?, true) == false))
-      |> Enum.reject(&Map.get(&1, :disable_model_invocation?, false))
       |> Enum.map(&skill_entry/1)
       |> Enum.reject(&(&1 == ""))
 

@@ -24,6 +24,15 @@ defmodule Sigma.Agent.PromptQueue do
   def pop(%__MODULE__{} = queue, :steering), do: pop_queue(queue, :steering)
   def pop(%__MODULE__{} = queue, :follow_up), do: pop_queue(queue, :follow_up)
 
+  def remove(%__MODULE__{} = queue, :follow_up, turn_id) do
+    {matching, rest} = Enum.split_with(queue.follow_up, &(&1.turn_id == turn_id))
+
+    case matching do
+      [item] -> {:ok, item, %{queue | follow_up: rest}}
+      [] -> {:error, :prompt_not_found}
+    end
+  end
+
   def counts(%__MODULE__{} = queue) do
     %{steering: length(queue.steering), follow_up: length(queue.follow_up)}
   end

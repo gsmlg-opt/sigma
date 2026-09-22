@@ -83,35 +83,93 @@ defmodule Sigma.ToolsTest do
     )
 
     assert {:ok, result} =
-             Sigma.Tools.ActivateSkill.execute("id", %{"reference" => "example", "arguments" => "carefully"}, cwd: tmp_dir)
+             Sigma.Tools.ActivateSkill.execute(
+               "id",
+               %{"reference" => "example", "arguments" => "carefully"},
+               cwd: tmp_dir,
+               register_skill_resource: register_resource(self())
+             )
 
     assert [%{type: :text, text: "Use carefully."}] = result.content
-    assert result.details.digest.scheme == "sha256-tree-v1"
-    assert result.details.manifest != []
+    assert result.details.digest =~ ~r/^sha256:[0-9a-f]{64}$/
+    assert %{files: [_ | _]} = result.details.manifest
+    release_registered_resource()
   end
 
   @tag :tmp_dir
   test "activate_skill deduplicates successful activation within a turn", %{tmp_dir: tmp_dir} do
     skill_dir = Path.join([tmp_dir, ".agents", "skills", "example"])
     File.mkdir_p!(skill_dir)
-    File.write!(Path.join(skill_dir, "SKILL.md"), "---\nname: example\ndescription: Example\n---\nBody")
+
+    File.write!(
+      Path.join(skill_dir, "SKILL.md"),
+      "---\nname: example\ndescription: Example\n---\nBody"
+    )
+
     table = :ets.new(:skill_activation_test, [:set, :public])
-    opts = [cwd: tmp_dir, tool_state: table, turn_id: "turn-1"]
+
+    opts = [
+      cwd: tmp_dir,
+      tool_state: table,
+      turn_id: "turn-1",
+      register_skill_resource: register_resource(self())
+    ]
 
     assert {:ok, %{content: [%{text: "Body"}]}} =
              Sigma.Tools.ActivateSkill.execute("id-1", %{"reference" => "example"}, opts)
 
     assert {:ok, %{details: %{deduplicated?: true}}} =
              Sigma.Tools.ActivateSkill.execute("id-2", %{"reference" => "example"}, opts)
+
+    release_registered_resource()
   end
 
   @tag :tmp_dir
   test "activate_skill rejects manual-only skills", %{tmp_dir: tmp_dir} do
     skill_dir = Path.join([tmp_dir, ".agents", "skills", "manual"])
     File.mkdir_p!(skill_dir)
-    File.write!(Path.join(skill_dir, "SKILL.md"), "---\nname: manual\ndescription: Manual\ndisable-model-invocation: true\n---\nBody")
+
+    File.write!(
+      Path.join(skill_dir, "SKILL.md"),
+      "---\nname: manual\ndescription: Manual\ndisable-model-invocation: true\n---\nBody"
+    )
 
     assert {:error, %Sigma.Coding.ToolError{kind: :manual_invocation_required}} =
              Sigma.Tools.ActivateSkill.execute("id", %{"reference" => "manual"}, cwd: tmp_dir)
+  end
+
+  @tag :tmp_dir
+  test "activate_skill permits model activation when user invocation is disabled", %{
+    tmp_dir: tmp_dir
+  } do
+    skill_dir = Path.join([tmp_dir, ".agents", "skills", "model-only"])
+    File.mkdir_p!(skill_dir)
+
+    File.write!(
+      Path.join(skill_dir, "SKILL.md"),
+      "---\nname: model-only\ndescription: Model only\nuser-invocable: false\n---\nBody"
+    )
+
+    assert {:ok, %{content: [%{text: "Body"}]}} =
+             Sigma.Tools.ActivateSkill.execute("id", %{"reference" => "model-only"},
+               cwd: tmp_dir,
+               register_skill_resource: register_resource(self())
+             )
+
+    release_registered_resource()
+  end
+
+  defp register_resource(owner) do
+    fn resource ->
+      send(owner, {:prepared_resource, resource})
+      :ok
+    end
+  end
+
+  defp release_registered_resource do
+    assert_receive {:prepared_resource, %{root: root, release: release}}
+    assert File.dir?(root)
+    assert :ok = release.()
+    refute File.exists?(root)
   end
 end

@@ -222,6 +222,8 @@ defmodule Sigma.Web.SessionLiveTest do
     refute html =~ "Enter sends"
     refute html =~ "Ctrl+Enter to send"
     assert html =~ ~s(id="prompt-input")
+    assert html =~ ~s(data-remote-skills-url="/api/v1/skills?repositoryId=)
+    assert html =~ ~s(data-remote-sources=)
     assert html =~ ~s(phx-hook="ChatInputHook")
     assert html =~ "/init"
     assert html =~ ~s(phx-update="ignore")

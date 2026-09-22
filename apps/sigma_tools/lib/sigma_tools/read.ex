@@ -26,7 +26,11 @@ defmodule Sigma.Tools.Read do
           "description" => "Line number to start reading from (1-indexed)",
           "minimum" => 1
         },
-        "limit" => %{"type" => "integer", "description" => "Maximum number of lines to read", "minimum" => 1}
+        "limit" => %{
+          "type" => "integer",
+          "description" => "Maximum number of lines to read",
+          "minimum" => 1
+        }
       },
       "required" => ["path"]
     }
@@ -40,10 +44,7 @@ defmodule Sigma.Tools.Read do
     cwd = Keyword.get(opts, :cwd, File.cwd!())
 
     with {:ok, absolute_path} <-
-           PathUtils.safe_resolve(path, cwd,
-             allow_skill_files?: true,
-             skill_roots: Keyword.get(opts, :skill_roots, [])
-           ),
+           PathUtils.safe_resolve(path, cwd, skill_roots: Keyword.get(opts, :skill_roots, [])),
          {:ok, raw} <- read_file(absolute_path) do
       {_bom, text} = Hashline.strip_bom(raw)
       normalized = Hashline.normalize_to_lf(text)
@@ -65,7 +66,9 @@ defmodule Sigma.Tools.Read do
       body =
         selected_lines
         |> Enum.with_index(offset)
-        |> Enum.map_join("\n", fn {line, line_number} -> Hashline.format_numbered_line(line_number, line) end)
+        |> Enum.map_join("\n", fn {line, line_number} ->
+          Hashline.format_numbered_line(line_number, line)
+        end)
 
       text =
         display_path

@@ -1,7 +1,13 @@
 defmodule Sigma.Session.Skills do
   @moduledoc "Discovers Agent Skills from user and repository skill directories."
 
-  alias Sigma.Session.{ConfigManager, RepoManager, Skills.Parser}
+  alias Backplane.SkillProtocol.Descriptor
+  alias Backplane.SkillProtocol.Source.Local
+  alias Sigma.Session.{ConfigManager, RepoManager, Skills.Protocol}
+
+  @max_depth 32
+  @max_entries 2_000
+  @max_diagnostics 100
 
   defmodule Skill do
     @moduledoc false
@@ -37,15 +43,16 @@ defmodule Sigma.Session.Skills do
 
   def list_global do
     disabled = ConfigManager.disabled_global_skills() |> MapSet.new()
-    global_skills_dir() |> list_dir(:global) |> mark_enabled(disabled)
+    global_skills_dir() |> discover_dir(:global) |> mark_enabled(disabled) |> public_result()
   end
 
   def list_repository(workdir),
     do:
       workdir
       |> repository_skills_dir()
-      |> list_dir(:repository)
+      |> discover_dir(:repository)
       |> mark_enabled(MapSet.new(RepoManager.disabled_skills(workdir)))
+      |> public_result()
 
   @doc """
   Global skills with the project-level disabled names for `workdir` applied
@@ -54,7 +61,7 @@ defmodule Sigma.Session.Skills do
   """
   def list_global_for_repository(workdir) do
     disabled = disabled_global_and_project(workdir)
-    global_skills_dir() |> list_dir(:global) |> mark_enabled(disabled)
+    global_skills_dir() |> discover_dir(:global) |> mark_enabled(disabled) |> public_result()
   end
 
   defp disabled_global_and_project(workdir) do
@@ -64,138 +71,142 @@ defmodule Sigma.Session.Skills do
   end
 
   def list_dir(root_dir, source) do
+    root_dir |> discover_dir(source) |> public_result()
+  end
+
+  @doc false
+  def discover_dir(root_dir, source) when source in [:repository, :global] do
     if File.dir?(root_dir) do
-      {skills, diagnostics} =
-        root_dir
-        |> skill_files()
-        |> Enum.map(&load_skill(&1, source))
-        |> Enum.reduce({[], []}, fn
-          {:ok, skill}, {skills, diagnostics} -> {[skill | skills], diagnostics}
-          {:error, diagnostic}, {skills, diagnostics} -> {skills, [diagnostic | diagnostics]}
-        end)
+      root = Path.expand(root_dir)
+      source_id = source_id(source, root)
 
-      %{
-        dir: root_dir,
-        skills: Enum.sort_by(skills, & &1.name),
-        diagnostics: Enum.reverse(diagnostics)
-      }
+      discover_root(root_dir, root, source, source_id)
     else
-      %{dir: root_dir, skills: [], diagnostics: []}
+      %{dir: root_dir, entries: [], skills: [], diagnostics: []}
     end
   end
 
-  defp skill_files(dir) do
-    skill_file = Path.join(dir, "SKILL.md")
+  defp discover_root(root_dir, root, source, source_id) do
+    roots = [%{source_id: source_id, path: root, precedence: precedence(source)}]
 
-    cond do
-      File.regular?(skill_file) ->
-        [skill_file]
+    case Local.discover_with_diagnostics(roots,
+           max_depth: @max_depth,
+           max_entries: @max_entries,
+           max_diagnostics: @max_diagnostics
+         ) do
+      {:ok, descriptors, package_diagnostics} ->
+        {entries, document_diagnostics} = load_descriptors(descriptors, source)
 
-      true ->
-        case File.ls(dir) do
-          {:ok, entries} ->
-            entries
-            |> Enum.reject(&skip_entry?/1)
-            |> Enum.sort()
-            |> Enum.flat_map(fn entry ->
-              path = Path.join(dir, entry)
-              if File.dir?(path), do: skill_files(path), else: []
-            end)
+        diagnostics =
+          package_diagnostics
+          |> Enum.map(&package_diagnostic(&1, root))
+          |> Kernel.++(document_diagnostics)
+          |> Enum.take(@max_diagnostics)
 
-          {:error, _reason} ->
-            []
-        end
+        %{
+          dir: root_dir,
+          entries: entries,
+          skills: entries |> Enum.map(& &1.skill) |> Enum.sort_by(& &1.name),
+          diagnostics: diagnostics
+        }
+
+      {:error, error} ->
+        %{path: path, message: message} = Protocol.discovery_error(error)
+
+        %{
+          dir: root_dir,
+          entries: [],
+          skills: [],
+          diagnostics: [%Diagnostic{path: path, message: message}]
+        }
     end
   end
 
-  defp skip_entry?(entry), do: String.starts_with?(entry, ".") or entry == "node_modules"
+  defp load_descriptors(descriptors, source) do
+    descriptors
+    |> Enum.map(&load_skill(&1, source))
+    |> Enum.reduce({[], []}, fn
+      {:ok, entry}, {entries, diagnostics} -> {[entry | entries], diagnostics}
+      {:error, diagnostic}, {entries, diagnostics} -> {entries, [diagnostic | diagnostics]}
+    end)
+    |> then(fn {entries, diagnostics} ->
+      {Enum.reverse(entries), Enum.reverse(diagnostics)}
+    end)
+  end
 
-  defp load_skill(path, source) do
-    with {:ok, content} <- File.read(path),
-         {:ok, metadata} <- Parser.parse(content),
-         :ok <- valid_policy_types(metadata),
-         {:ok, description} <- required_description(metadata),
-         {:ok, name} <- skill_name(metadata, path) do
+  defp load_skill(%Descriptor{} = descriptor, source) do
+    with {:ok, content} <- File.read(descriptor.path),
+         {:ok, document} <- Protocol.parse_document(content) do
+      source_id = descriptor.ref.source_id
+      source_key = descriptor.ref.skill_id
+
+      skill = %Skill{
+        name: document.name,
+        description: document.description,
+        path: descriptor.path,
+        source: source,
+        skill_id: source_id <> ":" <> source_key,
+        source_id: source_id,
+        source_key: source_key,
+        metadata: document.metadata,
+        argument_hint: document.metadata["argument-hint"],
+        disable_model_invocation?: document.metadata["disable-model-invocation"] == true
+      }
+
       {:ok,
-       %Skill{
-         name: name,
-         description: description,
-         path: path,
-         source: source,
-         metadata: metadata,
-         argument_hint: Map.get(metadata, "argument-hint"),
-         disable_model_invocation?: Map.get(metadata, "disable-model-invocation") == true
+       %{
+         skill: skill,
+         document: document,
+         descriptor: descriptor
        }}
     else
-      {:error, reason} when is_atom(reason) ->
-        {:error, %Diagnostic{path: path, message: "could not read skill: #{reason}"}}
+      {:error, error} when is_map(error) ->
+        {:error,
+         %Diagnostic{
+           path: descriptor.ref.skill_id,
+           message: Protocol.primary_diagnostic_message(error)
+         }}
 
-      {:error, message} ->
-        {:error, %Diagnostic{path: path, message: message}}
+      {:error, _reason} ->
+        {:error,
+         %Diagnostic{path: descriptor.ref.skill_id, message: "skill document cannot be read"}}
     end
   end
 
-  defp skill_name(metadata, path) do
-    case Map.get(metadata, "name") do
-      nil ->
-        {:ok, path |> Path.dirname() |> Path.basename()}
+  defp package_diagnostic(diagnostic, root) do
+    %{path: path, message: message} = Protocol.discovery_diagnostic(diagnostic)
 
-      name when is_binary(name) ->
-        if String.trim(name) == "" do
-          {:error, "name must be a non-empty string"}
-        else
-          {:ok, String.trim(name)}
-        end
+    message =
+      with true <- path != ".",
+           {:ok, content} <- File.read(Path.join(root, path)),
+           {:error, error} <- Protocol.parse_document(content) do
+        Protocol.primary_diagnostic_message(error)
+      else
+        _ -> message
+      end
 
-      _name ->
-        {:error, "name must be a non-empty string"}
-    end
+    %Diagnostic{path: path, message: message}
   end
 
   defp mark_enabled(result, disabled_names) do
-    skills =
-      Enum.map(result.skills, &%{&1 | enabled?: not MapSet.member?(disabled_names, &1.name)})
+    entries =
+      Enum.map(result.entries, fn %{skill: skill} = entry ->
+        %{entry | skill: %{skill | enabled?: not MapSet.member?(disabled_names, skill.name)}}
+      end)
 
-    %{result | skills: skills}
+    %{
+      result
+      | entries: entries,
+        skills: entries |> Enum.map(& &1.skill) |> Enum.sort_by(& &1.name)
+    }
   end
 
-  defp required_description(metadata) do
-    case Map.get(metadata, "description") do
-      description when is_binary(description) ->
-        if String.trim(description) == "" do
-          {:error, "description is required"}
-        else
-          {:ok, String.trim(description)}
-        end
+  defp public_result(result), do: Map.drop(result, [:entries])
+  defp precedence(:repository), do: 0
+  defp precedence(:global), do: 100
+  defp source_id(:global, _root), do: "global"
+  defp source_id(:repository, root), do: "repo-" <> digest(root)
 
-      nil ->
-        {:error, "description is required"}
-
-      _description ->
-        {:error, "description must be a string"}
-    end
-  end
-
-  defp valid_policy_types(metadata) do
-    with :ok <- validate_boolean(metadata, "disable-model-invocation"),
-         :ok <- validate_string(metadata, "argument-hint") do
-      :ok
-    end
-  end
-
-  defp validate_boolean(metadata, key) do
-    case Map.get(metadata, key) do
-      nil -> :ok
-      value when is_boolean(value) -> :ok
-      _value -> {:error, "#{key} must be a boolean"}
-    end
-  end
-
-  defp validate_string(metadata, key) do
-    case Map.get(metadata, key) do
-      nil -> :ok
-      value when is_binary(value) -> :ok
-      _value -> {:error, "#{key} must be a string"}
-    end
-  end
+  defp digest(value),
+    do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower) |> binary_part(0, 16)
 end

@@ -4,7 +4,8 @@ defmodule Sigma.Session.SlashCommands do
   """
 
   @init_command "init"
-  alias Sigma.Session.Skills.Catalog
+  alias Sigma.Session.Skills.{Catalog, Snapshot}
+
   @init_prompt """
   Set up a minimal AGENTS.md, and optionally Sigma Agent skills and supported hooks, for this repo. AGENTS.md instructions are loaded into Sigma Agent sessions, so the file must stay concise: only include what Sigma Agent would get wrong without it.
 
@@ -194,7 +195,21 @@ defmodule Sigma.Session.SlashCommands do
   Then present a short to-do list with only relevant follow-ups, ordered by impact.
   """
 
-  @spec expand(String.t(), keyword()) :: :not_command | {:ok, String.t()} | {:error, String.t()}
+  @type prepared_resource :: %{
+          required(:root) => String.t(),
+          required(:ref) => map(),
+          required(:digest) => String.t(),
+          required(:release) => (-> :ok | {:error, atom()})
+        }
+
+  @type prepared_expansion :: %{
+          required(:content) => String.t(),
+          required(:skill) => %{required(:ref) => map(), required(:digest) => String.t()},
+          required(:prepared_resources) => [prepared_resource()]
+        }
+
+  @spec expand(String.t(), keyword()) ::
+          :not_command | {:ok, String.t() | prepared_expansion()} | {:error, String.t()}
   def expand(text, opts \\ []) when is_binary(text) do
     text
     |> String.trim()
@@ -217,35 +232,58 @@ defmodule Sigma.Session.SlashCommands do
   defp invoke_skill(reference, arguments, opts, explicit?) do
     cwd = Keyword.get(opts, :cwd, File.cwd!())
 
-    case Catalog.resolve(Catalog.build(cwd), reference) do
+    case Catalog.resolve(Catalog.build(cwd), reference, :explicit) do
       {:ok, skill} ->
-        with {:ok, content} <- File.read(skill.path) do
-          {:ok, expand_skill_body(content, arguments)}
+        with {:ok, snapshot} <- Snapshot.prepare(skill) do
+          {:ok,
+           %{
+             content: expand_body(snapshot.entry_body, arguments),
+             skill: %{ref: snapshot.ref, digest: snapshot.digest},
+             prepared_resources: [prepared_resource(snapshot)]
+           }}
         else
-          {:error, reason} -> {:error, "Could not read skill #{skill.name}: #{reason}"}
+          {:error, reason} -> {:error, "Could not prepare skill #{skill.name}: #{reason}"}
         end
 
       {:error, :skill_not_found} ->
-        if explicit?, do: {:error, "Skill not found: #{reference}"}, else: {:error, "Unknown slash command: /#{reference}"}
-      {:error, :ambiguous_skill} -> {:error, "Skill reference is ambiguous: #{reference}"}
-      {:error, :skill_disabled} -> {:error, "Skill is disabled: #{reference}"}
+        prepare_remote(reference, arguments, opts, explicit?)
+
+      {:error, :ambiguous_skill} ->
+        {:error, "Skill reference is ambiguous: #{reference}"}
+
+      {:error, :skill_disabled} ->
+        {:error, "Skill is disabled: #{reference}"}
+
+      {:error, :unsupported_skill_kind} ->
+        {:error, "Skill is not supported: #{reference}"}
     end
   end
 
-  defp expand_skill_body(content, arguments) do
-    body = skill_body(content)
+  defp prepare_remote(reference, arguments, opts, true) do
+    case Keyword.get(opts, :remote_preparer) do
+      callback when is_function(callback, 3) -> callback.(reference, arguments, opts)
+      _callback -> {:error, "Skill not found: #{reference}"}
+    end
+  end
 
+  defp prepare_remote(reference, _arguments, _opts, false),
+    do: {:error, "Unknown slash command: /#{reference}"}
+
+  defp prepared_resource(snapshot) do
+    %{
+      root: snapshot.root,
+      ref: snapshot.ref,
+      digest: snapshot.digest,
+      release: fn -> Snapshot.release(snapshot) end
+    }
+  end
+
+  @doc false
+  def expand_body(body, arguments) when is_binary(body) and is_binary(arguments) do
     if String.contains?(body, "$ARGUMENTS") do
       String.replace(body, "$ARGUMENTS", arguments)
     else
       if arguments == "", do: body, else: body <> "\n\nSkill arguments:\n" <> arguments
-    end
-  end
-
-  defp skill_body(content) do
-    case String.split(String.replace(content, "\r\n", "\n"), "\n---\n", parts: 2) do
-      ["---\n" <> _metadata, body] -> String.trim(body)
-      _ -> String.trim(content)
     end
   end
 

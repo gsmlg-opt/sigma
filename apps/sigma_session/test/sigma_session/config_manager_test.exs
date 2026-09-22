@@ -3,6 +3,38 @@ defmodule Sigma.Session.ConfigManagerTest do
 
   alias Sigma.Session.ConfigManager
 
+  @tag :tmp_dir
+  test "normalizes configured Skill sources without resolving credential values" do
+    File.mkdir_p!(ConfigManager.agent_dir())
+
+    File.write!(
+      Path.join(ConfigManager.agent_dir(), "settings.json"),
+      Jason.encode!(%{
+        "skillSources" => %{
+          "source-b" => %{
+            "kind" => "backplane",
+            "name" => "  ",
+            "baseUrl" => " https://skills.example.test ",
+            "credentialId" => " credential-1 ",
+            "accessContextId" => " client:sigma ",
+            "offline" => true
+          },
+          "source-a" => %{"kind" => "unsupported", "token" => "secret"}
+        }
+      })
+    )
+
+    assert [source] = ConfigManager.skill_sources()
+    assert source.source_id == "source-b"
+    assert source.name == "source-b"
+    assert source.base_url == "https://skills.example.test"
+    assert source.credential_id == "credential-1"
+    assert source.access_context_id == "client:sigma"
+    assert source.enabled?
+    assert source.offline?
+    refute Map.has_key?(source, :token)
+  end
+
   setup %{tmp_dir: tmp_dir} do
     previous = Application.get_env(:sigma_session, :agent_dir)
     agent_dir = Path.join(tmp_dir, "agent")
@@ -36,6 +68,7 @@ defmodule Sigma.Session.ConfigManagerTest do
     )
 
     assert %{default: :allow, rules: %{}} = ConfigManager.get_permissions()
+
     assert %{"default" => "allow", "rules" => %{}} =
              ConfigManager.get_config()["permissions"]
   end

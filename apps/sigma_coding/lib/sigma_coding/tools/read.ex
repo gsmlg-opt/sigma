@@ -45,10 +45,7 @@ defmodule Sigma.Coding.Tools.Read do
     limit = Map.get(params, "limit")
     cwd = Keyword.get(opts, :cwd, File.cwd!())
 
-    case PathUtils.safe_resolve(path, cwd,
-           allow_skill_files?: true,
-           skill_roots: Keyword.get(opts, :skill_roots, [])
-         ) do
+    case PathUtils.safe_resolve(path, cwd, skill_roots: Keyword.get(opts, :skill_roots, [])) do
       {:ok, absolute_path} ->
         do_read(absolute_path, offset, limit)
 

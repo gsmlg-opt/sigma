@@ -120,6 +120,12 @@ el-dm-chat.sigma-chat-with-actions::part(actions) {
   padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
 }
 
+.sigma-session-composer:has(.slash-command-menu:not(.hidden)) {
+  position: relative;
+  z-index: 40;
+  overflow: visible;
+}
+
 .sigma-session-chip {
   display: inline-flex;
   align-items: center;

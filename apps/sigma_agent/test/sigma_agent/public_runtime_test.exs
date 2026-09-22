@@ -285,6 +285,45 @@ defmodule Sigma.Agent.PublicRuntimeTest do
     assert {:ok, ^metrics_event} = Codec.decode(encoded)
   end
 
+  test "dispatches negotiated Skill commands through the supplied callbacks", context do
+    session_id = "skill-command"
+
+    for {type, callback} <- [
+          {"skill.invoke", :skill_invoke},
+          {"skill.invocation.status", :skill_invocation_status},
+          {"skill.invocation.cancel", :skill_invocation_cancel}
+        ] do
+      assert {:ok, command} =
+               Envelope.command(type, session_id, %{
+                 "requiredCapabilities" => ["skills.v1"],
+                 "invocationId" => "invocation-1"
+               })
+
+      context =
+        Map.merge(context, %{
+          callback => fn payload ->
+            send(self(), {callback, payload})
+            Envelope.event("skill.invocation.updated", session_id, %{"state" => "queued"})
+          end
+        })
+
+      assert {:ok, %{type: "skill.invocation.updated"}} = PublicRuntime.execute(command, context)
+      assert_receive {^callback, %{"invocationId" => "invocation-1"}}
+    end
+  end
+
+  test "does not dispatch Skill commands without skills.v1 negotiation", context do
+    assert {:ok, command} = Envelope.command("skill.invocation.status", "legacy-client", %{})
+
+    context =
+      Map.put(context, :skill_invocation_status, fn _payload ->
+        flunk("legacy command reached the Skill callback")
+      end)
+
+    assert {:error, %{type: "session.error", error: %{code: "required_capability_missing"}}} =
+             PublicRuntime.execute(command, context)
+  end
+
   test "active attach overlays the durable in-flight request at cursor zero", context do
     session_id = "active-request-attach"
 

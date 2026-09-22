@@ -2,17 +2,17 @@
 
 Date: 2026-09-10
 
-This report covers the local-only scope after the Backplane work was moved to a
-separate job. It is evidence for the Sigma portions of the Skills PRD and does
-not claim full V1 acceptance.
+This is historical local-only evidence from before the Backplane Skill Protocol
+cutover. It records the former Sigma implementation and does not claim current
+V1 acceptance.
 
 ## Verified
 
 | Area | Evidence |
 | --- | --- |
-| YAML parser and policy validation | `Sigma.Session.Skills.Parser`; comments, quoted/folded values, nested metadata, CRLF, duplicate keys, invalid policy types; `apps/sigma_session/test/sigma_session/skills_test.exs` |
+| YAML parser and policy validation | Historical `Sigma.Session.Skills.Parser`; comments, quoted/folded values, nested metadata, CRLF, duplicate keys, invalid policy types; `apps/sigma_session/test/sigma_session/skills_test.exs` |
 | Local catalog | Repository/global source IDs, precedence, qualified references, disabled/manual filtering, catalog revision; `Sigma.Session.Skills.Catalog` tests |
-| Local snapshots | Bounded tree manifest, `sha256-tree-v1`, entry/resource capture, symlink rejection; `Sigma.Session.Skills.Snapshot` tests |
+| Local snapshots | Historical bounded tree manifest and `sha256-tree-v1` digest, entry/resource capture, symlink rejection; `Sigma.Session.Skills.Snapshot` tests |
 | Manual invocation | `/skill <reference> <arguments>`, shorthand commands, one-pass `$ARGUMENTS`, existing LiveView admission path; slash-command tests |
 | Model activation | `activate_skill` built-in, manual-only denial, snapshot preparation, per-turn deduplication; `apps/sigma_tools/test` |
 | Resource grants | Agent turn ID/root propagation and read-path authorization under activated roots; `PathUtils` tests |

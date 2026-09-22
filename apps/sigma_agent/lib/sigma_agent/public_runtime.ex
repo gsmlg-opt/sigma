@@ -11,6 +11,12 @@ defmodule Sigma.Agent.PublicRuntime do
   alias Sigma.Agent.{ProtocolEventMapper, ProtocolSubscription, Runtime}
   alias Sigma.Protocol.Envelope
 
+  @skill_callbacks %{
+    "skill.invoke" => :skill_invoke,
+    "skill.invocation.status" => :skill_invocation_status,
+    "skill.invocation.cancel" => :skill_invocation_cancel
+  }
+
   @doc """
   Builds the bounded runtime/session projection shared by protocol clients.
 
@@ -275,6 +281,25 @@ defmodule Sigma.Agent.PublicRuntime do
     end
   end
 
+  defp dispatch(%Envelope{type: type} = command, context)
+       when is_map_key(@skill_callbacks, type) do
+    callback_key = Map.fetch!(@skill_callbacks, type)
+
+    with {:ok, capabilities} <- negotiate_capabilities(command),
+         true <- "skills.v1" in capabilities,
+         callback when is_function(callback, 1) <- context[callback_key],
+         result <- callback.(Map.put_new(command.payload, "sessionId", command.session_id)),
+         {:ok, %Envelope{kind: :event, session_id: session_id} = event}
+         when session_id == command.session_id <- result do
+      {:ok, event}
+    else
+      false -> {:error, {:required_capability_missing, "skills.v1"}}
+      nil -> {:error, :skill_callback_unavailable}
+      {:error, _reason} = error -> error
+      _result -> {:error, :invalid_skill_callback_result}
+    end
+  end
+
   defp dispatch(%Envelope{type: "subscription.attach"} = command, context) do
     sink = context[:subscriber] || self()
 
@@ -397,22 +422,41 @@ defmodule Sigma.Agent.PublicRuntime do
   end
 
   defp admit_prompt(command, context, mode) do
-    with {:ok, agent} <- running_agent(command, context),
-         content when is_binary(content) or is_list(content) <- command.payload["content"],
-         result <- call_prompt(agent, mode, content, prompt_opts(context, agent)),
-         {:ok, status, info} <- admission_payload(result),
-         {:ok, event} <-
-           Envelope.event(
-             "prompt.admitted",
-             command.session_id,
-             Map.put(info, "status", status),
-             turn_id: info["turnId"]
-           ) do
-      {:ok, event}
+    with {:ok, agent} <- running_agent(command, context) do
+      with content when is_binary(content) or is_list(content) <- command.payload["content"],
+           result <- call_prompt(agent, mode, content, prompt_opts(context, agent)),
+           {:ok, status, info} <- admission_payload(result),
+           {:ok, event} <-
+             Envelope.event(
+               "prompt.admitted",
+               command.session_id,
+               Map.put(info, "status", status),
+               turn_id: info["turnId"]
+             ) do
+        {:ok, event}
+      else
+        nil ->
+          release_prompt_resources(context)
+          {:error, :missing_prompt_content}
+
+        {:error, _reason} = error ->
+          error
+      end
     else
-      nil -> {:error, :missing_prompt_content}
-      {:error, _reason} = error -> error
+      {:error, _reason} = error ->
+        release_prompt_resources(context)
+        error
     end
+  end
+
+  defp release_prompt_resources(context) do
+    context
+    |> Map.get(:prompt_opts, [])
+    |> Keyword.get(:prepared_resources, [])
+    |> Enum.each(fn
+      %{release: release} when is_function(release, 0) -> release.()
+      _resource -> :ok
+    end)
   end
 
   defp call_prompt(agent, :submit, content, opts), do: Sigma.Agent.prompt(agent, content, opts)
@@ -433,7 +477,9 @@ defmodule Sigma.Agent.PublicRuntime do
       |> maybe_put_resolver(:permission_request_fn, permission_resolver)
       |> maybe_put_resolver(:ask_user_question_fn, context[:question_resolver])
 
-    if dispatcher_opts == [], do: [], else: [dispatcher_opts: dispatcher_opts]
+    context
+    |> Map.get(:prompt_opts, [])
+    |> Keyword.put(:dispatcher_opts, dispatcher_opts)
   end
 
   defp maybe_put_resolver(opts, _key, nil), do: opts

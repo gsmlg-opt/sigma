@@ -2,7 +2,6 @@ defmodule Sigma.Session.SkillsTest do
   use ExUnit.Case, async: false
 
   alias Sigma.Session.RepoManager
-  alias Sigma.Session.RepoManager
   alias Sigma.Session.Skills
   alias Sigma.Session.Skills.Catalog
   alias Sigma.Session.Skills.Snapshot
@@ -29,8 +28,10 @@ defmodule Sigma.Session.SkillsTest do
 
     assert skill.name == "repo-skill"
     assert skill.description == "Helps with repository work"
-    assert skill.path == Path.join(skill_dir, "SKILL.md")
+    assert skill.path == Path.join(skill_dir, "SKILL.md") |> Path.expand()
     assert skill.source == :repository
+    assert skill.source_key == "repo-skill"
+    assert skill.skill_id == skill.source_id <> ":repo-skill"
     assert skill.disable_model_invocation? == true
   end
 
@@ -49,8 +50,50 @@ defmodule Sigma.Session.SkillsTest do
     assert %{skills: [], diagnostics: [diagnostic]} =
              Skills.list_dir(Path.join([tmp_dir, ".agents", "skills"]), :repository)
 
-    assert diagnostic.path == Path.join(skill_dir, "SKILL.md")
+    assert diagnostic.path == "broken-skill"
     assert diagnostic.message == "description is required"
+  end
+
+  @tag :tmp_dir
+  test "applies standard name validation after package discovery", %{tmp_dir: tmp_dir} do
+    skill_dir = Path.join([tmp_dir, ".agents", "skills", "legacy-name"])
+    File.mkdir_p!(skill_dir)
+
+    File.write!(
+      Path.join(skill_dir, "SKILL.md"),
+      "---\nname: Legacy_Name\ndescription: Legacy\n---\nBody"
+    )
+
+    assert %{skills: [], diagnostics: [%{path: "legacy-name", message: message}]} =
+             Skills.list_dir(Path.dirname(skill_dir), :repository)
+
+    assert message == "name must be lowercase kebab-case"
+  end
+
+  @tag :tmp_dir
+  test "keeps valid siblings when a package-invalid candidate is diagnosed", %{tmp_dir: tmp_dir} do
+    skills_root = Path.join([tmp_dir, ".agents", "skills"])
+
+    for {directory, document} <- [
+          {"valid", "---\nname: valid\ndescription: Valid\n---\nBody"},
+          {"invalid", "---\ndescription: Missing name\n---\nBody"}
+        ] do
+      File.mkdir_p!(Path.join(skills_root, directory))
+      File.write!(Path.join([skills_root, directory, "SKILL.md"]), document)
+    end
+
+    assert %{skills: [%{name: "valid"}], diagnostics: [%{message: "name is required"}]} =
+             Skills.list_dir(skills_root, :repository)
+  end
+
+  @tag :tmp_dir
+  test "does not fall back to the skill directory when name is missing", %{tmp_dir: tmp_dir} do
+    skill_dir = Path.join([tmp_dir, ".agents", "skills", "directory-name"])
+    File.mkdir_p!(skill_dir)
+    File.write!(Path.join(skill_dir, "SKILL.md"), "---\ndescription: Missing name\n---\nBody")
+
+    assert %{skills: [], diagnostics: [%{message: "name is required"}]} =
+             Skills.list_dir(Path.dirname(skill_dir), :repository)
   end
 
   @tag :tmp_dir
@@ -133,10 +176,10 @@ defmodule Sigma.Session.SkillsTest do
 
     File.write!(
       Path.join(skill_dir, "SKILL.md"),
-      "---\ndescription: Invalid\ndisable-model-invocation: \"true\"\n---\nBody"
+      "---\nname: invalid-policy\ndescription: Invalid\ndisable-model-invocation: \"true\"\n---\nBody"
     )
 
-    assert %{skills: [], diagnostics: [%{message: "disable-model-invocation must be a boolean"}]} =
+    assert %{skills: [], diagnostics: [%{message: "invocation flag is invalid"}]} =
              Skills.list_dir(Path.join([tmp_dir, ".agents", "skills"]), :repository)
   end
 
@@ -147,10 +190,10 @@ defmodule Sigma.Session.SkillsTest do
 
     File.write!(
       Path.join(skill_dir, "SKILL.md"),
-      "---\ndescription: first\ndescription: second\n---\nBody"
+      "---\nname: duplicate-key\ndescription: first\ndescription: second\n---\nBody"
     )
 
-    assert %{skills: [], diagnostics: [%{message: "duplicate frontmatter key: description"}]} =
+    assert %{skills: [], diagnostics: [%{message: "Skill metadata is invalid"}]} =
              Skills.list_dir(Path.join([tmp_dir, ".agents", "skills"]), :repository)
   end
 
@@ -178,30 +221,119 @@ defmodule Sigma.Session.SkillsTest do
   end
 
   @tag :tmp_dir
-  test "prepares a bounded tree snapshot with a stable digest", %{tmp_dir: tmp_dir} do
+  test "catalog preserves package ambiguity within the winning source", %{tmp_dir: tmp_dir} do
+    for directory <- ["one", "two"] do
+      path = Path.join([tmp_dir, ".agents", "skills", directory, "SKILL.md"])
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, "---\nname: shared\ndescription: Shared\n---\nBody")
+    end
+
+    assert {:error, :ambiguous_skill} = Catalog.resolve(Catalog.build(tmp_dir), "shared")
+  end
+
+  @tag :tmp_dir
+  test "disabled repository winner does not fall through to the global skill", %{
+    tmp_dir: tmp_dir
+  } do
+    with_agent_dir(tmp_dir, fn ->
+      for path <- [
+            Path.join([tmp_dir, ".agents", "skills", "shared", "SKILL.md"]),
+            Path.join([tmp_dir, "global", "shared", "SKILL.md"])
+          ] do
+        File.mkdir_p!(Path.dirname(path))
+        File.write!(path, "---\nname: shared\ndescription: Shared\n---\nBody")
+      end
+
+      Application.put_env(:sigma_session, :global_skills_dir, Path.join(tmp_dir, "global"))
+      on_exit(fn -> Application.delete_env(:sigma_session, :global_skills_dir) end)
+      RepoManager.add_repo(tmp_dir)
+      RepoManager.set_disabled_skills(tmp_dir, ["shared"])
+
+      assert {:error, :skill_disabled} = Catalog.resolve(Catalog.build(tmp_dir), "shared")
+      assert {:error, :skill_disabled} = Catalog.resolve(Catalog.build(tmp_dir), "global:shared")
+    end)
+  end
+
+  @tag :tmp_dir
+  test "manual-only skills are excluded from automatic selection but allow explicit selection", %{
+    tmp_dir: tmp_dir
+  } do
+    Application.put_env(:sigma_session, :global_skills_dir, Path.join(tmp_dir, "global"))
+    on_exit(fn -> Application.delete_env(:sigma_session, :global_skills_dir) end)
+
+    path = Path.join([tmp_dir, ".agents", "skills", "manual", "SKILL.md"])
+    File.mkdir_p!(Path.dirname(path))
+
+    File.write!(
+      path,
+      "---\nname: manual\ndescription: Manual\ndisable-model-invocation: true\n---\nBody"
+    )
+
+    catalog = Catalog.build(tmp_dir)
+    assert [] = Catalog.automatic(catalog)
+    assert {:ok, %{name: "manual"}} = Catalog.resolve(catalog, "repo:manual")
+  end
+
+  @tag :tmp_dir
+  test "user-invocable false allows automatic resolution but denies explicit resolution", %{
+    tmp_dir: tmp_dir
+  } do
+    Application.put_env(:sigma_session, :global_skills_dir, Path.join(tmp_dir, "global"))
+    on_exit(fn -> Application.delete_env(:sigma_session, :global_skills_dir) end)
+
+    path = Path.join([tmp_dir, ".agents", "skills", "model-only", "SKILL.md"])
+    File.mkdir_p!(Path.dirname(path))
+
+    File.write!(
+      path,
+      "---\nname: model-only\ndescription: Model only\nuser-invocable: false\n---\nBody"
+    )
+
+    catalog = Catalog.build(tmp_dir)
+
+    assert [%{name: "model-only"}] = Catalog.automatic(catalog)
+    assert {:ok, %{name: "model-only"}} = Catalog.resolve(catalog, "repo:model-only", :automatic)
+    assert {:error, :unsupported_skill_kind} = Catalog.resolve(catalog, "repo:model-only")
+    assert [] = Catalog.explicit(catalog)
+  end
+
+  @tag :tmp_dir
+  test "prepares a package-backed snapshot through the compatibility facade", %{tmp_dir: tmp_dir} do
     skill_dir = Path.join([tmp_dir, ".agents", "skills", "snapshot-skill"])
     File.mkdir_p!(Path.join(skill_dir, "references"))
     entry_path = Path.join(skill_dir, "SKILL.md")
-    File.write!(entry_path, "---\nname: snapshot\ndescription: Snapshot\n---\nBody")
+
+    File.write!(
+      entry_path,
+      "---\nname: snapshot-skill\ndescription: Snapshot\n---\nBody"
+    )
+
     File.write!(Path.join([skill_dir, "references", "guide.md"]), "Guide")
 
     assert %{skills: [skill]} =
              Skills.list_dir(Path.join([tmp_dir, ".agents", "skills"]), :repository)
 
     assert {:ok, snapshot} = Snapshot.prepare(skill)
-    assert snapshot.digest.scheme == "sha256-tree-v1"
-    assert Enum.map(snapshot.manifest, & &1.path) == ["SKILL.md", "references/guide.md"]
+    assert snapshot.digest =~ ~r/^sha256:[0-9a-f]{64}$/
+    assert Enum.map(snapshot.manifest.files, & &1.path) == ["SKILL.md", "references/guide.md"]
     assert snapshot.entry_body == "Body"
 
     assert {:ok, same_snapshot} = Snapshot.prepare(skill)
     assert same_snapshot.digest == snapshot.digest
+    assert :ok = Snapshot.release(snapshot)
+    assert :ok = Snapshot.release(same_snapshot)
   end
 
   @tag :tmp_dir
   test "rejects symlinked snapshot resources", %{tmp_dir: tmp_dir} do
     skill_dir = Path.join([tmp_dir, ".agents", "skills", "unsafe"])
     File.mkdir_p!(skill_dir)
-    File.write!(Path.join(skill_dir, "SKILL.md"), "---\ndescription: Unsafe\n---\nBody")
+
+    File.write!(
+      Path.join(skill_dir, "SKILL.md"),
+      "---\nname: unsafe\ndescription: Unsafe\n---\nBody"
+    )
+
     outside = Path.join(tmp_dir, "outside.txt")
     File.write!(outside, "secret")
     File.ln_s!(outside, Path.join(skill_dir, "secret.txt"))
@@ -210,6 +342,47 @@ defmodule Sigma.Session.SkillsTest do
              Skills.list_dir(Path.join([tmp_dir, ".agents", "skills"]), :repository)
 
     assert {:error, :unsafe_archive} = Snapshot.prepare(skill)
+  end
+
+  @tag :tmp_dir
+  test "fails a root closed when a linked path escapes it", %{tmp_dir: tmp_dir} do
+    skills_root = Path.join([tmp_dir, ".agents", "skills"])
+    valid_dir = Path.join(skills_root, "valid")
+    outside_dir = Path.join(tmp_dir, "outside")
+    File.mkdir_p!(valid_dir)
+    File.mkdir_p!(outside_dir)
+
+    File.write!(
+      Path.join(valid_dir, "SKILL.md"),
+      "---\nname: valid\ndescription: Valid\n---\nBody"
+    )
+
+    File.ln_s!(outside_dir, Path.join(skills_root, "escaping"))
+
+    assert %{skills: [], diagnostics: [diagnostic]} =
+             Skills.list_dir(skills_root, :repository)
+
+    assert diagnostic.path == "."
+    assert diagnostic.message == "local skill root is invalid"
+  end
+
+  @tag :tmp_dir
+  test "fails a root closed when the package scan budget is exceeded", %{tmp_dir: tmp_dir} do
+    skills_root = Path.join([tmp_dir, ".agents", "skills"])
+    valid_dir = Path.join(skills_root, "000-valid")
+    File.mkdir_p!(valid_dir)
+
+    File.write!(
+      Path.join(valid_dir, "SKILL.md"),
+      "---\nname: valid\ndescription: Valid\n---\nBody"
+    )
+
+    for index <- 0..2_000 do
+      File.write!(Path.join(skills_root, "filler-#{index}"), "")
+    end
+
+    assert %{skills: [], diagnostics: [%{path: ".", message: "local skill scan limit exceeded"}]} =
+             Skills.list_dir(skills_root, :repository)
   end
 
   # --- project-level disabled skills ---

@@ -14,15 +14,32 @@ defmodule Sigma.Coding.Utils.PathUtilsTest do
       tmp = System.tmp_dir!()
       cwd = Path.join(tmp, "pi_grant_cwd_#{System.unique_integer([:positive])}")
       skill_root = Path.join(tmp, "pi_grant_skill_#{System.unique_integer([:positive])}")
+      sibling = skill_root <> "-sibling"
       File.mkdir_p!(Path.join(skill_root, "references"))
+      File.mkdir_p!(sibling)
       resource = Path.join([skill_root, "references", "guide.md"])
+      sibling_resource = Path.join(sibling, "secret.md")
       File.write!(resource, "guide")
+      File.write!(sibling_resource, "secret")
+      File.ln_s!(sibling, Path.join(skill_root, "escape"))
 
-      on_exit(fn -> File.rm_rf!(cwd); File.rm_rf!(skill_root) end)
+      on_exit(fn ->
+        File.rm_rf!(cwd)
+        File.rm_rf!(skill_root)
+        File.rm_rf!(sibling)
+      end)
 
       assert {:error, _reason} = PathUtils.safe_resolve(resource, cwd)
       assert {:ok, resolved} = PathUtils.safe_resolve(resource, cwd, skill_roots: [skill_root])
       assert String.ends_with?(resolved, "/references/guide.md")
+
+      assert {:error, _reason} =
+               PathUtils.safe_resolve(sibling_resource, cwd, skill_roots: [skill_root])
+
+      assert {:error, _reason} =
+               PathUtils.safe_resolve(Path.join(skill_root, "escape/secret.md"), cwd,
+                 skill_roots: [skill_root]
+               )
     end
 
     test "resolves absolute path within cwd" do
@@ -36,7 +53,7 @@ defmodule Sigma.Coding.Utils.PathUtilsTest do
       assert reason =~ "outside of the current working directory"
     end
 
-    test "allows skill files outside cwd only when explicitly enabled" do
+    test "rejects arbitrary skill files outside cwd" do
       tmp = System.tmp_dir!()
       cwd = Path.join(tmp, "pi_test_cwd_#{System.unique_integer([:positive])}")
       skill_dir = Path.join(tmp, "pi_test_skill_#{System.unique_integer([:positive])}")
@@ -52,9 +69,6 @@ defmodule Sigma.Coding.Utils.PathUtilsTest do
 
       assert {:error, reason} = PathUtils.safe_resolve(skill_path, cwd)
       assert reason =~ "outside of the current working directory"
-      assert {:ok, resolved} = PathUtils.safe_resolve(skill_path, cwd, allow_skill_files?: true)
-      assert String.ends_with?(resolved, "/SKILL.md")
-      assert File.read!(resolved) == "skill"
     end
 
     test "rejects relative path going out of cwd" do
@@ -89,7 +103,9 @@ defmodule Sigma.Coding.Utils.PathUtilsTest do
     end
 
     test "rejects an intermediate directory symlink escaping cwd" do
-      tmp = Path.join(System.tmp_dir!(), "pi_path_components_#{System.unique_integer([:positive])}")
+      tmp =
+        Path.join(System.tmp_dir!(), "pi_path_components_#{System.unique_integer([:positive])}")
+
       cwd = Path.join(tmp, "repo")
       outside = Path.join(tmp, "outside")
       File.mkdir_p!(cwd)

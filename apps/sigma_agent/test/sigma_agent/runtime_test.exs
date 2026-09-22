@@ -1008,7 +1008,8 @@ defmodule Sigma.Agent.RuntimeTest do
 
     assert List.last(after_snapshot.messages).metadata == %{
              "retry_of_turn_id" => "turn-second",
-             "turn_id" => result.turn_id
+             "turn_id" => result.turn_id,
+             "skill_preparations" => []
            }
 
     assert List.last(after_snapshot.messages).attachments == [

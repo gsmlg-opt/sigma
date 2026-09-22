@@ -99,13 +99,8 @@ defmodule Sigma.Coding.Utils.PathUtils do
     path == cwd or String.starts_with?(path, cwd_prefix)
   end
 
-  defp allowed_external_path?(path, real_path, opts) do
-    granted_root_path?(real_path, opts) or
-      (Keyword.get(opts, :allow_skill_files?, false) and
-         Path.basename(path) == "SKILL.md" and
-         Path.basename(real_path) == "SKILL.md" and
-         File.regular?(real_path))
-  end
+  defp allowed_external_path?(_path, real_path, opts),
+    do: granted_root_path?(real_path, opts)
 
   defp granted_root_path?(real_path, opts) do
     opts

@@ -50,6 +50,7 @@ defmodule Sigma.Agent do
     messages: [],
     subscribers: [],
     current_turn_assistant_message: nil,
+    current_turn_resources: [],
     pending_user_questions: %{},
     pending_mcp_elicitations: %{},
     prompt_queue: %PromptQueue{},
@@ -186,6 +187,10 @@ defmodule Sigma.Agent do
     GenServer.call(pid, :cancel)
   end
 
+  def cancel_prompt(pid, turn_id) when is_binary(turn_id) do
+    GenServer.call(pid, {:cancel_prompt, turn_id})
+  end
+
   @doc """
   Restarts the session's MCP clients and re-discovers their tools.
 
@@ -318,6 +323,8 @@ defmodule Sigma.Agent do
 
   @impl true
   def terminate(reason, state) do
+    release_all_resources(state)
+
     if Sigma.Coding.Hooks.any_for_event?(state.hook_specs, :session_end) do
       task = Task.async(fn -> run_session_end_hook(state, reason) end)
 
@@ -416,10 +423,12 @@ defmodule Sigma.Agent do
       ) do
     cond do
       state.turn_state.phase != :session_operation or not is_nil(state.current_turn_task) ->
+        release_resources(Keyword.get(opts, :prepared_resources, []))
         {:reply, {:rejected, :session_busy}, state}
 
       not is_list(context_messages) or not is_binary(retry_of_turn_id) or
           retry_of_turn_id == "" ->
+        release_resources(Keyword.get(opts, :prepared_resources, []))
         {:reply, {:rejected, :invalid_retry_checkpoint}, state}
 
       true ->
@@ -436,6 +445,7 @@ defmodule Sigma.Agent do
             {:reply, {:accepted, info}, state}
 
           {:error, reason} ->
+            release_resources(Keyword.get(opts, :prepared_resources, []))
             {:reply, {:rejected, reason}, state}
         end
     end
@@ -464,6 +474,17 @@ defmodule Sigma.Agent do
         {:ok, queue} -> {:reply, :ok, %{state | prompt_queue: queue}}
         {:error, _reason} = error -> {:reply, error, state}
       end
+    else
+      {:reply, {:error, :turn_changed}, state}
+    end
+  end
+
+  def handle_call({:register_skill_resource, turn_id, resource}, _from, state) do
+    if state.turn_state.turn_id == turn_id and not is_nil(state.current_turn_task) and
+         valid_prepared_resource?(resource) do
+      register_skill_grant(state.tool_state, turn_id, resource)
+
+      {:reply, :ok, %{state | current_turn_resources: [resource | state.current_turn_resources]}}
     else
       {:reply, {:error, :turn_changed}, state}
     end
@@ -512,6 +533,35 @@ defmodule Sigma.Agent do
           |> Map.put(:cancel_timer, timer)
 
         {:reply, {:cancelling, turn_id}, %{state | turn_state: turn_state}}
+    end
+  end
+
+  def handle_call({:cancel_prompt, turn_id}, _from, state) do
+    cond do
+      state.turn_state.turn_id == turn_id and not is_nil(state.current_turn_task) ->
+        task = state.current_turn_task
+        cancellation_ref = state.turn_state.cancellation_ref
+        send(task.pid, {:cancel, cancellation_ref})
+        send(task.pid, {:abort, cancellation_ref})
+        state = cancel_pending_interactions(state)
+        timer = Process.send_after(self(), {:force_cancel, turn_id, task.ref}, 2_000)
+
+        turn_state =
+          state.turn_state
+          |> TurnState.transition(:cancelling)
+          |> Map.put(:cancel_timer, timer)
+
+        {:reply, :ok, %{state | turn_state: turn_state}}
+
+      true ->
+        case PromptQueue.remove(state.prompt_queue, :follow_up, turn_id) do
+          {:ok, item, queue} ->
+            release_resources(item.prepared_resources)
+            {:reply, :ok, %{state | prompt_queue: queue}}
+
+          {:error, :prompt_not_found} ->
+            {:reply, {:error, :prompt_not_found}, state}
+        end
     end
   end
 
@@ -900,10 +950,12 @@ defmodule Sigma.Agent do
   defp admit_prompt(state, content, opts, requested_mode) do
     case new_prompt_item(content, opts) do
       {:error, reason} ->
+        release_resources(Keyword.get(opts, :prepared_resources, []))
         emit(state, {:prompt_rejected, reason})
         {{:rejected, reason}, state}
 
       {:ok, _item} when state.turn_state.phase == :session_operation ->
+        release_resources(Keyword.get(opts, :prepared_resources, []))
         emit(state, {:prompt_rejected, :session_busy})
         {{:rejected, :session_busy}, state}
 
@@ -917,6 +969,7 @@ defmodule Sigma.Agent do
       {:ok, item} ->
         mode = admission_mode(requested_mode, opts)
         item = if mode == :steering, do: %{item | turn_id: state.turn_state.turn_id}, else: item
+        state = if mode == :steering, do: attach_turn_resources(state, item), else: state
         queue = PromptQueue.enqueue(state.prompt_queue, mode, item)
         result = if mode == :steering, do: :queued_as_steering, else: :queued_as_follow_up
         info = prompt_info(item, item.turn_id)
@@ -929,20 +982,28 @@ defmodule Sigma.Agent do
 
   defp new_prompt_item(content, opts) when is_binary(content) or is_list(content) do
     empty? = is_binary(content) and String.trim(content) == ""
+    prepared_resources = Keyword.get(opts, :prepared_resources, [])
 
-    if empty? or content == [] do
-      {:error, :empty_prompt}
-    else
-      {:ok,
-       %{
-         message_id: "msg_user_#{random_id(8)}",
-         turn_id: "turn_#{random_id(8)}",
-         content: content,
-         attachments: Keyword.get(opts, :attachments),
-         retry_of_turn_id: Keyword.get(opts, :retry_of_turn_id),
-         retry_admission_notify: Keyword.get(opts, :retry_admission_notify),
-         dispatcher_opts: Keyword.get(opts, :dispatcher_opts, [])
-       }}
+    cond do
+      empty? or content == [] ->
+        {:error, :empty_prompt}
+
+      not is_list(prepared_resources) or
+          not Enum.all?(prepared_resources, &valid_prepared_resource?/1) ->
+        {:error, :invalid_prepared_resources}
+
+      true ->
+        {:ok,
+         %{
+           message_id: "msg_user_#{random_id(8)}",
+           turn_id: "turn_#{random_id(8)}",
+           content: content,
+           attachments: Keyword.get(opts, :attachments),
+           retry_of_turn_id: Keyword.get(opts, :retry_of_turn_id),
+           retry_admission_notify: Keyword.get(opts, :retry_admission_notify),
+           dispatcher_opts: Keyword.get(opts, :dispatcher_opts, []),
+           prepared_resources: prepared_resources
+         }}
     end
   end
 
@@ -959,6 +1020,7 @@ defmodule Sigma.Agent do
   end
 
   defp start_turn(state, item) do
+    state = attach_turn_resources(state, item)
     control_pid = self()
     cancellation_ref = make_ref()
     turn_started_at = DateTime.utc_now() |> DateTime.to_iso8601()
@@ -967,6 +1029,16 @@ defmodule Sigma.Agent do
     dispatcher_opts =
       state.dispatcher_opts
       |> Keyword.merge(item.dispatcher_opts)
+      |> Keyword.put(
+        :skill_roots,
+        merge_skill_roots(state.dispatcher_opts, prepared_resource_roots(item.prepared_resources))
+      )
+      |> Keyword.put(:register_skill_resource, fn resource ->
+        GenServer.call(control_pid, {:register_skill_resource, item.turn_id, resource}, :infinity)
+      end)
+      |> Keyword.put(:skill_cancelled?, fn ->
+        GenServer.call(control_pid, {:cancelled?, item.turn_id}, :infinity)
+      end)
       |> Keyword.put(:signal, cancellation_ref)
 
     provider_options =
@@ -997,6 +1069,7 @@ defmodule Sigma.Agent do
     %{
       state
       | current_turn_task: task,
+        current_turn_resources: state.current_turn_resources,
         turn_started_at: turn_started_at,
         turn_started_monotonic: turn_started_monotonic,
         turn_state: TurnState.start(item.turn_id, cancellation_ref),
@@ -1040,6 +1113,8 @@ defmodule Sigma.Agent do
       )
     end
 
+    state = release_turn_resources(state)
+
     state = %{
       state
       | turn_started_at: nil,
@@ -1081,6 +1156,80 @@ defmodule Sigma.Agent do
   end
 
   defp clear_cancel_timer(state), do: state
+
+  defp attach_turn_resources(state, item) do
+    resources = Enum.filter(item.prepared_resources, &valid_prepared_resource?/1)
+
+    Enum.each(resources, &register_skill_grant(state.tool_state, item.turn_id, &1))
+    %{state | current_turn_resources: resources ++ state.current_turn_resources}
+  end
+
+  defp valid_prepared_resource?(%{root: root, release: release}),
+    do: is_binary(root) and is_function(release, 0)
+
+  defp valid_prepared_resource?(_resource), do: false
+
+  defp prepared_resource_roots(resources) do
+    resources
+    |> Enum.filter(&valid_prepared_resource?/1)
+    |> Enum.map(& &1.root)
+  end
+
+  defp prepared_resource_metadata(resources) do
+    resources
+    |> Enum.filter(&valid_prepared_resource?/1)
+    |> Enum.map(&Map.take(&1, [:ref, :digest]))
+  end
+
+  defp register_skill_grant(table, turn_id, resource) do
+    :ets.insert(table, {{:skill_grant, turn_id, resource.root}, %{resource_root: resource.root}})
+  rescue
+    _ -> :ok
+  end
+
+  defp release_turn_resources(state) do
+    release_resources(state.current_turn_resources)
+
+    try do
+      :ets.match_delete(state.tool_state, {{:skill_grant, state.turn_state.turn_id, :_}, :_})
+      :ets.match_delete(state.tool_state, {{:skill_activation, state.turn_state.turn_id, :_}, :_})
+    rescue
+      _ -> :ok
+    end
+
+    %{state | current_turn_resources: []}
+  end
+
+  defp release_all_resources(state) do
+    queued_resources =
+      Enum.flat_map([:steering, :follow_up], fn queue ->
+        state.prompt_queue
+        |> Map.fetch!(queue)
+        |> Enum.flat_map(& &1.prepared_resources)
+      end)
+
+    (state.current_turn_resources ++ queued_resources)
+    |> Enum.uniq_by(&Map.get(&1, :root))
+    |> release_resources()
+  end
+
+  defp release_resources(resources) when is_list(resources) do
+    Enum.each(resources, fn
+      %{release: release} when is_function(release, 0) ->
+        try do
+          release.()
+        rescue
+          _ -> :ok
+        catch
+          _, _ -> :ok
+        end
+
+      _resource ->
+        :ok
+    end)
+  end
+
+  defp release_resources(_resources), do: :ok
 
   defp cancel_pending_interactions(state) do
     Enum.each(pending_user_question_map(state), fn {question_id, pending} ->
@@ -1131,7 +1280,8 @@ defmodule Sigma.Agent do
       |> Map.put(:attachments, item.attachments)
       |> Map.put(:metadata, %{
         turn_id: item.turn_id,
-        retry_of_turn_id: item.retry_of_turn_id
+        retry_of_turn_id: item.retry_of_turn_id,
+        skill_preparations: prepared_resource_metadata(item.prepared_resources)
       })
 
     case run_user_prompt_submit_hook(state, user_msg) do
@@ -1622,11 +1772,23 @@ defmodule Sigma.Agent do
   end
 
   defp skill_grant_roots(table, turn_id) do
-    :ets.match_object(table, {{:skill_activation, turn_id, :_}, %{resource_root: :_}})
+    activation_roots =
+      :ets.match_object(table, {{:skill_activation, turn_id, :_}, %{resource_root: :_}})
+
+    prompt_roots =
+      :ets.match_object(table, {{:skill_grant, turn_id, :_}, %{resource_root: :_}})
+
+    (activation_roots ++ prompt_roots)
     |> Enum.map(fn {_key, %{resource_root: root}} -> root end)
     |> Enum.uniq()
   rescue
     _ -> []
+  end
+
+  defp merge_skill_roots(opts, dynamic_roots) do
+    (Keyword.get(opts, :skill_roots, []) ++ dynamic_roots)
+    |> Enum.filter(&is_binary/1)
+    |> Enum.uniq()
   end
 
   defp execute_tools(state, tool_calls) do
@@ -1643,7 +1805,13 @@ defmodule Sigma.Agent do
       |> Keyword.put(:session_id, state.session_id)
       |> Keyword.put(:log_session_id, state.log_session_id)
       |> Keyword.put(:turn_id, state.turn_state.turn_id)
-      |> Keyword.put(:skill_roots, skill_grant_roots(state.tool_state, state.turn_state.turn_id))
+      |> Keyword.put(
+        :skill_roots,
+        merge_skill_roots(
+          state.dispatcher_opts,
+          skill_grant_roots(state.tool_state, state.turn_state.turn_id)
+        )
+      )
       |> Keyword.put(:transcript_path, transcript_path(state))
       |> Keyword.put(:hook_specs, state.hook_specs)
       |> Keyword.put(:tool_state, state.tool_state)
@@ -2961,7 +3129,10 @@ defmodule Sigma.Agent do
       |> Keyword.put(:log_session_id, state.log_session_id)
       |> Keyword.put(:turn_id, turn_id)
       |> Keyword.put(:request_id, state.current_request_id)
-      |> Keyword.put(:skill_roots, skill_grant_roots(state.tool_state, turn_id))
+      |> Keyword.put(
+        :skill_roots,
+        merge_skill_roots(state.dispatcher_opts, skill_grant_roots(state.tool_state, turn_id))
+      )
       |> Keyword.put(:transcript_path, transcript_path(state))
       |> Keyword.put(:hook_specs, state.hook_specs)
       |> Keyword.put(:tool_state, state.tool_state)

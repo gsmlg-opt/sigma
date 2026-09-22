@@ -63,7 +63,7 @@ defmodule Sigma.Coding.Tools.ReadTest do
     assert reason =~ "outside of the current working directory"
   end
 
-  test "reads skill files outside cwd", %{tmp_dir: tmp_dir} do
+  test "rejects arbitrary skill files outside cwd", %{tmp_dir: tmp_dir} do
     skill_dir = Path.join(System.tmp_dir!(), "pi_test_skill_#{System.unique_integer([:positive])}")
     File.mkdir_p!(skill_dir)
     skill_path = Path.join(skill_dir, "SKILL.md")
@@ -71,9 +71,7 @@ defmodule Sigma.Coding.Tools.ReadTest do
 
     on_exit(fn -> File.rm_rf!(skill_dir) end)
 
-    assert {:ok, result} = Read.execute("1", %{"path" => skill_path}, cwd: tmp_dir)
-    assert [%{text: text}] = result.content
-    assert text =~ "name: example"
-    assert text =~ "Use this skill."
+    assert {:error, reason} = Read.execute("1", %{"path" => skill_path}, cwd: tmp_dir)
+    assert reason =~ "outside of the current working directory"
   end
 end

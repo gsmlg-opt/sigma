@@ -25,8 +25,8 @@ defmodule Sigma.Session.MixProject do
     [
       {:sigma_protocol, in_umbrella: true},
       {:sigma_agent, in_umbrella: true, only: :test},
+      {:backplane_skill_protocol, "~> 1.7.8"},
       {:jason, "~> 1.4"},
-      {:yaml_elixir, "~> 2.12"},
       {:telemetry, "~> 1.0"}
     ]
   end

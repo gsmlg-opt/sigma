@@ -7,6 +7,7 @@ import { encodeImageFiles } from "./chat_attachments.js"
 import { shouldClearComposer } from "./chat_submission.js"
 import { formatElapsedTime, formatRelativeTime } from "./session_time.js"
 import { SessionTerminals } from "./hooks/session_terminals.js"
+import { filterSkillCandidates, insertSkillCandidate, searchableRemoteSources } from "./skill_completion.js"
 
 import "./duskmoon_elements.js"
 
@@ -292,6 +293,10 @@ const ChatInputHook = {
     this._chatInput = this.el.querySelector('el-dm-chat-input')
     if (!this._chatInput) return
     this._commands = this._parseCommands()
+    this._remoteSources = this._parseRemoteSources()
+    this._remoteCommands = []
+    this._remoteSearchSequence = 0
+    this._remoteSearchQuery = null
     this._submitting = false
     this._filteredCommands = []
     this._activeIndex = 0
@@ -300,6 +305,7 @@ const ChatInputHook = {
     this._buildMenu()
 
     this._keyHandler = (e) => {
+      if (e.isComposing) return
       if (this._menuOpen && SLASH_COMMAND_MENU_KEYS.includes(e.key)) {
         this._handleMenuKey(e)
         return
@@ -315,6 +321,7 @@ const ChatInputHook = {
       this._syncMenu()
     }
     this._editorKeyHandler = (e) => {
+      if (e.isComposing) return
       if (this._menuOpen && SLASH_COMMAND_MENU_KEYS.includes(e.key)) {
         this._handleMenuKey(e)
       }
@@ -342,7 +349,10 @@ const ChatInputHook = {
     })
   },
   updated() {
+    this._commands = this._parseCommands()
+    this._remoteSources = this._parseRemoteSources()
     this._restoreDraft()
+    this._syncMenu()
   },
   reconnected() {
     window.requestAnimationFrame(() => this._restoreDraft())
@@ -357,6 +367,8 @@ const ChatInputHook = {
       this._chatInput.removeEventListener('send', this._sendHandler)
     }
     this._editorObserver?.disconnect()
+    window.clearTimeout(this._remoteSearchTimer)
+    this._remoteSearchAbort?.abort()
     if (this._editorFrame) window.cancelAnimationFrame(this._editorFrame)
     this._clearEditorBindings()
     document.removeEventListener('mousedown', this._clickAwayHandler)
@@ -370,12 +382,23 @@ const ChatInputHook = {
       return DEFAULT_SLASH_COMMANDS
     }
   },
+  _parseRemoteSources() {
+    try {
+      const sources = JSON.parse(this.el.dataset.remoteSources || '[]')
+      return Array.isArray(sources) ? sources : []
+    } catch {
+      return []
+    }
+  },
   _buildMenu() {
     this._menu = document.createElement('div')
     this._menu.className = 'slash-command-menu hidden'
     this._menu.setAttribute('role', 'listbox')
     this._menu.setAttribute('aria-label', 'Slash commands')
-    this.el.appendChild(this._menu)
+    this._ensureMenu()
+  },
+  _ensureMenu() {
+    if (this._menu?.parentNode !== this.el) this.el.appendChild(this._menu)
   },
   _bindEditorEvents() {
     this._clearEditorBindings()
@@ -462,18 +485,25 @@ const ChatInputHook = {
     })
   },
   _syncMenu() {
+    this._ensureMenu()
     const value = this._getValue()
-    const shouldOpen = value.startsWith('/') && !/\s/.test(value)
+    const selectingSkill = value.startsWith('/skill ')
+    const shouldOpen = selectingSkill || (value.startsWith('/') && !/\s/.test(value))
 
     if (!shouldOpen) {
       this._closeMenu()
       return
     }
 
-    const query = value.slice(1).toLowerCase()
-    this._filteredCommands = this._commands.filter((command) => {
-      return command.value.slice(1).toLowerCase().startsWith(query)
-    })
+    if (selectingSkill) {
+      this._queueRemoteSearch(value)
+      this._filteredCommands = filterSkillCandidates([...this._commands, ...this._remoteCommands], value)
+    } else {
+      const query = value.slice(1).toLowerCase()
+      this._filteredCommands = this._commands.filter((command) => {
+        return command.kind !== 'skill' && command.value.slice(1).toLowerCase().startsWith(query)
+      })
+    }
     this._activeIndex = Math.min(this._activeIndex, Math.max(this._filteredCommands.length - 1, 0))
 
     if (this._filteredCommands.length === 0) {
@@ -485,32 +515,50 @@ const ChatInputHook = {
     this._openMenu()
   },
   _renderMenu() {
-    this._menu.innerHTML = this._filteredCommands.map((command, index) => {
-      const active = index === this._activeIndex
-      return `
-        <button
-          type="button"
-          class="slash-command-item ${active ? 'is-active' : ''}"
-          role="option"
-          aria-selected="${active}"
-          data-index="${index}"
-        >
-          <span class="slash-command-label">${command.label || command.value}</span>
-          <span class="slash-command-description">${command.description || ''}</span>
-        </button>
-      `
-    }).join('')
+    this._menu.replaceChildren()
 
-    this._menu.querySelectorAll('.slash-command-item').forEach((item) => {
+    this._filteredCommands.forEach((command, index) => {
+      const item = document.createElement('button')
+      const active = index === this._activeIndex
+      item.type = 'button'
+      item.className = `slash-command-item ${active ? 'is-active' : ''}`
+      item.setAttribute('role', 'option')
+      item.setAttribute('aria-selected', String(active))
+      item.dataset.index = String(index)
+
+      const label = document.createElement('span')
+      label.className = 'slash-command-label'
+      label.textContent = command.label || command.value || command.name || ''
+      item.appendChild(label)
+
+      const description = document.createElement('span')
+      description.className = 'slash-command-description'
+      description.textContent = command.description || ''
+      item.appendChild(description)
+
+      if (command.kind === 'skill') {
+        const metadata = document.createElement('span')
+        metadata.className = 'slash-command-metadata'
+        metadata.textContent = [
+          command.source,
+          command.manual_only ? 'manual' : 'model',
+          command.status,
+          command.argument_hint
+        ].filter(Boolean).join(' · ')
+        item.appendChild(metadata)
+      }
+
       item.addEventListener('mousedown', (e) => {
         e.preventDefault()
         this._selectCommand(Number(item.dataset.index))
       })
+      this._menu.appendChild(item)
     })
 
     this._menu.querySelector('.slash-command-item.is-active')?.scrollIntoView({ block: 'nearest' })
   },
   _handleMenuKey(e) {
+    if (e.isComposing) return
     e.stopPropagation()
 
     if (e.key === 'Escape') {
@@ -548,7 +596,10 @@ const ChatInputHook = {
   _selectCommand(index) {
     const command = this._filteredCommands[index]
     if (!command) return
-    this._setValue(`${command.value} `)
+    const value = command.kind === 'skill'
+      ? insertSkillCandidate(this._getValue(), command)
+      : `${command.value} `
+    this._setValue(value)
     this._closeMenu()
     this._focusInput()
     window.requestAnimationFrame(() => this._focusInput())
@@ -566,6 +617,62 @@ const ChatInputHook = {
   _closeMenu() {
     this._menuOpen = false
     this._menu?.classList.add('hidden')
+  },
+  _queueRemoteSearch(value) {
+    const query = value.slice('/skill '.length).split(/\s/, 1)[0]
+    if (query === this._remoteSearchQuery) return
+
+    this._remoteSearchQuery = query
+    this._remoteCommands = []
+    this._remoteSearchSequence += 1
+    const sequence = this._remoteSearchSequence
+    window.clearTimeout(this._remoteSearchTimer)
+    this._remoteSearchAbort?.abort()
+
+    const sources = searchableRemoteSources(this._remoteSources)
+    const baseUrl = this.el.dataset.remoteSkillsUrl
+    if (!baseUrl || sources.length === 0) return
+
+    this._remoteSearchTimer = window.setTimeout(async () => {
+      const abort = new AbortController()
+      this._remoteSearchAbort = abort
+
+      const requests = sources.map(async (source) => {
+        const sourceId = source.sourceId || source.source_id
+        const url = new URL(baseUrl, window.location.origin)
+        url.searchParams.set('sourceId', sourceId)
+        url.searchParams.set('q', query)
+        url.searchParams.set('limit', '50')
+
+        const response = await fetch(url, { signal: abort.signal, headers: { accept: 'application/json' } })
+        if (!response.ok) return []
+        const body = await response.json()
+        return Array.isArray(body.items) ? body.items : []
+      })
+
+      try {
+        const pages = await Promise.all(requests)
+        if (sequence !== this._remoteSearchSequence) return
+        this._remoteCommands = pages.flat().map((item) => ({
+          kind: 'skill',
+          value: `/skill ${item.reference}`,
+          reference: item.reference,
+          name: item.name,
+          label: item.name,
+          description: item.description,
+          source: item.sourceId,
+          manual_only: item.manualOnly,
+          argument_hint: item.argumentHint,
+          status: item.status
+        }))
+        this._syncMenu()
+      } catch (error) {
+        if (error?.name !== 'AbortError' && sequence === this._remoteSearchSequence) {
+          this._remoteCommands = []
+          this._syncMenu()
+        }
+      }
+    }, 200)
   }
 }
 

@@ -342,6 +342,32 @@ defmodule Sigma.Session.ConfigManager do
     |> disabled_global_skill_names()
   end
 
+  @doc "Returns configured remote Skill sources without resolving credentials."
+  @spec skill_sources() :: [map()]
+  def skill_sources do
+    @settings_file
+    |> load_json(%{})
+    |> Map.get("skillSources", %{})
+    |> normalize_skill_sources()
+  end
+
+  @doc false
+  @spec credential_supplier(binary()) :: (-> binary() | nil)
+  def credential_supplier(credential_id) when is_binary(credential_id) do
+    fn ->
+      case load_json(@auth_file, %{})[credential_id] do
+        %{"type" => "api_key", "key" => key} when is_binary(key) and key != "" -> key
+        _credential -> nil
+      end
+    end
+  end
+
+  @doc false
+  @spec credential_available?(binary()) :: boolean()
+  def credential_available?(credential_id) when is_binary(credential_id) do
+    is_binary(credential_supplier(credential_id).())
+  end
+
   def set_global_skill_enabled(name, enabled?) when is_binary(name) do
     set_global_skills_enabled([name], enabled?)
   end
@@ -478,6 +504,40 @@ defmodule Sigma.Session.ConfigManager do
     do: name |> Atom.to_string() |> String.trim()
 
   defp normalize_skill_name(_), do: ""
+
+  defp normalize_skill_sources(sources) when is_map(sources) do
+    sources
+    |> Enum.flat_map(fn
+      {source_id, %{} = source} when is_binary(source_id) ->
+        case normalize_skill_source(source_id, source) do
+          nil -> []
+          normalized -> [normalized]
+        end
+
+      _ ->
+        []
+    end)
+    |> Enum.sort_by(& &1.source_id)
+  end
+
+  defp normalize_skill_sources(_sources), do: []
+
+  defp normalize_skill_source(source_id, %{"kind" => "backplane"} = source) do
+    name = trim_config_value(source["name"])
+
+    %{
+      source_id: source_id,
+      kind: "backplane",
+      name: if(name == "", do: source_id, else: name),
+      base_url: trim_config_value(source["baseUrl"]),
+      credential_id: trim_config_value(source["credentialId"]),
+      access_context_id: trim_config_value(source["accessContextId"]),
+      enabled?: source["enabled"] != false,
+      offline?: source["offline"] == true
+    }
+  end
+
+  defp normalize_skill_source(_source_id, _source), do: nil
 
   # MCP server configuration
 
@@ -802,7 +862,8 @@ defmodule Sigma.Session.ConfigManager do
 
     with {:ok, default, default_string} <- permission_action(default_value),
          {:ok, rules, string_rules} <- permission_rules(rules_value) do
-      {:ok, %{default: default, rules: rules}, %{"default" => default_string, "rules" => string_rules}}
+      {:ok, %{default: default, rules: rules},
+       %{"default" => default_string, "rules" => string_rules}}
     end
   end
 

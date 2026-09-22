@@ -1,12 +1,19 @@
 # Sigma Skills V1 Contract
 
-Status: frozen S0 contract for implementation in this checkout.
+Status: frozen S0 compatibility contract. `:backplane_skill_protocol ~> 1.7.8`
+is authoritative for new Skill protocol terms.
 
 This document records the first implementation boundary for
 `docs/features/skills/sigma-skills-prd.md`. It is intentionally narrower than
 the complete release gate: local parsing, catalog resolution, activation,
 resource grants, remote reads, publication, and public transports remain
 separate work orders.
+
+New protocol work uses `Backplane.SkillProtocol` v1 for document parsing and
+validation, descriptors and references, resolution, bundle verification, and
+prepared-resource reads. Sigma exposes only its own plain maps at service and
+public boundaries; package structs do not leave `sigma_session`. Sigma retains
+thin Session facades for host policy and stable cross-application maps.
 
 ## Baseline
 
@@ -17,11 +24,15 @@ separate work orders.
 - Supported verification: `mix format --check-formatted`,
   `mix compile --warnings-as-errors`, `mix test`
 
-The implementation now pins `yaml_elixir ~> 2.12` (resolved as 2.12.2, with
+The legacy implementation pins `yaml_elixir ~> 2.12` (resolved as 2.12.2, with
 `yamerl 0.10.0`) behind `Sigma.Session.Skills.Parser`. It discovers `SKILL.md` below
 `~/.agents/skills` and `<workdir>/.agents/skills`. It exposes absolute paths
 internally and uses name-based global disable settings. These are compatibility
-inputs to S1-A/S1-B, not the V1 public identity.
+inputs to the migration, not the V1 public identity.
+
+The package standard validation profile requires an explicit lowercase
+kebab-case `name` and nonempty `description`. Directory-name fallback is not a
+valid new-document interpretation.
 
 `Sigma.Agent.PublicRuntime` and `Sigma.Protocol.Envelope` are the shared
 headless boundary. Protocol V1 currently has no skill command or event types;
@@ -84,19 +95,31 @@ winner does not fall through to a lower-priority source.
 snapshot = %{
   skill_id: binary(),
   source_id: binary(),
-  digest: %{scheme: "sha256-tree-v1" | "sha256-archive", value: binary()},
+  ref: %{
+    source_id: binary(),
+    skill_id: binary(),
+    revision: binary() | nil,
+    artifact_digest: "sha256:" <> lowercase_hex()
+  },
+  digest: "sha256:" <> lowercase_hex(),
   root: internal_path(),
-  manifest: [map()],
+  manifest: map(),
   entry_body: binary(),
-  provenance: map()
+  provenance: map(),
+  ownership: %{operation_root: internal_path(), token: binary()}
 }
 ```
 
-Local snapshots use `sha256-tree-v1`: sorted relative paths, file-byte
-digests, and executable bits. Remote snapshots use `sha256-archive`: the exact
-compressed archive bytes before extraction. The schemes are never compared as
-the same identity. Snapshot roots are trusted internal values and are not
-accepted from model or public request payloads.
+New snapshots use the package `BundleManifest.artifact_digest`: the exact
+compressed archive bytes represented as `sha256:<lowercase-hex>`, with the
+package bundle manifest as the resource inventory. Snapshot roots are trusted
+internal values and are not accepted from model or public request payloads.
+
+The operation ownership fields are internal lifecycle data and are never accepted
+from model or public request payloads. `sha256-tree-v1` is historical Sigma
+persistence only. Existing records remain readable for history, but are never
+replayed or silently resolved to new content, and no new snapshot may use that
+scheme.
 
 ## Invocation contract
 
@@ -186,16 +209,17 @@ requests do not reach the provider.
 
 ## Verified implementation slices
 
-- S1-A parser: `Sigma.Session.Skills.Parser` handles YAML comments, quoted and
+- Historical S1-A parser: `Sigma.Session.Skills.Parser` handles YAML comments, quoted and
   folded values, nested metadata, CRLF, duplicate keys, and supported policy
   type validation. `Sigma.Session.Skills` preserves metadata and argument hints.
 - S1-B local catalog: `Sigma.Session.Skills.Catalog` supplies one revisioned
   repository/global catalog to the current web and headless context builders,
   with repository precedence and qualified `repo:`/`global:` resolution.
-- S1-C local snapshot: `Sigma.Session.Skills.Snapshot.prepare/1` verifies a
-  bounded local tree, rejects symlinks/unsafe entries, captures the entry and
-  manifest, and computes `sha256-tree-v1`. The current Agent turn propagates
-  activated roots to read tools; durable cache retention is still pending.
+- SP-03 immutable preparation: `Sigma.Session.Skills.Snapshot` is a thin facade
+  over package `Bundle.pack/3` and `Bundle.prepare/3`. It returns the exact package
+  ref/digest/manifest and `Document.body_raw` as plain Sigma maps, retries package
+  `source_changed` once, and retains a marker-owned prepared root until release.
+  Historical `sha256-tree-v1` snapshots remain non-replayable records.
 - S2 local entry path: `Sigma.Session.SlashCommands` supports explicit
   `/skill <reference> <arguments>` and unqualified local skill commands with
   one-pass `$ARGUMENTS` expansion. The existing LiveView admission path passes

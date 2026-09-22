@@ -1,5 +1,12 @@
 # Sigma Skills Implementation Plan
 
+> Protocol ownership update (2026-09-22): use
+> [`backplane-skill-protocol-migration-plan.md`](backplane-skill-protocol-migration-plan.md)
+> for parser, validation, discovery, resolution, bundle preparation, resource reads,
+> and Backplane read-client work. It supersedes the hand-written protocol portions
+> of S1-A, S1-B, S1-C, and S4; the remaining product/UI/invocation requirements in
+> this document continue to apply unless the migration plan explicitly amends them.
+
 | Item | Value |
 | --- | --- |
 | Status | Ready for implementation planning; all implementation tasks below are not started |

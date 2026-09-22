@@ -59,6 +59,7 @@ defmodule Sigma.Protocol.CodecTest do
   test "publishes the closed protocol capability set" do
     assert Envelope.capabilities() == [
              "metrics.v1",
+             "skills.v1",
              "subscription.cursor.v1",
              "subscription.resync.v1"
            ]

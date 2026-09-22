@@ -2,6 +2,7 @@ defmodule Sigma.Web.ProjectSkillsLive do
   use Sigma.Web, :live_view
 
   alias Sigma.Session.{RepoManager, Skills}
+  alias Sigma.Session.Skills.Facade
   import Sigma.Web.ProjectSidebar
 
   @impl true
@@ -36,6 +37,7 @@ defmodule Sigma.Web.ProjectSkillsLive do
      |> assign(:project_skill_total, results |> Map.get(:project) |> count_skills())
      |> assign(:global_skill_count, results |> Map.get(:global) |> count_enabled_skills())
      |> assign(:global_skill_total, results |> Map.get(:global) |> count_skills())
+     |> assign(:remote_skill_sources, Facade.remote_sources())
      |> assign(:skills_result, Map.fetch!(results, tab))}
   end
 
@@ -87,6 +89,17 @@ defmodule Sigma.Web.ProjectSkillsLive do
 
           <.project_skills_tab_content {assigns} />
 
+          <div :if={@remote_skill_sources != []} id="remote-skill-sources" class="mt-6 border-t border-outline-variant pt-4">
+            <h2 class="text-sm font-bold text-on-surface">Remote sources</h2>
+            <ul class="mt-2 space-y-1 text-sm text-on-surface-variant">
+              <li :for={source <- @remote_skill_sources}>
+                <span class="font-medium text-on-surface">{source.name}</span>
+                <span class="font-mono text-xs">{source.source_id}</span>
+                <span>{source.status}</span>
+              </li>
+            </ul>
+          </div>
+
           <div
             :if={!Enum.empty?(@skills_result.diagnostics)}
             class="mt-4 rounded-2xl border border-warning/30 bg-warning/10 p-4 text-warning"
@@ -97,7 +110,7 @@ defmodule Sigma.Web.ProjectSkillsLive do
             </div>
             <ul class="space-y-1 text-sm">
               <li :for={diagnostic <- @skills_result.diagnostics}>
-                <code class="font-mono break-all">{diagnostic.path}</code>: {diagnostic.message}
+                {diagnostic.message}
               </li>
             </ul>
           </div>
@@ -113,8 +126,7 @@ defmodule Sigma.Web.ProjectSkillsLive do
     ~H"""
     <div class="space-y-6">
       <p class="text-sm text-on-surface-variant">
-        Global skills from <code class="font-mono">{@skills_result.dir}</code>. Switches here
-        override availability for this project only — use
+        Global skills available to this repository. Switches here override availability for this project only — use
         <.dm_link navigate={~p"/settings/skills"} class="link link-primary">
           Settings → Skills
         </.dm_link>
@@ -132,8 +144,7 @@ defmodule Sigma.Web.ProjectSkillsLive do
     ~H"""
     <div class="space-y-6">
       <p class="text-sm text-on-surface-variant">
-        Skills discovered in <code class="font-mono">{@skills_result.dir}</code>. All skills are
-        enabled by default; toggles write this project's disabled list.
+        Repository skills are enabled by default; toggles write this project's disabled list.
       </p>
       <.skills_toolbar {assigns} />
       <.skills_table {assigns} />
@@ -154,7 +165,7 @@ defmodule Sigma.Web.ProjectSkillsLive do
           name="skills[query]"
           label="Search"
           value={@query}
-          placeholder="Name, description, or path"
+          placeholder="Name, description, or source"
           phx-debounce="200"
         />
       </form>
@@ -255,7 +266,7 @@ defmodule Sigma.Web.ProjectSkillsLive do
             <th role="columnheader" scope="col" class="settings-skills-description-cell">
               Description
             </th>
-            <th role="columnheader" scope="col" class="min-w-96">Path</th>
+            <th role="columnheader" scope="col" class="min-w-96">Source</th>
           </tr>
         </thead>
         <tbody role="row-group">
@@ -338,9 +349,9 @@ defmodule Sigma.Web.ProjectSkillsLive do
                 </p>
               </.dm_popover>
             </td>
-            <td data-label="Path" role="cell" class="min-w-96">
+            <td data-label="Source" role="cell" class="min-w-96">
               <code class="block text-[11px] font-mono text-on-surface-variant break-all">
-                {skill.path}
+                {skill.source_id}
               </code>
             </td>
           </tr>
@@ -516,7 +527,7 @@ defmodule Sigma.Web.ProjectSkillsLive do
     [
       skill.name,
       skill.description,
-      skill.path,
+      skill.source_id,
       if(skill.enabled?, do: "enabled", else: "disabled"),
       if(skill.disable_model_invocation?, do: "manual", else: "model")
     ]

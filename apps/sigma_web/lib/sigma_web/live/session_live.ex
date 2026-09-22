@@ -5,8 +5,9 @@ defmodule Sigma.Web.SessionLive do
   alias Sigma.Session.ConfigManager
   alias Sigma.Session.RepoManager
   alias Sigma.Session.SessionFiles
+  alias Sigma.Session.SkillExpander
   alias Sigma.Session.Skills
-  alias Sigma.Session.SlashCommands
+  alias Sigma.Session.Skills.Facade
   alias Sigma.Web.ImageAttachments
   alias Sigma.Web.Session.TerminalBinding
   alias Sigma.Web.SessionObservability
@@ -618,6 +619,10 @@ defmodule Sigma.Web.SessionLive do
             phx-hook="ChatInputHook"
             data-slash-commands={
               Jason.encode!(slash_commands(assigns[:effective_cwd]))
+            }
+            data-remote-sources={Jason.encode!(Facade.remote_sources())}
+            data-remote-skills-url={
+              ~p"/api/v1/skills?repositoryId=#{@encoded_repository}&view=remote"
             }
             class="relative mx-auto max-w-4xl"
           >
@@ -1744,7 +1749,13 @@ defmodule Sigma.Web.SessionLive do
     |> Enum.find("", &(&1 != ""))
   end
 
-  defp submit_prompt(socket, prompt) do
+  defp submit_prompt(socket, %{content: content, prepared_resources: resources}) do
+    submit_prompt(socket, content, prepared_resources: resources)
+  end
+
+  defp submit_prompt(socket, prompt), do: submit_prompt(socket, prompt, [])
+
+  defp submit_prompt(socket, prompt, prompt_opts) do
     agent = socket.assigns.agent
 
     with {:ok, command} <-
@@ -1756,6 +1767,7 @@ defmodule Sigma.Web.SessionLive do
              repo_path: socket.assigns.workdir,
              sessions_dir: socket.assigns.sessions_dir,
              interactive_approvals: true,
+             prompt_opts: prompt_opts,
              question_resolver: fn request, tool_opts ->
                Sigma.Agent.ask_user_question(agent, request, tool_opts)
              end
@@ -2614,7 +2626,7 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp handle_prompt(prompt, socket) do
-    case SlashCommands.expand(prompt, cwd: socket.assigns.effective_cwd) do
+    case SkillExpander.expand(prompt, cwd: socket.assigns.effective_cwd) do
       :not_command ->
         prompt_admission(socket, submit_prompt(socket, prompt))
 
@@ -3969,7 +3981,7 @@ defmodule Sigma.Web.SessionLive do
   defp logs_topic(repo_key, session_id), do: "sigma:logs:#{repo_key}:#{session_id}"
 
   defp session_skills_context(effective_cwd) do
-    Skills.Catalog.build(effective_cwd).skills
+    effective_cwd |> Skills.Catalog.build() |> Skills.Catalog.automatic()
   end
 
   defp slash_commands(cwd) do
@@ -3985,11 +3997,22 @@ defmodule Sigma.Web.SessionLive do
     skills =
       cwd
       |> Kernel.||(".")
-      |> Skills.Catalog.build()
-      |> Map.get(:skills, [])
+      |> Facade.catalog()
+      |> Map.fetch!(:items)
       |> Enum.filter(& &1.enabled?)
       |> Enum.map(fn skill ->
-        %{value: "/#{skill.name}", label: "/#{skill.name}", description: skill.description}
+        %{
+          kind: "skill",
+          value: "/skill #{skill.reference}",
+          reference: skill.reference,
+          name: skill.name,
+          label: skill.name,
+          description: skill.description,
+          source: skill.source_kind,
+          manual_only: skill.manual_only?,
+          argument_hint: skill.argument_hint,
+          status: skill.status
+        }
       end)
 
     builtins ++ skills

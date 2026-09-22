@@ -6,7 +6,7 @@ defmodule Sigma.Web.SessionChannel do
   alias Sigma.Agent.{ProtocolSubscription, PublicRuntime}
   alias Sigma.Protocol.{Codec, Envelope, Error}
   alias Sigma.Session.SessionFiles
-  alias Sigma.Session.{SkillInvocationStore, SlashCommands}
+  alias Sigma.Session.{SkillExpander, SkillInvocationStore}
 
   @impl true
   def join("session:" <> session_id, _payload, socket) do
@@ -72,15 +72,22 @@ defmodule Sigma.Web.SessionChannel do
         find: fn session_id, request_key ->
           SkillInvocationStore.find(socket.assigns.sessions_dir, session_id, request_key)
         end,
-        list: fn session_id -> SkillInvocationStore.list(socket.assigns.sessions_dir, session_id) end,
+        list: fn session_id ->
+          SkillInvocationStore.list(socket.assigns.sessions_dir, session_id)
+        end,
         reserve: fn session_id, record ->
           SkillInvocationStore.reserve(socket.assigns.sessions_dir, session_id, record)
         end,
         update: fn session_id, invocation_id, changes ->
-          SkillInvocationStore.update(socket.assigns.sessions_dir, session_id, invocation_id, changes)
+          SkillInvocationStore.update(
+            socket.assigns.sessions_dir,
+            session_id,
+            invocation_id,
+            changes
+          )
         end
       },
-      skill_expander: &SlashCommands.expand/2
+      skill_expander: &SkillExpander.expand/2
     }
 
     context = Map.merge(context, Sigma.Agent.SkillInvocationService.callbacks(context))
@@ -91,8 +98,12 @@ defmodule Sigma.Web.SessionChannel do
 
   defp protocol_session_opts(socket) do
     case Application.get_env(:sigma_web, :protocol_session_opts) do
-      opts when is_list(opts) -> opts
-      resolver when is_function(resolver, 1) -> resolver
+      opts when is_list(opts) ->
+        opts
+
+      resolver when is_function(resolver, 1) ->
+        resolver
+
       _opts ->
         fn snapshot ->
           Sigma.Web.ProtocolSessionOptions.resolve(
@@ -139,12 +150,18 @@ defmodule Sigma.Web.SessionChannel do
   end
 
   defp push_encode_error(socket, reason) do
-    error = Error.new("envelope_encode_failed", "The protocol response exceeded transport bounds.")
+    error =
+      Error.new("envelope_encode_failed", "The protocol response exceeded transport bounds.")
 
     {:ok, event} =
-      Envelope.event("session.error", socket.assigns.session_id, %{
-        "reason" => if(is_atom(reason), do: Atom.to_string(reason), else: "encoding_failed")
-      }, error: error)
+      Envelope.event(
+        "session.error",
+        socket.assigns.session_id,
+        %{
+          "reason" => if(is_atom(reason), do: Atom.to_string(reason), else: "encoding_failed")
+        },
+        error: error
+      )
 
     {:ok, encoded} = Codec.encode(event)
     push(socket, "event", %{"data" => encoded})

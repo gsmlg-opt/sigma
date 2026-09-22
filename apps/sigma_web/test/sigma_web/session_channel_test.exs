@@ -16,7 +16,12 @@ defmodule Sigma.Web.SessionChannelTest do
     def stream(params) do
       response = Keyword.get(params.options, :response, "channel response")
       message = message(response)
-      [{:start, %{message | content: []}}, {:text_delta, 0, response, message}, {:done, :stop, message}]
+
+      [
+        {:start, %{message | content: []}},
+        {:text_delta, 0, response, message},
+        {:done, :stop, message}
+      ]
     end
 
     def message(text) do
@@ -90,13 +95,11 @@ defmodule Sigma.Web.SessionChannelTest do
         Application.delete_env(:sigma_session, :agent_dir)
       end
 
-
       if previous_protocol_token do
         Application.put_env(:sigma_web, :protocol_token, previous_protocol_token)
       else
         Application.delete_env(:sigma_web, :protocol_token)
       end
-
 
       if previous_mock_provider do
         Application.put_env(:sigma_web, :mock_provider_module, previous_mock_provider)
@@ -129,7 +132,7 @@ defmodule Sigma.Web.SessionChannelTest do
 
     Process.unlink(socket.channel_pid)
     leave_ref = leave(socket)
-    assert_reply leave_ref, :ok
+    assert_reply(leave_ref, :ok)
 
     reconnected = join_session!(context, session_id)
     push_command(reconnected, command!("session.status", session_id))
@@ -138,7 +141,8 @@ defmodule Sigma.Web.SessionChannelTest do
              receive_type("session.snapshot")
   end
 
-  test "WebSocket disconnect does not cancel a turn and a reconnected client can cancel explicitly", context do
+  test "WebSocket disconnect does not cancel a turn and a reconnected client can cancel explicitly",
+       context do
     session_id = "websocket-cancel"
 
     create_session!(context, session_id,
@@ -154,7 +158,8 @@ defmodule Sigma.Web.SessionChannelTest do
 
     Process.unlink(socket.channel_pid)
     leave_ref = leave(socket)
-    assert_reply leave_ref, :ok
+    assert_reply(leave_ref, :ok)
+
     assert %{phase: :streaming_provider} =
              Sigma.Agent.status(Sigma.Agent.Runtime.lookup(context.repo, session_id, :agent))
 
@@ -169,7 +174,7 @@ defmodule Sigma.Web.SessionChannelTest do
            } = receive_type("session.snapshot")
 
     assert %{type: "turn.cancelled"} = receive_type("turn.cancelled")
-    refute_push "event", _payload, 50
+    refute_push("event", _payload, 50)
   end
 
   test "WebSocket rejects missing or incorrect capability tokens", context do
@@ -200,6 +205,83 @@ defmodule Sigma.Web.SessionChannelTest do
     push_command(socket, command!("prompt.submit", session_id, %{"content" => "resumed"}))
     assert %{payload: %{"status" => "accepted"}} = receive_type("prompt.admitted")
     assert List.last(receive_until("turn.completed", [])).type == "turn.completed"
+  end
+
+  test "WebSocket dispatches negotiated Skill invoke, status, and cancel through the shared service",
+       context do
+    session_id = "websocket-skill-commands"
+    invocation_id = "invocation-websocket-cancel"
+    skill_dir = Path.join([context.repo, ".agents", "skills", "review"])
+    File.mkdir_p!(skill_dir)
+
+    File.write!(
+      Path.join(skill_dir, "SKILL.md"),
+      "---\nname: review\ndescription: Review code\n---\nReview $ARGUMENTS"
+    )
+
+    create_session!(context, session_id, provider: ChannelProvider)
+
+    assert {:ok, _record} =
+             Sigma.Session.SkillInvocationStore.reserve(context.sessions_dir, session_id, %{
+               "invocationId" => invocation_id,
+               "requestKey" => "request-websocket",
+               "fingerprint" => "fingerprint",
+               "state" => "preparing"
+             })
+
+    socket = join_session!(context, session_id)
+
+    push_command(
+      socket,
+      command!("skill.invoke", session_id, %{
+        "requiredCapabilities" => ["skills.v1"],
+        "repositoryId" => "repo-websocket",
+        "requestKey" => "request-websocket-invoke",
+        "reference" => "repo:review",
+        "arguments" => "lib/example.ex"
+      })
+    )
+
+    assert %{payload: invoke_payload} = receive_type("skill.invocation.updated")
+    assert "sha256:" <> _digest = invoke_payload["artifactDigest"]
+    assert invoke_payload["resolvedRef"]["artifact_digest"] == invoke_payload["artifactDigest"]
+    assert invoke_payload["resolvedRef"]["source_id"] =~ "repo-"
+
+    push_command(
+      socket,
+      command!("skill.invocation.status", session_id, %{
+        "requiredCapabilities" => ["skills.v1"],
+        "invocationId" => invocation_id
+      })
+    )
+
+    assert %{
+             type: "skill.invocation.updated",
+             payload: %{"invocationId" => ^invocation_id, "state" => "preparing"}
+           } = receive_type("skill.invocation.updated")
+
+    push_command(
+      socket,
+      command!("skill.invocation.cancel", session_id, %{
+        "requiredCapabilities" => ["skills.v1"],
+        "invocationId" => invocation_id
+      })
+    )
+
+    assert %{payload: %{"invocationId" => ^invocation_id, "state" => "cancelled"}} =
+             receive_type("skill.invocation.updated")
+
+    push_command(
+      socket,
+      command!("skill.invoke", session_id, %{
+        "repositoryId" => "repo-websocket",
+        "requestKey" => "legacy-request",
+        "reference" => "repo:review"
+      })
+    )
+
+    assert %{type: "session.error", error: %{code: "required_capability_missing"}} =
+             receive_type("session.error")
   end
 
   defp create_session!(context, session_id, opts) do
@@ -249,7 +331,7 @@ defmodule Sigma.Web.SessionChannelTest do
   end
 
   defp receive_type(type) do
-    assert_push "event", %{"data" => encoded}, 1_000
+    assert_push("event", %{"data" => encoded}, 1_000)
     assert {:ok, event} = Codec.decode(encoded)
     if event.type == type, do: event, else: receive_type(type)
   end
@@ -261,7 +343,7 @@ defmodule Sigma.Web.SessionChannelTest do
   end
 
   defp receive_type_any do
-    assert_push "event", %{"data" => encoded}, 1_000
+    assert_push("event", %{"data" => encoded}, 1_000)
     assert {:ok, event} = Codec.decode(encoded)
     event
   end

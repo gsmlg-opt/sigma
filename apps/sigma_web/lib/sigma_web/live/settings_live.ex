@@ -3,6 +3,7 @@ defmodule Sigma.Web.SettingsLive do
 
   alias Sigma.Agent.ContextBuilder
   alias Sigma.Session.{ConfigManager, Skills}
+  alias Sigma.Session.Skills.Facade
   alias Phoenix.LiveView.AsyncResult
 
   @credential_ref_regex ~r/^\{\{credential:([^}]+)\}\}$/
@@ -825,8 +826,19 @@ defmodule Sigma.Web.SettingsLive do
       <div class="flex justify-between items-center text-on-surface">
         <div>
           <h2 class="text-2xl font-bold font-display">Skills</h2>
-          <p class="text-sm text-on-surface-variant font-mono mt-1">{@result.dir}</p>
+          <p class="text-sm text-on-surface-variant mt-1">Globally available Skills</p>
         </div>
+      </div>
+
+      <div :if={Map.get(@result, :remote_sources, []) != []} id="settings-remote-skill-sources" class="border-y border-outline-variant py-4">
+        <h3 class="text-sm font-bold text-on-surface">Remote sources</h3>
+        <ul class="mt-2 space-y-1 text-sm text-on-surface-variant">
+          <li :for={source <- @result.remote_sources}>
+            <span class="font-medium text-on-surface">{source.name}</span>
+            <span class="font-mono text-xs">{source.source_id}</span>
+            <span>{source.status}</span>
+          </li>
+        </ul>
       </div>
 
       <div
@@ -840,7 +852,7 @@ defmodule Sigma.Web.SettingsLive do
             name="skills[query]"
             label="Search"
             value={@query}
-            placeholder="Name, description, or path"
+            placeholder="Name, description, or source"
             phx-debounce="200"
           />
         </form>
@@ -939,7 +951,7 @@ defmodule Sigma.Web.SettingsLive do
               >
                 Description
               </th>
-              <th role="columnheader" scope="col" class="min-w-96">Path</th>
+              <th role="columnheader" scope="col" class="min-w-96">Source</th>
             </tr>
           </thead>
           <tbody role="row-group">
@@ -1026,9 +1038,9 @@ defmodule Sigma.Web.SettingsLive do
                   </p>
                 </.dm_popover>
               </td>
-              <td data-label="Path" role="cell" class="min-w-96">
+              <td data-label="Source" role="cell" class="min-w-96">
                 <code class="block text-[11px] font-mono text-on-surface-variant break-all">
-                  {skill.path}
+                  {skill.source_id}
                 </code>
               </td>
             </tr>
@@ -1043,7 +1055,7 @@ defmodule Sigma.Web.SettingsLive do
         </div>
         <ul class="space-y-1 text-sm">
           <li :for={diagnostic <- @result.diagnostics}>
-            <code class="font-mono break-all">{diagnostic.path}</code>: {diagnostic.message}
+            {diagnostic.message}
           </li>
         </ul>
       </div>
@@ -2002,7 +2014,9 @@ defmodule Sigma.Web.SettingsLive do
     }
   end
 
-  defp load_settings_data(:skills), do: Skills.list_global()
+  defp load_settings_data(:skills) do
+    Skills.list_global() |> Map.put(:remote_sources, Facade.remote_sources())
+  end
 
   defp load_settings_data(:mcp) do
     config = ConfigManager.get_config()
@@ -2069,7 +2083,7 @@ defmodule Sigma.Web.SettingsLive do
     [
       skill.name,
       skill.description,
-      skill.path,
+      skill.source_id,
       if(skill.enabled?, do: "enabled", else: "disabled"),
       if(skill.disable_model_invocation?, do: "manual", else: "model")
     ]
@@ -2150,7 +2164,11 @@ defmodule Sigma.Web.SettingsLive do
   end
 
   defp provider_api_options do
-    [{"anthropic", "Anthropic"}, {"openai", "OpenAI Responses"}, {"openai-completions", "OpenAI Chat Completions"}]
+    [
+      {"anthropic", "Anthropic"},
+      {"openai", "OpenAI Responses"},
+      {"openai-completions", "OpenAI Chat Completions"}
+    ]
   end
 
   defp provider_auth_type_options do
@@ -2264,7 +2282,9 @@ defmodule Sigma.Web.SettingsLive do
     )
   end
 
-  defp default_auth_type(api_type) when api_type in ["openai", "openai-responses", "openai-completions"], do: "bearer"
+  defp default_auth_type(api_type)
+       when api_type in ["openai", "openai-responses", "openai-completions"], do: "bearer"
+
   defp default_auth_type(_api_type), do: "x-api-key"
 
   defp maybe_update_default_auth_type(current_form, params) do
