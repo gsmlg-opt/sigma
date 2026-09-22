@@ -85,6 +85,7 @@ defmodule Sigma.Agent.Backplane.Engine do
     Enum.reduce_while(state.tools, {:ok, %ToolRegistry{}}, fn tool, {:ok, registry} ->
       schema = Tool.schema(tool)
 
+      # TODO(upstream): gsmlg-opt/backplane#36
       case InputSchema.validate(schema, %{}) do
         {:error, %Error{class: :unsupported_capability} = error} ->
           {:halt, {:error, error}}
