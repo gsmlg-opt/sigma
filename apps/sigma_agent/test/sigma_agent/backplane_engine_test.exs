@@ -82,6 +82,37 @@ defmodule Sigma.Agent.BackplaneEngineTest do
     end
   end
 
+  defmodule DefaultSchemaTool do
+    @behaviour Sigma.Coding.Tool
+
+    @impl true
+    def name, do: "backplane_default_schema"
+
+    @impl true
+    def description, do: "Exercises an optional schema default"
+
+    @impl true
+    def schema do
+      %{
+        "type" => "object",
+        "required" => ["path"],
+        "properties" => %{
+          "path" => %{"type" => "string"},
+          "mode" => %{"type" => "string", "default" => "safe"}
+        }
+      }
+    end
+
+    @impl true
+    def execute(_id, %{"path" => path} = arguments, _opts) when map_size(arguments) == 1 do
+      :ok = File.write(path, "default schema")
+      {:ok, %{content: [%{type: :text, text: "ok"}], details: %{path: path}}}
+    end
+
+    def execute(_id, arguments, _opts),
+      do: raise("unexpected default insertion: #{inspect(arguments)}")
+  end
+
   defmodule BlockingProvider do
     @behaviour Sigma.Ai.Provider
 
@@ -236,6 +267,41 @@ defmodule Sigma.Agent.BackplaneEngineTest do
     assert_receive {:agent_end, _}, 5_000
     refute_receive {:backplane_provider_waiting, _, _}
     assert Sigma.Agent.status(agent).phase == :failed
+  end
+
+  @tag :tmp_dir
+  test "optional schema defaults permit a provider and tool turn without argument insertion", %{
+    tmp_dir: dir
+  } do
+    output_path = Path.join(dir, "default-schema.txt")
+
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        session_id: "backplane-default-schema-test",
+        execution_engine: :backplane,
+        backplane_runtime_path: Path.join(dir, "runtime"),
+        model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+        provider: ToolProvider,
+        tools: [DefaultSchemaTool],
+        options: [
+          test_pid: self(),
+          path: output_path,
+          tool_call: %{
+            type: :tool_call,
+            id: "default-1",
+            name: "backplane_default_schema",
+            arguments: %{"path" => output_path}
+          }
+        ]
+      )
+
+    Sigma.Agent.subscribe(agent)
+    assert {:accepted, _} = Sigma.Agent.prompt(agent, "write it")
+    assert_receive {:backplane_provider, _}, 5_000
+    assert_receive {:tool_execution_end, "default-1", "backplane_default_schema", _, false}, 5_000
+    assert_receive {:agent_end, _}, 5_000
+    assert File.read!(output_path) == "default schema"
+    assert Sigma.Agent.status(agent).phase == :completed
   end
 
   @tag :tmp_dir
