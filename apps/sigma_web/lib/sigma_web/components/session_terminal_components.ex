@@ -61,11 +61,32 @@ defmodule Sigma.Web.SessionTerminalComponents do
       aria-label="Session terminals"
     >
       <div class="sigma-terminal-toolbar">
-        <div class="sigma-terminal-title">
+        <div class="sigma-terminal-title" title={catalog_title(@catalog)}>
           <.dm_mdi name="console-line" class="h-4 w-4" />
-          <span>Terminals</span>
-          <span class="sigma-terminal-summary" role="status">{catalog_title(@catalog)}</span>
+          <span :if={@entries == []}>Terminals</span>
+          <span class="sr-only" role="status">{catalog_title(@catalog)}</span>
         </div>
+        <div :if={not @unavailable?} class="sigma-terminal-tabbar" role="tablist" aria-label="Terminal tabs">
+          <button
+            :for={entry <- @entries}
+            id={tab_id(entry)}
+            class={tab_class(entry, @selected_id)}
+            type="button"
+            role="tab"
+            title={value(entry, :label, "Terminal")}
+            aria-selected={to_string(selected?(entry, @selected_id))}
+            aria-controls={panel_id(entry)}
+            tabindex={if selected?(entry, @selected_id), do: "0", else: "-1"}
+            data-terminal-id={value(entry, :terminal_id)}
+            data-terminal-generation={value(entry, :generation)}
+          >
+            <span class={"sigma-terminal-state is-#{state(entry)}"} aria-hidden="true"></span>
+            <span class="sigma-terminal-tab-label">{value(entry, :label, "Terminal")}</span>
+            <span :if={value(entry, :unread?) == true} class="sigma-terminal-unread" aria-label="Unread terminal output">new</span>
+            <span class="sr-only">{state_label(entry)}. {control_label(entry)}. {exit_label(entry)}</span>
+          </button>
+        </div>
+        <.terminal_icon_button :if={not @unavailable?} id="session-terminal-create-btn" event="terminal_create" label="Create terminal" icon="plus" />
         <div class="sigma-terminal-actions">
           <.terminal_icon_button id="session-terminal-height-btn" label="Adjust terminal height, current automatic" icon="arrow-expand-vertical" action="height" action_value="automatic" />
           <.terminal_icon_button id="session-terminal-maximize-btn" label="Maximize terminal" icon="arrow-expand-all" action="maximize" action_value="restored" pressed="false" />
@@ -76,27 +97,6 @@ defmodule Sigma.Web.SessionTerminalComponents do
       <p :if={@unavailable?} class="sigma-terminal-notice is-error" role="status">
         {unavailable_message(@catalog)}
       </p>
-
-      <div :if={not @unavailable?} class="sigma-terminal-tabbar" role="tablist" aria-label="Terminal tabs">
-        <button
-          :for={entry <- @entries}
-          id={tab_id(entry)}
-          class={tab_class(entry, @selected_id)}
-          type="button"
-          role="tab"
-          aria-selected={to_string(selected?(entry, @selected_id))}
-          aria-controls={panel_id(entry)}
-          tabindex={if selected?(entry, @selected_id), do: "0", else: "-1"}
-          data-terminal-id={value(entry, :terminal_id)}
-          data-terminal-generation={value(entry, :generation)}
-        >
-          <span class={"sigma-terminal-state is-#{state(entry)}"} aria-hidden="true"></span>
-          <span class="sigma-terminal-tab-label">{value(entry, :label, "Terminal")}</span>
-          <span :if={value(entry, :unread?) == true} class="sigma-terminal-unread" aria-label="Unread terminal output">new</span>
-          <span class="sr-only">{state_label(entry)}. {control_label(entry)}. {exit_label(entry)}</span>
-        </button>
-        <.terminal_icon_button id="session-terminal-create-btn" event="terminal_create" label="Create terminal" icon="plus" />
-      </div>
 
       <div :if={not @unavailable? and @entries == []} class="sigma-terminal-empty">
         <p>No retained terminals.</p>
@@ -170,10 +170,13 @@ defmodule Sigma.Web.SessionTerminalComponents do
               </p>
             </form>
             <div :if={not renaming?(entry)} class="sigma-terminal-run-identity">
-              <strong>{value(entry, :label, "Terminal")}</strong>
-              <span class="sigma-terminal-meta">{state_label(entry)} | {control_label(entry)} | {exit_label(entry)}</span>
+              <span class="sigma-terminal-meta" title={control_label(entry)}>
+                {state_label(entry)}
+                <span :if={value(entry, :controller?) != true}> · Read only</span>
+                <span :if={is_integer(value(entry, :exit_status))}> · {exit_label(entry)}</span>
+              </span>
               <span :if={value(entry, :startup_directory)} class="sigma-terminal-path" title={value(entry, :startup_directory)}>
-                started in {value(entry, :startup_directory)}
+                {value(entry, :startup_directory)}
               </span>
             </div>
           </div>
@@ -206,7 +209,8 @@ defmodule Sigma.Web.SessionTerminalComponents do
   defp terminal_icon_button(assigns) do
     # WORKAROUND(upstream): duskmoon-dev/phoenix-duskmoon-ui#165
     # Confirm buttons render as native buttons; forwarding this hook creates an id-less hooked action.
-    assigns = assign(assigns, :web_component_hook, if(assigns.confirm == "", do: "WebComponentHook"))
+    assigns =
+      assign(assigns, :web_component_hook, if(assigns.confirm == "", do: "WebComponentHook"))
 
     ~H"""
     <.dm_btn id={@id} type="button" phx-click={@event} phx-value-terminal_id={@value} phx-hook={@web_component_hook} data-terminal-action={@action} data-terminal-action-value={@action_value} variant="ghost" size="xs" shape="square" aria-label={@label} aria-pressed={@pressed} title={@label} confirm={@confirm} confirm_title="Confirm terminal action">

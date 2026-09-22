@@ -142,6 +142,43 @@ describe("session terminal authority and rendering", () => {
     expect(selections).toEqual(["terminal-2"])
   })
 
+  test("reveals a server-selected tab through the tabbar without vertical scrolling", () => {
+    const tabbar = {
+      scrollLeft: 0,
+      scrollTop: 17,
+      getBoundingClientRect: () => ({ left: 300, right: 400, width: 100 })
+    }
+    const tab = (terminalId, offsetLeft, rect) => ({
+      dataset: { terminalId },
+      offsetLeft,
+      tabIndex: -1,
+      setAttribute() {},
+      classList: { toggle() {} },
+      closest: (selector) => selector === ".sigma-terminal-tabbar" ? tabbar : null,
+      getBoundingClientRect: () => rect,
+      scrollIntoView: () => { throw new Error("the session viewport must not scroll") }
+    })
+    const tabs = [
+      tab("terminal-1", 300, { left: 300, right: 370, width: 70 }),
+      tab("terminal-2", 420, { left: 420, right: 490, width: 70 })
+    ]
+    const context = {
+      presentation: presentation({ selectedId: "terminal-2" }),
+      el: {
+        classList: { toggle() {} },
+        style: { removeProperty() {} },
+        querySelector: () => null,
+        querySelectorAll: (selector) => selector.includes('role="tab"') ? tabs : []
+      },
+      updatePresentationControls() {}
+    }
+
+    SessionTerminals.applyPresentation.call(context)
+
+    expect(tabbar.scrollLeft).toBe(90)
+    expect(tabbar.scrollTop).toBe(17)
+  })
+
   test("renders a visible observer at confirmed canonical dimensions without fitting its viewport", () => {
     let fits = 0
     const sizes = []

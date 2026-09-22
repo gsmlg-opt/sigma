@@ -348,9 +348,25 @@ export const SessionTerminals = {
       tab.classList.toggle("has-unread", this.presentation.unread[tab.dataset.terminalId] === true)
     })
 
+    SessionTerminals.revealSelectedTab.call(this, validSelection || tabs[0])
+
     this.el.querySelectorAll("[role=tabpanel][data-terminal-id]").forEach((panel) => {
       panel.hidden = panel.dataset.terminalId !== this.presentation.selectedId
     })
+  },
+  revealSelectedTab(tab) {
+    if (!this.presentation.panelOpen || !tab) return
+
+    const tabbar = tab.closest?.(".sigma-terminal-tabbar")
+    const tabRect = tab.getBoundingClientRect?.()
+    const tabbarRect = tabbar?.getBoundingClientRect?.()
+    if (!tabbar || !tabRect || !tabbarRect || tabbarRect.width <= 0) return
+
+    if (tabRect.width >= tabbarRect.width || tabRect.left < tabbarRect.left) {
+      tabbar.scrollLeft = Math.max(0, tabbar.scrollLeft + tabRect.left - tabbarRect.left)
+    } else if (tabRect.right > tabbarRect.right) {
+      tabbar.scrollLeft += tabRect.right - tabbarRect.right
+    }
   },
   updatePresentationControls() {
     const state = presentationControlState(this.presentation)
