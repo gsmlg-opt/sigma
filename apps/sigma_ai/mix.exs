@@ -24,6 +24,7 @@ defmodule Sigma.Ai.MixProject do
 
   defp deps do
     [
+      {:backplane_ai_protocol, "~> 1.6"},
       {:req, "~> 0.5"},
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.0"}

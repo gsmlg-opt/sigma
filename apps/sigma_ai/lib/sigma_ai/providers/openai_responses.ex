@@ -1,7 +1,8 @@
 defmodule Sigma.Ai.Providers.OpenAIResponses do
   @behaviour Sigma.Ai.Provider
 
-  alias Sigma.Ai.{ProviderAuth, ProviderCapabilities, ProviderError, ProviderRequest, Stream}
+  alias Backplane.AiProtocol.{Request, Serialization, SSE}
+  alias Sigma.Ai.{ProviderAuth, ProviderCapabilities, ProviderError, ProviderRequest}
 
   @impl true
   def stream_normalized(%ProviderRequest{} = request),
@@ -53,6 +54,11 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     # Add tools if present
     body =
       if context[:tools], do: Map.put(body, :tools, transform_tools(context.tools)), else: body
+
+    case protocol_request(model, context) do
+      {:ok, _request} -> :ok
+      {:error, error} -> raise ArgumentError, "Invalid AI protocol request: #{error.message}"
+    end
 
     headers =
       [
@@ -110,8 +116,10 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
         resp =
           try do
+            {:ok, encoded_body} = Serialization.to_json(body)
+
             Req.post!(base_url <> "/responses",
-              json: body,
+              body: encoded_body,
               headers: headers,
               receive_timeout: options[:receive_timeout] || 120_000,
               into: :self
@@ -121,26 +129,31 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
               reraise transport_error_message(e), __STACKTRACE__
           end
 
-        {_initial_assistant_message(model), "", :streaming, resp}
+        {_initial_assistant_message(model),
+         %{
+           framer: SSE.new(),
+           observer: Backplane.AiProtocol.OpenAIResponsesObserver.new(),
+           error_body: ""
+         }, :streaming, resp}
       end,
       fn
-        {message, _buffer, :done, resp} ->
-          {:halt, {message, "", :done, resp}}
+        {message, _state, :done, resp} ->
+          {:halt, {message, %{}, :done, resp}}
 
-        {message, buffer, :streaming, resp} ->
+        {message, state, :streaming, resp} ->
           cancellation_ref = options[:cancellation_ref]
 
           receive do
             {:cancel, ^cancellation_ref} when not is_nil(cancellation_ref) ->
               Req.cancel_async_response(resp)
               error = ProviderError.from_reason(:cancelled)
-              {[{:provider_error, error}], {message, buffer, :done, resp}}
+              {[{:provider_error, error}], {message, state, :done, resp}}
 
             req_message ->
-              {processed_events, new_message, new_buffer, status} =
-                handle_async_message(resp, req_message, message, buffer)
+              {processed_events, new_message, new_state, status} =
+                handle_async_message(resp, req_message, message, state)
 
-              {processed_events, {new_message, new_buffer, status, resp}}
+              {processed_events, {new_message, new_state, status, resp}}
           after
             options[:receive_timeout] || 120_000 ->
               Req.cancel_async_response(resp)
@@ -148,7 +161,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
           end
       end,
       fn
-        {_message, _buffer, :streaming, resp} -> Req.cancel_async_response(resp)
+        {_message, _state, :streaming, resp} -> Req.cancel_async_response(resp)
         _ -> :ok
       end
     )
@@ -168,61 +181,122 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
       "Check your connection and try again."
   end
 
-  defp handle_async_message(resp, req_message, message, buffer) do
+  defp handle_async_message(resp, req_message, message, state) do
     case Req.parse_message(resp, req_message) do
       {:ok, chunks} ->
         if resp.status >= 400 do
-          handle_error_chunks(resp, chunks, message, buffer)
+          handle_error_chunks(resp, chunks, message, state)
         else
-          handle_stream_chunks(chunks, message, buffer)
+          handle_stream_chunks(chunks, message, state)
         end
 
       {:error, %{reason: reason}} ->
         raise transport_error_message(%{reason: reason})
 
       :unknown ->
-        {[], message, buffer, :streaming}
+        {[], message, state, :streaming}
     end
   end
 
-  defp handle_stream_chunks(chunks, message, buffer) do
-    Enum.reduce(chunks, {[], message, buffer, :streaming}, fn
-      {:data, _chunk}, {acc_events, acc_message, acc_buffer, :done} ->
-        {acc_events, acc_message, acc_buffer, :done}
+  defp handle_stream_chunks(chunks, message, state) do
+    Enum.reduce(chunks, {[], message, state, :streaming}, fn
+      {:data, _chunk}, {acc_events, acc_message, acc_state, :done} ->
+        {acc_events, acc_message, acc_state, :done}
 
-      {:data, chunk}, {acc_events, acc_message, acc_buffer, _status} ->
-        {events, new_buffer} = Stream.decode(acc_buffer, chunk)
-        {processed_events, new_message} = process_events(events, acc_message)
+      {:data, chunk}, {acc_events, acc_message, acc_state, _status} ->
+        observer = Backplane.AiProtocol.OpenAIResponsesObserver.feed(acc_state.observer, chunk)
 
-        status =
-          if Enum.any?(processed_events, &match?({:done, _, _}, &1)),
-            do: :done,
-            else: :streaming
+        case SSE.feed(acc_state.framer, chunk) do
+          {:ok, framer, frames} ->
+            events = decode_frames(frames)
+            {processed_events, new_message} = process_events(events, acc_message)
 
-        {acc_events ++ processed_events, new_message, new_buffer, status}
+            status =
+              if Enum.any?(processed_events, &match?({:done, _, _}, &1)),
+                do: :done,
+                else: :streaming
 
-      :done, {acc_events, acc_message, acc_buffer, :done} ->
-        {acc_events, acc_message, acc_buffer, :done}
+            observer =
+              if status == :done,
+                do: Backplane.AiProtocol.OpenAIResponsesObserver.finish(observer, :eof),
+                else: observer
 
-      :done, {acc_events, acc_message, acc_buffer, _status} ->
-        error = ProviderError.malformed(:truncated_stream)
-        {acc_events ++ [{:provider_error, error}], acc_message, acc_buffer, :done}
+            {acc_events ++ processed_events, new_message,
+             %{framer: framer, observer: observer, error_body: acc_state.error_body}, status}
+
+          {:error, _error, framer} ->
+            error = ProviderError.malformed(:invalid_sse)
+
+            {acc_events ++ [{:provider_error, error}], acc_message,
+             %{framer: framer, observer: observer, error_body: acc_state.error_body}, :done}
+        end
+
+      :done, {acc_events, acc_message, acc_state, :done} ->
+        {acc_events, acc_message, acc_state, :done}
+
+      :done, {acc_events, acc_message, acc_state, _status} ->
+        case SSE.finish(acc_state.framer) do
+          {:ok, framer, frames} ->
+            events = decode_frames(frames)
+            {processed_events, new_message} = process_events(events, acc_message)
+
+            if Enum.any?(processed_events, &match?({:done, _, _}, &1)) do
+              {acc_events ++ processed_events, new_message,
+               %{
+                 framer: framer,
+                 observer:
+                   Backplane.AiProtocol.OpenAIResponsesObserver.finish(acc_state.observer, :eof),
+                 error_body: acc_state.error_body
+               }, :done}
+            else
+              error = ProviderError.malformed(:truncated_stream)
+
+              {acc_events ++ processed_events ++ [{:provider_error, error}], new_message,
+               %{
+                 framer: framer,
+                 observer:
+                   Backplane.AiProtocol.OpenAIResponsesObserver.finish(acc_state.observer, :eof),
+                 error_body: acc_state.error_body
+               }, :done}
+            end
+
+          {:error, _error, framer} ->
+            error = ProviderError.malformed(:truncated_stream)
+
+            {acc_events ++ [{:provider_error, error}], acc_message,
+             %{framer: framer, observer: acc_state.observer, error_body: acc_state.error_body},
+             :done}
+        end
 
       _chunk, acc ->
         acc
     end)
   end
 
-  defp handle_error_chunks(resp, chunks, message, buffer) do
-    Enum.reduce(chunks, {[], message, buffer, :streaming}, fn
-      {:data, chunk}, {acc_events, acc_message, acc_buffer, _status} ->
-        {acc_events, acc_message, acc_buffer <> chunk, :streaming}
+  defp handle_error_chunks(resp, chunks, message, state) do
+    Enum.reduce(chunks, {[], message, state, :streaming}, fn
+      {:data, chunk}, {acc_events, acc_message, acc_state, _status} ->
+        {acc_events, acc_message, %{acc_state | error_body: acc_state.error_body <> chunk},
+         :streaming}
 
-      :done, {_acc_events, _acc_message, acc_buffer, _status} ->
-        raise http_provider_error(resp.status, acc_buffer, resp.headers)
+      :done, {_acc_events, _acc_message, acc_state, _status} ->
+        raise http_provider_error(resp.status, acc_state.error_body, resp.headers)
 
       _chunk, acc ->
         acc
+    end)
+  end
+
+  defp decode_frames(frames) do
+    Enum.flat_map(frames, fn
+      %{data: "[DONE]"} ->
+        [:done]
+
+      %{data: data} ->
+        case Serialization.from_json(data) do
+          {:ok, event} when is_map(event) -> [event]
+          _ -> [{:provider_error, ProviderError.malformed(:invalid_event_json)}]
+        end
     end)
   end
 
@@ -319,6 +393,82 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
         strict: false
       }
     end)
+  end
+
+  # Validate the provider-neutral request before the provider-specific wire projection is sent.
+  # The protocol package deliberately does not own HTTP transport or provider credentials.
+  defp protocol_request(model, context) do
+    input =
+      [protocol_system_message(context[:system] || context[:system_prompt]) | context.messages]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.map(&protocol_message/1)
+
+    attrs = %{
+      model: model.id,
+      input: input,
+      tools: Enum.map(context[:tools] || [], &protocol_tool/1),
+      settings: %{}
+    }
+
+    Request.new(attrs)
+  end
+
+  defp protocol_system_message(system) do
+    case system_text(system) do
+      nil -> nil
+      text -> %{role: :system, content: [%{type: :text, text: text}]}
+    end
+  end
+
+  defp protocol_message(%{role: :user, content: content}),
+    do: %{role: :user, content: protocol_content(content)}
+
+  defp protocol_message(%{role: :system, content: content}),
+    do: %{role: :system, content: protocol_content(content)}
+
+  defp protocol_message(%{role: :assistant, content: content}),
+    do: %{role: :assistant, content: protocol_content(content)}
+
+  defp protocol_message(%{role: :tool_result, tool_call_id: id, content: content}),
+    do: %{role: :tool, tool_call_id: id, content: protocol_content(content)}
+
+  defp protocol_message(_message), do: %{role: :invalid, content: []}
+
+  defp protocol_content(content) when is_binary(content),
+    do: [%{type: :text, text: content}]
+
+  defp protocol_content(content) when is_list(content),
+    do: Enum.map(content, &protocol_block/1)
+
+  defp protocol_content(_content), do: [%{type: :invalid}]
+
+  defp protocol_block(%{type: :text, text: text}),
+    do: %{type: :text, text: text}
+
+  defp protocol_block(%{type: :image, data: data, mime_type: mime}),
+    do: %{type: :image, data: %{data: data, mime_type: mime}}
+
+  defp protocol_block(%{type: :thinking, thinking: thinking}),
+    do: %{type: :reasoning, data: %{text: thinking}}
+
+  defp protocol_block(%{type: :tool_call, id: id, name: name, arguments: arguments}) do
+    raw_arguments =
+      if is_binary(arguments), do: {:json, arguments}, else: {:structured, arguments}
+
+    %{
+      type: :tool_call,
+      tool_call: %{id: id, name: name, raw_arguments: raw_arguments}
+    }
+  end
+
+  defp protocol_block(_block), do: %{type: :invalid}
+
+  defp protocol_tool(tool) do
+    %{
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.parameters
+    }
   end
 
   defp prepend_system_message(items, system) do

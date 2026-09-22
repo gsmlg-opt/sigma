@@ -48,6 +48,42 @@ defmodule Sigma.Ai.Providers.OpenAITest do
     end)
   end
 
+  test "accepts enum JSON Schema through the Backplane AI protocol request" do
+    sse = [
+      sse_json(%{"type" => "response.completed", "response" => %{"status" => "completed"}}),
+      "data: [DONE]\n\n"
+    ]
+
+    with_request_capture_server(sse, fn base_url, captured ->
+      OpenAIResponses.stream(%{
+        model: %{id: "gpt-5", api: "openai", provider: "openai"},
+        context: %{
+          messages: [%{role: :user, content: "Pick one"}],
+          system_prompt: nil,
+          tools: [
+            %{
+              name: "todo",
+              description: "Manage a todo",
+              parameters: %{
+                "type" => "object",
+                "properties" => %{
+                  "status" => %{"type" => "string", "enum" => ["todo", "done"]}
+                }
+              }
+            }
+          ]
+        },
+        options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+      })
+      |> Enum.to_list()
+
+      assert [%{"type" => "function", "parameters" => parameters}] =
+               Agent.get(captured, & &1.body["tools"])
+
+      assert parameters["properties"]["status"]["enum"] == ["todo", "done"]
+    end)
+  end
+
   test "completes Responses API function calls after output item metadata arrives" do
     arguments = "{\"path\":\"README.md\"}"
 
