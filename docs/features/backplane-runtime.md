@@ -1,6 +1,6 @@
 # Backplane execution engine
 
-Sigma uses `backplane_agent_runtime` 1.6.0 by default for newly started sessions. The existing Sigma engine remains available as an explicit fallback while Backplane is validated in use.
+Sigma uses `backplane_agent_runtime` 1.7.0 by default for newly started sessions. The existing Sigma engine remains available as an explicit fallback while Backplane is validated in use.
 
 ## Activation
 
@@ -34,6 +34,7 @@ Store APIs can reopen runtime evidence. Sigma does not yet load/fence an interru
 ## Compatibility limits
 
 - Tools execute sequentially on the Backplane path.
+- Version 1.7.0 supports typed enum constraints used by the Todo action/status fields; invalid enum values are rejected before dispatch.
 - Exact tool schemas are retained. Unsupported MCP schema keywords fail explicitly; constraints are never stripped to force acceptance.
 - Sigma's coding dispatcher remains the tool boundary for permissions and pre/post hooks.
 - Each turn has a work quota of 100 provider/tool invocations and five-minute run/effect timeouts. The quota does not measure billed tokens.
@@ -47,7 +48,7 @@ Keep the Sigma engine until Backplane has passed representative live-provider/br
 
 ## Verified locally
 
-The scoped agent and protocol suites passed (236 tests, including 25 Backplane tests). Tests run a scripted provider through the actual public runtime and coding dispatcher: a real file is written, the provider continues with the tool result, Protocol V1 events encode, JSONL history persists, and runtime records reopen after the session stops. Approval denial/cancellation prevents the write. Separate tests cover steering at response completion, follow-ups, killed provider metrics, prompt/stop hooks, strict schema rejection, and store conformance/failure cases.
+The scoped agent and protocol suites passed (238 tests, including 27 Backplane tests). Tests run a scripted provider through the actual public runtime and coding dispatcher: a real file is written, the provider continues with the tool result, Protocol V1 events encode, JSONL history persists, and runtime records reopen after the session stops. Approval denial/cancellation prevents the write. Separate tests cover steering at response completion, follow-ups, killed provider metrics, prompt/stop hooks, strict schema rejection, valid Todo enum execution and invalid enum rejection before dispatch, and store conformance/failure cases.
 
 These tests use no live model service. Browser and live-provider checks remain prerequisites for a broader rollout.
 

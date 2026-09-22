@@ -16,12 +16,15 @@ defmodule Sigma.Agent.BackplaneEngineTest do
             {[%{type: :text, text: "written"}], :stop}
 
           _message ->
-            call = %{
-              type: :tool_call,
-              id: "write-1",
-              name: "backplane_test_write",
-              arguments: %{"path" => params.options[:path], "count" => 1}
-            }
+            call =
+              Keyword.get_lazy(params.options, :tool_call, fn ->
+                %{
+                  type: :tool_call,
+                  id: "write-1",
+                  name: "backplane_test_write",
+                  arguments: %{"path" => params.options[:path], "count" => 1}
+                }
+              end)
 
             {[call], :tool_use}
         end
@@ -216,7 +219,10 @@ defmodule Sigma.Agent.BackplaneEngineTest do
   defmodule UnsupportedTool do
     def name, do: "unsupported"
     def description, do: "Unsupported schema fixture"
-    def schema, do: %{"type" => "object", "properties" => %{"mode" => %{"enum" => ["one"]}}}
+
+    def schema,
+      do: %{"type" => "object", "properties" => %{"mode" => %{"$ref" => "#/$defs/mode"}}}
+
     def execute(_, _, _), do: raise("unsupported tool must never run")
   end
 
@@ -323,6 +329,70 @@ defmodule Sigma.Agent.BackplaneEngineTest do
 
     File.write!(Path.join(dir, "runtime"), "not a directory")
     assert {:error, {:backplane_store_unavailable, _}} = start_blocking_agent(dir)
+  end
+
+  @tag :tmp_dir
+  test "Todo enum schema reaches the real dispatcher and updates session state", %{tmp_dir: dir} do
+    {:ok, agent} =
+      start_todo_agent(dir, %{
+        "action" => "add",
+        "content" => "Ship runtime update",
+        "status" => "in_progress"
+      })
+
+    :ok = Sigma.Agent.subscribe(agent)
+    assert {:accepted, _} = Sigma.Agent.prompt(agent, "Track this task")
+    assert_receive {:agent_end, [_, _, %Message{role: :tool_result, is_error: false}, _]}, 5_000
+    assert_receive {:metrics, :tool_finished, _}
+    assert Sigma.Agent.status(agent).phase == :completed
+
+    assert Sigma.Tools.Store.get_todo_state(:sys.get_state(agent).tool_state) == %{
+             items: [%{id: "1", content: "Ship runtime update", status: "in_progress"}],
+             next_id: 2
+           }
+  end
+
+  @tag :tmp_dir
+  test "invalid Todo enum is rejected before the dispatcher can mutate session state", %{
+    tmp_dir: dir
+  } do
+    {:ok, agent} =
+      start_todo_agent(dir, %{
+        "action" => "add",
+        "content" => "Must not be added",
+        "status" => "blocked"
+      })
+
+    :ok = Sigma.Agent.subscribe(agent)
+    assert {:accepted, _} = Sigma.Agent.prompt(agent, "Track this task")
+
+    assert_receive {:agent_end,
+                    [_, _, %Message{role: :tool_result, is_error: true, content: content}, _]},
+                   5_000
+
+    assert [%{type: :text, text: error}] = content
+    assert error =~ "allowed enum"
+    refute_receive {:metrics, :tool_finished, _}
+    assert Sigma.Agent.status(agent).phase == :completed
+
+    assert Sigma.Tools.Store.get_todo_state(:sys.get_state(agent).tool_state) == %{
+             items: [],
+             next_id: 1
+           }
+  end
+
+  defp start_todo_agent(dir, arguments) do
+    Sigma.Agent.start_link(
+      execution_engine: :backplane,
+      backplane_runtime_path: Path.join(dir, "runtime"),
+      model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+      provider: ToolProvider,
+      tools: [Sigma.Tools.Todo],
+      options: [
+        test_pid: self(),
+        tool_call: %{type: :tool_call, id: "todo-1", name: "todo", arguments: arguments}
+      ]
+    )
   end
 
   defp start_blocking_agent(dir, opts \\ []) do
