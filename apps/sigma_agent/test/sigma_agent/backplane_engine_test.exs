@@ -282,12 +282,61 @@ defmodule Sigma.Agent.BackplaneEngineTest do
     end
   end
 
+  defmodule ReferencedSchemaTool do
+    defdelegate name(), to: DefaultSchemaTool
+    defdelegate description(), to: DefaultSchemaTool
+    defdelegate execute(id, arguments, opts), to: DefaultSchemaTool
+
+    def schema do
+      %{
+        "type" => "object",
+        "$defs" => %{"path" => %{"type" => "string", "minLength" => 1}},
+        "required" => ["path"],
+        "properties" => %{"path" => %{"$ref" => "#/$defs/path"}}
+      }
+    end
+  end
+
+  @tag :tmp_dir
+  test "referenced schemas permit tool execution and retain argument constraints", %{tmp_dir: dir} do
+    schema = ReferencedSchemaTool.schema()
+    assert :ok = InputSchema.validate_schema(schema)
+    assert {:error, %{class: :validation}} = InputSchema.validate(schema, %{"path" => ""})
+
+    output_path = Path.join(dir, "referenced-schema.txt")
+
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        execution_engine: :backplane,
+        backplane_runtime_path: Path.join(dir, "runtime"),
+        model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+        provider: ToolProvider,
+        tools: [ReferencedSchemaTool],
+        options: [
+          test_pid: self(),
+          tool_call: %{
+            type: :tool_call,
+            id: "ref-1",
+            name: ReferencedSchemaTool.name(),
+            arguments: %{"path" => output_path}
+          }
+        ]
+      )
+
+    :ok = Sigma.Agent.subscribe(agent)
+    assert {:accepted, _} = Sigma.Agent.prompt(agent, "write it")
+    assert_receive {:tool_execution_end, "ref-1", "backplane_default_schema", _, false}, 5_000
+    assert_receive {:agent_end, _}, 5_000
+    assert File.read!(output_path) == "default schema"
+    assert Sigma.Agent.status(agent).phase == :completed
+  end
+
   defmodule UnsupportedTool do
     def name, do: "unsupported"
     def description, do: "Unsupported schema fixture"
 
     def schema,
-      do: %{"type" => "object", "properties" => %{"mode" => %{"$ref" => "#/$defs/mode"}}}
+      do: %{"type" => "object", "$schema" => "https://example.test/unsupported-dialect"}
 
     def execute(_, _, _), do: raise("unsupported tool must never run")
   end
@@ -523,7 +572,8 @@ defmodule Sigma.Agent.BackplaneEngineTest do
                    5_000
 
     assert [%{type: :text, text: error}] = content
-    assert error =~ "allowed enum"
+    assert error =~ "class: :validation"
+    assert error =~ "rule: :enum"
     refute_receive {:metrics, :tool_finished, _}
     assert Sigma.Agent.status(agent).phase == :completed
 

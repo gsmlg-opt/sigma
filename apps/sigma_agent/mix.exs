@@ -24,7 +24,7 @@ defmodule Sigma.Agent.MixProject do
 
   defp deps do
     [
-      {:backplane_agent_runtime, "1.8.2"},
+      {:backplane_agent_runtime, "1.8.3"},
       {:sigma_protocol, in_umbrella: true},
       {:sigma_ai, in_umbrella: true},
       {:sigma_coding, in_umbrella: true},
