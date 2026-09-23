@@ -31,7 +31,7 @@ defmodule Sigma.Web.ReleaseWorkflowTest do
     assert source =~ ~S|sigma-v${VERSION}-linux-amd64.tar.gz|
     assert source =~ "sigma-user-service"
     assert source =~ "Application.spec(:backplane_mcp_protocol, :vsn)"
-    assert source =~ ~S|test "$dependency_version" = "0.6.2"|
+    assert source =~ ~S|test "$dependency_version" = "1.10.0"|
     assert source =~ "verify-release-agent-smoke.exs"
     assert source =~ ~S|if [[ "$http_code" == 200 ]]|
     assert source =~ ~S|kill -TERM "$smoke_pid"|
