@@ -56,8 +56,14 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
       if context[:tools], do: Map.put(body, :tools, transform_tools(context.tools)), else: body
 
     case protocol_request(model, context) do
-      {:ok, _request} -> :ok
-      {:error, error} -> raise ArgumentError, "Invalid AI protocol request: #{error.message}"
+      {:ok, _request} ->
+        :ok
+
+      {:error, error} ->
+        raise ProviderError,
+          kind: :invalid_request,
+          message: "Invalid AI protocol request: #{error.message}",
+          retryable: false
     end
 
     headers =
@@ -429,8 +435,16 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   defp protocol_message(%{role: :assistant, content: content}),
     do: %{role: :assistant, content: protocol_content(content)}
 
-  defp protocol_message(%{role: :tool_result, tool_call_id: id, content: content}),
-    do: %{role: :tool, tool_call_id: id, content: protocol_content(content)}
+  defp protocol_message(%{role: :tool_result, tool_call_id: id, content: content}) do
+    # A silent tool still has a result; the canonical protocol represents its
+    # empty output with no content blocks, while the wire output remains "".
+    blocks =
+      content
+      |> protocol_content()
+      |> Enum.reject(&match?(%{type: :text, text: ""}, &1))
+
+    %{role: :tool, tool_call_id: id, content: blocks}
+  end
 
   defp protocol_message(_message), do: %{role: :invalid, content: []}
 

@@ -48,6 +48,57 @@ defmodule Sigma.Ai.Providers.OpenAITest do
     end)
   end
 
+  test "empty bash output preserves the function result and permits the next request" do
+    sse = [
+      sse_json(%{"type" => "response.completed", "response" => %{"status" => "completed"}}),
+      "data: [DONE]\n\n"
+    ]
+
+    for content <- ["", [], [%{type: :text, text: ""}]] do
+      with_request_capture_server(sse, fn base_url, captured ->
+        events =
+          OpenAIResponses.stream(%{
+            model: %{id: "gpt-5", api: "openai", provider: "openai"},
+            context: %{
+              messages: [
+                %{role: :user, content: "Run a silent command"},
+                %{
+                  role: :assistant,
+                  content: [%{type: :tool_call, id: "silent-1", name: "bash", arguments: %{}}]
+                },
+                %{role: :tool_result, tool_call_id: "silent-1", content: content}
+              ],
+              tools: []
+            },
+            options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+          })
+          |> Enum.to_list()
+
+        assert [
+                 _,
+                 %{"type" => "function_call", "call_id" => "silent-1"},
+                 %{"type" => "function_call_output", "call_id" => "silent-1", "output" => ""}
+               ] =
+                 Agent.get(captured, & &1.body["input"])
+
+        assert Enum.any?(events, &match?({:done, :stop, _}, &1))
+      end)
+    end
+  end
+
+  test "invalid protocol requests are non-retryable request errors" do
+    error =
+      assert_raise ProviderError, fn ->
+        OpenAIResponses.stream(%{
+          model: %{id: "gpt-5", api: "openai", provider: "openai"},
+          context: %{messages: [%{role: :user, content: [%{type: :text, text: nil}]}]},
+          options: [api_key: "test-key", base_url: "http://127.0.0.1:1"]
+        })
+      end
+
+    assert %{kind: :invalid_request, retryable: false} = ProviderError.from_exception(error)
+  end
+
   test "accepts enum JSON Schema through the Backplane AI protocol request" do
     sse = [
       sse_json(%{"type" => "response.completed", "response" => %{"status" => "completed"}}),
