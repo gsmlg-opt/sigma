@@ -406,7 +406,7 @@ jobs:
             "$release_root/bin/sigma" eval \
               'IO.puts(Application.spec(:backplane_mcp_protocol, :vsn))'
           )"
-          test "$dependency_version" = "0.6.2"
+test "$dependency_version" = "1.10.0"
 
           smoke_code="$(<scripts/verify-release-agent-smoke.exs)"
           smoke_result="$(
