@@ -767,11 +767,45 @@ const ElapsedTime = {
   destroyed() { window.clearInterval(this._timer) }
 }
 
+// Triggers title rename mode via double-click or long-press on touch devices.
+// Use: phx-hook="SessionTitleDblClick" data-session-id="session_id"
+const SessionTitleDblClick = {
+  mounted() {
+    let pressTimer = null
+    const trigger = () => {
+      const id = this.el.dataset.sessionId
+      if (id) {
+        this.pushEvent("start_rename_title", { id })
+      }
+    }
+    this._dblHandler = (e) => {
+      e.stopPropagation()
+      trigger()
+    }
+    this._touchStart = () => {
+      pressTimer = setTimeout(trigger, 500)
+    }
+    this._touchEnd = () => {
+      if (pressTimer) clearTimeout(pressTimer)
+    }
+    this.el.addEventListener("dblclick", this._dblHandler)
+    this.el.addEventListener("touchstart", this._touchStart, { passive: true })
+    this.el.addEventListener("touchend", this._touchEnd)
+    this.el.addEventListener("touchcancel", this._touchEnd)
+  },
+  destroyed() {
+    this.el.removeEventListener("dblclick", this._dblHandler)
+    this.el.removeEventListener("touchstart", this._touchStart)
+    this.el.removeEventListener("touchend", this._touchEnd)
+    this.el.removeEventListener("touchcancel", this._touchEnd)
+  }
+}
+
 let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 
 let liveSocket = new LiveSocket("/live", Socket, {
   params: {_csrf_token: csrfToken},
-  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, AutocompleteHook, SessionMenuHook, ChatInputHook, MarkdownInputHook, AppearanceThemeHook, LocalTime, RelativeTime, ElapsedTime, SessionTerminals }
+  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, AutocompleteHook, SessionMenuHook, ChatInputHook, MarkdownInputHook, AppearanceThemeHook, LocalTime, RelativeTime, ElapsedTime, SessionTerminals, SessionTitleDblClick }
 })
 
 // Show progress bar on live navigation and form submits
