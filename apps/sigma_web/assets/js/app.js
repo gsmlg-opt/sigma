@@ -771,31 +771,43 @@ const ElapsedTime = {
 // Use: phx-hook="SessionTitleDblClick" data-session-id="session_id"
 const SessionTitleDblClick = {
   mounted() {
-    let pressTimer = null
+    this._pressTimer = null
     const trigger = () => {
-      const id = this.el.dataset.sessionId
+      this._clearPressTimer()
+      const id = this.el?.dataset?.sessionId
       if (id) {
         this.pushEvent("start_rename_title", { id })
       }
     }
+    this._clearPressTimer = () => {
+      if (this._pressTimer) {
+        clearTimeout(this._pressTimer)
+        this._pressTimer = null
+      }
+    }
     this._dblHandler = (e) => {
       e.stopPropagation()
+      e.preventDefault()
       trigger()
     }
     this._touchStart = () => {
-      pressTimer = setTimeout(trigger, 500)
+      this._clearPressTimer()
+      this._pressTimer = setTimeout(trigger, 500)
     }
     this._touchEnd = () => {
-      if (pressTimer) clearTimeout(pressTimer)
+      this._clearPressTimer()
     }
     this.el.addEventListener("dblclick", this._dblHandler)
     this.el.addEventListener("touchstart", this._touchStart, { passive: true })
+    this.el.addEventListener("touchmove", this._touchEnd, { passive: true })
     this.el.addEventListener("touchend", this._touchEnd)
     this.el.addEventListener("touchcancel", this._touchEnd)
   },
   destroyed() {
+    this._clearPressTimer?.()
     this.el.removeEventListener("dblclick", this._dblHandler)
     this.el.removeEventListener("touchstart", this._touchStart)
+    this.el.removeEventListener("touchmove", this._touchEnd)
     this.el.removeEventListener("touchend", this._touchEnd)
     this.el.removeEventListener("touchcancel", this._touchEnd)
   }
