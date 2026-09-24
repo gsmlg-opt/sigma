@@ -579,6 +579,119 @@ defmodule Sigma.Web.RepositoryLiveTest do
     end)
   end
 
+  @tag :tmp_dir
+  test "blur event after cancel or when not renaming does not persist changes", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    workdir = tmp_workdir!("repository-rename-blur-race")
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+      write_session_files!(sessions_dir, "blur-race")
+
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}")
+
+      render_click(view, "start_rename_title", %{"id" => "blur-race"})
+      render_click(view, "cancel_rename_title")
+
+      # Stale blur event arrives after cancellation
+      html =
+        render_submit(view, "save_rename_title", %{
+          "id" => "blur-race",
+          "title" => "Should Not Be Saved"
+        })
+
+      refute html =~ "Session title updated."
+      refute html =~ "Should Not Be Saved"
+      assert html =~ "blur-race"
+
+      meta =
+        sessions_dir
+        |> Path.join("blur-race.meta.json")
+        |> File.read!()
+        |> Jason.decode!()
+
+      refute meta["title"] == "Should Not Be Saved"
+    end)
+  end
+
+  @tag :tmp_dir
+  test "submitting title trims whitespace and truncates exceeding 120 characters", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    workdir = tmp_workdir!("repository-rename-length")
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+      write_session_files!(sessions_dir, "length-test")
+
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}")
+
+      render_click(view, "start_rename_title", %{"id" => "length-test"})
+
+      long_title = "   " <> String.duplicate("a", 150) <> "   "
+      expected_title = String.duplicate("a", 120)
+
+      html =
+        render_submit(view, "save_rename_title", %{
+          "id" => "length-test",
+          "title" => long_title
+        })
+
+      assert html =~ "Session title updated."
+      assert html =~ expected_title
+
+      meta =
+        sessions_dir
+        |> Path.join("length-test.meta.json")
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert meta["title"] == expected_title
+      assert byte_size(meta["title"]) == 120
+    end)
+  end
+
+  @tag :tmp_dir
+  test "displays error flash when update_metadata fails", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    workdir = tmp_workdir!("repository-rename-error")
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+      write_session_files!(sessions_dir, "error-test")
+
+      # Break metadata file to cause update_metadata failure
+      File.write!(Path.join(sessions_dir, "error-test.meta.json"), "invalid json {")
+
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}")
+
+      render_click(view, "start_rename_title", %{"id" => "error-test"})
+
+      html =
+        render_submit(view, "save_rename_title", %{
+          "id" => "error-test",
+          "title" => "New Title"
+        })
+
+      assert html =~ "This session operation could not be completed."
+      refute html =~ ~s(id="rename-form-error-test")
+    end)
+  end
+
   defp assert_sidebar_order(html) do
     assert :binary.match(html, "project-sidebar-settings") <
              :binary.match(html, "project-sidebar-skills")

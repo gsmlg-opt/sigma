@@ -138,7 +138,7 @@ defmodule Sigma.Web.RepositoryLive do
                   class="flex w-full min-w-0 max-w-full items-center justify-between gap-3 overflow-hidden py-1 text-on-surface"
                 >
                   <div
-                    class="flex min-w-0 flex-1 items-center gap-3 overflow-hidden cursor-pointer"
+                    class="flex min-w-0 flex-1 items-center gap-3 overflow-hidden cursor-pointer select-none"
                     id={"session-title-container-#{s.session_id}"}
                     phx-hook="SessionTitleDblClick"
                     data-session-id={s.session_id}
@@ -340,47 +340,44 @@ defmodule Sigma.Web.RepositoryLive do
   @impl true
   def handle_event("save_rename_title", params, socket) do
     id = Map.get(params, "id") || Map.get(params, "_id") || socket.assigns.renaming_session
-    raw_title = Map.get(params, "title") || Map.get(params, "value") || ""
-    new_title = raw_title |> String.trim() |> String.slice(0, 120)
 
-    session = Enum.find(socket.assigns.sessions, &(&1.session_id == id))
-    current_title = (session && session.title) || id
+    if socket.assigns.renaming_session != id do
+      {:noreply, socket}
+    else
+      raw_title = Map.get(params, "title") || Map.get(params, "value") || ""
+      new_title = raw_title |> String.trim() |> String.slice(0, 120)
 
-    cond do
-      not SessionFiles.valid_session_id?(id) ->
-        {:noreply,
-         socket
-         |> assign(renaming_session: nil, renaming_title: nil)
-         |> put_flash(:error, OperationError.message(:invalid_session_id))}
+      session = Enum.find(socket.assigns.sessions, &(&1.session_id == id))
+      current_title = (session && session.title) || id
 
-      new_title == "" or new_title == current_title ->
-        {:noreply, assign(socket, renaming_session: nil, renaming_title: nil)}
+      cond do
+        not SessionFiles.valid_session_id?(id) ->
+          {:noreply,
+           socket
+           |> assign(renaming_session: nil, renaming_title: nil)
+           |> put_flash(:error, OperationError.message(:invalid_session_id))}
 
-      true ->
-        case SessionFiles.update_metadata(socket.assigns.sessions_dir, id, %{"title" => new_title}) do
-          :ok ->
-            updated_sessions =
-              Enum.map(socket.assigns.sessions, fn
-                %{session_id: ^id} = s -> %{s | title: new_title}
-                s -> s
-              end)
+        new_title == "" or new_title == current_title ->
+          {:noreply, assign(socket, renaming_session: nil, renaming_title: nil)}
 
-            {:ok, fresh_sessions} =
-              Sigma.Session.Log.list_session_summaries(socket.assigns.sessions_dir)
+        true ->
+          case SessionFiles.update_metadata(socket.assigns.sessions_dir, id, %{"title" => new_title}) do
+            :ok ->
+              {:ok, fresh_sessions} =
+                Sigma.Session.Log.list_session_summaries(socket.assigns.sessions_dir)
 
-            sessions = if fresh_sessions != [], do: fresh_sessions, else: updated_sessions
+              {:noreply,
+               socket
+               |> assign(sessions: fresh_sessions, renaming_session: nil, renaming_title: nil)
+               |> put_flash(:info, "Session title updated.")}
 
-            {:noreply,
-             socket
-             |> assign(sessions: sessions, renaming_session: nil, renaming_title: nil)
-             |> put_flash(:info, "Session title updated.")}
-
-          {:error, reason} ->
-            {:noreply,
-             socket
-             |> assign(renaming_session: nil, renaming_title: nil)
-             |> put_flash(:error, OperationError.message(reason))}
-        end
+            {:error, reason} ->
+              {:noreply,
+               socket
+               |> assign(renaming_session: nil, renaming_title: nil)
+               |> put_flash(:error, OperationError.message(reason))}
+          end
+      end
     end
   end
 

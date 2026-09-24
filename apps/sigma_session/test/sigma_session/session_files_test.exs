@@ -618,6 +618,18 @@ defmodule Sigma.Session.SessionFilesTest do
     assert temp_files == []
   end
 
+  test "update_metadata returns error and preserves corrupt metadata intact", %{tmp_dir: tmp_dir} do
+    jsonl_path = jsonl_path(tmp_dir, "corrupt-meta")
+    meta_path = meta_path(tmp_dir, "corrupt-meta")
+    File.write!(jsonl_path, "session header\n")
+    File.write!(meta_path, "not valid json {")
+
+    assert {:error, :invalid_session_metadata} =
+             SessionFiles.update_metadata(tmp_dir, "corrupt-meta", %{"title" => "New Title"})
+
+    assert File.read!(meta_path) == "not valid json {"
+  end
+
   defp jsonl_path(dir, id), do: Path.join(dir, "#{id}.jsonl")
   defp meta_path(dir, id), do: Path.join(dir, "#{id}.meta.json")
 
