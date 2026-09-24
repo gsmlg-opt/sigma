@@ -554,6 +554,70 @@ defmodule Sigma.Session.SessionFilesTest do
     refute File.exists?(meta_path(target_dir, "orphan"))
   end
 
+  test "update_metadata updates existing metadata while preserving other keys", %{
+    tmp_dir: tmp_dir
+  } do
+    jsonl_path = jsonl_path(tmp_dir, "test-update")
+    meta_path = meta_path(tmp_dir, "test-update")
+    File.write!(jsonl_path, "session header\n")
+
+    File.write!(
+      meta_path,
+      Jason.encode!(%{"cwd" => "/path/to/project", "title" => "Old Title", "branch" => "main"})
+    )
+
+    assert :ok = SessionFiles.update_metadata(tmp_dir, "test-update", %{"title" => "New Title"})
+
+    assert read_meta!(tmp_dir, "test-update") == %{
+             "cwd" => "/path/to/project",
+             "title" => "New Title",
+             "branch" => "main"
+           }
+  end
+
+  test "update_metadata creates metadata file if missing when journal exists", %{tmp_dir: tmp_dir} do
+    jsonl_path = jsonl_path(tmp_dir, "missing-meta")
+    File.write!(jsonl_path, "session header\n")
+
+    assert :ok =
+             SessionFiles.update_metadata(tmp_dir, "missing-meta", %{"title" => "Created Title"})
+
+    assert read_meta!(tmp_dir, "missing-meta") == %{
+             "title" => "Created Title"
+           }
+  end
+
+  test "update_metadata rejects invalid session id and non-existent journal", %{tmp_dir: tmp_dir} do
+    assert {:error, :invalid_session_id} =
+             SessionFiles.update_metadata(tmp_dir, "../escape", %{"title" => "Bad"})
+
+    assert {:error, :enoent} =
+             SessionFiles.update_metadata(tmp_dir, "does-not-exist", %{"title" => "Bad"})
+  end
+
+  test "update_metadata cleans up temp file when rename fails", %{tmp_dir: tmp_dir} do
+    jsonl_path = jsonl_path(tmp_dir, "fail-replace")
+    File.write!(jsonl_path, "session header\n")
+
+    with_session_file_hook(
+      fn
+        :before_meta_update, _paths -> {:error, :simulated_failure}
+        _event, _paths -> :ok
+      end,
+      fn ->
+        assert {:error, :simulated_failure} =
+                 SessionFiles.update_metadata(tmp_dir, "fail-replace", %{"title" => "Failed"})
+      end
+    )
+
+    temp_files =
+      tmp_dir
+      |> File.ls!()
+      |> Enum.filter(&String.ends_with?(&1, ".tmp"))
+
+    assert temp_files == []
+  end
+
   defp jsonl_path(dir, id), do: Path.join(dir, "#{id}.jsonl")
   defp meta_path(dir, id), do: Path.join(dir, "#{id}.meta.json")
 

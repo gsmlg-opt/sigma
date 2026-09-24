@@ -130,6 +130,26 @@ defmodule Sigma.Session.SessionFiles do
     end
   end
 
+  @doc """
+  Safely updates sidecar metadata without changing session logs or IDs.
+  """
+  def update_metadata(sessions_dir, id, updates, opts \\ [])
+
+  def update_metadata(sessions_dir, id, updates, opts)
+      when is_binary(sessions_dir) and is_map(updates) do
+    with {:ok, meta_path} <- meta_path(sessions_dir, id),
+         {:ok, jsonl_path} <- jsonl_path(sessions_dir, id),
+         :ok <- require_regular(jsonl_path),
+         {:ok, meta_result} <- read_metadata(meta_path),
+         {:ok, new_data} <- merge_metadata(meta_result, updates),
+         {:ok, encoded} <- encode_metadata(new_data),
+         {:ok, temp_path} <- unused_temp_path(meta_path) do
+      write_and_replace_metadata(temp_path, meta_path, encoded, opts)
+    end
+  end
+
+  def update_metadata(_sessions_dir, _id, _updates, _opts), do: {:error, :invalid_arguments}
+
   defp safe_path(sessions_dir, id, suffix) do
     if valid_session_id?(id) do
       {:ok, Path.join(sessions_dir, id <> suffix)}
@@ -338,6 +358,43 @@ defmodule Sigma.Session.SessionFiles do
 
       if result != :ok, do: rm_optional(temp_path)
       result
+    end
+  end
+
+  defp merge_metadata(%{exists?: true, data: nil}, _updates),
+    do: {:error, :invalid_session_metadata}
+
+  defp merge_metadata(%{exists?: true, data: data}, updates) when is_map(data),
+    do: {:ok, Map.merge(data, stringify_keys(updates))}
+
+  defp merge_metadata(%{exists?: false}, updates),
+    do: {:ok, stringify_keys(updates)}
+
+  defp stringify_keys(map) when is_map(map) do
+    Map.new(map, fn {k, v} -> {to_string(k), v} end)
+  end
+
+  defp write_and_replace_metadata(temp_path, meta_path, encoded, opts) do
+    result =
+      with :ok <- File.write(temp_path, encoded),
+           :ok <-
+             run_metadata_hook(opts, :before_meta_update, %{
+               source: temp_path,
+               target: meta_path
+             }),
+           :ok <- File.rename(temp_path, meta_path) do
+        :ok
+      end
+
+    if result != :ok, do: rm_optional(temp_path)
+    result
+  end
+
+  defp run_metadata_hook(opts, event, paths) do
+    case Keyword.get(opts, :operation_hook) || Process.get({__MODULE__, :operation_hook}) do
+      hook when is_function(hook, 2) -> hook.(event, paths)
+      nil -> :ok
+      _hook -> {:error, :invalid_operation_hook}
     end
   end
 
