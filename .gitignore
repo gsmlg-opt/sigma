@@ -49,6 +49,7 @@ bun.lock
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+/apps/sigma_web/assets/js/duskmoon_elements.js
 
 # Agent temporary files
 /.antigravitycli/

@@ -26,6 +26,7 @@ defmodule Mix.Tasks.DuskmoonBundleTest do
     assert source =~ "System.cmd(bun, args, cd: Path.dirname(node_modules_path)"
   end
 
+  @tag :assets
   test "generated element bundle is self-contained" do
     bundle = File.read!(Path.join(@repo_root, "apps/sigma_web/assets/js/duskmoon_elements.js"))
 

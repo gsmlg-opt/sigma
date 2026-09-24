@@ -141,7 +141,7 @@ jobs:
         run: mix assets.build
 
       - name: Run asset-dependent ExUnit checks
-        run: mix test --only assets apps/sigma_web/test/sigma_web/assets_build_test.exs
+        run: mix test --only assets apps/sigma_web/test/sigma_web/assets_build_test.exs apps/sigma_web/test/mix/tasks/duskmoon_bundle_test.exs
 
   release_smoke:
     name: Installed release agent smoke
