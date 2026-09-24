@@ -1311,6 +1311,23 @@ defmodule Sigma.AgentTest do
     assert {:ok, "yes"} = Task.await(task)
   end
 
+  test "keeps a default user question pending until answered" do
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+        provider: EmptyProvider
+      )
+
+    Sigma.Agent.subscribe(agent)
+
+    task = Task.async(fn -> Sigma.Agent.ask_user_question(agent, %{question: "Continue?"}) end)
+
+    assert_receive {:ask_user_question, question_id, %{question: "Continue?"}}, 1_000
+    assert is_nil(Task.yield(task, 50))
+    assert :ok = Sigma.Agent.answer_user_question(agent, question_id, {:ok, "yes"})
+    assert {:ok, "yes"} = Task.await(task)
+  end
+
   defp compact_pre_messages do
     Enum.flat_map(1..11, fn i ->
       [

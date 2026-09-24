@@ -7,6 +7,25 @@ defmodule Sigma.Coding.Tools.AskUserQuestionTest do
     assert AskUserQuestion.name() == "AskUserQuestion"
   end
 
+  test "does not expose an answer timeout" do
+    refute Map.has_key?(AskUserQuestion.schema()["properties"], "timeout_ms")
+
+    test_pid = self()
+
+    assert {:ok, _result} =
+             AskUserQuestion.execute(
+               "call_1",
+               %{"question" => "Continue?", "timeout_ms" => 1},
+               ask_user_question_fn: fn request, _opts ->
+                 send(test_pid, {:request, request})
+                 {:ok, "yes"}
+               end
+             )
+
+    assert_receive {:request, request}
+    refute Map.has_key?(request, :timeout_ms)
+  end
+
   test "asks through configured callback and returns the user's answer" do
     test_pid = self()
 

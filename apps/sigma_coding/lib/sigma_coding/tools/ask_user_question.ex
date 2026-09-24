@@ -49,11 +49,6 @@ defmodule Sigma.Coding.Tools.AskUserQuestion do
           "type" => "string",
           "description" =>
             "Placeholder text for the final custom-answer input only. Do not put selectable choices here."
-        },
-        "timeout_ms" => %{
-          "type" => "integer",
-          "description" => "Optional answer timeout in milliseconds.",
-          "minimum" => 1_000
         }
       },
       "required" => ["question"]
@@ -106,8 +101,7 @@ defmodule Sigma.Coding.Tools.AskUserQuestion do
           question: question,
           options: options,
           allow_freeform: allow_freeform?(params, options),
-          placeholder: placeholder,
-          timeout_ms: timeout_ms(params)
+          placeholder: placeholder
         }
 
         {:ok, request}
@@ -167,13 +161,6 @@ defmodule Sigma.Coding.Tools.AskUserQuestion do
 
   defp allow_freeform?(params, _options) do
     get_param(params, "allow_freeform", true) != false
-  end
-
-  defp timeout_ms(params) do
-    case get_param(params, "timeout_ms") do
-      value when is_integer(value) and value > 0 -> value
-      _ -> nil
-    end
   end
 
   defp string_param(params, key) do

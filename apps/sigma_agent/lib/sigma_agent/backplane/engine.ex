@@ -74,6 +74,7 @@ defmodule Sigma.Agent.Backplane.Engine do
         tool_revision: 1
       },
       work: 100,
+      # TODO(upstream): gsmlg-opt/backplane#48 exclude human interaction waits from deadlines.
       run_timeout: 300_000,
       effect_timeout: 300_000
     )

@@ -62,7 +62,6 @@ defmodule Sigma.Agent do
     mcp_session: %{handles: [], subscriptions: [], clients: %{}}
   ]
 
-  @default_user_question_timeout_ms 300_000
   @default_mcp_elicitation_timeout_ms 60_000
   @mcp_sampling_timeout_ms 60_000
 
@@ -132,8 +131,7 @@ defmodule Sigma.Agent do
   def ask_user_question(pid, request, opts \\ []) when is_map(request) do
     question_id = "ask_#{System.unique_integer([:positive])}"
 
-    timeout =
-      request[:timeout_ms] || Keyword.get(opts, :timeout, @default_user_question_timeout_ms)
+    timeout = request[:timeout_ms] || Keyword.get(opts, :timeout, :infinity)
 
     case GenServer.call(pid, {:ask_user_question, question_id, self(), request}) do
       {:ok, ^question_id} ->
