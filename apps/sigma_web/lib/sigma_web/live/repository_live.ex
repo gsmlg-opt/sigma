@@ -95,6 +95,8 @@ defmodule Sigma.Web.RepositoryLive do
                     value={@renaming_title}
                     maxlength="120"
                     autofocus
+                    aria-label="Session title"
+                    placeholder="Session title"
                     phx-blur="save_rename_title"
                     phx-value-id={s.session_id}
                     phx-keydown="rename_keydown"
@@ -109,6 +111,7 @@ defmodule Sigma.Web.RepositoryLive do
                       size="sm"
                       shape="circle"
                       title="Save title"
+                      aria-label="Save title"
                       phx-hook="WebComponentHook"
                     >
                       <.dm_mdi name="check" class="w-4 h-4" />
@@ -116,11 +119,13 @@ defmodule Sigma.Web.RepositoryLive do
                     <.dm_btn
                       id={"cancel-title-#{s.session_id}"}
                       type="button"
+                      onmousedown="event.preventDefault()"
                       phx-click="cancel_rename_title"
                       variant="ghost"
                       size="sm"
                       shape="circle"
                       title="Cancel"
+                      aria-label="Cancel rename"
                       phx-hook="WebComponentHook"
                     >
                       <.dm_mdi name="close" class="w-4 h-4" />
@@ -153,8 +158,9 @@ defmodule Sigma.Web.RepositoryLive do
                       variant="ghost"
                       size="sm"
                       shape="circle"
-                      class="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                      class="shrink-0 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
                       title="Rename session"
+                      aria-label="Rename session"
                     >
                       <.dm_mdi name="pencil-outline" class="w-4 h-4 text-on-surface-variant" />
                     </.dm_btn>
@@ -166,8 +172,9 @@ defmodule Sigma.Web.RepositoryLive do
                       variant="ghost"
                       size="sm"
                       shape="circle"
-                      class="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                      class="shrink-0 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
                       title="Delete session"
+                      aria-label="Delete session"
                     >
                       <.dm_mdi name="delete-outline" class="w-4 h-4 text-error" />
                     </.dm_btn>
