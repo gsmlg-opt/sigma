@@ -452,6 +452,133 @@ defmodule Sigma.Web.RepositoryLiveTest do
              "This session operation could not be completed. No files were changed."
   end
 
+  @tag :tmp_dir
+  test "clicking rename button opens inline rename form prefilled with current title", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    workdir = tmp_workdir!("repository-rename-start")
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+      write_session_files!(sessions_dir, "session-to-rename")
+
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      {:ok, view, html} = live(conn, "/repository/#{encoded_repository}")
+
+      assert html =~ ~s(id="rename-session-session-to-rename")
+
+      render_click(view, "start_rename_title", %{"id" => "session-to-rename"})
+      html = render(view)
+
+      assert html =~ ~s(id="rename-form-session-to-rename")
+      assert html =~ ~s(id="rename-input-session-to-rename")
+      assert html =~ ~s(value="session-to-rename")
+    end)
+  end
+
+  @tag :tmp_dir
+  test "submitting rename form updates session title in metadata and list", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    workdir = tmp_workdir!("repository-rename-save")
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+      write_session_files!(sessions_dir, "rename-me")
+
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}")
+
+      render_click(view, "start_rename_title", %{"id" => "rename-me"})
+
+      html =
+        render_submit(view, "save_rename_title", %{
+          "id" => "rename-me",
+          "title" => "Updated Session Title"
+        })
+
+      assert html =~ "Session title updated."
+      assert html =~ "Updated Session Title"
+      refute html =~ ~s(id="rename-form-rename-me")
+
+      meta =
+        sessions_dir
+        |> Path.join("rename-me.meta.json")
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert meta["title"] == "Updated Session Title"
+    end)
+  end
+
+  @tag :tmp_dir
+  test "cancelling rename form restores original display without persisting", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    workdir = tmp_workdir!("repository-rename-cancel")
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+      write_session_files!(sessions_dir, "cancel-me")
+
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}")
+
+      render_click(view, "start_rename_title", %{"id" => "cancel-me"})
+      assert render(view) =~ ~s(id="rename-form-cancel-me")
+
+      html = render_click(view, "cancel_rename_title")
+      refute html =~ ~s(id="rename-form-cancel-me")
+      assert html =~ "cancel-me"
+
+      # Also test Escape key via rename_keydown
+      render_click(view, "start_rename_title", %{"id" => "cancel-me"})
+      assert render(view) =~ ~s(id="rename-form-cancel-me")
+
+      html = render_hook(view, "rename_keydown", %{"key" => "Escape"})
+      refute html =~ ~s(id="rename-form-cancel-me")
+    end)
+  end
+
+  @tag :tmp_dir
+  test "submitting empty title reverts without changes or errors", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    workdir = tmp_workdir!("repository-rename-empty")
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      sessions_dir = ConfigManager.sessions_dir(workdir)
+      write_session_files!(sessions_dir, "empty-me")
+
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}")
+
+      render_click(view, "start_rename_title", %{"id" => "empty-me"})
+
+      html =
+        render_submit(view, "save_rename_title", %{
+          "id" => "empty-me",
+          "title" => "   "
+        })
+
+      refute html =~ ~s(id="rename-form-empty-me")
+      refute html =~ "Session title updated."
+      assert html =~ "empty-me"
+    end)
+  end
+
   defp assert_sidebar_order(html) do
     assert :binary.match(html, "project-sidebar-settings") <
              :binary.match(html, "project-sidebar-skills")
