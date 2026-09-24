@@ -22,6 +22,8 @@ defmodule Sigma.Web.RepositoryLive do
           |> assign(:sessions_dir, sessions_dir)
           |> assign(:sessions, sessions)
           |> assign(:deleting_session, nil)
+          |> assign(:renaming_session, nil)
+          |> assign(:renaming_title, nil)
 
         {:ok, socket}
 
@@ -79,26 +81,97 @@ defmodule Sigma.Web.RepositoryLive do
               class="grid-stretch h-full group interactive hover:shadow-xl transition-all duration-300 bg-surface-container-low"
             >
               <:title class="min-w-0 flex-1 overflow-hidden">
-                <div class="flex w-full min-w-0 max-w-full items-center justify-between gap-3 overflow-hidden py-1 text-on-surface">
-                  <div class="flex min-w-0 flex-1 items-center gap-3 overflow-hidden">
+                <form
+                  :if={@renaming_session == s.session_id}
+                  id={"rename-form-#{s.session_id}"}
+                  phx-submit="save_rename_title"
+                  class="flex w-full min-w-0 items-center gap-2 py-1"
+                >
+                  <input type="hidden" name="_id" value={s.session_id} />
+                  <input
+                    type="text"
+                    name="title"
+                    id={"rename-input-#{s.session_id}"}
+                    value={@renaming_title}
+                    maxlength="120"
+                    autofocus
+                    phx-blur="save_rename_title"
+                    phx-value-id={s.session_id}
+                    phx-keydown="rename_keydown"
+                    phx-key="Escape"
+                    class="flex-1 min-w-0 px-2 py-1 text-base font-semibold bg-surface text-on-surface rounded-lg border border-primary focus:outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                  <div class="flex items-center gap-1 shrink-0">
+                    <.dm_btn
+                      id={"save-title-#{s.session_id}"}
+                      type="submit"
+                      variant="primary"
+                      size="sm"
+                      shape="circle"
+                      title="Save title"
+                      phx-hook="WebComponentHook"
+                    >
+                      <.dm_mdi name="check" class="w-4 h-4" />
+                    </.dm_btn>
+                    <.dm_btn
+                      id={"cancel-title-#{s.session_id}"}
+                      type="button"
+                      phx-click="cancel_rename_title"
+                      variant="ghost"
+                      size="sm"
+                      shape="circle"
+                      title="Cancel"
+                      phx-hook="WebComponentHook"
+                    >
+                      <.dm_mdi name="close" class="w-4 h-4" />
+                    </.dm_btn>
+                  </div>
+                </form>
+
+                <div
+                  :if={@renaming_session != s.session_id}
+                  class="flex w-full min-w-0 max-w-full items-center justify-between gap-3 overflow-hidden py-1 text-on-surface"
+                >
+                  <div
+                    class="flex min-w-0 flex-1 items-center gap-3 overflow-hidden cursor-pointer"
+                    id={"session-title-container-#{s.session_id}"}
+                    phx-hook="SessionTitleDblClick"
+                    data-session-id={s.session_id}
+                    title="Double-click to rename"
+                  >
                     <div class="p-2 bg-primary/10 rounded-lg text-primary group-hover:bg-primary group-hover:text-primary-content transition-colors duration-300 shrink-0">
                       <.dm_mdi name="chat-processing-outline" class="w-5 h-5" />
                     </div>
                     <span class="block min-w-0 truncate font-bold text-lg" title={s.session_id}>{s.title}</span>
                   </div>
-                  <.dm_btn
-                    id={"delete-session-#{s.session_id}"}
-                    phx-click="delete_session"
-                    phx-value-id={s.session_id}
-                    phx-hook="WebComponentHook"
-                    variant="ghost"
-                    size="sm"
-                    shape="circle"
-                    class="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
-                    title="Delete session"
-                  >
-                    <.dm_mdi name="delete-outline" class="w-4 h-4 text-error" />
-                  </.dm_btn>
+                  <div class="flex items-center gap-1 shrink-0">
+                    <.dm_btn
+                      id={"rename-session-#{s.session_id}"}
+                      phx-click="start_rename_title"
+                      phx-value-id={s.session_id}
+                      phx-hook="WebComponentHook"
+                      variant="ghost"
+                      size="sm"
+                      shape="circle"
+                      class="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                      title="Rename session"
+                    >
+                      <.dm_mdi name="pencil-outline" class="w-4 h-4 text-on-surface-variant" />
+                    </.dm_btn>
+                    <.dm_btn
+                      id={"delete-session-#{s.session_id}"}
+                      phx-click="delete_session"
+                      phx-value-id={s.session_id}
+                      phx-hook="WebComponentHook"
+                      variant="ghost"
+                      size="sm"
+                      shape="circle"
+                      class="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                      title="Delete session"
+                    >
+                      <.dm_mdi name="delete-outline" class="w-4 h-4 text-error" />
+                    </.dm_btn>
+                  </div>
                 </div>
               </:title>
 
@@ -223,6 +296,84 @@ defmodule Sigma.Web.RepositoryLive do
        socket
        |> assign(deleting_session: nil)
        |> put_flash(:error, OperationError.message(:invalid_session_id))}
+    end
+  end
+
+  @impl true
+  def handle_event("start_rename_title", params, socket) do
+    id = Map.get(params, "id")
+
+    if SessionFiles.valid_session_id?(id) do
+      session = Enum.find(socket.assigns.sessions, &(&1.session_id == id))
+      current_title = (session && session.title) || id
+
+      {:noreply,
+       socket
+       |> assign(renaming_session: id, renaming_title: current_title)}
+    else
+      {:noreply, put_flash(socket, :error, OperationError.message(:invalid_session_id))}
+    end
+  end
+
+  @impl true
+  def handle_event("cancel_rename_title", _, socket) do
+    {:noreply, assign(socket, renaming_session: nil, renaming_title: nil)}
+  end
+
+  @impl true
+  def handle_event("rename_keydown", %{"key" => "Escape"}, socket) do
+    {:noreply, assign(socket, renaming_session: nil, renaming_title: nil)}
+  end
+
+  @impl true
+  def handle_event("rename_keydown", _, socket) do
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("save_rename_title", params, socket) do
+    id = Map.get(params, "id") || Map.get(params, "_id") || socket.assigns.renaming_session
+    raw_title = Map.get(params, "title") || Map.get(params, "value") || ""
+    new_title = raw_title |> String.trim() |> String.slice(0, 120)
+
+    session = Enum.find(socket.assigns.sessions, &(&1.session_id == id))
+    current_title = (session && session.title) || id
+
+    cond do
+      not SessionFiles.valid_session_id?(id) ->
+        {:noreply,
+         socket
+         |> assign(renaming_session: nil, renaming_title: nil)
+         |> put_flash(:error, OperationError.message(:invalid_session_id))}
+
+      new_title == "" or new_title == current_title ->
+        {:noreply, assign(socket, renaming_session: nil, renaming_title: nil)}
+
+      true ->
+        case SessionFiles.update_metadata(socket.assigns.sessions_dir, id, %{"title" => new_title}) do
+          :ok ->
+            updated_sessions =
+              Enum.map(socket.assigns.sessions, fn
+                %{session_id: ^id} = s -> %{s | title: new_title}
+                s -> s
+              end)
+
+            {:ok, fresh_sessions} =
+              Sigma.Session.Log.list_session_summaries(socket.assigns.sessions_dir)
+
+            sessions = if fresh_sessions != [], do: fresh_sessions, else: updated_sessions
+
+            {:noreply,
+             socket
+             |> assign(sessions: sessions, renaming_session: nil, renaming_title: nil)
+             |> put_flash(:info, "Session title updated.")}
+
+          {:error, reason} ->
+            {:noreply,
+             socket
+             |> assign(renaming_session: nil, renaming_title: nil)
+             |> put_flash(:error, OperationError.message(reason))}
+        end
     end
   end
 
