@@ -217,7 +217,7 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   test "renders session page", %{conn: conn} do
-    {:ok, view, html} = live_loaded(conn, session_path(unique_session_id("render")))
+    {:ok, _view, html} = live_loaded(conn, session_path(unique_session_id("render")))
     assert html =~ "Ask ∑ anything"
     refute html =~ "Enter sends"
     refute html =~ "Ctrl+Enter to send"
@@ -237,9 +237,13 @@ defmodule Sigma.Web.SessionLiveTest do
     assert html =~ ~s(href="/repository/#{@encoded_workdir}/skills")
     assert_session_sidebar_order(html)
 
-    drawer_html = render_click(view, "toggle_observability")
-    assert drawer_html =~ ~s(id="session-observability-drawer")
-    assert drawer_html =~ ~s(aria-label="Close session observability")
+    assert html =~ ~s(id="session-panels")
+    assert html =~ ~s(phx-hook="SessionPanels")
+    assert html =~ ~s(data-session-panel="navigation")
+    assert html =~ ~s(data-session-panel="details")
+    assert html =~ ~s(data-session-panel-toggle="details")
+    assert html =~ ~s(data-session-panel-backdrop)
+    assert html =~ ~s(aria-label="Close session details")
   end
 
   @tag :tmp_dir
@@ -260,6 +264,51 @@ defmodule Sigma.Web.SessionLiveTest do
       assert loaded_html =~ "Ask ∑ anything"
       refute loaded_html =~ "Could not load session"
     end)
+  end
+
+  test "exposes runtime context warnings outside the collapsible details panel" do
+    for policy <- [
+          %{overflow: :hard_overflow},
+          %{tokens_remaining: 0, estimate_stale: false}
+        ] do
+      html = session_render_assigns(context_policy: policy) |> render_session()
+      document = Floki.parse_document!(html)
+
+      assert [_] =
+               Floki.find(
+                 document,
+                 "#session-context-warning[data-session-context-open][data-session-panel-toggle=details]"
+               )
+
+      assert Floki.find(document, "#session-details #session-context-warning") == []
+      assert [_] = Floki.find(document, "#session-context-details[tabindex='-1']")
+    end
+
+    html = session_render_assigns(context_policy: %{}) |> render_session()
+    assert Floki.find(Floki.parse_document!(html), "#session-context-warning") == []
+  end
+
+  test "places fork lineage in metadata and keeps inherited usage in session usage" do
+    html =
+      session_render_assigns(
+        parent_session_id: "parent-session",
+        session_metrics: %{inherited_usage: %{total_tokens: 3000, request_count: 2}}
+      )
+      |> render_session()
+
+    document = Floki.parse_document!(html)
+
+    [link] =
+      Floki.find(
+        document,
+        "[aria-label='Connections and metadata'] a[href='#{session_path("parent-session")}']"
+      )
+
+    assert Floki.text(link) =~ "forked from: parent-session"
+    overview = Floki.find(document, ".sigma-session-overview")
+    assert Floki.text(overview) =~ "inherited: 3000 tokens (2 requests)"
+    refute Floki.text(overview) =~ "Lineage"
+    refute Floki.text(overview) =~ "forked from:"
   end
 
   test "does not render the ignored prompt input disabled while loading" do
@@ -1103,7 +1152,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
         assert_eventually(fn ->
           html = render(view)
-          html =~ "input: 90000" and html =~ "output: 1" and html =~ "Turn total"
+          html =~ "input: 90000" and html =~ "output: 1" and html =~ "Turn summary"
         end)
 
         assert {:ok, messages} = Sigma.Session.Log.replay(storage_path)
@@ -1174,7 +1223,7 @@ defmodule Sigma.Web.SessionLiveTest do
         render_click(view, "compact_session")
 
         html = render_async(view, 2_000)
-        assert html =~ "successful: 1"
+        assert html =~ "Successful compactions: 1"
         assert html =~ "known total: 207000"
 
         after_context =
@@ -1184,7 +1233,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
         stop_repository_supervisors(@workdir)
         {:ok, _reloaded_view, reloaded_html} = live_loaded(conn, session_path(session_id))
-        assert reloaded_html =~ "successful: 1"
+        assert reloaded_html =~ "Successful compactions: 1"
         assert reloaded_html =~ "known total: 207000"
       end)
     end)
@@ -1695,10 +1744,10 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   test "does not infer context size from an assistant message", %{conn: conn} do
-    {:ok, view, html} = live_loaded(conn, session_path(unique_session_id("context_size")))
-
-    assert html =~ ~s(id="session-context-size-unknown")
-    assert html =~ "Context: unknown"
+    session_id = unique_session_id("context_size")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    estimate = assert_runtime_context(view, session_id)
+    refute estimate == 12_345
 
     message = %Sigma.Agent.Message{
       id: "msg_context_size",
@@ -1717,21 +1766,23 @@ defmodule Sigma.Web.SessionLiveTest do
 
     send(view.pid, {:message_end, message})
 
-    html = render(view)
-    assert html =~ ~s(id="session-context-size-unknown")
-    assert html =~ "Context: unknown"
+    assert assert_runtime_context(view, session_id) == estimate
   end
 
   test "does not let replayed message usage replace runtime context", %{conn: conn} do
-    {:ok, view, _html} =
-      live_loaded(conn, session_path(unique_session_id("context_runtime_owned")))
+    session_id = unique_session_id("context_runtime_owned")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    estimate = assert_runtime_context(view, session_id)
+    refute estimate in [12_345, 105]
 
     send(view.pid, {:message_end, assistant_usage_message("large", 12_345)})
     send(view.pid, {:message_end, assistant_usage_message("small", 105)})
-    assert render(view) =~ "Context: unknown"
+    assert assert_runtime_context(view, session_id) == estimate
   end
 
-  test "keeps context unknown when journal replay only has message usage", %{conn: conn} do
+  test "uses runtime context rather than maximum input usage after legacy journal replay", %{
+    conn: conn
+  } do
     session_id = unique_session_id("context_replay")
     storage_path = session_storage_path(session_id)
     File.mkdir_p!(Path.dirname(storage_path))
@@ -1748,9 +1799,10 @@ defmodule Sigma.Web.SessionLiveTest do
         {:message_end, assistant_usage_message("small", 105)}
       )
 
-    {:ok, _view, html} = live_loaded(conn, session_path(session_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
-    assert html =~ "Context: unknown"
+    estimate = assert_runtime_context(view, session_id)
+    refute estimate in [12_345, 105]
   end
 
   test "projects durable metric facts into the live session rail", %{conn: conn} do
@@ -1785,8 +1837,214 @@ defmodule Sigma.Web.SessionLiveTest do
 
     assert_eventually(fn ->
       html = render(view)
-      html =~ "Usage" and html =~ "150" and html =~ "coverage: 1/1"
+      html =~ "Session usage" and html =~ "150" and html =~ "coverage: 1/1"
     end)
+  end
+
+  test "refreshes a streamed turn summary after terminal metrics and late usage", %{conn: conn} do
+    session_id = unique_session_id("streamed_turn_metrics")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    turn_id = "turn_streamed"
+    request_id = "request_streamed"
+    message_id = "answer_streamed"
+
+    send(
+      view.pid,
+      {:metrics, :turn_started, %{turn_id: turn_id, session_id: session_id, revision: 0}}
+    )
+
+    send(view.pid, {
+      :metrics,
+      :request_finished,
+      %{
+        request_id: request_id,
+        message_id: message_id,
+        turn_id: turn_id,
+        session_id: session_id,
+        revision: 1,
+        status: :completed,
+        input_tokens_total: 10,
+        output_tokens_total: 5
+      }
+    })
+
+    message = %Message{
+      id: message_id,
+      role: :assistant,
+      content: [%{type: :text, text: "answer"}],
+      metadata: %{turn_id: turn_id},
+      timestamp: System.system_time(:millisecond)
+    }
+
+    send(view.pid, {:message_end, message})
+
+    assert_eventually(fn ->
+      view |> element("#messages .sigma-turn-summary") |> render() =~ "running"
+    end)
+
+    send(view.pid, {
+      :metrics,
+      :turn_finished,
+      %{
+        turn_id: turn_id,
+        session_id: session_id,
+        revision: 1,
+        status: :completed,
+        wall_time_ms: 1_200
+      }
+    })
+
+    assert_eventually(fn ->
+      summary = view |> element("#messages .sigma-turn-summary") |> render()
+      summary =~ "completed" and summary =~ "wall: 1200ms"
+    end)
+
+    send(view.pid, {
+      :metrics,
+      :request_usage,
+      %{
+        request_id: request_id,
+        message_id: message_id,
+        turn_id: turn_id,
+        session_id: session_id,
+        revision: 2,
+        input_tokens_total: 12,
+        output_tokens_total: 7
+      }
+    })
+
+    assert_eventually(fn ->
+      summary = view |> element("#messages .sigma-turn-summary") |> render()
+      summary =~ "completed" and summary =~ "input: 12" and summary =~ "output: 7"
+    end)
+  end
+
+  test "keeps one summary at the last assistant message across multiple requests", %{conn: conn} do
+    session_id = unique_session_id("multi_request_summary")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    turn_id = "multi_request_turn"
+    send(view.pid, {:metrics, :turn_started, %{turn_id: turn_id, session_id: session_id}})
+
+    for {message_id, input, output} <- [{"first_answer", 10, 5}, {"last_answer", 20, 7}] do
+      send(
+        view.pid,
+        {:metrics, :request_finished,
+         %{
+           request_id: "request_#{message_id}",
+           message_id: message_id,
+           turn_id: turn_id,
+           session_id: session_id,
+           revision: 1,
+           status: :completed,
+           input_tokens_total: input,
+           output_tokens_total: output
+         }}
+      )
+
+      send(
+        view.pid,
+        {:message_end,
+         %Message{
+           id: message_id,
+           role: :assistant,
+           content: [%{type: :text, text: message_id}],
+           metadata: %{turn_id: turn_id}
+         }}
+      )
+
+      assert has_element?(view, "##{message_id} .sigma-turn-summary", "running")
+    end
+
+    send(
+      view.pid,
+      {:metrics, :turn_finished,
+       %{
+         turn_id: turn_id,
+         session_id: session_id,
+         revision: 1,
+         status: :completed,
+         wall_time_ms: 1500
+       }}
+    )
+
+    summary = view |> element("#messages .sigma-turn-summary") |> render()
+    assert summary =~ "completed"
+    assert summary =~ "requests: 2"
+    assert summary =~ "input: 30"
+    assert summary =~ "output: 12"
+    assert has_element?(view, "#last_answer .sigma-turn-summary")
+    refute has_element?(view, "#first_answer .sigma-turn-summary")
+    assert has_element?(view, "#first_answer .sigma-message-metrics details:not([open])")
+    assert has_element?(view, "#last_answer .sigma-message-metrics details:not([open])")
+  end
+
+  test "retains a tool-only summary on failure and cancellation without final answer text", %{
+    conn: conn
+  } do
+    for status <- [:failed, :cancelled] do
+      session_id = unique_session_id("tool_only_#{status}")
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+      turn_id = "tool_turn"
+      send(view.pid, {:metrics, :turn_started, %{turn_id: turn_id, session_id: session_id}})
+
+      send(
+        view.pid,
+        {:message_end,
+         %Message{
+           id: "tool_answer",
+           role: :assistant,
+           content: [
+             %{type: :tool_call, id: "tool_call", name: "read", arguments: %{path: "missing"}}
+           ],
+           metadata: %{turn_id: turn_id}
+         }}
+      )
+
+      send(
+        view.pid,
+        {:message_end,
+         %Message{
+           id: "tool_result",
+           role: :tool_result,
+           tool_call_id: "tool_call",
+           content: "File unavailable",
+           is_error: true,
+           metadata: %{turn_id: turn_id}
+         }}
+      )
+
+      send(
+        view.pid,
+        {:metrics, :tool_finished,
+         %{
+           tool_id: "tool_call",
+           turn_id: turn_id,
+           status: :failed,
+           revision: 1
+         }}
+      )
+
+      send(
+        view.pid,
+        {:metrics, :turn_finished,
+         %{
+           turn_id: turn_id,
+           session_id: session_id,
+           revision: 1,
+           status: status,
+           terminal_reason: "Tool execution stopped",
+           wall_time_ms: 200
+         }}
+      )
+
+      summary = view |> element("#messages .sigma-turn-summary") |> render()
+      assert summary =~ Atom.to_string(status)
+      assert summary =~ "tools: 1"
+      assert summary =~ "input: unknown"
+      assert summary =~ "Tool execution stopped"
+      assert has_element?(view, "#tool_answer .sigma-turn-summary")
+      assert has_element?(view, "#tool_answer", "File unavailable")
+    end
   end
 
   test "restores persisted usage as owned by the logical route session", %{conn: conn} do
@@ -2226,6 +2484,24 @@ defmodule Sigma.Web.SessionLiveTest do
     |> IO.iodata_to_binary()
   end
 
+  defp assert_runtime_context(view, session_id) do
+    {:ok, {agent, _policy}} =
+      Sigma.Web.SessionManager.get_agent(session_id, repo_path: @workdir)
+
+    estimate = Sigma.Agent.status(agent).context_snapshot.next_request_estimated_input_tokens
+    assert is_integer(estimate)
+
+    assert has_element?(
+             view,
+             "#session-context-details",
+             "Next request estimate: #{estimate} tokens"
+           )
+
+    assert has_element?(view, "#session-context-details", "Model window: unknown")
+    refute has_element?(view, "#session-context-details progress")
+    estimate
+  end
+
   defp session_render_assigns(overrides) do
     Map.merge(
       %{
@@ -2272,6 +2548,7 @@ defmodule Sigma.Web.SessionLiveTest do
         storage_path: session_storage_path("render_session"),
         streaming_message_id: nil,
         streams: %{messages: []},
+        turn_last_message_ids: %{},
         tool_results: %{},
         turn_in_flight: false,
         workdir: @workdir

@@ -6,6 +6,7 @@ import * as DuskmoonHooks from "phoenix_duskmoon/hooks"
 import { encodeImageFiles } from "./chat_attachments.js"
 import { shouldClearComposer } from "./chat_submission.js"
 import { formatElapsedTime, formatRelativeTime } from "./session_time.js"
+import { SessionPanels } from "./hooks/session_panels.js"
 import { SessionTerminals } from "./hooks/session_terminals.js"
 import { filterSkillCandidates, insertSkillCandidate, searchableRemoteSources } from "./skill_completion.js"
 
@@ -817,7 +818,7 @@ let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("
 
 let liveSocket = new LiveSocket("/live", Socket, {
   params: {_csrf_token: csrfToken},
-  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, AutocompleteHook, SessionMenuHook, ChatInputHook, MarkdownInputHook, AppearanceThemeHook, LocalTime, RelativeTime, ElapsedTime, SessionTerminals, SessionTitleDblClick }
+  hooks: { ...DuskmoonHooks, ModalHook, ScrollBottom, AutocompleteHook, SessionMenuHook, ChatInputHook, MarkdownInputHook, AppearanceThemeHook, LocalTime, RelativeTime, ElapsedTime, SessionPanels, SessionTerminals, SessionTitleDblClick }
 })
 
 // Show progress bar on live navigation and form submits

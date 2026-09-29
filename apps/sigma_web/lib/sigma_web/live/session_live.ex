@@ -198,6 +198,7 @@ defmodule Sigma.Web.SessionLive do
           model_options = model_options(system_config, provider_id)
           current_model_value = model_option_value(provider_id, model_id)
           {stream_messages, tool_results, tool_call_to_msg} = split_messages(initial_messages)
+          {display_messages, turn_last_message_ids} = index_display_messages(stream_messages)
           session_metrics_state = ensure_metrics_session(snapshot.metrics, session_id)
           session_metrics = Sigma.Session.Metrics.snapshot(session_metrics_state)
           context_snapshot = agent_status.context_snapshot
@@ -233,6 +234,8 @@ defmodule Sigma.Web.SessionLive do
              pending_mcp_elicitations: load_pending_mcp_elicitations(agent),
              sessions: sessions,
              stream_messages: stream_messages,
+             display_messages: display_messages,
+             turn_last_message_ids: turn_last_message_ids,
              tool_call_to_msg: tool_call_to_msg,
              tool_results: tool_results,
              terminal_capability: terminal_capability
@@ -279,6 +282,8 @@ defmodule Sigma.Web.SessionLive do
       |> assign(:turn_in_flight, active_runtime_phase?(session_data.runtime_status))
       |> assign(:tool_call_to_msg, session_data.tool_call_to_msg)
       |> assign(:tool_results, session_data.tool_results)
+      |> assign(:display_messages, session_data.display_messages)
+      |> assign(:turn_last_message_ids, session_data.turn_last_message_ids)
       |> stream(:messages, session_data.stream_messages, reset: true)
       |> start_async(:agent_status, fn -> Sigma.Agent.status(agent) end)
 
@@ -345,17 +350,25 @@ defmodule Sigma.Web.SessionLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="sigma-session-shell relative flex h-[calc(100vh-64px)] overflow-hidden bg-surface text-on-surface font-sans">
-      <aside class="sigma-session-sidebar hidden w-64 shrink-0 flex-col border-r border-outline-variant bg-secondary text-secondary-content md:flex">
-        <div class="border-b border-secondary-content/10 p-4 text-on-secondary">
+    <div id="session-panels" phx-hook="SessionPanels" class="sigma-session-shell relative flex h-[calc(100vh-64px)] overflow-hidden bg-surface text-on-surface font-sans">
+      <aside id="session-navigation" data-session-panel="navigation" aria-label="Session navigation" class="sigma-session-sidebar hidden w-64 shrink-0 flex-col border-r border-outline-variant bg-surface-container-low text-on-surface md:flex">
+        <div class="border-b border-outline-variant p-4">
           <div class="mb-1 flex items-center gap-2">
             <.dm_mdi name="folder-outline" class="h-4 w-4 opacity-70" />
             <span class="text-xs font-bold uppercase tracking-widest opacity-70">Workspace</span>
           </div>
           <h2 class="truncate text-sm font-semibold" title={@workdir}>{Path.basename(@workdir)}</h2>
-          <p class="mt-1 truncate font-mono text-[11px] opacity-60" title={@effective_cwd}>
-            {short_path(@effective_cwd)}
-          </p>
+          <details class="mt-2 text-xs text-on-surface-variant">
+            <summary class="cursor-pointer">Project paths</summary>
+            <p class="mt-2 font-semibold">Project root</p>
+            <code class="block break-all font-mono">{@workdir}</code>
+            <button type="button" data-session-copy={@workdir} aria-label="Copy project root" class="mt-1 rounded px-2 py-1 text-primary focus-visible:outline">Copy</button>
+            <span data-copy-status role="status" aria-live="polite"></span>
+            <p :if={@effective_cwd != @workdir} class="mt-2 font-semibold">Execution directory</p>
+            <code :if={@effective_cwd != @workdir} class="block break-all font-mono">{@effective_cwd}</code>
+            <button :if={@effective_cwd != @workdir} type="button" data-session-copy={@effective_cwd} aria-label="Copy execution directory" class="mt-1 rounded px-2 py-1 text-primary focus-visible:outline">Copy</button>
+            <span :if={@effective_cwd != @workdir} data-copy-status role="status" aria-live="polite"></span>
+          </details>
 
           <nav class="mt-4 flex flex-col gap-1.5">
             <.dm_link
@@ -400,7 +413,7 @@ defmodule Sigma.Web.SessionLive do
         </div>
 
         <div class="flex-1 overflow-y-auto">
-          <div class="px-4 py-3 text-xs font-bold uppercase tracking-widest text-secondary-content opacity-60">
+          <div class="px-4 py-3 text-xs font-bold uppercase tracking-widest text-on-surface-variant">
             Sessions
           </div>
           <ul class="flex flex-col gap-0.5 px-2">
@@ -422,11 +435,13 @@ defmodule Sigma.Web.SessionLive do
               <.dm_link
                 :if={not is_renaming and session_id == @session_id}
                 navigate={~p"/repository/#{@encoded_repository}/sessions/#{session_id}"}
-                class={["flex min-w-0 flex-1 items-center gap-2 truncate rounded-lg px-3 py-2 text-secondary-content transition-colors",
+                class={["flex min-w-0 flex-1 items-center gap-2 truncate rounded-lg px-3 py-2 transition-colors",
                   "bg-primary text-primary-content font-bold"]}
+                aria-current="page"
               >
                 <.dm_mdi name="chat-outline" class="h-4 w-4 shrink-0 opacity-70" />
-                <span class="truncate text-xs font-mono" title={session_id}>{s.title}</span>
+                <span class="min-w-0 truncate text-xs" title={session_id}>{session_display_title(s.title, session_id)}</span>
+                <span :if={unnamed_session?(s.title, session_id)} class="font-mono text-[10px] opacity-70">{short_session_id(session_id)}</span>
                 <.dm_mdi
                   :if={s[:parent_session_id]}
                   name="source-branch"
@@ -442,10 +457,11 @@ defmodule Sigma.Web.SessionLive do
                 phx-value-session={session_id}
                 phx-hook="WebComponentHook"
                 variant="ghost"
-                class="flex min-w-0 flex-1 items-center justify-start gap-2 truncate rounded-lg px-3 py-2 text-secondary-content transition-colors hover:bg-secondary-content/10"
+                class="flex min-w-0 flex-1 items-center justify-start gap-2 truncate rounded-lg px-3 py-2 text-on-surface transition-colors hover:bg-surface-container-high"
               >
                 <.dm_mdi name="chat-outline" class="h-4 w-4 shrink-0 opacity-70" />
-                <span class="truncate text-xs font-mono" title={session_id}>{s.title}</span>
+                <span class="min-w-0 truncate text-xs" title={session_id}>{session_display_title(s.title, session_id)}</span>
+                <span :if={unnamed_session?(s.title, session_id)} class="font-mono text-[10px] opacity-70">{short_session_id(session_id)}</span>
                 <.dm_mdi
                   :if={s[:parent_session_id]}
                   name="source-branch"
@@ -459,7 +475,8 @@ defmodule Sigma.Web.SessionLive do
                 type="button"
                 variant="ghost"
                 size="xs"
-                class="mr-1 shrink-0 opacity-0 transition-opacity group-hover:opacity-60"
+                class="mr-1 shrink-0 opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
+                aria-label={"Actions for #{session_display_title(s.title, session_id)}"}
               >
                 <.dm_mdi name="dots-vertical" class="h-4 w-4" />
               </.dm_btn>
@@ -480,39 +497,28 @@ defmodule Sigma.Web.SessionLive do
           </ul>
         </div>
 
-        <div class="border-t border-secondary-content/10 p-4">
-          <p class="mb-2 text-[10px] font-bold uppercase tracking-widest opacity-50">Project root</p>
-          <code class="block break-all font-mono text-[10px] leading-tight opacity-70">{@workdir}</code>
-        </div>
+        <button type="button" data-session-panel-close class="m-3 rounded px-3 py-2 text-xs focus-visible:outline md:hidden" aria-label="Close navigation">Close navigation</button>
       </aside>
 
       <section class="sigma-session-main grid min-w-0 flex-1 bg-surface-container-lowest">
         <header class="sigma-session-header border-b border-outline-variant bg-surface px-4 py-2">
           <div class="flex min-w-0 flex-wrap items-center justify-between gap-3">
             <div class="flex min-w-0 items-center gap-3">
+              <button type="button" data-session-panel-toggle="navigation" aria-label="Toggle navigation" aria-controls="session-navigation" aria-expanded="false" class="rounded p-2 focus-visible:outline">
+                <.dm_mdi name="menu" class="h-5 w-5" />
+              </button>
               <span class={["sigma-session-status-dot", session_status_class(@session_ready, @turn_in_flight)]} />
               <div class="min-w-0">
-                <p class="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">
-                  Active Session
-                </p>
                 <h1 class="truncate text-sm font-semibold text-on-surface" title={@session_id}>
-                  {@session_id}
+                  {current_session_title(@sessions, @session_id)}
                 </h1>
+                <p :if={current_session_unnamed?(@sessions, @session_id)} class="font-mono text-[10px] text-on-surface-variant">{short_session_id(@session_id)}</p>
               </div>
-              <span class="hidden max-w-[28rem] truncate font-mono text-[11px] text-on-surface-variant lg:inline" title={@effective_cwd}>
-                {short_path(@effective_cwd)}
-              </span>
+              <span id="session-runtime-phase" class="sigma-session-chip" role="status">{runtime_phase_label(@runtime_status)}</span>
+              <SessionObservability.context_warning policy={assigns[:context_policy] || %{}} />
             </div>
 
             <div class="flex min-w-0 flex-wrap items-center justify-end gap-2">
-              <span
-                :if={@active_provider_id}
-                class="sigma-session-chip"
-                title={"Provider: #{@active_provider_id}"}
-              >
-                Provider: {@active_provider_id}
-              </span>
-
               <form id="model-select-form" phx-change="select_model" class="sigma-session-model-select">
                 <.dm_select
                   id="model-select"
@@ -529,68 +535,22 @@ defmodule Sigma.Web.SessionLive do
                 </.dm_select>
               </form>
 
-              <span
-                :if={is_integer(@context_window) and @context_window > 0}
-                id="session-context-size"
-                class={["sigma-context-gauge", context_usage_class(@context_token_count, @context_window)]}
-                title={format_context_size_title(@context_token_count, @context_window)}
-                aria-label={"Context #{format_context_size_title(@context_token_count, @context_window)}"}
-              >
-                <span class="sigma-context-gauge-track">
-                  <span
-                    class="sigma-context-gauge-fill"
-                    style={"width: #{context_usage_width(@context_token_count, @context_window)}"}
-                  />
-                </span>
-                <span class="sigma-context-gauge-label">
-                  Context: {format_context_size(@context_token_count, @context_window)}
-                </span>
-              </span>
-              <span
-                :if={not (is_integer(@context_window) and @context_window > 0)}
-                id="session-context-size-unknown"
-                class="sigma-session-chip"
-                title="The selected model does not report a context window"
-              >
-                Context: unknown
-              </span>
-
               <SessionTerminalComponents.terminal_trigger
                 catalog={@terminal_catalog}
                 panel_open?={@terminal_panel_open}
               />
 
-              <.dm_btn
-                id="compact-session-btn"
-                type="button"
-                phx-click="compact_session"
-                phx-hook="WebComponentHook"
-                variant="ghost"
-                size="sm"
-                shape="circle"
-                disabled={not @session_ready or @turn_in_flight or @pending_compaction}
-                title="Compact context"
-                aria-label="Compact context"
-              >
-                <.dm_mdi name="arrow-collapse-vertical" class="h-4 w-4" />
-                <span class="sr-only">Compact context</span>
-              </.dm_btn>
-
-              <.dm_btn
+              <button
                 id="session-observability-open-btn"
                 type="button"
-                phx-click="toggle_observability"
-                phx-hook="WebComponentHook"
-                variant="ghost"
-                size="sm"
-                shape="circle"
-                class="xl:hidden"
-                title="Session observability"
-                aria-label="Open session observability"
+                data-session-panel-toggle="details"
+                aria-controls="session-details"
+                aria-expanded="false"
+                aria-label="Toggle session details"
+                class="rounded p-2 focus-visible:outline"
               >
                 <.dm_mdi name="chart-box-outline" class="h-4 w-4" />
-                <span class="sr-only">Open session observability</span>
-              </.dm_btn>
+              </button>
             </div>
           </div>
         </header>
@@ -609,6 +569,7 @@ defmodule Sigma.Web.SessionLive do
               session_ready={@session_ready}
               turn_in_flight={@turn_in_flight}
               session_metrics={@session_metrics}
+              turn_last_message_ids={@turn_last_message_ids}
             />
           </div>
         </div>
@@ -675,6 +636,7 @@ defmodule Sigma.Web.SessionLive do
 
             <div class="relative">
               <%!-- # TODO(upstream): duskmoon-dev/duskmoon-elements#77 --%>
+              <%!-- # TODO(upstream): duskmoon-dev/duskmoon-elements#81 --%>
               <.dm_chat_input
                 id="prompt-input"
                 phx-update="ignore"
@@ -700,98 +662,55 @@ defmodule Sigma.Web.SessionLive do
         />
       </section>
 
-      <aside class="sigma-session-rail hidden w-72 shrink-0 flex-col border-l border-outline-variant bg-surface-container-low p-4 xl:flex">
-        <div class="mb-4">
-          <p class="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">
-            Runtime
-          </p>
-          <h2 class="mt-1 text-sm font-semibold text-on-surface">Session State</h2>
+      <aside id="session-details" data-session-panel="details" aria-label="Session details" class="sigma-session-rail hidden w-72 shrink-0 flex-col overflow-y-auto border-l border-outline-variant bg-surface-container-low p-4 xl:flex">
+        <div class="mb-4 flex items-center justify-between gap-2">
+          <h2 class="text-sm font-semibold text-on-surface">Session details</h2>
+          <button type="button" data-session-panel-close aria-label="Close session details" class="rounded p-2 focus-visible:outline">
+            <.dm_mdi name="close" class="h-4 w-4" />
+          </button>
         </div>
-
-        <div class="grid gap-3 text-sm">
-          <div class="rounded-md border border-outline-variant bg-surface-container p-3">
-            <p class="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">
-              Working Directory
-            </p>
-            <p class="mt-1 break-all font-mono text-xs text-on-surface" title={@effective_cwd}>
-              {@effective_cwd}
-            </p>
-          </div>
-
-          <div class="rounded-md border border-outline-variant bg-surface-container p-3">
-            <p class="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">
-              Model
-            </p>
-            <p
-              class="mt-1 truncate font-mono text-xs text-on-surface"
-              title={assigns[:current_model] || "Loading"}
-            >
-              {assigns[:current_model] || "Loading"}
-            </p>
-          </div>
-
-          <div class="rounded-md border border-outline-variant bg-surface-container p-3">
-            <p class="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">
-              Context
-            </p>
-            <p class="mt-1 font-mono text-xs text-on-surface">
-              {format_context_size(@context_token_count, @context_window)}
-            </p>
-          </div>
-
-          <div class="rounded-md border border-outline-variant bg-surface-container p-3">
-            <p class="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">
-              MCP Servers
-            </p>
-            <p class="mt-1 font-mono text-xs text-on-surface">
-              {length(assigns[:mcp_server_ids] || [])}
-            </p>
-          </div>
-        </div>
-
         <SessionObservability.session_overview_rail snapshot={session_observability_snapshot(assigns)} />
-        <SessionObservability.context_budget_card policy={context_budget_view(assigns)} />
-        <SessionObservability.branch_alternatives branches={@branch_summaries} />
-      </aside>
-
-      <button
-        :if={@show_observability}
-        id="session-observability-backdrop"
-        type="button"
-        phx-click="toggle_observability"
-        class="absolute inset-0 z-20 bg-scrim/40 xl:hidden"
-        aria-label="Close session observability"
-      />
-      <aside
-        :if={@show_observability}
-        id="session-observability-drawer"
-        class="absolute inset-y-0 right-0 z-30 flex w-[min(22rem,calc(100vw-2rem))] flex-col overflow-y-auto border-l border-outline-variant bg-surface-container-high p-4 text-on-surface shadow-xl xl:hidden"
-        aria-label="Session observability drawer"
-      >
-        <header class="mb-4 flex items-center justify-between gap-3 border-b border-outline-variant pb-3">
-          <h2 class="text-sm font-semibold">Session observability</h2>
+        <section id="session-context-details" class="mt-4" tabindex="-1" aria-label="Context details">
+          <SessionObservability.context_budget_card
+            policy={context_budget_view(assigns)}
+            successful_compactions={get_in(assigns, [:session_metrics, :successful_compactions])}
+            last_compaction={get_in(assigns, [:session_metrics, :last_compaction])}
+          />
           <.dm_btn
-            id="session-observability-close-btn"
+            id="compact-session-btn"
             type="button"
-            phx-click="toggle_observability"
+            phx-click="compact_session"
             phx-hook="WebComponentHook"
             variant="ghost"
             size="sm"
-            shape="circle"
-            aria-label="Close session observability"
+            disabled={not @session_ready or @turn_in_flight or @pending_compaction}
+            class="mt-2"
           >
-            <.dm_mdi name="close" class="h-4 w-4" />
-            <span class="sr-only">Close session observability</span>
+            Compact context
           </.dm_btn>
-        </header>
-        <SessionObservability.session_overview_rail snapshot={session_observability_snapshot(assigns)} />
-        <div class="mt-4">
-          <SessionObservability.context_budget_card policy={context_budget_view(assigns)} />
-        </div>
-        <div class="mt-4">
+        </section>
+        <section class="mt-4 rounded-md border border-outline-variant bg-surface-container p-3 text-xs" aria-label="Connections and metadata">
+          <h3 class="font-semibold">Connections and metadata</h3>
+          <dl class="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-2">
+            <dt>Provider</dt><dd class="break-all font-mono">{assigns[:active_provider_id] || "unknown"}</dd>
+            <dt>Session ID</dt><dd class="break-all font-mono">{@session_id}</dd>
+            <dt :if={@parent_session_id}>Lineage</dt>
+            <dd :if={@parent_session_id}>
+              <.link navigate={parent_session_path(assigns)} class="break-all font-mono text-primary underline">
+                forked from: {@parent_session_id}
+              </.link>
+            </dd>
+            <dt>MCP</dt><dd>{length(assigns[:mcp_server_ids] || [])} configured servers · connection status unavailable</dd>
+          </dl>
+          <button type="button" data-session-copy={@session_id} aria-label="Copy session ID" class="mt-2 rounded px-2 py-1 text-primary focus-visible:outline">Copy session ID</button>
+          <span data-copy-status role="status" aria-live="polite"></span>
+          <.dm_link navigate={~p"/settings/mcp"} class="mt-2 inline-block text-primary">MCP settings</.dm_link>
+        </section>
+        <div class="mt-4 pb-4">
           <SessionObservability.branch_alternatives branches={@branch_summaries} />
         </div>
       </aside>
+      <button id="session-panels-backdrop" type="button" data-session-panel-backdrop hidden class="sigma-session-panel-backdrop absolute inset-0 z-20 bg-scrim/40" aria-label="Close open session panel" />
 
       <.dm_modal :if={@pending_retry} id="retry-turn-modal" phx-hook="ModalHook">
         <:title>
@@ -1111,6 +1030,14 @@ defmodule Sigma.Web.SessionLive do
       assigns
       |> assign(:user_text, user_content(assigns.message.content))
       |> assign(:user_images, user_images(assigns.message.content))
+      |> assign(
+        :turn_summary,
+        turn_summary_for(
+          assigns.message,
+          assigns[:session_metrics],
+          assigns[:turn_last_message_ids]
+        )
+      )
 
     ~H"""
     <.dm_chat
@@ -1136,8 +1063,11 @@ defmodule Sigma.Web.SessionLive do
         />
       </div>
 
+      <:footer :if={not is_nil(@turn_summary)}>
+        <SessionObservability.turn_summary summary={@turn_summary} />
+      </:footer>
+
       <:actions_slot>
-        <SessionObservability.side_effect_warning />
         <.dm_btn
           :if={retryable_message?(@message)}
           id={"retry-turn-#{@message.id}"}
@@ -1165,6 +1095,10 @@ defmodule Sigma.Web.SessionLive do
           <:prefix><.dm_mdi name="refresh" class="w-3 h-3" /></:prefix>
           Resend
         </.dm_btn>
+        <details class="mt-1 text-xs text-on-surface-variant">
+          <summary class="cursor-pointer">What Resend does</summary>
+          <p>Starts a new turn with this message. Earlier file edits, commands, Git changes, and external requests remain.</p>
+        </details>
       </:actions_slot>
     </.dm_chat>
     """
@@ -1182,7 +1116,14 @@ defmodule Sigma.Web.SessionLive do
         :request_metrics,
         request_metrics_for(assigns.message, assigns[:session_metrics])
       )
-      |> assign(:turn_summary, turn_summary_for(assigns.message, assigns[:session_metrics]))
+      |> assign(
+        :turn_summary,
+        turn_summary_for(
+          assigns.message,
+          assigns[:session_metrics],
+          assigns[:turn_last_message_ids]
+        )
+      )
 
     ~H"""
     <.dm_chat
@@ -1280,16 +1221,22 @@ defmodule Sigma.Web.SessionLive do
 
   defp assistant_content_blocks(content) when is_list(content), do: content
 
-  defp turn_summary_for(%{stop_reason: :tool_use}, _session_metrics), do: nil
-
-  defp turn_summary_for(%{metadata: metadata}, session_metrics)
-       when is_map(metadata) and is_map(session_metrics) do
-    turn_id = metadata[:turn_id] || metadata["turn_id"]
+  defp turn_summary_for(message, session_metrics, turn_last_message_ids)
+       when is_map(session_metrics) and is_map(turn_last_message_ids) do
+    turn_id = message_turn_id(message)
     turns = session_metrics[:turns] || session_metrics["turns"] || %{}
-    Map.get(turns, turn_id)
+
+    if Map.get(turn_last_message_ids, turn_id) == message.id,
+      do: Map.get(turns, turn_id),
+      else: nil
   end
 
-  defp turn_summary_for(_message, _session_metrics), do: nil
+  defp turn_summary_for(_message, _session_metrics, _turn_last_message_ids), do: nil
+
+  defp message_turn_id(%{metadata: metadata}) when is_map(metadata),
+    do: metadata[:turn_id] || metadata["turn_id"]
+
+  defp message_turn_id(_message), do: nil
 
   defp local_time(assigns) do
     assigns = assign(assigns, :dom_id, "#{assigns.id}-local-time")
@@ -1391,6 +1338,74 @@ defmodule Sigma.Web.SessionLive do
     end)
   end
 
+  defp index_display_messages(messages) do
+    Enum.reduce(messages, {%{}, %{}}, fn message, {by_id, last_by_turn} ->
+      turn_id = message_turn_id(message)
+
+      last_by_turn =
+        if is_binary(turn_id) and message.role in [:user, :assistant],
+          do: Map.put(last_by_turn, turn_id, message.id),
+          else: last_by_turn
+
+      {Map.put(by_id, message.id, message), last_by_turn}
+    end)
+  end
+
+  defp stream_display_message(socket, message) do
+    previous_id = Map.get(socket.assigns.turn_last_message_ids, message_turn_id(message))
+    {by_id, last_by_turn} = index_display_messages([message])
+    turn_id = message_turn_id(message)
+
+    socket =
+      socket
+      |> assign(:display_messages, Map.merge(socket.assigns.display_messages, by_id))
+      |> assign(
+        :turn_last_message_ids,
+        Map.merge(socket.assigns.turn_last_message_ids, last_by_turn)
+      )
+      |> stream_insert(:messages, message)
+
+    if previous_id && previous_id != message.id && is_binary(turn_id) do
+      case Map.get(socket.assigns.display_messages, previous_id) do
+        nil -> socket
+        previous -> stream_insert(socket, :messages, previous)
+      end
+    else
+      socket
+    end
+  end
+
+  defp refresh_metric_messages(socket, fact, attrs, metrics_state) do
+    turn_id = attrs[:turn_id] || attrs["turn_id"]
+    request_id = attrs[:request_id] || attrs["request_id"]
+    request = Map.get(metrics_state.requests, request_id) || %{}
+    message_id = attrs[:message_id] || attrs["message_id"] || request[:message_id]
+
+    ids =
+      [
+        if(
+          fact in [
+            :turn_started,
+            :turn_finished,
+            :request_finished,
+            :request_usage,
+            :tool_finished
+          ],
+          do: Map.get(socket.assigns.turn_last_message_ids, turn_id || request[:turn_id])
+        ),
+        if(fact in [:request_finished, :request_usage], do: message_id)
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    Enum.reduce(ids, socket, fn id, socket ->
+      case Map.get(socket.assigns.display_messages, id) do
+        nil -> socket
+        message -> stream_insert(socket, :messages, message)
+      end
+    end)
+  end
+
   defp format_timestamp(ts) when is_integer(ts) do
     ts |> DateTime.from_unix!(:millisecond) |> Calendar.strftime("%H:%M:%S")
   end
@@ -1426,38 +1441,12 @@ defmodule Sigma.Web.SessionLive do
 
   defp request_metrics_for(_message, _session_metrics), do: []
 
-  defp format_context_size(count, nil),
-    do: "#{format_token_count(non_negative_integer(count) || 0)} tokens"
-
-  defp format_context_size(count, context_window) do
-    "#{format_token_count(non_negative_integer(count) || 0)} / #{format_token_count(context_window)} tokens"
-  end
-
-  defp format_context_size_title(count, context_window) do
-    "#{format_integer(non_negative_integer(count) || 0)} / #{format_integer(context_window)} tokens"
-  end
-
-  defp context_usage_width(count, context_window) do
-    "#{context_usage_percent(count, context_window)}%"
-  end
-
-  defp context_usage_class(count, context_window) do
-    if context_usage_percent(count, context_window) >= 80 do
-      "is-warning"
-    else
-      nil
-    end
-  end
-
-  defp context_usage_percent(count, context_window) do
-    count = non_negative_integer(count) || 0
-
-    case positive_integer(context_window) do
-      nil -> 0
-      window -> count |> Kernel.*(100) |> Kernel./(window) |> min(100) |> max(0) |> round()
-    end
-  end
-
+  defp runtime_phase_label(:loading), do: "Loading…"
+  defp runtime_phase_label(:idle), do: "Ready"
+  defp runtime_phase_label(:completed), do: "Completed"
+  defp runtime_phase_label(:failed), do: "Failed"
+  defp runtime_phase_label(:cancelled), do: "Cancelled"
+  defp runtime_phase_label(:interrupted), do: "Interrupted"
   defp runtime_phase_label(:waiting_provider), do: "Waiting for provider…"
   defp runtime_phase_label(:streaming_provider), do: "Receiving model output…"
   defp runtime_phase_label(:running_tools), do: "Running tools…"
@@ -1466,7 +1455,7 @@ defmodule Sigma.Web.SessionLive do
   defp runtime_phase_label(:cancelling), do: "Cancelling…"
   defp runtime_phase_label(:compacting), do: "Compacting context…"
   defp runtime_phase_label(:queued), do: "Queued…"
-  defp runtime_phase_label(_phase), do: "Agent is working…"
+  defp runtime_phase_label(_phase), do: "Working…"
 
   defp fork_boundary_label(%{message_id: :all}), do: "latest completed turn"
 
@@ -1493,52 +1482,32 @@ defmodule Sigma.Web.SessionLive do
   defp session_status_class(true, true), do: "is-running"
   defp session_status_class(true, false), do: "is-ready"
 
-  defp short_path(path) when is_binary(path) do
-    path
-    |> Path.split()
-    |> compact_path_segments()
-    |> Path.join()
+  defp current_session_title(sessions, session_id) do
+    title =
+      Enum.find_value(sessions, fn session ->
+        if session.session_id == session_id, do: session.title
+      end)
+
+    session_display_title(title, session_id)
   end
 
-  defp short_path(_path), do: ""
+  defp current_session_unnamed?(sessions, session_id) do
+    title =
+      Enum.find_value(sessions, fn session ->
+        if session.session_id == session_id, do: session.title
+      end)
 
-  defp compact_path_segments(segments) when length(segments) > 4 do
-    [first | rest] = segments
-    [first, "…"] ++ Enum.take(rest, -3)
+    unnamed_session?(title, session_id)
   end
 
-  defp compact_path_segments(segments), do: segments
-
-  defp format_token_count(value) when is_integer(value) and value < 1_000 do
-    format_integer(value)
+  defp session_display_title(title, session_id) do
+    if unnamed_session?(title, session_id), do: "Untitled session", else: title
   end
 
-  defp format_token_count(value) when is_integer(value) and value < 1_000_000 do
-    "~#{format_compact_number(value, 1_000)}K"
-  end
+  defp unnamed_session?(title, session_id), do: title in [nil, "", session_id]
 
-  defp format_token_count(value) when is_integer(value) do
-    "~#{format_compact_number(value, 1_000_000)}M"
-  end
-
-  defp format_compact_number(value, scale) do
-    value
-    |> Kernel./(scale)
-    |> Float.round(1)
-    |> :erlang.float_to_binary(decimals: 1)
-    |> String.trim_trailing(".0")
-  end
-
-  defp format_integer(value) when is_integer(value) do
-    value
-    |> Integer.to_string()
-    |> String.graphemes()
-    |> Enum.reverse()
-    |> Enum.chunk_every(3)
-    |> Enum.map(&Enum.reverse/1)
-    |> Enum.reverse()
-    |> Enum.map_join(",", &Enum.join/1)
-  end
+  defp short_session_id(session_id) when is_binary(session_id), do: String.slice(session_id, 0, 8)
+  defp short_session_id(_session_id), do: ""
 
   defp non_negative_integer(value) when is_integer(value) and value >= 0, do: value
 
@@ -2756,7 +2725,7 @@ defmodule Sigma.Web.SessionLive do
   def handle_info({:message_start, %{role: :assistant} = message}, socket) do
     socket =
       socket
-      |> stream_insert(:messages, message)
+      |> stream_display_message(message)
       |> assign(:streaming_message_id, message.id)
 
     {:noreply, socket}
@@ -2764,12 +2733,12 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def handle_info({:message_start, message}, socket) do
-    {:noreply, stream_insert(socket, :messages, message)}
+    {:noreply, stream_display_message(socket, message)}
   end
 
   @impl true
   def handle_info({:message_update, message, _event}, socket) do
-    {:noreply, stream_insert(socket, :messages, message)}
+    {:noreply, stream_display_message(socket, message)}
   end
 
   @impl true
@@ -2798,7 +2767,7 @@ defmodule Sigma.Web.SessionLive do
 
     socket =
       socket
-      |> stream_insert(:messages, message)
+      |> stream_display_message(message)
       |> assign(:tool_call_to_msg, new_tc_map)
 
     {:noreply, socket}
@@ -2806,12 +2775,12 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def handle_info({:message_end, %{role: :assistant} = message}, socket) do
-    {:noreply, stream_insert(socket, :messages, message)}
+    {:noreply, stream_display_message(socket, message)}
   end
 
   @impl true
   def handle_info({:message_end, message}, socket) do
-    {:noreply, stream_insert(socket, :messages, message)}
+    {:noreply, stream_display_message(socket, message)}
   end
 
   @impl true
@@ -2833,6 +2802,7 @@ defmodule Sigma.Web.SessionLive do
       |> assign(:session_metrics_state, metrics_state)
       |> assign(:session_metrics, Sigma.Session.Metrics.snapshot(metrics_state))
       |> assign(:runtime_status, runtime_status)
+      |> refresh_metric_messages(fact, attrs, metrics_state)
 
     socket =
       if fact in [:request_finished, :request_usage, :turn_finished, :compaction] and
@@ -3636,6 +3606,8 @@ defmodule Sigma.Web.SessionLive do
     |> assign(:turn_in_flight, false)
     |> assign(:streaming_message_id, nil)
     |> assign(:tool_results, %{})
+    |> assign(:display_messages, %{})
+    |> assign(:turn_last_message_ids, %{})
     |> assign(:tool_call_to_msg, %{})
     |> assign(:sessions, [])
     |> assign(:renaming_session, nil)

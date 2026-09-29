@@ -7,14 +7,16 @@ defmodule Sigma.Web.SessionObservability do
 
   def message_metrics_footer(assigns) do
     ~H"""
-    <footer class="sigma-message-metrics mt-2 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] text-on-surface-variant" aria-label="Message metrics">
-      <span>input: {metric_value(@metrics, :input_tokens_total)}</span>
-      <span>output: {metric_value(@metrics, :output_tokens_total)}</span>
-      <span>LLM: {throughput(@metrics)}</span>
-      <span>elapsed: {duration(@elapsed_ms)}</span>
-      <span :if={@status} class={status_class(@status)}>{status_label(@status)}</span>
-      <details class="basis-full text-on-surface-variant">
+    <footer class="sigma-message-metrics mt-2 font-mono text-[10px] text-on-surface-variant" aria-label="Message metrics">
+      <details id={request_details_id(@metrics)}>
         <summary class="w-fit cursor-pointer">Request details</summary>
+        <div class="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+          <span>input: {metric_value(@metrics, :input_tokens_total)}</span>
+          <span>output: {metric_value(@metrics, :output_tokens_total)}</span>
+          <span>LLM: {throughput(@metrics)}</span>
+          <span>elapsed: {duration(@elapsed_ms)}</span>
+          <span :if={@status} class={status_class(@status)}>{status_label(@status)}</span>
+        </div>
         <dl class="mt-1 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 pl-2">
           <dt>provider/model</dt>
           <dd class="break-all">{provider_model(@metrics)}</dd>
@@ -41,14 +43,13 @@ defmodule Sigma.Web.SessionObservability do
   def turn_summary(assigns) do
     ~H"""
     <section class="sigma-turn-summary border-t border-outline-variant pt-2 text-xs text-on-surface-variant" aria-label="Turn summary">
-      <strong class="mr-2 text-on-surface">Turn total</strong>
-      <span class="mr-2">requests: {@summary[:request_count] || 0}</span>
-      <span class="mr-2">tools: {@summary[:tool_count] || 0}</span>
+      <strong class="mr-2 text-on-surface">Turn summary</strong>
+      <span :if={show_count?(@summary, :request_count, 1)} class="mr-2">requests: {metric_value(@summary, :request_count)}</span>
+      <span :if={show_count?(@summary, :tool_count, 0)} class="mr-2">tools: {metric_value(@summary, :tool_count)}</span>
       <span class="mr-2">input: {metric_value(@summary, :input_tokens_total)}</span>
       <span class="mr-2">output: {metric_value(@summary, :output_tokens_total)}</span>
-      <span class="mr-2">total: {metric_value(@summary, :total_tokens)}</span>
       <span class="mr-2">wall: {duration(value(@summary, :wall_time_ms))}</span>
-      <span class="mr-2">LLM: {throughput(@summary)}</span>
+      <span :if={value(@summary, :partial?)} class="mr-2 text-warning">known portion only</span>
       <span class={status_class(value(@summary, :status))}>
         {status_label(value(@summary, :status))}
       </span>
@@ -65,19 +66,16 @@ defmodule Sigma.Web.SessionObservability do
     ~H"""
     <aside class="sigma-session-overview grid gap-3 text-sm" aria-label="Session observability">
       <section>
-        <h2 class="text-xs font-semibold">Runtime</h2>
-        <p>{display(value(@snapshot, :status), "unknown")}</p>
-        <p class="text-xs text-on-surface-variant">model: {display(value(@snapshot, :model), "unknown")}</p>
-      </section>
-      <section>
-        <h2 class="text-xs font-semibold">Usage</h2>
+        <h2 class="text-xs font-semibold">Session usage</h2>
         <p>input: {usage_value(@snapshot, :input_tokens_total)}</p>
         <p>output: {usage_value(@snapshot, :output_tokens_total)}</p>
         <p>known total: {usage_total(@snapshot)}</p>
         <p class="text-xs text-on-surface-variant">{coverage(@snapshot)}</p>
-        <p :if={inherited_requests(@snapshot) > 0} class="text-xs text-on-surface-variant">
-          inherited: {inherited_total(@snapshot)} tokens ({inherited_requests(@snapshot)} requests)
-        </p>
+        <p :if={value(value(@snapshot, :own_usage), :partial?)} class="text-xs text-warning">known portion only</p>
+        <details :if={has_inherited_usage?(@snapshot)} class="mt-1 text-xs text-on-surface-variant">
+          <summary class="cursor-pointer">Inherited usage</summary>
+          <p>inherited: {inherited_total(@snapshot)} tokens ({display(inherited_requests(@snapshot), "unknown")} requests)</p>
+        </details>
         <details :if={usage_groups(@snapshot, :usage_by_purpose) != []} class="mt-1 text-xs text-on-surface-variant">
           <summary class="cursor-pointer">By purpose</summary>
           <p :for={{name, usage} <- usage_groups(@snapshot, :usage_by_purpose)} class="font-mono">
@@ -92,7 +90,7 @@ defmodule Sigma.Web.SessionObservability do
         </details>
       </section>
       <section>
-        <h2 class="text-xs font-semibold">Timing</h2>
+        <h2 class="text-xs font-semibold">Session timing</h2>
         <p :if={value(@snapshot, :started_at)}>
           <time
             id={"session-started-#{value(@snapshot, :session_id) || "unknown"}"}
@@ -114,56 +112,97 @@ defmodule Sigma.Web.SessionObservability do
         </p>
         <p>average LLM: {throughput(value(@snapshot, :own_usage) || %{})}</p>
       </section>
-      <section>
-        <h2 class="text-xs font-semibold">Context</h2>
-        <p>{display(value(@snapshot, :context), "unknown")}</p>
-      </section>
-      <section>
-        <h2 class="text-xs font-semibold">Compaction</h2>
-        <p>successful: {display(value(@snapshot, :successful_compactions), "unknown")}</p>
-        <p class="text-xs text-on-surface-variant">{compaction_detail(value(@snapshot, :last_compaction))}</p>
-        <details :if={value(@snapshot, :last_compaction)} class="mt-1 text-xs text-on-surface-variant">
-          <summary class="cursor-pointer">Last compaction details</summary>
-          <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 font-mono">
-            <dt>trigger</dt><dd>{display(value(value(@snapshot, :last_compaction), :trigger), "unknown")}</dd>
-            <dt>source leaf</dt><dd class="break-all">{display(value(value(@snapshot, :last_compaction), :source_leaf_id), "unknown")}</dd>
-            <dt>summary entry</dt><dd class="break-all">{display(value(value(@snapshot, :last_compaction), :summary_id), "unknown")}</dd>
-            <dt>requests</dt><dd class="break-all">{request_ids(value(@snapshot, :last_compaction))}</dd>
-            <dt>measurement</dt><dd>{measurement_sources(value(@snapshot, :last_compaction))}</dd>
-          </dl>
-        </details>
-      </section>
-      <section :if={value(@snapshot, :parent_session_id)}>
-        <h2 class="text-xs font-semibold">Lineage</h2>
-        <.link
-          :if={value(@snapshot, :parent_path)}
-          navigate={value(@snapshot, :parent_path)}
-          class="break-all font-mono text-xs text-primary underline"
-        >forked from: {value(@snapshot, :parent_session_id)}</.link>
-        <p :if={is_nil(value(@snapshot, :parent_path))} class="break-all font-mono text-xs text-on-surface-variant">
-          forked from: {value(@snapshot, :parent_session_id)}
-        </p>
-      </section>
     </aside>
     """
   end
 
   attr(:policy, :map, required: true)
 
+  def context_warning(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :warning,
+        cond do
+          hard_budget_warning?(assigns.policy) ->
+            hard_budget_warning_label(assigns.policy)
+
+          at_compaction_threshold?(assigns.policy) ->
+            "Compaction threshold reached — waiting for a safe checkpoint"
+
+          true ->
+            nil
+        end
+      )
+
+    ~H"""
+    <button
+      :if={@warning}
+      id="session-context-warning"
+      type="button"
+      data-session-panel-toggle="details"
+      data-session-context-open="true"
+      aria-controls="session-details"
+      aria-expanded="false"
+      class="rounded px-2 py-1 text-xs text-warning focus-visible:outline"
+    >
+      {@warning} · Context details
+    </button>
+    """
+  end
+
+  attr(:policy, :map, required: true)
+  attr(:successful_compactions, :integer, default: nil)
+  attr(:last_compaction, :map, default: nil)
+
   def context_budget_card(assigns) do
     ~H"""
-    <section class="sigma-context-budget border border-outline-variant p-3" aria-label="Context budget">
-      <h2 class="text-xs font-semibold">Context budget</h2>
-      <p class="font-mono text-sm">estimate: {display(@policy[:estimate] || @policy["estimate"], "unknown")}</p>
-      <p class="text-xs text-on-surface-variant">source: {display(@policy[:estimate_source] || @policy["estimate_source"], "unknown")}</p>
-      <p class="font-mono text-sm">last measured: {display(@policy[:last_measured] || @policy["last_measured"], "unknown")}</p>
-      <p class="text-xs text-on-surface-variant">measurement: {display(@policy[:measurement_source] || @policy["measurement_source"], "unknown")}</p>
-      <p class="text-xs text-on-surface-variant">window: {display(@policy[:context_window] || @policy["context_window"], "unknown")} ({display(@policy[:window_source] || @policy["window_source"], "unknown")})</p>
-      <p class="font-mono text-sm">remaining: {display(@policy[:tokens_remaining] || @policy["tokens_remaining"], "unknown")}</p>
-      <p class="text-xs text-on-surface-variant">threshold: {display(@policy[:threshold] || @policy["threshold"], "unknown")}</p>
-      <p class="text-xs text-on-surface-variant">check: {display(@policy[:check_phase] || @policy["check_phase"], "unknown")}</p>
-      <p class={overflow_class(@policy)}>budget: {display(@policy[:overflow] || @policy["overflow"], "unknown")}</p>
-      <p :if={@policy[:estimate_stale] || @policy["estimate_stale"]} class="text-warning text-xs">estimate stale</p>
+    <section class="sigma-context-budget border border-outline-variant p-3" aria-label="Context and compaction">
+      <h2 class="text-xs font-semibold">Context and compaction</h2>
+      <p class="font-mono text-sm">Next request estimate: {token_amount(value(@policy, :estimate))}</p>
+      <p :if={value(@policy, :estimate_stale)} class="text-xs text-warning">estimate stale — current budget unknown</p>
+      <p class="font-mono text-sm">Model window: {token_amount(value(@policy, :context_window))}</p>
+      <progress
+        :if={progress_available?(@policy)}
+        class="w-full accent-primary"
+        value={value(@policy, :estimate)}
+        max={value(@policy, :context_window)}
+        aria-label="Next request estimate of model window"
+      />
+      <p class="font-mono text-sm">Auto-compaction threshold: {token_amount(value(@policy, :threshold))}</p>
+      <p class="font-mono text-sm">Until compaction threshold: {remaining_label(@policy)}</p>
+      <p :if={at_compaction_threshold?(@policy)} class="text-xs text-warning">Waiting for a safe checkpoint</p>
+      <p class={overflow_class(@policy)}>Hard request budget: {hard_budget_label(@policy)}</p>
+      <p :if={hard_budget_warning?(@policy)} class="text-xs text-error">{hard_budget_warning_label(@policy)}</p>
+      <p class="text-xs text-on-surface-variant">Successful compactions: {display(@successful_compactions, "unknown")}</p>
+      <p class="text-xs text-on-surface-variant">{compaction_detail(@last_compaction)}</p>
+      <details class="mt-2 text-xs text-on-surface-variant">
+        <summary class="cursor-pointer">Measurements and budget details</summary>
+        <dl class="mt-1 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1">
+          <dt>Last measured input</dt><dd>{token_amount(value(@policy, :last_measured))}</dd>
+          <dt>Estimate source</dt><dd>{display(value(@policy, :estimate_source), "unknown")}</dd>
+          <dt>Measurement source</dt><dd>{display(value(@policy, :measurement_source), "unknown")}</dd>
+          <dt>Window source</dt><dd>{display(value(@policy, :window_source), "unknown")}</dd>
+          <dt>Threshold source</dt><dd>{display(value(@policy, :threshold_source), "unknown")}</dd>
+          <dt>Check phase</dt><dd>{display(value(@policy, :check_phase), "unknown")}</dd>
+          <dt>Hard budget remaining</dt><dd>{hard_remaining_label(@policy)}</dd>
+          <dt>Last budget check</dt><dd>{display(value(@policy, :overflow), "unknown")}</dd>
+          <dt>Output reserve</dt><dd>{token_amount(value(@policy, :output_reserve))}</dd>
+          <dt>Context revision</dt><dd>{display(value(@policy, :context_revision), "unknown")}</dd>
+          <dt>Active leaf</dt><dd class="break-all">{display(value(@policy, :active_leaf), "unknown")}</dd>
+          <dt>Estimate generated</dt><dd>{display(value(@policy, :generated_at), "unknown")}</dd>
+        </dl>
+      </details>
+      <details :if={@last_compaction} class="mt-1 text-xs text-on-surface-variant">
+        <summary class="cursor-pointer">Last compaction details</summary>
+        <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 font-mono">
+          <dt>trigger</dt><dd>{display(value(@last_compaction, :trigger), "unknown")}</dd>
+          <dt>source leaf</dt><dd class="break-all">{display(value(@last_compaction, :source_leaf_id), "unknown")}</dd>
+          <dt>summary entry</dt><dd class="break-all">{display(value(@last_compaction, :summary_id), "unknown")}</dd>
+          <dt>requests</dt><dd class="break-all">{request_ids(@last_compaction)}</dd>
+          <dt>measurement</dt><dd>{measurement_sources(@last_compaction)}</dd>
+        </dl>
+      </details>
     </section>
     """
   end
@@ -173,7 +212,9 @@ defmodule Sigma.Web.SessionObservability do
   def branch_alternatives(assigns) do
     original_leaf_ids =
       assigns.branches
-      |> Enum.filter(&(is_binary(value(&1, :retry_of_turn_id)) and value(&1, :retry_of_turn_id) != ""))
+      |> Enum.filter(
+        &(is_binary(value(&1, :retry_of_turn_id)) and value(&1, :retry_of_turn_id) != "")
+      )
       |> Enum.reduce(MapSet.new(), fn retry, originals ->
         original =
           Enum.find(assigns.branches, fn candidate ->
@@ -254,7 +295,7 @@ defmodule Sigma.Web.SessionObservability do
   def compaction_summary(assigns) do
     ~H"""
     <section class="sigma-compaction-summary text-xs" aria-label="Compaction summary">
-      <span>successful compactions: {@compaction[:successful_compactions] || 0}</span>
+      <span>successful compactions: {display(value(@compaction, :successful_compactions), "unknown")}</span>
       <span :if={@compaction[:last]} class="ml-2">last: {display(@compaction[:last], "unknown")}</span>
       <span :if={@compaction[:partial?]} class="ml-2 text-warning">history partial</span>
     </section>
@@ -334,8 +375,65 @@ defmodule Sigma.Web.SessionObservability do
 
   defp inherited_requests(snapshot) do
     inherited = value(snapshot, :inherited_usage) || %{}
-    Map.get(inherited, :request_count) || Map.get(inherited, "request_count") || 0
+    value(inherited, :request_count)
   end
+
+  defp has_inherited_usage?(snapshot) do
+    count = inherited_requests(snapshot)
+    is_integer(count) and count > 0
+  end
+
+  defp request_details_id(metrics) do
+    case value(metrics, :request_id) do
+      id when is_binary(id) and id != "" -> "request-details-#{id}"
+      _ -> nil
+    end
+  end
+
+  defp token_amount(nil), do: "unknown"
+  defp token_amount(amount), do: "#{display(amount, "unknown")} tokens"
+
+  defp show_count?(summary, key, minimum) do
+    case value(summary, key) do
+      count when is_integer(count) -> count > minimum
+      _ -> false
+    end
+  end
+
+  defp progress_available?(policy) do
+    is_integer(value(policy, :estimate)) and is_integer(value(policy, :context_window)) and
+      value(policy, :context_window) > 0 and value(policy, :estimate_stale) != true
+  end
+
+  defp remaining_label(policy) do
+    if value(policy, :estimate_stale) == true,
+      do: "unknown (estimate stale)",
+      else: token_amount(value(policy, :tokens_remaining))
+  end
+
+  defp hard_remaining_label(policy) do
+    if value(policy, :estimate_stale) == true,
+      do: "unknown (estimate stale)",
+      else: token_amount(value(policy, :hard_tokens_remaining))
+  end
+
+  defp hard_budget_label(policy) do
+    if value(policy, :estimate_stale) == true,
+      do: "unknown (estimate stale)",
+      else: display(value(policy, :overflow), "unknown")
+  end
+
+  defp hard_budget_warning_label(policy) do
+    if value(policy, :estimate_stale) == true,
+      do: "Previous check exceeded the model hard budget; current budget unknown",
+      else: "Request exceeds the model hard budget"
+  end
+
+  defp at_compaction_threshold?(policy),
+    do: value(policy, :estimate_stale) != true and value(policy, :tokens_remaining) == 0
+
+  defp hard_budget_warning?(policy),
+    do: value(policy, :overflow) in [:overflow, :hard_overflow, "overflow", "hard_overflow"]
 
   defp compaction_detail(nil), do: "last: none recorded"
 
@@ -422,9 +520,14 @@ defmodule Sigma.Web.SessionObservability do
 
   defp overflow_class(policy) do
     case value(policy, :overflow) do
-      status when status in [:overflow, :hard_overflow] -> "text-xs text-error"
-      :unknown -> "text-xs text-on-surface-variant"
-      _ -> "text-xs text-on-surface-variant"
+      status when status in [:overflow, :hard_overflow, "overflow", "hard_overflow"] ->
+        "text-xs text-error"
+
+      :unknown ->
+        "text-xs text-on-surface-variant"
+
+      _ ->
+        "text-xs text-on-surface-variant"
     end
   end
 

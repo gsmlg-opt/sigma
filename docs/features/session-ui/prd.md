@@ -149,9 +149,9 @@ Session age 与 active time 分开。Active time 来自执行区间的并集，�
 
 ### 5.2 Message footer 与 Turn summary
 
-Assistant message footer 的基础内容：`input · output · LLM tok/s · 请求耗时`。详情可展开缓存、reasoning、TTFT、模型、request 状态和数据质量。
+2026-09-29 经用户确认的展示调整：每个可识别 turn 默认只显示一条紧凑摘要（状态、整轮墙钟耗时、input、output）；多个请求或有工具时增加请求/工具数量。请求级 input/output、LLM 请求吞吐率、请求耗时、缓存、reasoning、TTFT、模型、request 状态与数据质量保留在默认折叠的请求明细。旧记录不能关联 turn 时保留请求范围说明。不得把最后一条回答的 usage 当成整轮消耗。
 
-一轮包含多个 LLM 请求时，最后增加明确标为“本轮合计”的 turn summary，包含请求数、工具数、整轮耗时与完整 token 总量。不得把最后一条回答的 usage 当成整轮消耗。
+失败、取消和 tool-only turn 也必须有摘要展示位置。终态与迟到 usage correction 更新对应摘要，不重置整段会话或把请求完成当成整轮完成。具体范围与验收以 `../../superpowers/specs/2026-09-29-session-ui-information-design.md` 为准。
 
 用户消息显示提交时间和相应操作，不显示虚构的 output/生成速度；输入 token 估计若存在，必须与 provider 实际消耗明确区分。
 

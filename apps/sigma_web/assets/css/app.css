@@ -669,3 +669,109 @@ el-dm-chat.sigma-chat-with-actions::part(actions) {
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* Session navigation and diagnostics share the same DOM at every breakpoint. */
+.sigma-session-shell [data-session-panel] {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  background: var(--color-surface-container-low);
+  color: var(--color-on-surface);
+}
+.sigma-session-shell [data-session-panel="navigation"] { width: 15rem; }
+.sigma-session-shell [data-session-panel="details"] { width: 19rem; }
+.sigma-session-shell[data-navigation-open="false"] [data-session-panel="navigation"],
+.sigma-session-shell[data-details-open="false"] [data-session-panel="details"] { display: none; }
+.sigma-session-shell[data-navigation-open="true"] [data-session-panel="navigation"],
+.sigma-session-shell[data-details-open="true"] [data-session-panel="details"] { display: flex; }
+.sigma-session-shell [data-session-panel-backdrop]:not([hidden]) {
+  position: absolute;
+  inset: 0;
+  z-index: 45;
+  border: 0;
+  background: color-mix(in srgb, var(--color-scrim) 45%, transparent);
+}
+.sigma-session-shell [data-session-panel-backdrop][hidden],
+.sigma-session-shell [data-session-panel-close][hidden] { display: none; }
+.sigma-session-shell [data-session-panel-toggle],
+.sigma-session-shell [data-session-panel-close] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.25rem;
+  min-height: 2.25rem;
+  border-radius: 0.5rem;
+  color: var(--color-on-surface-variant);
+  cursor: pointer;
+}
+.sigma-session-shell [data-session-panel-toggle]:hover,
+.sigma-session-shell [data-session-panel-close]:hover {
+  background: var(--color-surface-container-high);
+  color: var(--color-on-surface);
+}
+.sigma-session-shell :is(button, a, summary):focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 3px;
+}
+.sigma-session-rail > * { flex-shrink: 0; }
+.sigma-session-rail :is(p, dd, code) { overflow-wrap: anywhere; }
+.sigma-session-sidebar .group:focus-within > el-dm-button { opacity: 1; }
+.sigma-session-header { padding-block: 0.75rem; }
+.sigma-session-header h1 { font-size: 1rem; }
+.sigma-session-shell .sigma-message-metrics { font-size: 0.75rem; }
+.sigma-session-shell .sigma-turn-summary { line-height: 1.8; }
+.sigma-session-shell .sigma-session-model-select { width: min(16rem, 100%); }
+.sigma-session-shell .sigma-session-overview { gap: 1rem; }
+.sigma-session-shell .sigma-context-budget { border-radius: 0.75rem; }
+
+@media (hover: none) {
+  .sigma-session-sidebar .group > el-dm-button { opacity: 1; }
+}
+@media (max-width: 1279px) {
+  .sigma-session-shell [data-session-panel="details"] {
+    display: none;
+    position: absolute;
+    inset-block: 0;
+    right: 0;
+    z-index: 50;
+    width: min(22rem, calc(100vw - 1rem));
+    background: var(--color-surface-container-high);
+  }
+}
+@media (max-width: 767px) {
+  .sigma-session-shell [data-session-panel="navigation"] {
+    display: none;
+    position: absolute;
+    inset-block: 0;
+    left: 0;
+    z-index: 50;
+    width: min(19rem, calc(100vw - 1rem));
+    background: var(--color-surface-container-high);
+  }
+  .sigma-session-header { padding: 0.5rem 0.75rem; }
+  .sigma-session-shell .sigma-session-model-select { width: min(13rem, 55vw); }
+}
+.sigma-session-header > div > div:last-child {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  max-width: 100%;
+}
+.sigma-session-overview > section {
+  padding: 0.75rem;
+  border: 1px solid var(--color-outline-variant);
+  border-radius: 0.75rem;
+  background: var(--color-surface-container);
+  color: var(--color-on-surface);
+}
+.sigma-session-overview h2,
+.sigma-context-budget h2 { margin-bottom: 0.5rem; }
+.sigma-session-overview p { line-height: 1.6; }
+.sigma-context-budget { background: var(--color-surface-container); }
+.sigma-context-budget > p.font-mono {
+  font-family: var(--font-body);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+}
+.sigma-session-shell[data-details-open="true"] #session-context-warning { display: none; }
