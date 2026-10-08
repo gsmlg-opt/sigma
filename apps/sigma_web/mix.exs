@@ -29,7 +29,7 @@ defmodule Sigma.Web.MixProject do
 
   defp deps do
     [
-      {:phoenix, "~> 1.8"},
+      {:phoenix, "~> 1.8.15"},
       {:phoenix_live_view, "~> 1.1"},
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_reload, "~> 1.5", only: :dev},
@@ -38,14 +38,14 @@ defmodule Sigma.Web.MixProject do
       {:gettext, "~> 1.0"},
       # TODO(upstream): duskmoon-dev/phoenix-duskmoon-ui#53
       # TODO(upstream): duskmoon-dev/phoenix-duskmoon-ui#54
-      {:duskmoon_bundler, "~> 9.13"},
-      {:phoenix_duskmoon, "~> 9.13"},
+      {:duskmoon_bundler, "~> 9.16.1"},
+      {:phoenix_duskmoon, "~> 9.16.1"},
       {:sigma_agent, in_umbrella: true},
       {:sigma_session, in_umbrella: true},
       {:sigma_logs, in_umbrella: true},
       {:sigma_tools, in_umbrella: true},
       {:floki, ">= 0.30.0"},
-      {:lazy_html, ">= 0.1.0"}
+      {:lazy_html, ">= 0.1.13"}
     ]
   end
 end

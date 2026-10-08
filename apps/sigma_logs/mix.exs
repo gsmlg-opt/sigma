@@ -25,7 +25,7 @@ defmodule Sigma.Logs.MixProject do
   defp deps do
     [
       {:telemetry, "~> 1.0"},
-      {:phoenix_pubsub, "~> 2.1"}
+      {:phoenix_pubsub, "~> 2.4.1"}
     ]
   end
 end
