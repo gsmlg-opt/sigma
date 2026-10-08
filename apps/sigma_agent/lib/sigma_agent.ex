@@ -3121,6 +3121,7 @@ defmodule Sigma.Agent do
 
     opts =
       state.dispatcher_opts
+      |> Keyword.put(:observed_permission_denials, true)
       |> Keyword.put(:cwd, state.cwd)
       |> Keyword.put(:permission_policy, resolve_policy(state.policy))
       |> Keyword.put(:session_id, state.session_id)

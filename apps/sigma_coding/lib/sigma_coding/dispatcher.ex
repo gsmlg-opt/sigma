@@ -51,8 +51,22 @@ defmodule Sigma.Coding.Dispatcher do
     |> Enum.with_index()
     |> Enum.reduce({[], %{}}, fn {tool_call, index}, {executions, results} ->
       case prepare(tool_call, tools, opts, index) do
-        {:ok, execution} -> {[execution | executions], results}
-        {:error, error} -> {executions, Map.put(results, index, {:error, error})}
+        {:ok, execution} ->
+          {[execution | executions], results}
+
+        {:permission_rejected, error} ->
+          # This denial precedes scheduler admission, so no tool effect has started.
+          result =
+            if Keyword.get(opts, :observed_permission_denials, false) do
+              {:ok, %ToolResult{is_error: true, content: [%{type: :text, text: error.message}]}}
+            else
+              {:error, error}
+            end
+
+          {executions, Map.put(results, index, result)}
+
+        {:error, error} ->
+          {executions, Map.put(results, index, {:error, error})}
       end
     end)
     |> then(fn {executions, results} -> {Enum.reverse(executions), results} end)
@@ -68,13 +82,13 @@ defmodule Sigma.Coding.Dispatcher do
         prepare_authorized(patched_call, tools, opts, index)
 
       {:deny, {:approval_required, tool_name}} ->
-        {:error,
+        {:permission_rejected,
          ToolError.new(:approval_required, "Approval required for tool: #{tool_name}",
            details: %{tool_name: tool_name}
          )}
 
       {:deny, reason} ->
-        {:error, ToolError.new(:permission_denied, reason)}
+        {:permission_rejected, ToolError.new(:permission_denied, reason)}
     end
   end
 
