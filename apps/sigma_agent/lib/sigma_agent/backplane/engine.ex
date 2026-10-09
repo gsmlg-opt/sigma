@@ -74,6 +74,7 @@ defmodule Sigma.Agent.Backplane.Engine do
         tool_revision: 1
       },
       work: 100,
+      # TODO(upstream): gsmlg-opt/backplane#62 support provider-only unlimited output.
       # TODO(upstream): gsmlg-opt/backplane#48 exclude human interaction waits from deadlines.
       run_timeout: 300_000,
       effect_timeout: 300_000
@@ -453,5 +454,22 @@ defmodule Sigma.Agent.Backplane.Engine do
     do: {:toolcall_end, Map.get(event, :index, 0), event.tool_call, event.message}
 
   defp normalize_error(%Sigma.Ai.ProviderError{} = error), do: error
+
+  defp normalize_error(
+         %Error{
+           class: :resource_conflict,
+           message: "provider output limit exceeded",
+           details: %{scope: :provider_response, size: size, limit: limit}
+         } = error
+       ) do
+    %Sigma.Ai.ProviderError{
+      kind: :output_limit,
+      message:
+        "Provider output limit exceeded (scope=provider_response, size=#{size}, limit=#{limit})",
+      retryable: false,
+      raw: error
+    }
+  end
+
   defp normalize_error(error), do: Sigma.Ai.ProviderError.from_exception(error)
 end
