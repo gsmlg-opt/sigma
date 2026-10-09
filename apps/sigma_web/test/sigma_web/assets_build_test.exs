@@ -31,7 +31,7 @@ defmodule Sigma.Web.AssetsBuildTest do
       File.read!(Path.join(@repo_root, "apps/sigma_web/assets/js/hooks/session_terminals.js"))
 
     assert app_js =~ ~s|import { SessionTerminals } from "./hooks/session_terminals.js"|
-    assert app_js =~ "ElapsedTime, SessionTerminals"
+    assert app_js =~ ~r/hooks:\s*\{[^}]*\bSessionTerminals\b/s
     refute app_js =~ "WebShellTerminal"
     assert hook_js =~ "convertEol: false"
     assert hook_js =~ ~s|import { FitAddon } from "@xterm/addon-fit"|

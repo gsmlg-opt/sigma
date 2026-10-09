@@ -36,8 +36,6 @@ defmodule Sigma.Web.MixProject do
       {:jason, "~> 1.4"},
       {:plug_cowboy, "~> 2.7"},
       {:gettext, "~> 1.0"},
-      # TODO(upstream): duskmoon-dev/phoenix-duskmoon-ui#53
-      # TODO(upstream): duskmoon-dev/phoenix-duskmoon-ui#54
       {:duskmoon_bundler, "~> 9.16.7"},
       {:phoenix_duskmoon, "~> 9.16.7"},
       {:sigma_agent, in_umbrella: true},

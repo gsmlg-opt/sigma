@@ -15,15 +15,42 @@ defmodule Mix.Tasks.DuskmoonBundleTest do
     assert source =~ ~S|File.rm_rf(paths.tmp_dir)|
   end
 
-  test "materializes rich elements and their transitive dependencies before invoking bun" do
-    source = File.read!(@bundle_task_path)
+  @tag :assets
+  test "rich elements resolve transitive dependencies from the installed npm tree" do
+    tmp_dir =
+      Path.join(@repo_root, "_build/test_rich_elements_#{System.unique_integer([:positive])}")
 
-    assert source =~ "WORKAROUND(upstream): duskmoon-dev/phoenix-duskmoon-ui#102"
-    assert source =~ ~S|materialize_package!(Path.join(node_modules_path, "@duskmoon-dev/#{el}"))|
-    assert source =~ "ensure_rich_bundle_dependencies!(node_modules_path)"
-    assert source =~ "NPM.Registry.get_packument(name)"
-    assert source =~ "NPM.Cache.ensure(name, version, info.dist.tarball, info.dist.integrity)"
-    assert source =~ "System.cmd(bun, args, cd: Path.dirname(node_modules_path)"
+    File.mkdir_p!(tmp_dir)
+    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+    entry = Path.join(tmp_dir, "entry.js")
+    output_path = Path.join(tmp_dir, "bundle.js")
+
+    File.write!(entry, """
+    import '@duskmoon-dev/el-chat/register';
+    import '@duskmoon-dev/el-markdown/register';
+    import '@duskmoon-dev/el-markdown-input/register';
+    """)
+
+    {output, status} =
+      System.cmd(
+        "bun",
+        [
+          "build",
+          entry,
+          "--bundle",
+          "--format=esm",
+          "--target=browser",
+          "--outfile=#{output_path}"
+        ],
+        cd: @repo_root,
+        stderr_to_stdout: true
+      )
+
+    assert status == 0, output
+    bundle = File.read!(output_path)
+    assert byte_size(bundle) > 0
+    refute bundle =~ ~r/from ["']@duskmoon-dev\//
   end
 
   @tag :assets
