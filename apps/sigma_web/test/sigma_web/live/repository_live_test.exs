@@ -106,7 +106,7 @@ defmodule Sigma.Web.RepositoryLiveTest do
              |> Enum.any?()
 
       assert document
-             |> LazyHTML.query("[slot='header'].min-w-0.flex-1.overflow-hidden")
+             |> LazyHTML.query(".card-title.min-w-0.flex-1.overflow-hidden")
              |> Enum.any?()
     end)
   end
