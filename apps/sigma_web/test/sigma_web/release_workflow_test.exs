@@ -31,7 +31,10 @@ defmodule Sigma.Web.ReleaseWorkflowTest do
     assert source =~ ~S|sigma-v${VERSION}-linux-amd64.tar.gz|
     assert source =~ "sigma-user-service"
     assert source =~ "Application.spec(:backplane_mcp_protocol, :vsn)"
-    assert source =~ ~S|test "$dependency_version" = "1.10.0"|
+    assert source =~ ~S|sed -nE 's/^  "backplane_mcp_protocol":|
+    assert source =~ ~S|test -n "$expected_dependency_version"|
+    assert source =~ ~S|test "$dependency_version" = "$expected_dependency_version"|
+    refute source =~ ~r/test "\$dependency_version" = "\d+\.\d+\.\d+"/
     assert source =~ "verify-release-agent-smoke.exs"
     assert source =~ ~S|if [[ "$http_code" == 200 ]]|
     assert source =~ ~S|kill -TERM "$smoke_pid"|
@@ -69,7 +72,9 @@ defmodule Sigma.Web.ReleaseWorkflowTest do
     refute source =~ "mix assets.setup"
 
     name_config = ~S|git config user.name "github-actions[bot]"|
-    email_config = ~S|git config user.email "41898282+github-actions[bot]@users.noreply.github.com"|
+
+    email_config =
+      ~S|git config user.email "41898282+github-actions[bot]@users.noreply.github.com"|
 
     assert length(:binary.matches(source, name_config)) == 2
     assert length(:binary.matches(source, email_config)) == 2
@@ -79,5 +84,12 @@ defmodule Sigma.Web.ReleaseWorkflowTest do
 
     assert {tag_offset, _length} = :binary.match(source, ~S|git tag -a "v${VERSION}"|)
     assert identity_offset < tag_offset
+  end
+
+  test "release build caches follow the tracked frontend lockfile" do
+    source = File.read!(@workflow_path)
+
+    assert length(Regex.scan(~r/hashFiles\([^\n]*'package-lock\.json'/, source)) == 2
+    refute source =~ "'npm.lock'"
   end
 end

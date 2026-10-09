@@ -240,7 +240,7 @@ jobs:
             ~/.cargo/git
             apps/sigma_tools/native/sigma_tools_hashline/target
             native/sigma_terminal_helper/target
-          key: release-${{ matrix.os }}-${{ matrix.arch }}-otp-28.5-elixir-1.18.4-${{ hashFiles('mix.lock', 'npm.lock', '**/Cargo.lock', '**/package.json') }}
+          key: release-${{ matrix.os }}-${{ matrix.arch }}-otp-28.5-elixir-1.18.4-${{ hashFiles('mix.lock', 'package-lock.json', '**/Cargo.lock', '**/package.json') }}
 
       - name: Install production dependencies
         run: |
@@ -398,6 +398,10 @@ jobs:
           test "$("$release_root/bin/sigma" version)" = "sigma ${VERSION}"
 
           secret_key_base="$(openssl rand -hex 64)"
+          expected_dependency_version="$(
+            sed -nE 's/^  "backplane_mcp_protocol": \{:hex, :backplane_mcp_protocol, "([^"]+)".*/\1/p' mix.lock
+          )"
+          test -n "$expected_dependency_version"
           dependency_version="$(
             HOME="$smoke_home" \
             SECRET_KEY_BASE="$secret_key_base" \
@@ -406,7 +410,7 @@ jobs:
             "$release_root/bin/sigma" eval \
               'IO.puts(Application.spec(:backplane_mcp_protocol, :vsn))'
           )"
-          test "$dependency_version" = "1.10.0"
+          test "$dependency_version" = "$expected_dependency_version"
 
           smoke_code="$(<scripts/verify-release-agent-smoke.exs)"
           smoke_result="$(
