@@ -153,7 +153,7 @@ defmodule Mix.Tasks.Duskmoon.Bundle do
 
   # WORKAROUND(upstream): duskmoon-dev/phoenix-duskmoon-ui#102
   defp ensure_rich_bundle_dependencies!(node_modules_path) do
-    {:ok, _} = Application.ensure_all_started(:req)
+    {:ok, _} = Application.ensure_all_started(:http_fetch)
 
     @rich_elements
     |> Enum.map(fn el ->
