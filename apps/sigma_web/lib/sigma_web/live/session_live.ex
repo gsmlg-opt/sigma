@@ -1724,23 +1724,29 @@ defmodule Sigma.Web.SessionLive do
 
   defp submit_prompt(socket, prompt), do: submit_prompt(socket, prompt, [])
 
-  defp submit_prompt(socket, prompt, prompt_opts) do
+  defp interactive_prompt_context(socket) do
     agent = socket.assigns.agent
 
+    %{
+      repo_path: socket.assigns.workdir,
+      sessions_dir: socket.assigns.sessions_dir,
+      interactive_approvals: true,
+      question_resolver: fn request, tool_opts ->
+        Sigma.Agent.ask_user_question(agent, request, tool_opts)
+      end
+    }
+  end
+
+  defp submit_prompt(socket, prompt, prompt_opts) do
     with {:ok, command} <-
            Sigma.Protocol.Envelope.command("prompt.submit", socket.assigns.session_id, %{
              "content" => prompt
            }),
          {:ok, %{payload: payload}} <-
-           Sigma.Agent.PublicRuntime.execute(command, %{
-             repo_path: socket.assigns.workdir,
-             sessions_dir: socket.assigns.sessions_dir,
-             interactive_approvals: true,
-             prompt_opts: prompt_opts,
-             question_resolver: fn request, tool_opts ->
-               Sigma.Agent.ask_user_question(agent, request, tool_opts)
-             end
-           }) do
+           Sigma.Agent.PublicRuntime.execute(
+             command,
+             Map.put(interactive_prompt_context(socket), :prompt_opts, prompt_opts)
+           ) do
       protocol_admission(payload)
     else
       {:error, %{error: error}} -> {:rejected, error.code}
@@ -2149,6 +2155,11 @@ defmodule Sigma.Web.SessionLive do
         socket.assigns.session_id,
         socket.assigns.sessions_dir,
         pending.message_id,
+        prompt_opts:
+          Sigma.Agent.PublicRuntime.prompt_opts(
+            interactive_prompt_context(socket),
+            socket.assigns.agent
+          ),
         operation_id: pending.operation_id,
         expected_source_revision: pending.expected_source_revision,
         expected_source_leaf: pending.expected_source_leaf

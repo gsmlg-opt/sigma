@@ -351,7 +351,7 @@ defmodule Sigma.Agent.RepositoryProcess do
          {:ok, checkpoint} <-
            apply(Sigma.Session.Log, :retry_checkpoint, [source_path, message_id]),
          :ok <- validate_retry_checkpoint(checkpoint, source_session_id, opts),
-         {:ok, info} <- admit_retry(agent, writer, checkpoint, admission_ref) do
+         {:ok, info} <- admit_retry(agent, writer, checkpoint, admission_ref, opts) do
       {:ok,
        %{
          session_id: source_session_id,
@@ -383,7 +383,13 @@ defmodule Sigma.Agent.RepositoryProcess do
   defp perform_operation(source_session_id, operation, _handle),
     do: perform_file_operation(source_session_id, operation)
 
-  defp admit_retry(agent, writer, checkpoint, admission_ref) do
+  defp admit_retry(agent, writer, checkpoint, admission_ref, opts) do
+    prompt_opts =
+      opts
+      |> Keyword.get(:prompt_opts, [])
+      |> Keyword.put(:attachments, checkpoint.attachments)
+      |> Keyword.put(:retry_admission_notify, {self(), admission_ref})
+
     with :ok <-
            apply(Sigma.Session.Writer, :checkout, [
              writer,
@@ -397,8 +403,7 @@ defmodule Sigma.Agent.RepositoryProcess do
                  checkpoint.context_messages,
                  checkpoint.content,
                  checkpoint.retry_of_turn_id,
-                 attachments: checkpoint.attachments,
-                 retry_admission_notify: {self(), admission_ref}
+                 prompt_opts
                ),
              :ok <- await_retry_admission(admission_ref) do
           {:ok, info}

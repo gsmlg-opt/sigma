@@ -168,6 +168,7 @@ defmodule Sigma.Agent.PublicRuntime do
 
   defp dispatch(%Envelope{type: "session.retry"} = command, context) do
     with {:ok, repo_path, sessions_dir} <- paths(command, context),
+         {:ok, agent} <- running_agent(command, context),
          message_id when is_binary(message_id) and message_id != "" <-
            command.payload["messageId"],
          {:ok, result} <-
@@ -176,7 +177,7 @@ defmodule Sigma.Agent.PublicRuntime do
              command.session_id,
              sessions_dir,
              message_id,
-             operation_opts(command)
+             Keyword.put(operation_opts(command), :prompt_opts, prompt_opts(context, agent))
            ),
          {:ok, event} <-
            Envelope.event(
@@ -465,7 +466,8 @@ defmodule Sigma.Agent.PublicRuntime do
   defp call_prompt(agent, :follow_up, content, opts),
     do: Sigma.Agent.follow_up(agent, content, opts)
 
-  defp prompt_opts(context, agent) do
+  @doc false
+  def prompt_opts(context, agent) do
     permission_resolver =
       case context[:interactive_approvals] do
         true -> &request_tool_permission(agent, &1)
