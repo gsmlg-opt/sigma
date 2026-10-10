@@ -173,6 +173,8 @@ jobs:
     env:
       MIX_ENV: prod
       VERSION: ${{ inputs.version }}
+      SIGMA_GIT_REF: v${{ inputs.version }}
+      SIGMA_GIT_SHA: ${{ needs.resolve.outputs.source_sha }}
     strategy:
       fail-fast: false
       matrix:
@@ -235,6 +237,8 @@ jobs:
 
       - name: Rebuild release applications
         run: |
+          export SIGMA_RELEASE_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "SIGMA_RELEASE_TIME=${SIGMA_RELEASE_TIME}" >> "$GITHUB_ENV"
           scripts/build-terminal-helper.sh release
           mix compile --force
 

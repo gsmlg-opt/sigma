@@ -2,8 +2,11 @@
   <:logo>
     <div class="font-display text-3xl font-black tracking-tighter text-primary-content">∑</div>
   </:logo>
+  <:after_title>
+    <.version_badge />
+  </:after_title>
   <:user_profile>
-    <div class="flex items-center gap-4 ml-6 pl-6 border-l border-primary-container/30">
+    <div class="flex items-center gap-2 ml-2 pl-2 md:gap-4 md:ml-6 md:pl-6 border-l border-primary-container/30">
       <.dm_link
         navigate={~p"/"}
         aria-label="Home"

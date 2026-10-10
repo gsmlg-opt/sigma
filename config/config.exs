@@ -1,5 +1,29 @@
 import Config
 
+repo_root = Path.expand("..", __DIR__)
+
+[version] =
+  Regex.run(~r/^\s+version: "([^"]+)"/m, File.read!(Path.join(repo_root, "mix.exs")),
+    capture: :all_but_first
+  )
+
+git_value = fn args ->
+  if git = System.find_executable("git") do
+    case System.cmd(git, args, cd: repo_root, stderr_to_stdout: true) do
+      {value, 0} -> String.trim(value)
+      _ -> nil
+    end
+  end
+end
+
+config :sigma_web, :build_info, %{
+  version: version,
+  environment: config_env(),
+  git_ref: System.get_env("SIGMA_GIT_REF") || git_value.(["rev-parse", "--abbrev-ref", "HEAD"]),
+  git_sha: System.get_env("SIGMA_GIT_SHA") || git_value.(["rev-parse", "HEAD"]),
+  released_at: System.get_env("SIGMA_RELEASE_TIME")
+}
+
 config :sigma_web, Sigma.Web.Endpoint,
   url: [host: "localhost"],
   secret_key_base: "uR8T8QyHkZfTjG+lS0fWf6eQ+V8S8QyHkZfTjG+lS0fWf6eQ+V8S8QyHkZfTjG+l",
