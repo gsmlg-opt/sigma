@@ -3,7 +3,10 @@ defmodule Sigma.Web.Layouts do
 
   import Sigma.Web.Flash
 
-  @build_info Application.compile_env(:sigma_web, :build_info)
+  # Git metadata changes between commits; capture it without runtime config validation.
+  @build_info :sigma_web
+              |> Application.get_all_env()
+              |> Keyword.fetch!(:build_info)
               |> Map.put(
                 :built_at,
                 DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
