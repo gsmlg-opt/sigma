@@ -174,7 +174,9 @@ defmodule Sigma.Coding.ToolMetadata do
     edit_paths =
       case arguments["input"] || arguments["_input"] do
         input when is_binary(input) ->
-          Regex.scan(~r/^\[([^\]#]+)#[^\]]+\]/m, input, capture: :all_but_first)
+          Regex.scan(~r/^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/m, input,
+            capture: :all_but_first
+          )
           |> List.flatten()
 
         _input ->

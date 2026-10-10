@@ -62,14 +62,14 @@ defmodule Sigma.ToolsTest do
     refute "ast_grep" in exposed_names
   end
 
-  test "edit tool schema steers models to hashline operations" do
+  test "edit tool schema steers models to apply_patch operations" do
     definition = Sigma.Coding.Tool.ai_definition(Sigma.Tools.Edit)
     input_schema = definition.parameters["properties"]["input"]
 
-    assert definition.description =~ "[path#TAG]"
-    assert definition.description =~ "replace N..M:"
-    assert input_schema["description"] =~ "Do not send unified diff"
-    assert input_schema["description"] =~ "replace N..M:"
+    assert definition.description =~ "apply_patch"
+    assert definition.description =~ "*** Begin Patch"
+    assert input_schema["description"] =~ "*** Update File:"
+    assert input_schema["description"] =~ "*** Move to:"
   end
 
   @tag :tmp_dir

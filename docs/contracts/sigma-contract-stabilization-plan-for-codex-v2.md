@@ -75,7 +75,7 @@ The following foundations are already present and should not be rewritten from s
 - Branch-aware replay and restoration of model, reasoning, service-tier, MCP, mode, compaction, and branch-summary state.
 - Session create, rename, delete, and fork scaffolding with no-overwrite file publication.
 - Built-in `ask`, `read`, `write`, `bash`, `edit`, `search`, and `find` tools.
-- Hashline edit support through a Rust NIF.
+- `apply_patch` editing through Backplane with workspace-confined file operations.
 - LiveView session/repository management and installable releases.
 
 ### 3.2 Verified blockers in the reviewed baseline
@@ -953,9 +953,9 @@ mix format --check-formatted
 mix compile --warnings-as-errors
 mix test <affected app test paths>
 mix test
-cargo fmt --manifest-path apps/sigma_tools/native/sigma_tools_hashline/Cargo.toml -- --check
-cargo clippy --manifest-path apps/sigma_tools/native/sigma_tools_hashline/Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path apps/sigma_tools/native/sigma_tools_hashline/Cargo.toml
+cargo fmt --manifest-path native/sigma_terminal_helper/Cargo.toml -- --check
+cargo clippy --locked --manifest-path native/sigma_terminal_helper/Cargo.toml --all-targets -- -D warnings
+cargo test --locked --manifest-path native/sigma_terminal_helper/Cargo.toml
 mix assets.setup
 mix assets.build
 ```

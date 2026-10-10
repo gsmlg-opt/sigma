@@ -20,7 +20,7 @@ oh-my-pi groups tools into file/content, runtime, code intelligence, coordinatio
 
 ### Implementation Update
 
-The first PR includes oh-my-pi hashline edit directly. `edit` is not a port of the old `path/content/old_content` replacement tool. It is `input`-only and uses the current oh-my-pi `[PATH#TAG]` header format, backed by a Rust NIF for hashline parsing, applying, and content tag calculation.
+`edit` is input-only and uses the `apply_patch` format through `Backplane.AgentRuntime.Codex.ApplyPatch`. File additions, context-based updates, deletions, and moves are workspace-confined. `read` and `search` return numbered lines under `[path]` headers; file tags, snapshots, and the edit Rust NIF have been removed.
 
 ## 2. Goals
 
@@ -69,7 +69,7 @@ The first PR includes oh-my-pi hashline edit directly. `edit` is not a port of t
 
 This PR should not fully implement LSP, AST editing, job management, task agents, memory, GitHub, web search, browser automation, or eval kernels.
 
-This PR should create the **tool surface and migration structure**, implement the first usable adapters, and make `edit` hashline-only.
+This PR should create the **tool surface and migration structure**, implement the first usable adapters, and make `edit` use `apply_patch`.
 
 Do not break existing current tools for direct callers, but do not expose legacy tool names in the default model-facing list.
 
@@ -123,8 +123,6 @@ Also owns future shared implementation code:
 ```text
 Sigma.Tools.Output
 Sigma.Tools.Truncation
-Sigma.Tools.SnapshotStore
-Sigma.Tools.Hashline.*
 Sigma.Tools.Search.*
 Sigma.Tools.Find.*
 Sigma.Tools.InternalURL
@@ -346,28 +344,33 @@ create parent directories
 
 ### 9.3 `Sigma.Tools.Edit`
 
-Implement oh-my-pi hashline edit in the first PR.
-
-Schema:
+Keep the tool name `edit` and the input-only schema:
 
 ```text
 input
 ```
 
-`input` is a hashline patch string. It must begin with `[PATH#TAG]` on the first non-blank line. `TAG` is a 4-hex content hash copied from the latest read/search/write/edit output in the same session.
-
-Supported first-scope operations:
+`input` is enclosed by `*** Begin Patch` and `*** End Patch`. Supported operations:
 
 ```text
-replace N..M:
-delete N..M
-insert before N:
-insert after N:
-insert head:
-insert tail:
+*** Add File: PATH
++new content
+*** Update File: PATH
+*** Move to: NEW_PATH (optional)
+@@ optional context anchor
+ context
+-old content
++new content
+*** Delete File: PATH
 ```
 
-Body rows use `+TEXT`. The old `path/content/old_content` edit schema must fail clearly and must not silently fall back to legacy replacement behavior.
+Reuse `Backplane.AgentRuntime.Codex.ApplyPatch` for parsing, context matching,
+and workspace/symlink confinement. No preceding read or snapshot is required.
+The old `path/content/old_content` schema is rejected.
+
+Operations are applied in order, not as a whole-patch transaction. Return
+structured errors with applied and uncertain file details when a later operation
+fails. Scheduling resource keys include all file headers and move destinations.
 
 ### 9.4 `Sigma.Tools.Search`
 
@@ -421,7 +424,7 @@ MVP behavior:
 * Output should be grouped by file when searching directories or multiple paths.
 * Keep output stable and readable.
 
-Future target: oh-my-pi `search` supports regex over files, directories, globs, archives, internal URLs, context lines, grouped output, pagination, and hashline anchors.
+Future target: oh-my-pi `search` supports regex over files, directories, globs, archives, internal URLs, context lines, grouped output, pagination, and numbered matches.
 
 ### 9.5 `Sigma.Tools.Find`
 
@@ -763,7 +766,7 @@ This PR is complete when:
    ask, read, write, bash, edit, search, find, todo
    ```
 
-3. `Sigma.Tools.Edit` is hashline-only, input-only, and backed by the Rust NIF hashline core.
+3. `Sigma.Tools.Edit` is input-only and applies workspace-confined `apply_patch` operations through Backplane.
 
 4. `Sigma.Tools.Catalog` lists the target oh-my-pi tool surface, including planned tools.
 
@@ -803,16 +806,7 @@ hooks, and MCP adapter.
 
 After this lands, use separate PRs:
 
-1. **Hashline snapshot store**
-
-   ```text
-   Sigma.Tools.SnapshotStore
-   Sigma.Tools.Hashline.Parser
-   Sigma.Tools.Hashline.Apply
-   Sigma.Tools.Hashline.Mismatch
-   ```
-
-2. **oh-my-pi read selectors**
+1. **oh-my-pi read selectors**
 
    ```text
    path:raw
@@ -823,26 +817,16 @@ After this lands, use separate PRs:
    URL read via read
    ```
 
-3. **Hashline edit mode**
-
-   ```text
-   ¶PATH#TAG
-   replace N..M
-   delete N..M
-   insert before/after/head/tail
-   ```
-
-4. **Search/find parity**
+2. **Search/find parity**
 
    ```text
    grouped output
    pagination
    gitignore
    hidden files
-   sparse snapshot recording
    ```
 
-5. **Bash hardening + job**
+3. **Bash hardening + job**
 
    ```text
    cwd
@@ -853,7 +837,7 @@ After this lands, use separate PRs:
    job list/poll/cancel
    ```
 
-6. **Resolve**
+4. **Resolve**
 
    ```text
    hidden apply/discard tool
@@ -861,7 +845,7 @@ After this lands, use separate PRs:
    preview producer integration
    ```
 
-7. **Code intelligence**
+5. **Code intelligence**
 
    ```text
    lsp
@@ -869,14 +853,14 @@ After this lands, use separate PRs:
    ast_edit
    ```
 
-8. **Coordination**
+6. **Coordination**
 
    ```text
    todo (shipped — Store-backed, session-scoped)
    task subagents
    ```
 
-9. **External/research**
+7. **External/research**
 
    ```text
    github

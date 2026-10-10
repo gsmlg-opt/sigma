@@ -3,14 +3,14 @@ defmodule Sigma.Tools.Write do
   @behaviour Sigma.Coding.Tool
 
   alias Sigma.Coding.Utils.PathUtils
-  alias Sigma.Tools.{Hashline, Result, Store}
+  alias Sigma.Tools.Result
 
   @impl true
   def name, do: "write"
 
   @impl true
   def description do
-    "Create a new local file and return a fresh hashline [path#TAG] header."
+    "Create a new local file. Existing files must be changed with edit."
   end
 
   @impl true
@@ -35,12 +35,8 @@ defmodule Sigma.Tools.Write do
          :ok <- ensure_new_file(absolute_path),
          :ok <- File.mkdir_p(Path.dirname(absolute_path)),
          :ok <- write_file(absolute_path, content) do
-      {_bom, text} = Hashline.strip_bom(content)
-      normalized = Hashline.normalize_to_lf(text)
       display_path = Path.relative_to(absolute_path, cwd)
-      tag = Store.record_snapshot(Store.from_opts(opts), Store.canonical_path(absolute_path), normalized)
-      header = Hashline.format_header(display_path, tag)
-      {:ok, Result.text("#{header}\nCreated #{display_path}.", %{path: absolute_path, hash: tag})}
+      {:ok, Result.text("Created #{display_path}.", %{path: absolute_path})}
     else
       {:error, reason} -> {:error, reason}
     end

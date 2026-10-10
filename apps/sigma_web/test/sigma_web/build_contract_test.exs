@@ -35,7 +35,7 @@ defmodule Sigma.Web.BuildContractTest do
     assert source =~ ~r/^  assets:/m
     assert source =~ ~r/^  release_smoke:/m
     assert source =~ "mix compile --warnings-as-errors"
-    assert source =~ "cargo test --manifest-path"
+    assert source =~ "cargo test --locked --manifest-path native/sigma_terminal_helper/Cargo.toml"
     assert source =~ "mix assets.setup"
     assert source =~ "mix test --only assets"
     assert source =~ "verify-release-agent-smoke.exs"

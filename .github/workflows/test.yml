@@ -46,7 +46,7 @@ jobs:
             ~/.cache/rebar3
             ~/.cargo/registry
             ~/.cargo/git
-            apps/sigma_tools/native/sigma_tools_hashline/target
+            native/sigma_terminal_helper/target
           key: test-${{ runner.os }}-${{ runner.arch }}-otp-28.5-elixir-1.18.4-${{ hashFiles('mix.lock', '**/mix.exs', '**/Cargo.lock') }}
 
       - name: Install dependencies

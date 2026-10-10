@@ -30,7 +30,7 @@ S9 在稳定化计划中刻意延期，涵盖 extension SDK、更多 providers�
 | --- | --- | --- |
 | Tool Runtime V2 | `sigma_coding`：`ToolMetadata` / `ToolScheduler` / `ToolResult` / `PendingToolRegistry`；execution report S4 | 新工具必须走 metadata + 规范化结果；禁止旁路 dispatcher |
 | First-party tool surface | `sigma_tools`：`Ask/Read/Write/Bash/Edit/Search/Find`；`Catalog` + `default_tools/0` | 扩展工具落在 `sigma_tools`，不塞进 `sigma_coding` |
-| Session-scoped tool state | `Sigma.Tools.Store`（Agent 拥有的 ETS；hashline snapshots） | `todo` 等协调类工具可复用，无需新持久化原语 |
+| Session-scoped tool state | `Sigma.Tools.Store`（Agent 拥有的 ETS；todo 等工具状态） | `todo` 等协调类工具可复用，无需新持久化原语 |
 | Provider contract | `Sigma.Ai.Provider` + Anthropic / OpenAI adapters + normalized events | 新 provider 应实现同一合约，禁止 agent 内特判 |
 | Protocol V1 + PublicRuntime | `sigma_protocol`；`Sigma.Agent.PublicRuntime`；stdio + WS `SessionChannel`；多订阅 `ProtocolSubscription` | Synapsis/Samgita **集成入口已存在**；缺产品侧 cookbook / 绑定层 |
 | MCP via Backplane | `backplane_mcp_protocol` + `Sigma.Coding.MCP` | Backplane「MCP 客户端」已用；「更深 provider/MCP 产品集成」仍缺 |

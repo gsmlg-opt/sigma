@@ -3,16 +3,14 @@ defmodule Sigma.Tools.Read do
   @behaviour Sigma.Coding.Tool
 
   alias Sigma.Coding.Utils.PathUtils
-  alias Sigma.Tools.{Hashline, Result, Store}
-
-  @snapshot_max_bytes 4 * 1024 * 1024
+  alias Sigma.Tools.Result
 
   @impl true
   def name, do: "read"
 
   @impl true
   def description do
-    "Read a local file and return hashline-numbered output anchored by a [path#TAG] header."
+    "Read a local file and return numbered lines under a [path] header."
   end
 
   @impl true
@@ -46,10 +44,13 @@ defmodule Sigma.Tools.Read do
     with {:ok, absolute_path} <-
            PathUtils.safe_resolve(path, cwd, skill_roots: Keyword.get(opts, :skill_roots, [])),
          {:ok, raw} <- read_file(absolute_path) do
-      {_bom, text} = Hashline.strip_bom(raw)
-      normalized = Hashline.normalize_to_lf(text)
+      normalized =
+        raw
+        |> String.trim_leading("\uFEFF")
+        |> String.replace("\r\n", "\n")
+        |> String.replace("\r", "\n")
+
       display_path = Path.relative_to(absolute_path, cwd)
-      tag = maybe_record_snapshot(Store.from_opts(opts), absolute_path, normalized)
       lines = String.split(normalized, "\n")
       total_lines = length(lines)
       start_index = max(offset - 1, 0)
@@ -67,21 +68,16 @@ defmodule Sigma.Tools.Read do
         selected_lines
         |> Enum.with_index(offset)
         |> Enum.map_join("\n", fn {line, line_number} ->
-          Hashline.format_numbered_line(line_number, line)
+          "#{line_number}:#{line}"
         end)
 
       text =
-        display_path
-        |> Hashline.format_header(tag)
-        |> Kernel.<>("\n")
-        |> Kernel.<>(body)
+        "[#{display_path}]\n#{body}"
         |> add_range_info(offset, read_count, total_lines)
 
       {:ok,
        Result.text(text, %{
          path: absolute_path,
-         hashline_path: display_path,
-         hash: tag,
          total_lines: total_lines,
          offset: offset,
          limit: limit,
@@ -96,14 +92,6 @@ defmodule Sigma.Tools.Read do
     case File.read(path) do
       {:ok, content} -> {:ok, content}
       {:error, reason} -> {:error, "Could not read file: #{path}. Reason: #{reason}"}
-    end
-  end
-
-  defp maybe_record_snapshot(store, absolute_path, normalized) do
-    if byte_size(normalized) <= @snapshot_max_bytes do
-      Store.record_snapshot(store, Store.canonical_path(absolute_path), normalized)
-    else
-      Hashline.compute_file_hash(normalized)
     end
   end
 

@@ -17,9 +17,26 @@ to the model.
 - `find`
 - `todo`
 
-`edit` is hashline-only. It accepts an `input` string with `[path#TAG]`
-sections and `replace`, `delete`, or `insert` operations. Tags are produced by
-`read`, `search`, `write`, and `edit` from session-scoped snapshots.
+`edit` accepts an `input` string in the `apply_patch` format and uses
+`Backplane.AgentRuntime.Codex.ApplyPatch`. It supports file additions, updates,
+deletions, and moves within the working directory. Update hunks match file
+context; there are no content tags or session snapshots.
+
+```text
+*** Begin Patch
+*** Update File: lib/example.ex
+@@
+-old content
++new content
+*** End Patch
+```
+
+`read` and `search` return numbered lines under `[path]` headers. `write` creates
+new files and rejects overwrites. Editing does not require a preceding read.
+
+Patch operations execute in order. On a later failure, earlier changes remain;
+the error message and details identify applied and uncertain files. Paths outside
+the working directory, including symlink escapes, are rejected.
 
 `todo` is session-scoped and Store-backed (agent-owned ETS). It supports
 `add` / `update` / `complete` / `remove` / `list` / `clear` and is not

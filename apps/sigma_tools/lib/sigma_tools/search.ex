@@ -3,7 +3,7 @@ defmodule Sigma.Tools.Search do
   @behaviour Sigma.Coding.Tool
 
   alias Sigma.Coding.Utils.PathUtils
-  alias Sigma.Tools.{Hashline, Result, Store}
+  alias Sigma.Tools.Result
 
   @default_limit 100
   @max_line_length 500
@@ -13,7 +13,7 @@ defmodule Sigma.Tools.Search do
 
   @impl true
   def description do
-    "Search local file contents with a regex and return matching lines grouped under hashline [path#TAG] headers."
+    "Search local file contents with a regex and return numbered matches grouped under [path] headers."
   end
 
   @impl true
@@ -23,11 +23,18 @@ defmodule Sigma.Tools.Search do
       "properties" => %{
         "pattern" => %{"type" => "string", "description" => "Regex pattern to search for"},
         "paths" => %{
-          "oneOf" => [%{"type" => "string"}, %{"type" => "array", "items" => %{"type" => "string"}}],
+          "oneOf" => [
+            %{"type" => "string"},
+            %{"type" => "array", "items" => %{"type" => "string"}}
+          ],
           "description" => "File, directory, or glob path(s) to search"
         },
         "i" => %{"type" => "boolean", "description" => "Case-insensitive search"},
-        "limit" => %{"type" => "integer", "description" => "Maximum number of matches", "minimum" => 1}
+        "limit" => %{
+          "type" => "integer",
+          "description" => "Maximum number of matches",
+          "minimum" => 1
+        }
       },
       "required" => ["pattern", "paths"]
     }
@@ -44,7 +51,7 @@ defmodule Sigma.Tools.Search do
 
     with {:ok, re} <- compile_regex(pattern, flags),
          {:ok, files} <- resolve_files(paths, cwd) do
-      {groups, count} = search_files(files, re, limit, cwd, Store.from_opts(opts))
+      {groups, count} = search_files(files, re, limit, cwd)
 
       text =
         case groups do
@@ -81,14 +88,22 @@ defmodule Sigma.Tools.Search do
 
   defp resolve_one(path, cwd) do
     if glob?(path) do
-      {:ok, Path.wildcard(Path.expand(path, cwd), match_dot: false) |> Enum.filter(&File.regular?/1)}
+      {:ok,
+       Path.wildcard(Path.expand(path, cwd), match_dot: false) |> Enum.filter(&File.regular?/1)}
     else
       case PathUtils.safe_resolve(path, cwd) do
         {:ok, abs_path} when is_binary(abs_path) ->
           cond do
-            File.regular?(abs_path) -> {:ok, [abs_path]}
-            File.dir?(abs_path) -> {:ok, Path.wildcard(Path.join(abs_path, "**/*"), match_dot: false) |> Enum.filter(&File.regular?/1)}
-            true -> {:ok, []}
+            File.regular?(abs_path) ->
+              {:ok, [abs_path]}
+
+            File.dir?(abs_path) ->
+              {:ok,
+               Path.wildcard(Path.join(abs_path, "**/*"), match_dot: false)
+               |> Enum.filter(&File.regular?/1)}
+
+            true ->
+              {:ok, []}
           end
 
         {:error, reason} ->
@@ -97,15 +112,19 @@ defmodule Sigma.Tools.Search do
     end
   end
 
-  defp search_files(files, re, limit, cwd, store) do
+  defp search_files(files, re, limit, cwd) do
     Enum.reduce_while(files, {[], 0}, fn file, {groups, count} ->
       if count >= limit do
         {:halt, {groups, count}}
       else
         case File.read(file) do
           {:ok, raw} ->
-            {_bom, text} = Hashline.strip_bom(raw)
-            normalized = Hashline.normalize_to_lf(text)
+            normalized =
+              raw
+              |> String.trim_leading("\uFEFF")
+              |> String.replace("\r\n", "\n")
+              |> String.replace("\r", "\n")
+
             remaining = limit - count
             matches = grep_file(normalized, re, remaining)
 
@@ -113,9 +132,13 @@ defmodule Sigma.Tools.Search do
               {:cont, {groups, count}}
             else
               rel = Path.relative_to(file, cwd)
-              tag = Store.record_snapshot(store, Store.canonical_path(file), normalized)
-              header = Hashline.format_header(rel, tag)
-              lines = Enum.map_join(matches, "\n", fn {line_no, line} -> "#{line_no}:#{truncate(line)}" end)
+              header = "[#{rel}]"
+
+              lines =
+                Enum.map_join(matches, "\n", fn {line_no, line} ->
+                  "#{line_no}:#{truncate(line)}"
+                end)
+
               {:cont, {[header <> "\n" <> lines | groups], count + length(matches)}}
             end
 

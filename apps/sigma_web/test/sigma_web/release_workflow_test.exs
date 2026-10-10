@@ -44,7 +44,7 @@ defmodule Sigma.Web.ReleaseWorkflowTest do
     assert source =~ ~S(ss -H -ltn "sport = :${smoke_port}")
   end
 
-  test "rebuilds and verifies the native release artifact" do
+  test "rebuilds and verifies the terminal helper release artifact" do
     source = File.read!(@workflow_path)
 
     assert {install_offset, _length} =
@@ -54,13 +54,13 @@ defmodule Sigma.Web.ReleaseWorkflowTest do
              :binary.match(source, "- name: Rebuild release applications")
 
     assert {release_offset, _length} = :binary.match(source, "- name: Build release")
-    assert {nif_offset, _length} = :binary.match(source, "sigma_tools_hashline.so")
+    assert {helper_offset, _length} = :binary.match(source, "sigma-terminal-helper")
     assert {package_offset, _length} = :binary.match(source, "- name: Package release")
 
     assert install_offset < compile_offset
     assert compile_offset < release_offset
-    assert release_offset < nif_offset
-    assert nif_offset < package_offset
+    assert release_offset < helper_offset
+    assert helper_offset < package_offset
     assert source =~ "mix compile --force"
     assert source =~ "mix compile --force --warnings-as-errors"
   end

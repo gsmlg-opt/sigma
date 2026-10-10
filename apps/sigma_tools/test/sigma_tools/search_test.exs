@@ -2,7 +2,7 @@ defmodule Sigma.Tools.SearchTest do
   use ExUnit.Case, async: true
 
   @tag :tmp_dir
-  test "search groups matches under hashline headers", %{tmp_dir: tmp_dir} do
+  test "search groups numbered matches under paths without snapshot tags", %{tmp_dir: tmp_dir} do
     File.write!(Path.join(tmp_dir, "a.txt"), "hello\nworld\n")
     store = Sigma.Tools.Store.new()
 
@@ -15,7 +15,8 @@ defmodule Sigma.Tools.SearchTest do
              )
 
     [%{text: text}] = result.content
-    assert text =~ ~r/^\[a\.txt#[0-9A-F]{4}\]/m
+    assert text =~ "[a.txt]\n2:world"
     assert text =~ "2:world"
+    assert [] = :ets.tab2list(store)
   end
 end
