@@ -31,8 +31,9 @@ defmodule Sigma.MixProject do
         "duskmoon.bundle"
       ],
       # TODO(upstream): duskmoon-dev/phoenix-duskmoon-ui#48
-      "assets.build": ["duskmoon.bundle", "duskmoon_bundler.build --tailwind"],
+      "assets.build": ["compile", "duskmoon.bundle", "duskmoon_bundler.build --tailwind"],
       "assets.deploy": [
+        "compile",
         "duskmoon.bundle",
         "duskmoon_bundler.build --tailwind",
         "phx.digest"

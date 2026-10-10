@@ -19,6 +19,14 @@ defmodule Sigma.Web.BuildContractTest do
     refute File.exists?(@patch_task_path)
   end
 
+  test "asset build aliases compile before running the local bundling task" do
+    aliases = Sigma.MixProject.project()[:aliases]
+
+    for task <- [:"assets.build", :"assets.deploy"] do
+      assert ["compile", "duskmoon.bundle" | _] = aliases[task]
+    end
+  end
+
   test "CI exposes Elixir, Rust, assets, and release smoke as independent jobs" do
     source = File.read!(@ci_path)
 
