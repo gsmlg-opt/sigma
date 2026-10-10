@@ -422,12 +422,13 @@ defmodule Sigma.Web.SessionLive do
               <% is_renaming = @renaming_session == session_id %>
               <% menu_button_id = session_menu_button_id(session_id) %>
               <% menu_id = session_menu_id(session_id) %>
-              <form :if={is_renaming} phx-submit="rename_session" class="flex-1 flex items-center gap-1 px-2 py-1">
+              <form :if={is_renaming} id={"rename-session-#{session_dom_id(session_id)}"} phx-submit="rename_session" class="flex-1 flex items-center gap-1 px-2 py-1">
                 <input type="hidden" name="old_id" value={session_id} />
                 <input
                   type="text"
                   name="new_name"
-                  value={session_id}
+                  value={s.title || session_id}
+                  maxlength="120"
                   autofocus
                   class="flex-1 text-sm bg-surface text-on-surface rounded px-2 py-1 border border-primary focus:outline-none"
                 />
@@ -1976,38 +1977,25 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def handle_event("rename_session", %{"old_id" => old_id, "new_name" => new_name}, socket) do
-    new_name = String.trim(new_name)
+    new_name = new_name |> String.trim() |> String.slice(0, 120)
     socket = assign(socket, :renaming_session, nil)
 
-    if new_name == "" or new_name == old_id do
+    if new_name == "" do
       {:noreply, socket}
     else
-      case Sigma.Agent.Runtime.rename_session(
-             socket.assigns.workdir,
+      case Sigma.Session.SessionFiles.update_metadata(
+             socket.assigns.sessions_dir,
              old_id,
-             new_name,
-             socket.assigns.sessions_dir
+             %{"title" => new_name}
            ) do
-        {:ok, _renamed} ->
+        :ok ->
           {:ok, sessions} =
             Sigma.Session.Log.list_session_summaries(socket.assigns.sessions_dir)
 
-          socket = assign(socket, :sessions, sessions)
-
-          if old_id == socket.assigns.session_id do
-            {:noreply,
-             push_navigate(socket,
-               to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{new_name}"
-             )}
-          else
-            {:noreply, socket}
-          end
+          {:noreply, assign(socket, :sessions, sessions)}
 
         {:error, :invalid_session_id} ->
           {:noreply, put_flash(socket, :error, "Invalid session id")}
-
-        {:error, :session_busy} ->
-          {:noreply, put_flash(socket, :error, "Wait for the active turn to finish first.")}
 
         {:error, _reason} ->
           {:noreply, put_flash(socket, :error, "Unable to rename session")}

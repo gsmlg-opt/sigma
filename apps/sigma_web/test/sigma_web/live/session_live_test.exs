@@ -403,24 +403,122 @@ defmodule Sigma.Web.SessionLiveTest do
     assert File.read!(outside_path) == "outside\n"
   end
 
-  test "rename session rejects traversal target names", %{conn: conn} do
+  test "sidebar rename updates the title while preserving the active session identity", %{
+    conn: conn
+  } do
+    session_id = unique_session_id("rename-active")
+    sessions_dir = ConfigManager.sessions_dir(@workdir)
+    source_path = session_storage_path(session_id)
+    File.mkdir_p!(sessions_dir)
+    :ok = Log.persist_event(source_path, {:agent_start, @workdir})
+    :ok = Log.persist_event(source_path, {:message_end, Message.user("m1", "hello")})
+    metadata = %{"title" => "Original title", "parent_session_id" => "parent", "cwd" => @workdir}
+    :ok = Sigma.Session.SessionFiles.update_metadata(sessions_dir, session_id, metadata)
+    original_log = File.read!(source_path)
+
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    owner = Sigma.Agent.Runtime.lookup(@workdir, session_id, :session)
+    agent = Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent)
+
+    render_hook(view, "session_menu_action", %{"value" => "rename", "session" => session_id})
+
+    assert has_element?(
+             view,
+             ~s(form[phx-submit="rename_session"] input[name="new_name"][value="Original title"])
+           )
+
+    html =
+      view
+      |> form(~s(form[phx-submit="rename_session"]), %{
+        "new_name" => "  Renamed session  "
+      })
+      |> render_submit()
+
+    assert html =~ "Renamed session"
+    assert has_element?(view, ~s(a[aria-current="page"][href="#{session_path(session_id)}"]))
+    assert File.read!(source_path) == original_log
+
+    assert Jason.decode!(File.read!(Path.join(sessions_dir, "#{session_id}.meta.json"))) ==
+             Map.put(metadata, "title", "Renamed session")
+
+    refute File.exists?(Path.join(sessions_dir, "Renamed session.jsonl"))
+    assert Sigma.Agent.Runtime.lookup(@workdir, session_id, :session) == owner
+    assert Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent) == agent
+    assert Process.alive?(agent)
+
+    {:ok, reloaded, html} = live_loaded(conn, session_path(session_id))
+    assert html =~ "Renamed session"
+    assert html =~ "hello"
+
+    render_hook(reloaded, "session_menu_action", %{"value" => "rename", "session" => session_id})
+
+    assert has_element?(
+             reloaded,
+             ~s(form[phx-submit="rename_session"] input[name="new_name"][value="Renamed session"])
+           )
+  end
+
+  test "sidebar rename of another session preserves both sessions and their files", %{conn: conn} do
+    session_id = unique_session_id("rename-current")
+    other_id = unique_session_id("rename-other")
+    sessions_dir = ConfigManager.sessions_dir(@workdir)
+    File.mkdir_p!(sessions_dir)
+    :ok = Log.persist_event(session_storage_path(session_id), {:agent_start, @workdir})
+    :ok = Log.persist_event(session_storage_path(other_id), {:agent_start, @workdir})
+    original_log = File.read!(session_storage_path(other_id))
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    html =
+      render_submit(view, "rename_session", %{"old_id" => other_id, "new_name" => session_id})
+
+    assert html =~ session_id
+    assert has_element?(view, ~s(a[aria-current="page"][href="#{session_path(session_id)}"]))
+    assert File.read!(session_storage_path(other_id)) == original_log
+    assert File.exists?(session_storage_path(session_id))
+
+    assert Jason.decode!(File.read!(Path.join(sessions_dir, "#{other_id}.meta.json")))["title"] ==
+             session_id
+
+    {:ok, _other_view, html} = live_loaded(conn, session_path(other_id))
+    assert html =~ session_id
+  end
+
+  test "sidebar rename allows titles with path separators without moving files", %{conn: conn} do
     session_id = unique_session_id("rename-safe")
     sessions_dir = Sigma.Session.ConfigManager.sessions_dir(@workdir)
     source_path = Path.join(sessions_dir, "#{session_id}.jsonl")
     outside_path = Path.expand("../escape.jsonl", sessions_dir)
 
     File.mkdir_p!(sessions_dir)
-    File.write!(source_path, "source\n")
+    :ok = Log.persist_event(source_path, {:agent_start, @workdir})
+    original_log = File.read!(source_path)
 
     {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
     assert render_submit(view, "rename_session", %{
              "old_id" => session_id,
              "new_name" => "../escape"
+           }) =~ "../escape"
+
+    assert File.read!(source_path) == original_log
+    refute File.exists?(outside_path)
+  end
+
+  test "sidebar rename rejects traversal source ids", %{conn: conn} do
+    session_id = unique_session_id("rename-source-safe")
+    sessions_dir = ConfigManager.sessions_dir(@workdir)
+    File.mkdir_p!(sessions_dir)
+    outside_path = Path.expand("../escape.jsonl", sessions_dir)
+    File.write!(outside_path, "outside\n")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    assert render_submit(view, "rename_session", %{
+             "old_id" => "../escape",
+             "new_name" => "New title"
            }) =~ "Invalid session id"
 
-    assert File.read!(source_path) == "source\n"
-    refute File.exists?(outside_path)
+    assert File.read!(outside_path) == "outside\n"
+    refute File.exists?(Path.expand("../escape.meta.json", sessions_dir))
   end
 
   test "fork retries colliding generated ids before navigating", %{conn: conn} do
