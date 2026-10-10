@@ -17,6 +17,8 @@ if value = System.get_env("SIGMA_SESSION_TERMINALS_ENABLED") do
 end
 
 if System.get_env("RELEASE_NAME") do
+  config :duskmoon_bundler_runtime, outdir: "priv/static/assets"
+
   config :sigma_web, Sigma.Web.Endpoint,
     server: System.get_env("PHX_SERVER", "true") in ["1", "true", "TRUE"],
     http: [

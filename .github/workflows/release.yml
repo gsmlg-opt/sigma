@@ -458,6 +458,9 @@ jobs:
             exit 1
           fi
 
+          python3 scripts/verify-release-web-smoke.py \
+            "http://127.0.0.1:${smoke_port}/" "$VERSION" "$SOURCE_SHA"
+
           kill -TERM "$smoke_pid"
           for _attempt in $(seq 1 60); do
             kill -0 "$smoke_pid" 2>/dev/null || break
