@@ -76,6 +76,7 @@ defmodule Sigma.Agent.ContextBuilder do
     messages
     |> MessageTransformer.transform_context(transforms: context_transforms(session_context))
     |> MessageTransformer.convert_to_llm()
+    |> MessageTransformer.complete_tool_results()
   end
 
   @doc """

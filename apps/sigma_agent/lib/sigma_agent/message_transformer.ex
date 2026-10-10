@@ -98,6 +98,61 @@ defmodule Sigma.Agent.MessageTransformer do
     |> Enum.reverse()
   end
 
+  @doc """
+  Completes missing tool results in provider context without changing session history.
+
+  Unresolved calls receive an error result before the next non-result message or
+  the end of context. Existing results remain in their original order, and the
+  synthetic result makes no claim about whether tool execution occurred.
+  """
+  @spec complete_tool_results([AiMessage.t()]) :: [AiMessage.t()]
+  def complete_tool_results(messages) when is_list(messages) do
+    {completed, pending} =
+      Enum.reduce(messages, {[], []}, fn
+        %{role: :tool_result, tool_call_id: id} = message, {acc, pending} ->
+          {[message | acc], Enum.reject(pending, fn {call, _timestamp} -> call.id == id end)}
+
+        message, {acc, pending} ->
+          acc = complete_pending_results(acc, pending)
+
+          pending =
+            case message do
+              %{role: :assistant, content: content, timestamp: timestamp} ->
+                for %{type: :tool_call} = call <- content, do: {call, timestamp}
+
+              _ ->
+                []
+            end
+
+          {[message | acc], pending}
+      end)
+
+    completed
+    |> complete_pending_results(pending)
+    |> Enum.reverse()
+  end
+
+  defp complete_pending_results(acc, pending) do
+    Enum.reduce(pending, acc, fn {call, timestamp}, acc ->
+      [
+        %{
+          role: :tool_result,
+          tool_call_id: call.id,
+          tool_name: call.name,
+          content: [
+            %{
+              type: :text,
+              text: "No tool result was recorded; execution outcome is unknown."
+            }
+          ],
+          is_error: true,
+          timestamp: timestamp
+        }
+        | acc
+      ]
+    end)
+  end
+
   defp take_thoughts(acc) do
     Enum.split_while(acc, fn
       %AgentMessage{role: :thought} -> true
