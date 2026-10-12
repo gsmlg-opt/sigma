@@ -704,6 +704,11 @@ defmodule Sigma.Agent do
   end
 
   @impl true
+  def handle_cast({:notify_subscribers, event}, state) do
+    notify_subscribers(state, event)
+    {:noreply, state}
+  end
+
   def handle_cast({:set_model, model}, state) do
     {:noreply, state |> Map.put(:model, model) |> invalidate_context(:model_change)}
   end
@@ -3022,12 +3027,22 @@ defmodule Sigma.Agent do
   defp emit(state, event) do
     case persist_event(state.on_event, event) do
       :ok ->
-        Enum.each(state.subscribers, fn sub -> send(sub, event) end)
+        notify_subscribers(state, event)
         :ok
 
       {:error, reason} ->
         throw({:event_persistence_failed, persisted_event_type(event), reason})
     end
+  end
+
+  defp notify_subscribers(%{control_pid: control_pid}, event)
+       when is_pid(control_pid) and control_pid != self() do
+    GenServer.cast(control_pid, {:notify_subscribers, event})
+  end
+
+  defp notify_subscribers(state, event) do
+    Enum.each(state.subscribers, fn sub -> send(sub, event) end)
+    :ok
   end
 
   @doc false
