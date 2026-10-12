@@ -1564,6 +1564,9 @@ defmodule Sigma.Web.SessionLiveTest do
       write_session_start_hook!(@workdir, "sleep 2", timeout: 3)
       {:ok, view, _html} = live(conn, session_path(unique_session_id("hook-not-ready")))
 
+      assert render_click(view, "continue_session", %{"msg-id" => "stale-answer"}) =~
+               "Session is still loading"
+
       html = render_hook(view, "send_prompt", %{"value" => "hello", "images" => []})
       assert_reply(view, %{status: "rejected"})
       assert html =~ "Session is still loading"
@@ -1600,6 +1603,159 @@ defmodule Sigma.Web.SessionLiveTest do
     assert_receive {:agent_start, _}, 2000
     assert_receive {:turn_start}, 2000
     assert_receive {:message_start, %{role: :user, content: "try again"}}, 2000
+  end
+
+  for terminal_event <- [{:turn_failed, "failed-turn"}, {:turn_cancelled}] do
+    @terminal_event terminal_event
+    test "continues the current history after #{inspect(terminal_event)}", %{conn: conn} do
+      previous_engine = Application.fetch_env!(:sigma_agent, :execution_engine)
+      Application.put_env(:sigma_agent, :execution_engine, :backplane)
+      on_exit(fn -> Application.put_env(:sigma_agent, :execution_engine, previous_engine) end)
+
+      session_id = unique_session_id("continue")
+      storage_path = session_storage_path(session_id)
+      File.mkdir_p!(Path.dirname(storage_path))
+
+      messages = [
+        Message.user("continue-user", "finish the task"),
+        Message.assistant("continue-old", %{content: "earlier answer"}),
+        Message.assistant("continue-last", %{
+          content: [
+            %{type: :text, text: "unfinished answer"},
+            %{
+              type: :tool_call,
+              id: "unfinished-call",
+              name: "bash",
+              arguments: %{"command" => "pwd"}
+            }
+          ]
+        })
+      ]
+
+      for message <- messages, do: :ok = Log.persist_event(storage_path, {:message_end, message})
+      Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+
+      with_capture_provider_pid(self(), fn ->
+        with_mock_provider(CaptureProvider, fn ->
+          {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+          send(view.pid, @terminal_event)
+          render(view)
+
+          assert has_element?(view, "#continue-at-continue-last")
+          refute has_element?(view, "#continue-at-continue-old")
+          assert has_element?(view, "#fork-at-continue-last")
+
+          html = render_click(view, "continue_session", %{"msg-id" => "continue-old"})
+          assert html =~ "Continue from the latest assistant message."
+          refute_receive {:provider_params, _}, 100
+
+          view |> element("#continue-at-continue-last") |> render_click()
+
+          assert_receive {:provider_params, params}, 2_000
+          context = params.context.messages
+          assert %{role: :user, content: first_content} = hd(context)
+          assert List.last(first_content) == %{type: :text, text: "finish the task"}
+          assert Enum.at(context, 1).content == [%{type: :text, text: "earlier answer"}]
+
+          assert Enum.at(context, 2).content == [%{type: :text, text: "unfinished answer"}]
+
+          assert List.last(context).role == :user
+          assert List.last(context).content =~ "Continue"
+          assert_receive {:turn_completed, _}, 2_000
+
+          {:ok, persisted} = Log.replay(storage_path)
+          assert Enum.take(Enum.map(persisted, & &1.id), 3) == Enum.map(messages, & &1.id)
+          assert Enum.count(persisted, &(&1.role == :user)) == 2
+          assert render(view) =~ "unfinished answer"
+        end)
+      end)
+    end
+  end
+
+  test "disables continuation during a turn and rejects duplicate clicks", %{conn: conn} do
+    write_selectable_provider_configs()
+    session_id = unique_session_id("continue-busy")
+    storage_path = session_storage_path(session_id)
+    File.mkdir_p!(Path.dirname(storage_path))
+
+    :ok =
+      Log.persist_event(
+        storage_path,
+        {:message_end, Message.assistant("busy-answer", %{content: "unfinished"})}
+      )
+
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+    Application.put_env(:sigma_web, :blocking_provider_pid, self())
+    on_exit(fn -> Application.delete_env(:sigma_web, :blocking_provider_pid) end)
+
+    with_mock_provider(BlockingTurnProvider, fn ->
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+      view |> element("#continue-at-busy-answer") |> render_click()
+      assert_receive {:web_provider_waiting, provider, _}, 2_000
+      assert_receive {:message_start, %{role: :user}}, 2_000
+      assert has_element?(view, "#continue-at-busy-answer[disabled]")
+
+      assert render_click(view, "continue_session", %{"msg-id" => "busy-answer"}) =~
+               "Agent is still working."
+
+      refute_receive {:message_start, %{role: :user}}, 100
+      send(provider, :release_web_provider)
+      assert_receive {:turn_completed, _}, 2_000
+      render(view)
+      refute has_element?(view, "#continue-at-busy-answer")
+      assert has_element?(view, "[phx-click=continue_session]:not([disabled])")
+    end)
+  end
+
+  for broadcast? <- [false, true] do
+    @broadcast_events broadcast?
+    test "continues a pre-existing runtime with broadcast=#{broadcast?}", %{conn: conn} do
+      session_id = unique_session_id("continue-existing")
+      storage_path = session_storage_path(session_id)
+      File.mkdir_p!(Path.dirname(storage_path))
+      messages = [Message.assistant("existing-answer", %{content: "unfinished"})]
+      for message <- messages, do: :ok = Log.persist_event(storage_path, {:message_end, message})
+
+      on_event =
+        if @broadcast_events do
+          fn event ->
+            Phoenix.PubSub.broadcast(Sigma.Web.PubSub, session_topic(@workdir, session_id), event)
+          end
+        end
+
+      Application.put_env(:sigma_web, :blocking_provider_pid, self())
+      on_exit(fn -> Application.delete_env(:sigma_web, :blocking_provider_pid) end)
+
+      {:ok, %{agent: agent}} =
+        Sigma.Agent.Runtime.get_session(@workdir, session_id,
+          model: %{id: "mock-model", provider: "mock-provider", api: "mock-api"},
+          provider: BlockingTurnProvider,
+          messages: messages,
+          transcript_path: storage_path,
+          cwd: @workdir,
+          on_event: on_event
+        )
+
+      :ok = Sigma.Agent.subscribe(agent)
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+      view |> element("#continue-at-existing-answer") |> render_click()
+      assert_receive {:web_provider_waiting, provider, prompt}, 2_000
+      assert render(view) =~ prompt
+
+      send(provider, :release_web_provider)
+      assert_receive {:turn_completed, _}, 2_000
+      html = render(view)
+      assert html =~ "I am a mock response."
+      refute has_element?(view, "#continue-at-existing-answer")
+      assert has_element?(view, "[phx-click=continue_session]:not([disabled])")
+
+      document = Floki.parse_document!(html)
+      assert Floki.find(document, "#messages el-dm-chat[author='You']") |> length() == 1
+      assert Floki.find(document, "#messages el-dm-chat[author='∑']") |> length() == 2
+
+      GenServer.stop(view.pid, :normal)
+      refute view.pid in :sys.get_state(agent).subscribers
+    end
   end
 
   test "expands init slash command before submitting to the agent", %{conn: conn} do
@@ -2645,6 +2801,7 @@ defmodule Sigma.Web.SessionLiveTest do
           Sigma.Agent.Terminals.Identity.session(@workdir, "render_session", "test"),
         storage_path: session_storage_path("render_session"),
         streaming_message_id: nil,
+        last_assistant_message_id: nil,
         streams: %{messages: []},
         turn_last_message_ids: %{},
         tool_results: %{},

@@ -63,7 +63,6 @@ defmodule Sigma.Web.SessionLive do
     log_session_id = Sigma.Logs.session_key(repo_key, session_id)
 
     if connected?(socket) do
-      Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(repo_key, session_id))
       Phoenix.PubSub.subscribe(Sigma.Web.PubSub, logs_topic(repo_key, session_id))
       Sigma.Logs.start_session(log_session_id)
     end
@@ -250,6 +249,7 @@ defmodule Sigma.Web.SessionLive do
   @impl true
   def handle_async(:session_load, {:ok, {:ok, session_data}}, socket) do
     agent = session_data.agent
+    :ok = Sigma.Agent.subscribe(agent)
     agent_ref = Process.monitor(agent)
 
     socket =
@@ -283,6 +283,13 @@ defmodule Sigma.Web.SessionLive do
       |> assign(:tool_call_to_msg, session_data.tool_call_to_msg)
       |> assign(:tool_results, session_data.tool_results)
       |> assign(:display_messages, session_data.display_messages)
+      |> assign(
+        :last_assistant_message_id,
+        Enum.find_value(Enum.reverse(session_data.stream_messages), fn
+          %{role: :assistant, id: id} -> id
+          _ -> nil
+        end)
+      )
       |> assign(:turn_last_message_ids, session_data.turn_last_message_ids)
       |> stream(:messages, session_data.stream_messages, reset: true)
       |> start_async(:agent_status, fn -> Sigma.Agent.status(agent) end)
@@ -318,6 +325,7 @@ defmodule Sigma.Web.SessionLive do
     {:noreply,
      socket
      |> assign(pending_compaction: false, runtime_status: :idle)
+     |> refresh_continue_button()
      |> put_flash(:info, "Context compacted.")}
   end
 
@@ -325,6 +333,7 @@ defmodule Sigma.Web.SessionLive do
     {:noreply,
      socket
      |> assign(pending_compaction: false, runtime_status: :idle)
+     |> refresh_continue_button()
      |> put_flash(:error, compact_error_message(reason))}
   end
 
@@ -332,6 +341,7 @@ defmodule Sigma.Web.SessionLive do
     {:noreply,
      socket
      |> assign(pending_compaction: false, runtime_status: :idle)
+     |> refresh_continue_button()
      |> put_flash(:error, "Compaction failed: #{inspect(reason)}")}
   end
 
@@ -569,6 +579,8 @@ defmodule Sigma.Web.SessionLive do
               streaming_message_id={@streaming_message_id}
               session_ready={@session_ready}
               turn_in_flight={@turn_in_flight}
+              last_assistant_message_id={@last_assistant_message_id}
+              pending_compaction={@pending_compaction}
               session_metrics={@session_metrics}
               turn_last_message_ids={@turn_last_message_ids}
             />
@@ -1196,6 +1208,21 @@ defmodule Sigma.Web.SessionLive do
           <.dm_mdi name="source-branch" class="w-3 h-3" />
           <span class="sr-only">Fork session from here</span>
         </.dm_btn>
+        <.dm_btn
+          :if={@message.id == @last_assistant_message_id}
+          id={"continue-at-#{@message.id}"}
+          phx-click="continue_session"
+          phx-value-msg-id={@message.id}
+          phx-hook="WebComponentHook"
+          variant="ghost"
+          size="xs"
+          disabled={not @session_ready or @turn_in_flight or @pending_compaction}
+          title="Continue the session using the current conversation"
+          aria-label="Continue session"
+        >
+          <.dm_mdi name="play" class="w-3 h-3" />
+          <span class="sr-only">Continue session</span>
+        </.dm_btn>
       </:actions_slot>
     </.dm_chat>
     """
@@ -1354,6 +1381,11 @@ defmodule Sigma.Web.SessionLive do
 
   defp stream_display_message(socket, message) do
     previous_id = Map.get(socket.assigns.turn_last_message_ids, message_turn_id(message))
+    previous_assistant_id = socket.assigns.last_assistant_message_id
+
+    new_assistant? =
+      message.role == :assistant and not Map.has_key?(socket.assigns.display_messages, message.id)
+
     {by_id, last_by_turn} = index_display_messages([message])
     turn_id = message_turn_id(message)
 
@@ -1366,6 +1398,18 @@ defmodule Sigma.Web.SessionLive do
       )
       |> stream_insert(:messages, message)
 
+    socket =
+      if new_assistant? do
+        socket = assign(socket, :last_assistant_message_id, message.id)
+
+        case Map.get(socket.assigns.display_messages, previous_assistant_id) do
+          nil -> socket
+          previous -> stream_insert(socket, :messages, previous)
+        end
+      else
+        socket
+      end
+
     if previous_id && previous_id != message.id && is_binary(turn_id) do
       case Map.get(socket.assigns.display_messages, previous_id) do
         nil -> socket
@@ -1373,6 +1417,13 @@ defmodule Sigma.Web.SessionLive do
       end
     else
       socket
+    end
+  end
+
+  defp refresh_continue_button(socket) do
+    case Map.get(socket.assigns.display_messages, socket.assigns.last_assistant_message_id) do
+      nil -> socket
+      message -> stream_insert(socket, :messages, message)
     end
   end
 
@@ -2086,6 +2137,30 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
+  def handle_event("continue_session", %{"msg-id" => msg_id}, socket) do
+    cond do
+      not session_ready?(socket) ->
+        {:noreply, put_flash(socket, :info, "Session is still loading.")}
+
+      socket.assigns.turn_in_flight or socket.assigns.pending_compaction ->
+        {:noreply, put_flash(socket, :info, "Agent is still working.")}
+
+      msg_id != socket.assigns.last_assistant_message_id ->
+        {:noreply, put_flash(socket, :info, "Continue from the latest assistant message.")}
+
+      true ->
+        prompt =
+          "Continue the current task from where it stopped, using the existing conversation context. " <>
+            "Check any uncertain tool outcomes before repeating actions."
+
+        case prompt_admission(socket, submit_prompt(socket, prompt)) do
+          {:accepted, _status, socket} -> {:noreply, socket}
+          {:rejected, socket} -> {:noreply, socket}
+        end
+    end
+  end
+
+  @impl true
   def handle_event("retry_message", %{"msg-id" => msg_id}, socket) do
     cond do
       not session_ready?(socket) ->
@@ -2457,6 +2532,7 @@ defmodule Sigma.Web.SessionLive do
             socket =
               socket
               |> assign(pending_compaction: true, runtime_status: :compacting)
+              |> refresh_continue_button()
               |> start_async(:manual_compaction, fn ->
                 Sigma.Agent.Runtime.compact_session(
                   workdir,
@@ -2607,7 +2683,7 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp prompt_admission(socket, {:accepted, _info}) do
-    {:accepted, "accepted", assign(socket, :turn_in_flight, true)}
+    {:accepted, "accepted", socket |> assign(:turn_in_flight, true) |> refresh_continue_button()}
   end
 
   defp prompt_admission(socket, {:queued_as_steering, _info}) do
@@ -2630,12 +2706,18 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def handle_info({:agent_start, _cwd}, socket) do
-    {:noreply, assign(socket, turn_in_flight: true, runtime_status: :streaming_provider)}
+    {:noreply,
+     socket
+     |> assign(turn_in_flight: true, runtime_status: :streaming_provider)
+     |> refresh_continue_button()}
   end
 
   @impl true
   def handle_info({:turn_start}, socket) do
-    {:noreply, assign(socket, turn_in_flight: true, runtime_status: :streaming_provider)}
+    {:noreply,
+     socket
+     |> assign(turn_in_flight: true, runtime_status: :streaming_provider)
+     |> refresh_continue_button()}
   end
 
   @impl true
@@ -2650,25 +2732,34 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def handle_info({:agent_end, _}, socket) do
-    {:noreply, assign(socket, turn_in_flight: false, streaming_message_id: nil)}
+    {:noreply,
+     socket
+     |> assign(turn_in_flight: false, streaming_message_id: nil)
+     |> refresh_continue_button()}
   end
 
   @impl true
   def handle_info({:turn_completed, _turn_id}, socket) do
     {:noreply,
-     assign(socket, turn_in_flight: false, streaming_message_id: nil, runtime_status: :completed)}
+     socket
+     |> assign(turn_in_flight: false, streaming_message_id: nil, runtime_status: :completed)
+     |> refresh_continue_button()}
   end
 
   @impl true
   def handle_info({:turn_failed, _turn_id}, socket) do
     {:noreply,
-     assign(socket, turn_in_flight: false, streaming_message_id: nil, runtime_status: :failed)}
+     socket
+     |> assign(turn_in_flight: false, streaming_message_id: nil, runtime_status: :failed)
+     |> refresh_continue_button()}
   end
 
   @impl true
   def handle_info({:turn_cancelled}, socket) do
     {:noreply,
-     assign(socket, turn_in_flight: false, streaming_message_id: nil, runtime_status: :cancelled)}
+     socket
+     |> assign(turn_in_flight: false, streaming_message_id: nil, runtime_status: :cancelled)
+     |> refresh_continue_button()}
   end
 
   @impl true
@@ -2678,7 +2769,8 @@ defmodule Sigma.Web.SessionLive do
     {:noreply,
      socket
      |> put_flash(:error, "Turn failed: #{msg}")
-     |> assign(turn_in_flight: false, streaming_message_id: nil, runtime_status: :failed)}
+     |> assign(turn_in_flight: false, streaming_message_id: nil, runtime_status: :failed)
+     |> refresh_continue_button()}
   end
 
   @impl true
@@ -3606,6 +3698,7 @@ defmodule Sigma.Web.SessionLive do
     |> assign(:streaming_message_id, nil)
     |> assign(:tool_results, %{})
     |> assign(:display_messages, %{})
+    |> assign(:last_assistant_message_id, nil)
     |> assign(:turn_last_message_ids, %{})
     |> assign(:tool_call_to_msg, %{})
     |> assign(:sessions, [])
@@ -4048,6 +4141,14 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def terminate(_reason, socket) do
+    if agent = socket.assigns[:agent] do
+      try do
+        Sigma.Agent.unsubscribe(agent)
+      catch
+        :exit, _reason -> :ok
+      end
+    end
+
     if socket.assigns[:log_session_id] do
       Sigma.Logs.stop_session(socket.assigns.log_session_id)
     end
