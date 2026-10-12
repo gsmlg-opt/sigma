@@ -21,7 +21,7 @@ defmodule Sigma.Agent.BackplaneContextContinuationTest do
     @impl true
     def execute(_id, %{"test_pid" => pid}, _opts) do
       send(pid |> String.to_charlist() |> :erlang.list_to_pid(), :command_executed)
-      {:error, Sigma.Coding.ToolError.new(:execution, "command timed out")}
+      {:error, Sigma.Coding.ToolError.new(:unknown_outcome, "command outcome is unknown")}
     end
   end
 
