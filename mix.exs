@@ -27,6 +27,7 @@ defmodule Sigma.MixProject do
       "sigma.rel-build": ["assets.build", &build_release/1],
       "sigma.rel-run": ["sigma.rel-build", &run_release/1],
       "assets.setup": [
+        # TODO(upstream): duskmoon-dev/phoenix-duskmoon-ui#190
         "npm.install",
         "duskmoon.bundle"
       ],
