@@ -75,8 +75,9 @@ defmodule Sigma.Agent.Backplane.Engine do
       },
       work: 100,
       provider_output_limit: :infinity,
-      # TODO(upstream): gsmlg-opt/backplane#48 exclude human interaction waits from deadlines.
-      run_timeout: 300_000,
+      # TODO(upstream): gsmlg-opt/backplane#65 support disabling whole-run deadlines.
+      # WORKAROUND(upstream): gsmlg-opt/backplane#65 use the maximum finite run timeout.
+      run_timeout: 3_600_000,
       effect_timeout: 300_000
     )
   end

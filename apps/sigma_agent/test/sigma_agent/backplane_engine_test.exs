@@ -175,6 +175,41 @@ defmodule Sigma.Agent.BackplaneEngineTest do
   end
 
   @tag :tmp_dir
+  test "a long turn retains a valid deadline beyond five minutes", %{tmp_dir: dir} do
+    {:ok, agent} =
+      start_supervised(
+        {Sigma.Agent,
+         execution_engine: :backplane,
+         backplane_runtime_path: Path.join(dir, "runtime"),
+         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+         provider: BlockingProvider,
+         options: [test_pid: self()]}
+      )
+
+    :ok = Sigma.Agent.subscribe(agent)
+    started_at = System.system_time(:millisecond)
+    assert {:accepted, %{turn_id: turn_id}} = Sigma.Agent.prompt(agent, "long task")
+    assert_receive {:backplane_provider_waiting, worker, "long task"}, 5_000
+
+    store = :sys.get_state(agent).backplane_store
+    assert {:ok, %{run: run}} = Sigma.Agent.Backplane.Store.load(store, turn_id)
+
+    assert :ok =
+             Backplane.AgentRuntime.Execution.validate_deadline(run,
+               wall_now: fn -> started_at + :timer.minutes(6) end
+             )
+
+    assert {:error, %{class: :timeout}} =
+             Backplane.AgentRuntime.Execution.validate_deadline(run,
+               wall_now: fn -> run.deadline + 1 end
+             )
+
+    send(worker, {:release_backplane_provider, "long task completed"})
+    assert_receive {:turn_completed, ^turn_id}, 5_000
+    assert Sigma.Agent.status(agent).phase == :completed
+  end
+
+  @tag :tmp_dir
   test "opt-in prompt runs the provider/tool conversation and keeps Sigma events", %{
     tmp_dir: tmp_dir
   } do
