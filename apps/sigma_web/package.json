@@ -3,10 +3,11 @@
   "private": true,
   "dependencies": {
     "@duskmoon-dev/art-elements": "1.9.1",
+    "@duskmoon-dev/components": "0.5.0",
     "@duskmoon-dev/core": "1.20.4",
     "@duskmoon-dev/css-art": "1.20.4",
-    "@duskmoon-dev/el-base": "1.9.1",
     "@duskmoon-dev/el-badge": "1.9.1",
+    "@duskmoon-dev/el-base": "1.9.1",
     "@duskmoon-dev/el-button": "1.9.1",
     "@duskmoon-dev/el-card": "1.9.1",
     "@duskmoon-dev/el-chat": "1.9.1",
@@ -18,6 +19,8 @@
     "@duskmoon-dev/elements": "1.9.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
     "topbar": "3.0.1"
   }
 }
