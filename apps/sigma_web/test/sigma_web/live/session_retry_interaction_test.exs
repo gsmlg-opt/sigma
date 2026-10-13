@@ -225,7 +225,32 @@ defmodule Sigma.Web.SessionRetryInteractionTest do
       end)
     end)
 
-    assert_eventually(fn -> render(view) =~ "Retry interaction completed" end)
+    assert_eventually(fn ->
+      %{proxy: {ref, _topic, _}} = view
+      drain_snapshots(ref)
+
+      [config] =
+        render(view)
+        |> Floki.parse_document!()
+        |> Floki.find("#messages")
+        |> Floki.attribute("data-chat")
+
+      render_hook(view, "chat.sync", %{
+        "id" => "messages",
+        "conversation_id" => Jason.decode!(config)["conversationId"]
+      })
+
+      assert_push_event(view, "chat:event", %{type: "chat.snapshot", messages: messages})
+      Enum.any?(messages, &(&1.content == "Retry interaction completed"))
+    end)
+  end
+
+  defp drain_snapshots(ref) do
+    receive do
+      {^ref, {:push_event, "chat:event", %{type: "chat.snapshot"}}} -> drain_snapshots(ref)
+    after
+      0 -> :ok
+    end
   end
 
   defp assert_eventually(fun),

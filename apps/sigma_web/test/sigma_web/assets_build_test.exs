@@ -21,6 +21,8 @@ defmodule Sigma.Web.AssetsBuildTest do
     css = File.read!(List.first(css_files))
     assert css =~ ".bg-surface"
     assert css =~ ".appbar"
+    assert css =~ ".chat-composer-editor"
+    assert css =~ ".chat-scroll"
     assert css =~ ".xterm"
   end
 
@@ -66,12 +68,5 @@ defmodule Sigma.Web.AssetsBuildTest do
              ~r/\.web-shell-terminal-host\s*\{[^}]*width:\s*100%;[^}]*height:\s*100%;[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;/s
 
     refute css =~ ~r/\.web-shell-terminal\s*\{[^}]*min-height:\s*16rem;/s
-  end
-
-  test "chat messages with action slots expose the DuskMoon actions part" do
-    css = File.read!(Path.join(@repo_root, "apps/sigma_web/assets/css/app.css"))
-
-    assert css =~
-             ~r/el-dm-chat\.sigma-chat-with-actions::part\(actions\)\s*\{[^}]*display:\s*block;/s
   end
 end

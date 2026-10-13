@@ -216,15 +216,108 @@ defmodule Sigma.Web.SessionLiveTest do
              live(conn, "/repository/not-base64!/sessions/#{unique_session_id("invalid")}")
   end
 
+  test "React chat sync restores canonical messages and admission state", %{conn: conn} do
+    session_id = unique_session_id("react-sync")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    render_hook(view, "chat.sync", %{"id" => "messages", "conversation_id" => session_id})
+    assert_reply(view, %{status: "ok"})
+
+    assert_push_event(view, "chat:event", %{
+      type: "chat.snapshot",
+      conversation_id: ^session_id,
+      messages: [],
+      admission: %{allowWhileStreaming: true, canSubmit: true}
+    })
+
+    assert has_element?(view, "#messages[phx-hook='SigmaReactChat'][phx-update='ignore']")
+  end
+
+  test "React chat maps follow-up admission without changing runtime semantics", %{conn: conn} do
+    session_id = unique_session_id("react-follow-up")
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+    Application.put_env(:sigma_web, :blocking_provider_pid, self())
+    on_exit(fn -> Application.delete_env(:sigma_web, :blocking_provider_pid) end)
+
+    with_mock_provider(BlockingTurnProvider, fn ->
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+      params = %{"id" => "messages", "conversation_id" => session_id, "text" => "first"}
+      render_hook(view, "chat.send", Map.put(params, "request_id", "react-first"))
+      assert_reply(view, %{status: "ok", admission: "accepted"})
+      assert_receive {:web_provider_waiting, first, "first"}, 1_000
+
+      render_hook(
+        view,
+        "chat.send",
+        Map.merge(params, %{"text" => "second", "request_id" => "react-second"})
+      )
+
+      assert_reply(view, %{status: "ok", admission: "queued_as_follow_up"})
+      send(first, :release_web_provider)
+      assert_receive {:web_provider_waiting, second, "second"}, 1_000
+      send(second, :release_web_provider)
+    end)
+  end
+
+  test "React chat batches message replacements and recovers their sequence", %{conn: conn} do
+    session_id = unique_session_id("react-sequence")
+    {:ok, view, html} = live_loaded(conn, session_path(session_id))
+    initial = chat_config(html)
+    message = Message.assistant("react-stream", %{content: "first"})
+
+    send(view.pid, {:agent_start, @workdir})
+    send(view.pid, {:message_start, message})
+    send(view.pid, {:message_update, %{message | content: "latest"}, :text_delta})
+    send(view.pid, :flush_chat)
+    render(view)
+
+    assert_push_event(view, "chat:event", %{
+      type: "chat.message",
+      message_id: "react-stream",
+      sequence: 1,
+      message: %{content: "latest", status: "streaming"},
+      runtime: %{active: true}
+    })
+
+    send(view.pid, {:message_end, %{message | content: "finished"}})
+    send(view.pid, :flush_chat)
+    render(view)
+
+    assert_push_event(view, "chat:event", %{
+      type: "chat.message",
+      sequence: 2,
+      message: %{content: "finished", status: "complete"},
+      runtime: %{active: true}
+    })
+
+    snapshot = chat_snapshot(view)
+    assert snapshot.sequences["react-stream"] == 2
+    assert [%{content: "finished"}] = snapshot.messages
+    assert chat_config(render(view)) == initial
+  end
+
+  test "React chat rejects another conversation before admitting a prompt", %{conn: conn} do
+    session_id = unique_session_id("react-scope")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    render_hook(view, "chat.send", %{
+      "id" => "messages",
+      "conversation_id" => "other",
+      "text" => "wrong session"
+    })
+
+    assert_reply(view, %{status: "error"})
+  end
+
   test "renders session page", %{conn: conn} do
     {:ok, _view, html} = live_loaded(conn, session_path(unique_session_id("render")))
-    assert html =~ "Ask ∑ anything"
+    assert html =~ ~s(phx-hook="SigmaReactChat")
     refute html =~ "Enter sends"
     refute html =~ "Ctrl+Enter to send"
     assert html =~ ~s(id="prompt-input")
-    assert html =~ ~s(data-remote-skills-url="/api/v1/skills?repositoryId=)
-    assert html =~ ~s(data-remote-sources=)
-    assert html =~ ~s(phx-hook="ChatInputHook")
+    assert chat_config(html)["metadata"]["remoteSkillsUrl"] =~ "/api/v1/skills?repositoryId="
+    assert is_list(chat_config(html)["metadata"]["remoteSources"])
+    assert html =~ ~s(phx-hook="SigmaReactChat")
     assert html =~ "/init"
     assert html =~ ~s(phx-update="ignore")
     assert html =~ "Session List"
@@ -256,12 +349,12 @@ defmodule Sigma.Web.SessionLiveTest do
       {:ok, view, _html} = live(conn, session_path(unique_session_id("slow-start")))
       html = render(view)
 
-      assert html =~ "Ask ∑ anything"
+      assert html =~ ~s(phx-hook="SigmaReactChat")
       refute html =~ "Could not load session"
       refute html =~ "pending_user_questions"
 
       loaded_html = render_async(view, 4_000)
-      assert loaded_html =~ "Ask ∑ anything"
+      assert loaded_html =~ ~s(phx-hook="SigmaReactChat")
       refute loaded_html =~ "Could not load session"
     end)
   end
@@ -353,7 +446,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
     {:ok, _view, html} = live_loaded(conn, session_path(session_id))
 
-    assert html =~ "Ask ∑ anything"
+    assert html =~ ~s(phx-hook="SigmaReactChat")
     assert html =~ ~s(id="session-menu-btn-UFIjNQ")
   end
 
@@ -582,7 +675,10 @@ defmodule Sigma.Web.SessionLiveTest do
 
     render_submit(view, "send_prompt", %{"value" => "from repo one"})
 
-    assert_eventually(fn -> render(view) =~ "from repo one" end)
+    assert_eventually(fn ->
+      Enum.any?(chat_snapshot(view).messages, &(&1.content == "from repo one"))
+    end)
+
     refute_eventually(fn -> render(other_view) =~ "from repo one" end)
   end
 
@@ -1249,7 +1345,7 @@ defmodule Sigma.Web.SessionLiveTest do
         refute_receive {:compact, %Message{role: :compaction_summary}, _first_kept_id}, 200
 
         assert_eventually(fn ->
-          html = render(view)
+          html = chat_footer_html(view)
           html =~ "input: 90000" and html =~ "output: 1" and html =~ "Turn summary"
         end)
 
@@ -1496,9 +1592,7 @@ defmodule Sigma.Web.SessionLiveTest do
     with_mock_provider(BlockingTurnProvider, fn ->
       {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
-      view
-      |> element("#retry-u_retry_race")
-      |> render_click()
+      chat_action(view, "u_retry_race", "retry_message")
 
       assert_receive {:web_provider_waiting, retry_provider, "retry me"}, 1_000
       html = render_hook(view, "send_prompt", %{"value" => "second", "images" => []})
@@ -1596,9 +1690,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
     {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
-    view
-    |> element("#retry-u_retry")
-    |> render_click()
+    chat_action(view, "u_retry", "retry_message")
 
     assert_receive {:agent_start, _}, 2000
     assert_receive {:turn_start}, 2000
@@ -1641,15 +1733,15 @@ defmodule Sigma.Web.SessionLiveTest do
           send(view.pid, @terminal_event)
           render(view)
 
-          assert has_element?(view, "#continue-at-continue-last")
-          refute has_element?(view, "#continue-at-continue-old")
-          assert has_element?(view, "#fork-at-continue-last")
+          assert chat_has_action?(view, "continue-last", "continue_session")
+          refute chat_has_action?(view, "continue-old", "continue_session")
+          assert chat_has_action?(view, "continue-last", "fork_at")
 
           html = render_click(view, "continue_session", %{"msg-id" => "continue-old"})
           assert html =~ "Continue from the latest assistant message."
           refute_receive {:provider_params, _}, 100
 
-          view |> element("#continue-at-continue-last") |> render_click()
+          chat_action(view, "continue-last", "continue_session")
 
           assert_receive {:provider_params, params}, 2_000
           context = params.context.messages
@@ -1690,10 +1782,10 @@ defmodule Sigma.Web.SessionLiveTest do
 
     with_mock_provider(BlockingTurnProvider, fn ->
       {:ok, view, _html} = live_loaded(conn, session_path(session_id))
-      view |> element("#continue-at-busy-answer") |> render_click()
+      chat_action(view, "busy-answer", "continue_session")
       assert_receive {:web_provider_waiting, provider, _}, 2_000
       assert_receive {:message_start, %{role: :user}}, 2_000
-      assert has_element?(view, "#continue-at-busy-answer[disabled]")
+      assert chat_snapshot(view).runtime.active
 
       assert render_click(view, "continue_session", %{"msg-id" => "busy-answer"}) =~
                "Agent is still working."
@@ -1702,8 +1794,12 @@ defmodule Sigma.Web.SessionLiveTest do
       send(provider, :release_web_provider)
       assert_receive {:turn_completed, _}, 2_000
       render(view)
-      refute has_element?(view, "#continue-at-busy-answer")
-      assert has_element?(view, "[phx-click=continue_session]:not([disabled])")
+      refute chat_has_action?(view, "busy-answer", "continue_session")
+      assert not chat_snapshot(view).runtime.active
+
+      assert Enum.any?(chat_snapshot(view).messages, fn message ->
+               Enum.any?(message.actions, &(&1.id == "continue_session"))
+             end)
     end)
   end
 
@@ -1738,20 +1834,24 @@ defmodule Sigma.Web.SessionLiveTest do
 
       :ok = Sigma.Agent.subscribe(agent)
       {:ok, view, _html} = live_loaded(conn, session_path(session_id))
-      view |> element("#continue-at-existing-answer") |> render_click()
+      chat_action(view, "existing-answer", "continue_session")
       assert_receive {:web_provider_waiting, provider, prompt}, 2_000
-      assert render(view) =~ prompt
+      assert Enum.any?(chat_snapshot(view).messages, &(&1.content == prompt))
 
       send(provider, :release_web_provider)
       assert_receive {:turn_completed, _}, 2_000
-      html = render(view)
-      assert html =~ "I am a mock response."
-      refute has_element?(view, "#continue-at-existing-answer")
-      assert has_element?(view, "[phx-click=continue_session]:not([disabled])")
+      render(view)
+      assert Enum.any?(chat_snapshot(view).messages, &(&1.content == "I am a mock response."))
+      refute chat_has_action?(view, "existing-answer", "continue_session")
+      assert not chat_snapshot(view).runtime.active
 
-      document = Floki.parse_document!(html)
-      assert Floki.find(document, "#messages el-dm-chat[author='You']") |> length() == 1
-      assert Floki.find(document, "#messages el-dm-chat[author='∑']") |> length() == 2
+      assert Enum.any?(chat_snapshot(view).messages, fn message ->
+               Enum.any?(message.actions, &(&1.id == "continue_session"))
+             end)
+
+      messages = chat_snapshot(view).messages
+      assert Enum.count(messages, &(&1.role == :user)) == 1
+      assert Enum.count(messages, &(&1.role == :assistant)) == 2
 
       GenServer.stop(view.pid, :normal)
       refute view.pid in :sys.get_state(agent).subscribers
@@ -1805,7 +1905,7 @@ defmodule Sigma.Web.SessionLiveTest do
     assert render(view) =~ "read"
   end
 
-  test "renders user messages aligned to the left", %{conn: conn} do
+  test "publishes user content and Resend actions", %{conn: conn} do
     {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("user_left")))
 
     message = %Sigma.Agent.Message{
@@ -1817,13 +1917,10 @@ defmodule Sigma.Web.SessionLiveTest do
 
     send(view.pid, {:message_start, message})
 
-    html = render(view)
-    assert html =~ ~s(id="msg_user_left")
-    assert html =~ ~s(align="start")
-    assert html =~ ~s(color="secondary")
-    assert html =~ ~s(id="retry-msg_user_left")
-    assert html =~ "Resend"
-    refute html =~ ~s(variant="filled")
+    message = Enum.find(chat_snapshot(view).messages, &(&1.id == "msg_user_left"))
+    assert message.role == :user
+    assert message.content == "hello"
+    assert [%{id: "retry_message", label: "Resend"}] = message.actions
   end
 
   test "renders persisted text and image content safely", %{conn: conn} do
@@ -1837,15 +1934,18 @@ defmodule Sigma.Web.SessionLiveTest do
     {:ok, _view, html} = live_loaded(conn, session_path(session_id))
 
     assert html =~ "describe this"
-    assert html =~ ~s(src="data:image/png;base64,#{@png_data}")
-    assert html =~ ~s(alt="Attached image")
-    assert html =~ ~s(loading="lazy")
-    assert html =~ ~s(decoding="async")
+
+    assert Enum.any?(
+             chat_config(html)["messages"],
+             &("data:image/png;base64,#{@png_data}" in &1["metadata"]["images"])
+           )
 
     {:ok, _reloaded_view, reloaded_html} = live_loaded(conn, session_path(session_id))
-    assert reloaded_html =~ ~s(src="data:image/png;base64,#{@png_data}")
-    assert reloaded_html =~ ~s(loading="lazy")
-    assert reloaded_html =~ ~s(decoding="async")
+
+    assert Enum.any?(
+             chat_config(reloaded_html)["messages"],
+             &("data:image/png;base64,#{@png_data}" in &1["metadata"]["images"])
+           )
   end
 
   test "renders image-only persisted messages without a text artifact", %{conn: conn} do
@@ -1857,7 +1957,11 @@ defmodule Sigma.Web.SessionLiveTest do
 
     {:ok, _view, html} = live_loaded(conn, session_path(session_id))
 
-    assert html =~ ~s(src="data:image/png;base64,#{@png_data}")
+    assert Enum.any?(
+             chat_config(html)["messages"],
+             &("data:image/png;base64,#{@png_data}" in &1["metadata"]["images"])
+           )
+
     refute html =~ ~s(content="")
   end
 
@@ -1885,7 +1989,7 @@ defmodule Sigma.Web.SessionLiveTest do
     {:ok, view, html} = live_loaded(conn, session_path(session_id))
     refute html =~ "data:image/png"
 
-    html = view |> element("#retry-u_many_images") |> render_click()
+    html = chat_action(view, "u_many_images", "retry_message")
     assert html =~ "Only text or image messages can be retried"
     refute_receive {:agent_start, _}, 200
   end
@@ -1911,7 +2015,7 @@ defmodule Sigma.Web.SessionLiveTest do
     {:ok, view, html} = live_loaded(conn, session_path(session_id))
     refute html =~ "data:image/png"
 
-    html = view |> element("#retry-u_large_images") |> render_click()
+    html = chat_action(view, "u_large_images", "retry_message")
     assert html =~ "Only text or image messages can be retried"
     refute_receive {:agent_start, _}, 200
     refute_receive {:message_start, %{role: :user}}, 200
@@ -1931,7 +2035,7 @@ defmodule Sigma.Web.SessionLiveTest do
     Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
 
     {:ok, view, _html} = live_loaded(conn, session_path(session_id))
-    view |> element("#retry-u_retry_image") |> render_click()
+    chat_action(view, "u_retry_image", "retry_message")
 
     assert_receive {:message_start, %{role: :user, content: ^content}}, 2000
   end
@@ -1943,7 +2047,7 @@ defmodule Sigma.Web.SessionLiveTest do
     :ok = Log.persist_event(storage_path, {:message_end, Message.user("u_retry_blank", "   ")})
     {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
-    html = view |> element("#retry-u_retry_blank") |> render_click()
+    html = chat_action(view, "u_retry_blank", "retry_message")
 
     assert html =~ "Only text or image messages can be retried"
     refute_receive {:agent_start, _}, 200
@@ -1969,7 +2073,7 @@ defmodule Sigma.Web.SessionLiveTest do
     Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
     {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
-    view |> element("#retry-u_retry_blank_image") |> render_click()
+    chat_action(view, "u_retry_blank_image", "retry_message")
 
     assert_receive {:message_start,
                     %{
@@ -1979,7 +2083,7 @@ defmodule Sigma.Web.SessionLiveTest do
                    2000
   end
 
-  test "renders message timestamps through the browser-local time hook", %{conn: conn} do
+  test "publishes message timestamps for browser-local rendering", %{conn: conn} do
     {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("local_time")))
 
     message = %Sigma.Agent.Message{
@@ -1991,10 +2095,10 @@ defmodule Sigma.Web.SessionLiveTest do
 
     send(view.pid, {:message_start, message})
 
-    html = render(view)
-    assert html =~ ~s(id="msg_user_time-local-time")
-    assert html =~ ~s(phx-hook="LocalTime")
-    assert html =~ ~s(data-ts="1779379527686")
+    render(view)
+
+    assert Enum.find(chat_snapshot(view).messages, &(&1.id == "msg_user_time")).metadata.timestamp ==
+             1_779_379_527_686
   end
 
   test "does not infer context size from an assistant message", %{conn: conn} do
@@ -2133,7 +2237,7 @@ defmodule Sigma.Web.SessionLiveTest do
     send(view.pid, {:message_end, message})
 
     assert_eventually(fn ->
-      view |> element("#messages .sigma-turn-summary") |> render() =~ "running"
+      chat_footer_html(view) =~ "running"
     end)
 
     send(view.pid, {
@@ -2149,7 +2253,7 @@ defmodule Sigma.Web.SessionLiveTest do
     })
 
     assert_eventually(fn ->
-      summary = view |> element("#messages .sigma-turn-summary") |> render()
+      summary = chat_footer_html(view)
       summary =~ "completed" and summary =~ "wall: 1200ms"
     end)
 
@@ -2168,7 +2272,7 @@ defmodule Sigma.Web.SessionLiveTest do
     })
 
     assert_eventually(fn ->
-      summary = view |> element("#messages .sigma-turn-summary") |> render()
+      summary = chat_footer_html(view)
       summary =~ "completed" and summary =~ "input: 12" and summary =~ "output: 7"
     end)
   end
@@ -2206,7 +2310,7 @@ defmodule Sigma.Web.SessionLiveTest do
          }}
       )
 
-      assert has_element?(view, "##{message_id} .sigma-turn-summary", "running")
+      assert chat_footer_html(view, message_id) =~ "running"
     end
 
     send(
@@ -2221,15 +2325,17 @@ defmodule Sigma.Web.SessionLiveTest do
        }}
     )
 
-    summary = view |> element("#messages .sigma-turn-summary") |> render()
+    summary = chat_footer_html(view)
     assert summary =~ "completed"
     assert summary =~ "requests: 2"
     assert summary =~ "input: 30"
     assert summary =~ "output: 12"
-    assert has_element?(view, "#last_answer .sigma-turn-summary")
-    refute has_element?(view, "#first_answer .sigma-turn-summary")
-    assert has_element?(view, "#first_answer .sigma-message-metrics details:not([open])")
-    assert has_element?(view, "#last_answer .sigma-message-metrics details:not([open])")
+    assert chat_footer_html(view, "last_answer") =~ "sigma-turn-summary"
+    refute chat_footer_html(view, "first_answer") =~ "sigma-turn-summary"
+    assert chat_footer_html(view, "first_answer") =~ "sigma-message-metrics"
+    refute chat_footer_html(view, "first_answer") =~ "open="
+    assert chat_footer_html(view, "last_answer") =~ "sigma-message-metrics"
+    refute chat_footer_html(view, "last_answer") =~ "open="
   end
 
   test "retains a tool-only summary on failure and cancellation without final answer text", %{
@@ -2291,13 +2397,15 @@ defmodule Sigma.Web.SessionLiveTest do
          }}
       )
 
-      summary = view |> element("#messages .sigma-turn-summary") |> render()
+      summary = chat_footer_html(view)
       assert summary =~ Atom.to_string(status)
       assert summary =~ "tools: 1"
       assert summary =~ "input: unknown"
       assert summary =~ "Tool execution stopped"
-      assert has_element?(view, "#tool_answer .sigma-turn-summary")
-      assert has_element?(view, "#tool_answer", "File unavailable")
+      assert chat_footer_html(view, "tool_answer") =~ "sigma-turn-summary"
+
+      assert Enum.find(chat_snapshot(view).messages, &(&1.id == "tool_answer")).tools
+             |> Enum.any?(&(&1.result == "File unavailable"))
     end
   end
 
@@ -2343,10 +2451,9 @@ defmodule Sigma.Web.SessionLiveTest do
                {:message_end, Message.assistant("retry-answer", %{content: "old answer"})}
              )
 
-    {:ok, view, html} = live_loaded(conn, session_path(session_id))
-    assert html =~ ~s(id="retry-turn-retry-user")
-    assert html =~ ~s(id="retry-retry-user")
-    assert Floki.find(Floki.parse_document!(html), "#retry-user.sigma-chat-with-actions") != []
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    assert chat_has_action?(view, "retry-user", "prepare_retry")
+    assert chat_has_action?(view, "retry-user", "retry_message")
 
     modal_html = render_click(view, "prepare_retry", %{"msg-id" => "retry-user"})
     assert modal_html =~ ~s(id="retry-turn-modal")
@@ -2730,6 +2837,61 @@ defmodule Sigma.Web.SessionLiveTest do
     "/repository/#{encoded_workdir}/sessions/#{URI.encode(session_id, &URI.char_unreserved?/1)}"
   end
 
+  defp chat_config(html) do
+    html
+    |> Floki.parse_document!()
+    |> Floki.find("#messages")
+    |> Floki.attribute("data-chat")
+    |> hd()
+    |> Jason.decode!()
+  end
+
+  defp chat_snapshot(view) do
+    %{proxy: {ref, _topic, _}} = view
+    drain_chat_snapshots(ref)
+
+    [conversation_id] =
+      render(view)
+      |> Floki.parse_document!()
+      |> Floki.find("#messages")
+      |> Floki.attribute("data-chat")
+
+    conversation_id = Jason.decode!(conversation_id)["conversationId"]
+    render_hook(view, "chat.sync", %{"id" => "messages", "conversation_id" => conversation_id})
+    assert_push_event(view, "chat:event", %{type: "chat.snapshot"} = snapshot)
+    snapshot
+  end
+
+  defp drain_chat_snapshots(ref) do
+    receive do
+      {^ref, {:push_event, "chat:event", %{type: "chat.snapshot"}}} -> drain_chat_snapshots(ref)
+    after
+      0 -> :ok
+    end
+  end
+
+  defp chat_action(view, id, action) do
+    render_hook(view, "chat.action", %{
+      "id" => "messages",
+      "conversation_id" => chat_snapshot(view).conversation_id,
+      "message_id" => id,
+      "action" => action
+    })
+  end
+
+  defp chat_has_action?(view, id, action) do
+    case Enum.find(chat_snapshot(view).messages, &(&1.id == id)) do
+      nil -> false
+      message -> Enum.any?(message.actions, &(&1.id == action))
+    end
+  end
+
+  defp chat_footer_html(view, id \\ nil) do
+    chat_snapshot(view).messages
+    |> Enum.filter(&(is_nil(id) or &1.id == id))
+    |> Enum.map_join(& &1.metadata.footerHtml)
+  end
+
   defp render_session(assigns) do
     assigns
     |> Map.put(:__changed__, %{})
@@ -2760,6 +2922,12 @@ defmodule Sigma.Web.SessionLiveTest do
     Map.merge(
       %{
         active_provider_id: nil,
+        chat_initial: %{
+          messages: [],
+          metadata: %{},
+          runtime: %{active: false},
+          admission: %{canSubmit: false}
+        },
         context_diagnostics: [],
         context_trace: [],
         context_token_count: 0,

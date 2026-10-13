@@ -51,7 +51,11 @@ config :duskmoon_bundler,
     sources: [
       %{base: Path.expand("../apps/sigma_web/lib", __DIR__), pattern: "**/*.{ex,heex}"},
       %{base: Path.expand("../apps/sigma_web/assets", __DIR__), pattern: "**/*.{js,ts,jsx,tsx}"},
-      %{base: Path.expand("../deps/phoenix_duskmoon", __DIR__), pattern: "**/*.{ex,heex}"}
+      %{base: Path.expand("../deps/phoenix_duskmoon", __DIR__), pattern: "**/*.{ex,heex,js}"},
+      %{
+        base: Path.expand("../node_modules/@duskmoon-dev/components", __DIR__),
+        pattern: "**/*.js"
+      }
     ]
   ]
 

@@ -3,6 +3,24 @@
 The session page exposes request, turn, session, context, and compaction state
 without changing the journal or provider accounting model.
 
+## Chat Composer
+
+The transcript and composer use DuskMoon React Chat through the Phoenix chat
+bridge. Send with **Ctrl/Cmd+Enter** or **Send**; Enter adds a new line. Slash
+commands and `/skill ` offer keyboard completion with arrows, Enter/Tab, and
+Escape. Images can be attached, pasted, or dropped (PNG, JPEG, GIF, or WebP;
+four files, 5 MiB per file, 10 MiB total). Images cannot accompany slash commands.
+
+Text drafts survive refresh in sessionStorage for each session. Pending image
+files survive in-app navigation but must be reattached after a full reload.
+An admitted submission clears only its unchanged draft. Rejections and
+disconnections preserve it. Prompts sent during a turn retain the runtime's
+steering/follow-up admission semantics, and **Stop** cancels the active turn.
+
+Scrolling up pauses automatic following; **Jump to latest** resumes it. Message
+updates carry per-message sequences, and reconnect requests a canonical
+snapshot. Request-detail expansion stays open when late metrics update.
+
 ## Reading Session Metrics
 
 Each completed assistant response has a compact footer with provider input and

@@ -78,7 +78,6 @@ defmodule Sigma.Web.SessionLive do
         log_session_id
       )
       |> assign(:storage_path, storage_path)
-      |> stream(:messages, [])
       |> start_async(:session_load, fn ->
         load_session_data(
           session_id,
@@ -250,6 +249,24 @@ defmodule Sigma.Web.SessionLive do
   def handle_async(:session_load, {:ok, {:ok, session_data}}, socket) do
     agent = session_data.agent
     :ok = Sigma.Agent.subscribe(agent)
+    # Turn tasks capture the direct subscriber list when they start. The session
+    # topic also delivers events to a page that joins an already running turn.
+    :ok =
+      Phoenix.PubSub.subscribe(
+        Sigma.Web.PubSub,
+        session_topic(
+          ConfigManager.repository_key(socket.assigns.workdir),
+          socket.assigns.session_id
+        )
+      )
+
+    session_data =
+      refresh_loaded_transcript(
+        session_data,
+        socket.assigns.storage_path,
+        socket.assigns.session_id
+      )
+
     agent_ref = Process.monitor(agent)
 
     socket =
@@ -291,10 +308,13 @@ defmodule Sigma.Web.SessionLive do
         end)
       )
       |> assign(:turn_last_message_ids, session_data.turn_last_message_ids)
-      |> stream(:messages, session_data.stream_messages, reset: true)
+      |> assign(:chat_order, Enum.map(session_data.stream_messages, & &1.id))
       |> start_async(:agent_status, fn -> Sigma.Agent.status(agent) end)
 
-    socket = initialize_terminals(socket, session_data.terminal_capability)
+    socket =
+      socket
+      |> initialize_terminals(session_data.terminal_capability)
+      |> initialize_chat()
 
     {:noreply, socket}
   end
@@ -352,10 +372,34 @@ defmodule Sigma.Web.SessionLive do
          do: socket.assigns.runtime_status,
          else: phase
 
-    {:noreply, apply_agent_status(socket, %{status | phase: phase})}
+    {:noreply, socket |> apply_agent_status(%{status | phase: phase}) |> queue_chat_state()}
   end
 
   def handle_async(:agent_status, _result, socket), do: {:noreply, socket}
+
+  defp refresh_loaded_transcript(session_data, storage_path, session_id) do
+    # Recover messages committed between the async load and this subscription.
+    case Sigma.Session.Log.snapshot(storage_path) do
+      {:ok, snapshot} ->
+        {messages, tool_results, tool_call_to_msg} = split_messages(snapshot.messages)
+        {display_messages, turn_last_message_ids} = index_display_messages(messages)
+        metrics = ensure_metrics_session(snapshot.metrics, session_id)
+
+        %{
+          session_data
+          | stream_messages: messages,
+            display_messages: display_messages,
+            turn_last_message_ids: turn_last_message_ids,
+            tool_results: tool_results,
+            tool_call_to_msg: tool_call_to_msg,
+            session_metrics_state: metrics,
+            session_metrics: Sigma.Session.Metrics.snapshot(metrics)
+        }
+
+      {:error, _reason} ->
+        session_data
+    end
+  end
 
   @impl true
   def render(assigns) do
@@ -566,40 +610,20 @@ defmodule Sigma.Web.SessionLive do
           </div>
         </header>
 
-        <div
+        <.dm_react_chat
           id="messages"
-          phx-update="stream"
-          phx-hook="ScrollBottom"
-          class="sigma-session-transcript space-y-2 overflow-y-auto px-4 py-5 md:px-6"
-        >
-          <div :for={{id, message} <- @streams.messages} id={id} class="mx-auto w-full max-w-4xl">
-            <.message_bubble
-              message={message}
-              tool_results={@tool_results}
-              streaming_message_id={@streaming_message_id}
-              session_ready={@session_ready}
-              turn_in_flight={@turn_in_flight}
-              last_assistant_message_id={@last_assistant_message_id}
-              pending_compaction={@pending_compaction}
-              session_metrics={@session_metrics}
-              turn_last_message_ids={@turn_last_message_ids}
-            />
-          </div>
-        </div>
+          hook="SigmaReactChat"
+          conversation_id={@session_id}
+          messages={@chat_initial.messages}
+          metadata={@chat_initial.metadata}
+          runtime={@chat_initial.runtime}
+          admission={@chat_initial.admission}
+          label="Session conversation"
+          class="sigma-session-transcript min-h-0 overflow-hidden px-4 py-5 md:px-6"
+        />
 
         <footer class="sigma-session-composer border-t border-outline-variant bg-surface px-4 py-3 md:px-6">
-          <div
-            id="chat-input-area"
-            phx-hook="ChatInputHook"
-            data-slash-commands={
-              Jason.encode!(slash_commands(assigns[:effective_cwd]))
-            }
-            data-remote-sources={Jason.encode!(Facade.remote_sources())}
-            data-remote-skills-url={
-              ~p"/api/v1/skills?repositoryId=#{@encoded_repository}&view=remote"
-            }
-            class="relative mx-auto max-w-4xl"
-          >
+          <div class="relative mx-auto max-w-4xl">
             <div :if={not @session_ready} class="mb-3 flex items-center gap-3 text-sm text-on-surface-variant">
               <.dm_loading_spinner size="sm" />
               <span>Loading session...</span>
@@ -629,34 +653,8 @@ defmodule Sigma.Web.SessionLive do
               </details>
             </details>
 
-            <div :if={@turn_in_flight} class="mb-3 flex items-center justify-between gap-3">
-              <div class="flex items-center gap-3 text-sm text-on-surface-variant">
-                <.dm_chat_typing />
-                <span>{runtime_phase_label(@runtime_status)}</span>
-              </div>
-              <.dm_btn
-                id="cancel-turn-btn"
-                type="button"
-                phx-click="cancel_turn"
-                phx-hook="WebComponentHook"
-                variant="ghost"
-                size="sm"
-              >
-                <:prefix><.dm_mdi name="stop" class="text-error w-4 h-4" /></:prefix>
-                Stop
-              </.dm_btn>
-            </div>
-
-            <div class="relative">
-              <%!-- # TODO(upstream): duskmoon-dev/duskmoon-elements#77 --%>
-              <%!-- # TODO(upstream): duskmoon-dev/duskmoon-elements#81 --%>
-              <.dm_chat_input
-                id="prompt-input"
-                phx-update="ignore"
-                placeholder="Ask ∑ anything…"
-                disabled={false}
-                clear_on_send={false}
-              />
+            <div id="chat-input-area" phx-update="ignore" class="relative">
+              <div id="prompt-input" aria-label="Message">Loading composer…</div>
             </div>
 
             <div class="mt-3 flex items-center justify-end text-[11px] text-on-surface-variant">
@@ -1038,211 +1036,217 @@ defmodule Sigma.Web.SessionLive do
     """
   end
 
-  defp message_bubble(%{message: %{role: :user}} = assigns) do
-    assigns =
-      assigns
-      |> assign(:user_text, user_content(assigns.message.content))
-      |> assign(:user_images, user_images(assigns.message.content))
-      |> assign(
-        :turn_summary,
-        turn_summary_for(
-          assigns.message,
-          assigns[:session_metrics],
-          assigns[:turn_last_message_ids]
-        )
-      )
+  defp initialize_chat(socket) do
+    initial = %{
+      messages: chat_messages(socket),
+      metadata: %{
+        commands: slash_commands(socket.assigns.effective_cwd),
+        remoteSources: Facade.remote_sources(),
+        remoteSkillsUrl:
+          "/api/v1/skills?repositoryId=#{socket.assigns.encoded_repository}&view=remote",
+        draftKey:
+          "sigma:composer-draft:/repository/#{socket.assigns.encoded_repository}/sessions/#{socket.assigns.session_id}"
+      },
+      runtime: chat_runtime(socket),
+      admission: chat_admission(socket)
+    }
 
-    ~H"""
-    <.dm_chat
-      id={@message.id}
-      class="sigma-chat-with-actions"
-      align="start"
-      color="secondary"
-      avatar="You"
-      author="You"
-      content={if @user_images == [], do: @user_text, else: nil}
-    >
-      <:header><.local_time id={@message.id} timestamp={@message.timestamp} /></:header>
-
-      <.dm_markdown :if={@user_text != "" and @user_images != []} content={@user_text} />
-      <div :if={@user_images != []} class="grid gap-2 sm:grid-cols-2">
-        <img
-          :for={src <- @user_images}
-          src={src}
-          alt="Attached image"
-          loading="lazy"
-          decoding="async"
-          class="max-h-96 w-full rounded-lg border border-outline-variant bg-surface-container-low object-contain"
-        />
-      </div>
-
-      <:footer :if={not is_nil(@turn_summary)}>
-        <SessionObservability.turn_summary summary={@turn_summary} />
-      </:footer>
-
-      <:actions_slot>
-        <.dm_btn
-          :if={retryable_message?(@message)}
-          id={"retry-turn-#{@message.id}"}
-          phx-click="prepare_retry"
-          phx-value-msg-id={@message.id}
-          phx-hook="WebComponentHook"
-          variant="ghost"
-          size="xs"
-          disabled={not @session_ready or @turn_in_flight}
-          title="Retry from this turn checkpoint"
-        >
-          <:prefix><.dm_mdi name="backup-restore" class="w-3 h-3" /></:prefix>
-          Retry
-        </.dm_btn>
-        <.dm_btn
-          id={"retry-#{@message.id}"}
-          phx-click="retry_message"
-          phx-value-msg-id={@message.id}
-          phx-hook="WebComponentHook"
-          variant="ghost"
-          size="xs"
-          disabled={not @session_ready or @turn_in_flight}
-          title="Resend as new turn"
-        >
-          <:prefix><.dm_mdi name="refresh" class="w-3 h-3" /></:prefix>
-          Resend
-        </.dm_btn>
-        <details class="mt-1 text-xs text-on-surface-variant">
-          <summary class="cursor-pointer">What Resend does</summary>
-          <p>Starts a new turn with this message. Earlier file edits, commands, Git changes, and external requests remain.</p>
-        </details>
-      </:actions_slot>
-    </.dm_chat>
-    """
+    socket |> assign(:chat_initial, initial) |> push_chat_snapshot()
   end
 
-  defp message_bubble(%{message: %{role: :assistant}} = assigns) do
-    content = assistant_content_blocks(assigns.message.content)
-
-    assigns =
-      assigns
-      |> assign(:thinking, Enum.find(content, &(&1.type == :thinking)))
-      |> assign(:texts, Enum.filter(content, &(&1.type == :text)))
-      |> assign(:tool_calls, Enum.filter(content, &(&1.type == :tool_call)))
-      |> assign(
-        :request_metrics,
-        request_metrics_for(assigns.message, assigns[:session_metrics])
-      )
-      |> assign(
-        :turn_summary,
-        turn_summary_for(
-          assigns.message,
-          assigns[:session_metrics],
-          assigns[:turn_last_message_ids]
-        )
-      )
-
-    ~H"""
-    <.dm_chat
-      id={@message.id}
-      class="sigma-chat-with-actions"
-      align="start"
-      avatar="∑"
-      author="∑"
-      streaming={@message.id == @streaming_message_id}
-    >
-      <:header><.local_time id={@message.id} timestamp={@message.timestamp} /></:header>
-
-      <%!-- Reasoning block; tool calls shown inside via the tools slot --%>
-      <.dm_chat_reasoning :if={@thinking} summary="Reasoning">
-        {@thinking.thinking}
-        <:tools :if={@tool_calls != []}>
-          <.dm_chat_tool
-            :for={block <- @tool_calls}
-            name={block.name}
-            status={tool_call_status(@tool_results, block.id)}
-          >
-            <:call>
-              <pre class="text-xs overflow-x-auto p-2 whitespace-pre-wrap">{format_tool_call_args(block)}</pre>
-            </:call>
-            <:result :if={Map.has_key?(@tool_results, block.id)}>
-              <pre class="text-xs overflow-x-auto p-2 whitespace-pre-wrap">{elem(@tool_results[block.id], 0)}</pre>
-            </:result>
-          </.dm_chat_tool>
-        </:tools>
-      </.dm_chat_reasoning>
-
-      <%!-- Tool calls at top level when there is no reasoning block --%>
-      <.dm_chat_tool
-        :if={is_nil(@thinking)}
-        :for={block <- @tool_calls}
-        name={block.name}
-        status={tool_call_status(@tool_results, block.id)}
-      >
-        <:call>
-          <pre class="text-xs overflow-x-auto p-2 whitespace-pre-wrap">{format_tool_call_args(block)}</pre>
-        </:call>
-        <:result :if={Map.has_key?(@tool_results, block.id)}>
-          <pre class="text-xs overflow-x-auto p-2 whitespace-pre-wrap">{elem(@tool_results[block.id], 0)}</pre>
-        </:result>
-      </.dm_chat_tool>
-
-      <.dm_markdown :for={block <- @texts} content={block.text} />
-
-      <:footer :if={@request_metrics != [] or not is_nil(@turn_summary)}>
-        <SessionObservability.message_metrics_footer
-          :for={request <- @request_metrics}
-          metrics={request}
-          elapsed_ms={request[:elapsed_ms]}
-          status={request[:status]}
-        />
-        <SessionObservability.turn_summary :if={not is_nil(@turn_summary)} summary={@turn_summary} />
-      </:footer>
-      <:actions_slot>
-        <.dm_btn
-          id={"fork-at-#{@message.id}"}
-          phx-click="fork_at"
-          phx-value-msg-id={@message.id}
-          phx-hook="WebComponentHook"
-          variant="ghost"
-          size="xs"
-          title="Fork session from here"
-          aria-label="Fork session from here"
-        >
-          <.dm_mdi name="source-branch" class="w-3 h-3" />
-          <span class="sr-only">Fork session from here</span>
-        </.dm_btn>
-        <.dm_btn
-          :if={@message.id == @last_assistant_message_id}
-          id={"continue-at-#{@message.id}"}
-          phx-click="continue_session"
-          phx-value-msg-id={@message.id}
-          phx-hook="WebComponentHook"
-          variant="ghost"
-          size="xs"
-          disabled={not @session_ready or @turn_in_flight or @pending_compaction}
-          title="Continue the session using the current conversation"
-          aria-label="Continue session"
-        >
-          <.dm_mdi name="play" class="w-3 h-3" />
-          <span class="sr-only">Continue session</span>
-        </.dm_btn>
-      </:actions_slot>
-    </.dm_chat>
-    """
+  defp chat_runtime(socket) do
+    %{
+      active: socket.assigns.turn_in_flight,
+      phase: socket.assigns.runtime_status,
+      label: runtime_phase_label(socket.assigns.runtime_status)
+    }
   end
 
-  defp message_bubble(%{message: %{role: :compaction_summary}} = assigns) do
-    ~H"""
-    <.dm_chat
-      id={@message.id}
-      align="start"
-      avatar="∑"
-      author="Summary"
-      content={@message.summary || "Context compacted."}
-    >
-      <:header><.local_time id={@message.id} timestamp={@message.timestamp} /></:header>
-    </.dm_chat>
-    """
+  defp chat_admission(socket) do
+    %{
+      canSubmit: session_ready?(socket) and not socket.assigns.pending_compaction,
+      allowWhileStreaming: true
+    }
   end
 
-  defp message_bubble(assigns), do: ~H""
+  defp chat_messages(socket) do
+    Enum.map(
+      socket.assigns.chat_order,
+      &chat_message(socket, socket.assigns.display_messages[&1])
+    )
+  end
+
+  defp chat_message(socket, message) do
+    summary =
+      turn_summary_for(
+        message,
+        socket.assigns.session_metrics,
+        socket.assigns.turn_last_message_ids
+      )
+
+    requests =
+      if message.role == :assistant,
+        do: request_metrics_for(message, socket.assigns.session_metrics),
+        else: []
+
+    footer =
+      Enum.map(requests, fn request ->
+        SessionObservability.message_metrics_footer(%{
+          __changed__: nil,
+          metrics: request,
+          elapsed_ms: request[:elapsed_ms],
+          status: request[:status]
+        })
+      end)
+
+    footer =
+      if summary,
+        do: footer ++ [SessionObservability.turn_summary(%{__changed__: nil, summary: summary})],
+        else: footer
+
+    blocks =
+      if message.role == :assistant, do: assistant_content_blocks(message.content), else: []
+
+    tools =
+      for %{type: :tool_call, id: id} = block <- blocks do
+        result = socket.assigns.tool_results[id]
+
+        %{
+          id: id,
+          name: block.name,
+          input: format_tool_call_args(block),
+          result: if(result, do: elem(result, 0)),
+          status: tool_call_status(socket.assigns.tool_results, id)
+        }
+      end
+
+    actions =
+      case message.role do
+        :user ->
+          checkpoint =
+            if retryable_message?(message),
+              do: [%{id: "prepare_retry", label: "Retry", domId: "retry-turn-#{message.id}"}],
+              else: []
+
+          checkpoint ++ [%{id: "retry_message", label: "Resend", domId: "retry-#{message.id}"}]
+
+        :assistant ->
+          fork = [%{id: "fork_at", label: "Fork", domId: "fork-at-#{message.id}"}]
+
+          if message.id == socket.assigns.last_assistant_message_id,
+            do:
+              fork ++
+                [%{id: "continue_session", label: "Continue", domId: "continue-at-#{message.id}"}],
+            else: fork
+
+        _ ->
+          []
+      end
+
+    %{
+      id: message.id,
+      role: message.role,
+      author:
+        case message.role do
+          :user -> "You"
+          :assistant -> "∑"
+          _ -> "Context compaction"
+        end,
+      content: user_content(message.content),
+      status:
+        if(message.id == socket.assigns.streaming_message_id, do: "streaming", else: "complete"),
+      tools: tools,
+      actions: actions,
+      metadata: %{
+        timestamp: message.timestamp,
+        images: user_images(message.content),
+        reasoning:
+          Enum.find_value(blocks, fn block -> if block.type == :thinking, do: block.thinking end),
+        footerHtml: footer |> Enum.map(&Phoenix.HTML.Safe.to_iodata/1) |> IO.iodata_to_binary()
+      }
+    }
+  end
+
+  defp queue_chat_message(socket, message) do
+    order = socket.assigns.chat_order
+
+    order =
+      if Map.has_key?(socket.assigns.display_messages, message.id) and message.id in order,
+        do: order,
+        else: order ++ [message.id]
+
+    socket
+    |> assign(:chat_order, order)
+    |> update(:display_messages, &Map.put(&1, message.id, message))
+    |> update(:chat_pending, &MapSet.put(&1, message.id))
+    |> schedule_chat_flush()
+  end
+
+  defp queue_chat_state(socket) do
+    case List.last(socket.assigns.chat_order) do
+      nil -> schedule_chat_flush(socket)
+      id -> queue_chat_message(socket, socket.assigns.display_messages[id])
+    end
+  end
+
+  defp schedule_chat_flush(%{assigns: %{chat_flush_timer: nil}} = socket),
+    do: assign(socket, :chat_flush_timer, Process.send_after(self(), :flush_chat, 40))
+
+  defp schedule_chat_flush(socket), do: socket
+
+  defp flush_chat(socket) do
+    socket = assign(socket, :chat_flush_timer, nil)
+    pending = socket.assigns.chat_pending
+    socket = assign(socket, :chat_pending, MapSet.new())
+
+    if socket.assigns.chat_order == [] do
+      push_chat_snapshot(socket)
+    else
+      Enum.reduce(socket.assigns.chat_order, socket, fn id, socket ->
+        if MapSet.member?(pending, id) do
+          sequence = Map.get(socket.assigns.chat_sequences, id, 0) + 1
+
+          socket
+          |> update(:chat_sequences, &Map.put(&1, id, sequence))
+          |> push_event("chat:event", %{
+            id: "messages",
+            conversation_id: socket.assigns.session_id,
+            type: "chat.message",
+            message_id: id,
+            sequence: sequence,
+            message: chat_message(socket, socket.assigns.display_messages[id]),
+            runtime: chat_runtime(socket),
+            admission: chat_admission(socket)
+          })
+        else
+          socket
+        end
+      end)
+    end
+  end
+
+  defp push_chat_snapshot(socket) do
+    push_event(socket, "chat:event", %{
+      id: "messages",
+      conversation_id: socket.assigns.session_id,
+      type: "chat.snapshot",
+      messages: chat_messages(socket),
+      sequences: socket.assigns.chat_sequences,
+      metadata: socket.assigns.chat_initial.metadata,
+      runtime: chat_runtime(socket),
+      admission: chat_admission(socket)
+    })
+  end
+
+  defp finish_chat_message(socket, id) do
+    if socket.assigns.streaming_message_id == id,
+      do: assign(socket, :streaming_message_id, nil),
+      else: socket
+  end
+
+  defp chat_scope?(socket, params) do
+    params["id"] == "messages" and params["conversation_id"] == socket.assigns.session_id
+  end
 
   defp assistant_content_blocks(content) when is_binary(content),
     do: [%{type: :text, text: content}]
@@ -1265,22 +1269,6 @@ defmodule Sigma.Web.SessionLive do
     do: metadata[:turn_id] || metadata["turn_id"]
 
   defp message_turn_id(_message), do: nil
-
-  defp local_time(assigns) do
-    assigns = assign(assigns, :dom_id, "#{assigns.id}-local-time")
-
-    ~H"""
-    <span
-      :if={is_integer(@timestamp)}
-      id={@dom_id}
-      phx-hook="LocalTime"
-      data-ts={@timestamp}
-      class="ml-2 font-mono text-[10px] opacity-50"
-    >
-      {format_timestamp(@timestamp)}
-    </span>
-    """
-  end
 
   defp user_content(content) when is_binary(content), do: content
 
@@ -1396,7 +1384,7 @@ defmodule Sigma.Web.SessionLive do
         :turn_last_message_ids,
         Map.merge(socket.assigns.turn_last_message_ids, last_by_turn)
       )
-      |> stream_insert(:messages, message)
+      |> queue_chat_message(message)
 
     socket =
       if new_assistant? do
@@ -1404,7 +1392,7 @@ defmodule Sigma.Web.SessionLive do
 
         case Map.get(socket.assigns.display_messages, previous_assistant_id) do
           nil -> socket
-          previous -> stream_insert(socket, :messages, previous)
+          previous -> queue_chat_message(socket, previous)
         end
       else
         socket
@@ -1413,7 +1401,7 @@ defmodule Sigma.Web.SessionLive do
     if previous_id && previous_id != message.id && is_binary(turn_id) do
       case Map.get(socket.assigns.display_messages, previous_id) do
         nil -> socket
-        previous -> stream_insert(socket, :messages, previous)
+        previous -> queue_chat_message(socket, previous)
       end
     else
       socket
@@ -1421,9 +1409,11 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp refresh_continue_button(socket) do
+    socket = queue_chat_state(socket)
+
     case Map.get(socket.assigns.display_messages, socket.assigns.last_assistant_message_id) do
       nil -> socket
-      message -> stream_insert(socket, :messages, message)
+      message -> queue_chat_message(socket, message)
     end
   end
 
@@ -1453,13 +1443,9 @@ defmodule Sigma.Web.SessionLive do
     Enum.reduce(ids, socket, fn id, socket ->
       case Map.get(socket.assigns.display_messages, id) do
         nil -> socket
-        message -> stream_insert(socket, :messages, message)
+        message -> queue_chat_message(socket, message)
       end
     end)
-  end
-
-  defp format_timestamp(ts) when is_integer(ts) do
-    ts |> DateTime.from_unix!(:millisecond) |> Calendar.strftime("%H:%M:%S")
   end
 
   defp message_metrics(usage) when is_map(usage) do
@@ -1887,6 +1873,65 @@ defmodule Sigma.Web.SessionLive do
       {:error, _reason} -> {:error, :not_retryable}
     end
   end
+
+  @impl true
+  def handle_event("chat.sync", params, socket) do
+    if chat_scope?(socket, params),
+      do: {:reply, %{status: "ok"}, push_chat_snapshot(socket)},
+      else: {:reply, %{status: "error", message: "Conversation is unavailable."}, socket}
+  end
+
+  def handle_event("chat.send", params, socket) do
+    if chat_scope?(socket, params) and is_binary(params["text"]) do
+      case handle_event(
+             "send_prompt",
+             %{"value" => params["text"], "images" => Map.get(params, "images", [])},
+             socket
+           ) do
+        {:reply, %{status: status}, socket}
+        when status in ["accepted", "queued_as_steering", "queued_as_follow_up"] ->
+          {:reply, %{status: "ok", admission: status, request_id: params["request_id"]},
+           queue_chat_state(socket)}
+
+        {:reply, _, socket} ->
+          {:reply,
+           %{
+             status: "error",
+             message:
+               socket.assigns.flash["error"] || socket.assigns.flash["info"] || "Prompt rejected."
+           }, socket}
+      end
+    else
+      {:reply, %{status: "error", message: "Conversation is unavailable."}, socket}
+    end
+  end
+
+  def handle_event("chat.stop", params, socket) do
+    if chat_scope?(socket, params) do
+      {:noreply, socket} = handle_event("cancel_turn", %{}, socket)
+      {:reply, %{status: "ok"}, queue_chat_state(socket)}
+    else
+      {:reply, %{status: "error", message: "Conversation is unavailable."}, socket}
+    end
+  end
+
+  def handle_event("chat.action", %{"message_id" => id, "action" => action} = params, socket) do
+    message = socket.assigns.display_messages[id]
+
+    if (chat_scope?(socket, params) and message) &&
+         Enum.any?(chat_message(socket, message).actions, &(&1.id == action)) do
+      {:noreply, socket} = handle_event(action, %{"msg-id" => id}, socket)
+      {:reply, %{status: "ok"}, queue_chat_state(socket)}
+    else
+      {:reply, %{status: "error", message: "Message action is unavailable."}, socket}
+    end
+  end
+
+  def handle_event("chat.action", _params, socket),
+    do: {:reply, %{status: "error", message: "Message action is unavailable."}, socket}
+
+  def handle_event("chat.retry", params, socket),
+    do: handle_event("chat.action", Map.put(params, "action", "prepare_retry"), socket)
 
   @impl true
   def handle_event("theme_changed", _, socket) do
@@ -2705,6 +2750,9 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
+  def handle_info(:flush_chat, socket), do: {:noreply, flush_chat(socket)}
+
+  @impl true
   def handle_info({:agent_start, _cwd}, socket) do
     {:noreply,
      socket
@@ -2722,12 +2770,12 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def handle_info({:tool_execution_start, _id, _name, _arguments}, socket) do
-    {:noreply, assign(socket, :runtime_status, :running_tools)}
+    {:noreply, socket |> assign(:runtime_status, :running_tools) |> queue_chat_state()}
   end
 
   @impl true
   def handle_info({:approval_required, _id, _name}, socket) do
-    {:noreply, assign(socket, :runtime_status, :waiting_permission)}
+    {:noreply, socket |> assign(:runtime_status, :waiting_permission) |> queue_chat_state()}
   end
 
   @impl true
@@ -2783,7 +2831,8 @@ defmodule Sigma.Web.SessionLive do
     {:noreply,
      socket
      |> assign(:runtime_status, :waiting_permission)
-     |> update(:pending_user_questions, &upsert_user_question(&1, question))}
+     |> update(:pending_user_questions, &upsert_user_question(&1, question))
+     |> queue_chat_state()}
   end
 
   @impl true
@@ -2791,7 +2840,8 @@ defmodule Sigma.Web.SessionLive do
     {:noreply,
      socket
      |> assign(:runtime_status, resumed_runtime_status(socket))
-     |> update(:pending_user_questions, &remove_user_question(&1, question_id))}
+     |> update(:pending_user_questions, &remove_user_question(&1, question_id))
+     |> queue_chat_state()}
   end
 
   @impl true
@@ -2801,7 +2851,8 @@ defmodule Sigma.Web.SessionLive do
     {:noreply,
      socket
      |> assign(:runtime_status, :waiting_elicitation)
-     |> update(:pending_mcp_elicitations, &upsert_mcp_elicitation(&1, elicitation))}
+     |> update(:pending_mcp_elicitations, &upsert_mcp_elicitation(&1, elicitation))
+     |> queue_chat_state()}
   end
 
   @impl true
@@ -2809,7 +2860,8 @@ defmodule Sigma.Web.SessionLive do
     {:noreply,
      socket
      |> assign(:runtime_status, resumed_runtime_status(socket))
-     |> update(:pending_mcp_elicitations, &remove_mcp_elicitation(&1, elicitation_id))}
+     |> update(:pending_mcp_elicitations, &remove_mcp_elicitation(&1, elicitation_id))
+     |> queue_chat_state()}
   end
 
   @impl true
@@ -2844,7 +2896,7 @@ defmodule Sigma.Web.SessionLive do
         &Map.put(&1, message.tool_call_id, {content_str, message.is_error})
       )
 
-    socket = if parent_msg, do: stream_insert(socket, :messages, parent_msg), else: socket
+    socket = if parent_msg, do: queue_chat_message(socket, parent_msg), else: socket
     {:noreply, socket}
   end
 
@@ -2860,13 +2912,14 @@ defmodule Sigma.Web.SessionLive do
       socket
       |> stream_display_message(message)
       |> assign(:tool_call_to_msg, new_tc_map)
+      |> finish_chat_message(message.id)
 
     {:noreply, socket}
   end
 
   @impl true
   def handle_info({:message_end, %{role: :assistant} = message}, socket) do
-    {:noreply, stream_display_message(socket, message)}
+    {:noreply, socket |> stream_display_message(message) |> finish_chat_message(message.id)}
   end
 
   @impl true
@@ -2894,6 +2947,7 @@ defmodule Sigma.Web.SessionLive do
       |> assign(:session_metrics, Sigma.Session.Metrics.snapshot(metrics_state))
       |> assign(:runtime_status, runtime_status)
       |> refresh_metric_messages(fact, attrs, metrics_state)
+      |> queue_chat_state()
 
     socket =
       if fact in [:request_finished, :request_usage, :turn_finished, :compaction] and
@@ -2911,7 +2965,7 @@ defmodule Sigma.Web.SessionLive do
   def handle_info({:compact, summary_msg, _first_kept_id}, socket) do
     socket =
       socket
-      |> stream_insert(:messages, summary_msg)
+      |> stream_display_message(summary_msg)
       |> put_flash(
         :info,
         "Context compacted — older messages summarized to stay within token limits."
@@ -3066,7 +3120,7 @@ defmodule Sigma.Web.SessionLive do
           )
           |> assign(turn_in_flight: false, streaming_message_id: nil)
 
-        {:noreply, socket}
+        {:noreply, queue_chat_state(socket)}
 
       true ->
         {:noreply, socket}
@@ -3698,6 +3752,16 @@ defmodule Sigma.Web.SessionLive do
     |> assign(:streaming_message_id, nil)
     |> assign(:tool_results, %{})
     |> assign(:display_messages, %{})
+    |> assign(:chat_order, [])
+    |> assign(:chat_sequences, %{})
+    |> assign(:chat_pending, MapSet.new())
+    |> assign(:chat_flush_timer, nil)
+    |> assign(:chat_initial, %{
+      messages: [],
+      metadata: %{},
+      runtime: %{active: false},
+      admission: %{canSubmit: false}
+    })
     |> assign(:last_assistant_message_id, nil)
     |> assign(:turn_last_message_ids, %{})
     |> assign(:tool_call_to_msg, %{})
