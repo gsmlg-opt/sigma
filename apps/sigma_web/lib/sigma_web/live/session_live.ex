@@ -127,6 +127,13 @@ defmodule Sigma.Web.SessionLive do
          log_session_id
        ) do
     session_meta = read_session_meta(meta_path)
+
+    context_limit =
+      case Sigma.Agent.ContextPolicy.parse_context_limit(session_meta["context_limit"]) do
+        {:ok, limit} -> limit
+        _ -> Sigma.Agent.ContextPolicy.default_context_limit()
+      end
+
     effective_cwd = Map.get(session_meta, "cwd", workdir)
     session_branch = Map.get(session_meta, "branch")
     project_mcp_server_ids = RepoManager.mcp_server_ids(workdir)
@@ -173,6 +180,7 @@ defmodule Sigma.Web.SessionLive do
         with {:ok, runtime_session} <-
                Sigma.Agent.Runtime.get_session(workdir, session_id,
                  model: selected_agent_model,
+                 context_limit: context_limit,
                  provider: provider_mod,
                  options: provider_options,
                  system_prompt: nil,
@@ -190,7 +198,9 @@ defmodule Sigma.Web.SessionLive do
              {:ok, sessions} <- Sigma.Session.Log.list_session_summaries(sessions_dir) do
           agent = runtime_session.agent
           runtime_status = Sigma.Agent.Runtime.session_status(workdir, session_id)
-          agent_status = load_agent_status(agent)
+
+          agent_status =
+            ensure_agent_context_limit(agent, load_agent_status(agent), context_limit)
 
           pending_user_questions = load_pending_user_questions(agent)
           model_options = model_options(system_config, provider_id)
@@ -211,6 +221,7 @@ defmodule Sigma.Web.SessionLive do
              current_request_id: agent_status.current_request_id,
              context_token_count: context_display_tokens(context_snapshot),
              context_window: context_policy[:context_window],
+             context_limit: context_policy[:context_limit] || context_limit,
              session_metrics: session_metrics,
              session_metrics_state: session_metrics_state,
              context_policy: context_policy,
@@ -277,6 +288,7 @@ defmodule Sigma.Web.SessionLive do
       |> assign(:agent_ref, agent_ref)
       |> assign(:context_token_count, session_data.context_token_count)
       |> assign(:context_window, session_data.context_window)
+      |> assign(:context_limit, session_data.context_limit)
       |> assign(:context_snapshot, session_data.context_snapshot)
       |> assign(:current_request_id, session_data.current_request_id)
       |> assign(:session_metrics, session_data.session_metrics)
@@ -682,6 +694,17 @@ defmodule Sigma.Web.SessionLive do
         </div>
         <SessionObservability.session_overview_rail snapshot={session_observability_snapshot(assigns)} />
         <section id="session-context-details" class="mt-4" tabindex="-1" aria-label="Context details">
+          <form id="context-limit-form" phx-change="select_context_limit" class="mb-2">
+            <.dm_select id="context-limit-select" name="context_limit" label="Context limit"
+              value={to_string(@context_limit)} size="sm"
+              disabled={not @session_ready or @turn_in_flight}>
+              <option :for={{label, limit} <- [{"256k", 256_000}, {"384k", 384_000}, {"500k", 500_000}, {"768k", 768_000}, {"1M", 1_000_000}]}
+                value={limit} selected={limit == @context_limit}>{label}</option>
+            </.dm_select>
+          </form>
+          <p :if={@session_ready and is_nil(@context_policy[:context_limit])} class="mb-2 text-xs text-on-surface-variant">
+            Context limit applies after the current turn finishes.
+          </p>
           <SessionObservability.context_budget_card
             policy={context_budget_view(assigns)}
             successful_compactions={get_in(assigns, [:session_metrics, :successful_compactions])}
@@ -2629,6 +2652,40 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
+  def handle_event("select_context_limit", %{"context_limit" => selected}, socket) do
+    if session_ready?(socket) do
+      sessions_dir = socket.assigns.sessions_dir
+      session_id = socket.assigns.session_id
+
+      with {:ok, limit} <- Sigma.Agent.ContextPolicy.parse_context_limit(selected),
+           :ok <-
+             Sigma.Agent.change_context_limit(socket.assigns.agent, limit, fn ->
+               SessionFiles.update_metadata(sessions_dir, session_id, %{"context_limit" => limit})
+             end) do
+        {:noreply, apply_agent_status(socket, Sigma.Agent.status(socket.assigns.agent))}
+      else
+        {:error, :session_busy} ->
+          {:noreply,
+           put_flash(
+             socket,
+             :info,
+             "Wait for the current turn to finish before changing context limit."
+           )}
+
+        {:error, :invalid_context_limit} ->
+          {:noreply, put_flash(socket, :error, "Unknown context limit.")}
+
+        {:error, _reason} ->
+          {:noreply, put_flash(socket, :error, "Could not persist context limit.")}
+      end
+    else
+      {:noreply, put_flash(socket, :info, "Session is still loading.")}
+    end
+  catch
+    :exit, _reason -> {:noreply, put_flash(socket, :error, "Session is unavailable.")}
+  end
+
+  @impl true
   def handle_event("select_model", %{"model" => selected}, socket) do
     if session_ready?(socket) do
       select_model(selected, socket)
@@ -2747,6 +2804,12 @@ defmodule Sigma.Web.SessionLive do
 
   defp prompt_admission(socket, {:rejected, reason}) do
     {:rejected, put_flash(socket, :error, "Prompt rejected: #{inspect(reason)}")}
+  end
+
+  @impl true
+  def handle_info({:context_limit_changed, _limit}, socket) do
+    agent = socket.assigns.agent
+    {:noreply, start_async(socket, :agent_status, fn -> Sigma.Agent.status(agent) end)}
   end
 
   @impl true
@@ -3778,6 +3841,7 @@ defmodule Sigma.Web.SessionLive do
     |> assign(:model_options, [])
     |> assign(:context_token_count, nil)
     |> assign(:context_window, nil)
+    |> assign(:context_limit, Sigma.Agent.ContextPolicy.default_context_limit())
     |> assign(:context_snapshot, nil)
     |> assign(:current_request_id, nil)
     |> assign(:branch_summaries, [])
@@ -3861,6 +3925,9 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp apply_agent_status(socket, status) do
+    status =
+      ensure_agent_context_limit(socket.assigns.agent, status, socket.assigns.context_limit)
+
     context_snapshot = status[:context_snapshot]
     context_policy = status[:context_policy] || %{}
 
@@ -3870,9 +3937,23 @@ defmodule Sigma.Web.SessionLive do
       context_snapshot: context_snapshot,
       current_request_id: status[:current_request_id],
       context_policy: context_policy,
+      context_limit: context_policy[:context_limit] || socket.assigns.context_limit,
       context_token_count: context_display_tokens(context_snapshot),
       context_window: context_policy[:context_window]
     )
+  end
+
+  defp ensure_agent_context_limit(agent, status, limit) do
+    if is_nil(get_in(status, [:context_policy, :context_limit])) do
+      case Sigma.Agent.ensure_context_limit(agent, limit) do
+        :ok -> load_agent_status(agent)
+        {:error, _reason} -> status
+      end
+    else
+      status
+    end
+  catch
+    :exit, _reason -> status
   end
 
   defp context_display_tokens(%{next_request_estimated_input_tokens: estimate})

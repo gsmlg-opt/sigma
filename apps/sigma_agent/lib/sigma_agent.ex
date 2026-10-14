@@ -38,6 +38,7 @@ defmodule Sigma.Agent do
     :current_request_id,
     :context_snapshot,
     :context_policy,
+    :context_limit,
     :turn_started_at,
     :turn_started_monotonic,
     :control_pid,
@@ -105,6 +106,16 @@ defmodule Sigma.Agent do
 
   def follow_up(pid, prompt_text, opts \\ []) do
     GenServer.call(pid, {:admit_prompt, prompt_text, opts, :follow_up}, :infinity)
+  end
+
+  @doc "Changes the session context limit only after a successful idle-time persistence callback."
+  def change_context_limit(pid, limit, persist) when is_function(persist, 0) do
+    GenServer.call(pid, {:change_context_limit, limit, persist}, :infinity)
+  end
+
+  @doc "Adopts a session limit at an idle checkpoint only if the runtime has no configured limit."
+  def ensure_context_limit(pid, limit) do
+    GenServer.call(pid, {:ensure_context_limit, limit}, :infinity)
   end
 
   def status(pid), do: GenServer.call(pid, :status)
@@ -301,7 +312,9 @@ defmodule Sigma.Agent do
           ]),
       provider_options: opts[:options] || [],
       context_snapshot: context_snapshot,
-      context_policy: context_policy(context_snapshot, opts[:model], opts[:options] || []),
+      context_limit: opts[:context_limit],
+      context_policy:
+        context_policy(context_snapshot, opts[:model], opts[:options] || [], opts[:context_limit]),
       hook_specs: hook_specs,
       prompt_queue: PromptQueue.new(),
       turn_state: TurnState.idle(),
@@ -566,6 +579,27 @@ defmodule Sigma.Agent do
   @impl true
   def handle_call(:get_policy, _from, state) do
     {:reply, state.policy, state}
+  end
+
+  @impl true
+  def handle_call({:ensure_context_limit, limit}, from, %{context_limit: nil} = state) do
+    handle_call({:change_context_limit, limit, fn -> :ok end}, from, state)
+  end
+
+  def handle_call({:ensure_context_limit, _limit}, _from, state), do: {:reply, :ok, state}
+
+  @impl true
+  def handle_call({:change_context_limit, limit, persist}, _from, state) do
+    with {:ok, limit} <- ContextPolicy.parse_context_limit(limit),
+         false <- TurnState.active?(state.turn_state) or not is_nil(state.current_turn_task),
+         result when result == :ok or elem(result, 0) == :ok <- run_state_change(persist) do
+      state = invalidate_context(%{state | context_limit: limit}, :context_limit_change)
+      notify_subscribers(state, {:context_limit_changed, limit})
+      {:reply, :ok, state}
+    else
+      true -> {:reply, {:error, :session_busy}, state}
+      {:error, _} = error -> {:reply, error, state}
+    end
   end
 
   @impl true
@@ -1410,6 +1444,7 @@ defmodule Sigma.Agent do
     policy =
       ContextPolicy.policy(snapshot,
         model: state.model,
+        context_limit: state.context_limit,
         output_reserve: provider_output_reserve(state.provider_options)
       )
 
@@ -2005,9 +2040,6 @@ defmodule Sigma.Agent do
   defp normalized_stop_reason(%Sigma.Ai.ProviderStopReason{reason: reason}, _raw), do: reason
   defp normalized_stop_reason(_normalized, raw), do: raw
 
-  @default_compact_threshold 80_000
-  @compact_context_ratio 0.8
-
   defp maybe_compact(state) do
     input_tokens =
       state.messages
@@ -2018,55 +2050,13 @@ defmodule Sigma.Agent do
         end
       end)
 
-    if input_tokens >= compact_threshold(state.model) do
+    if input_tokens >= state.context_policy.threshold do
       {state, _result} = run_compact(state, trigger: :auto)
       state
     else
       state
     end
   end
-
-  defp compact_threshold(model) do
-    case model_context_window(model) do
-      nil -> @default_compact_threshold
-      context_window -> floor(context_window * @compact_context_ratio)
-    end
-  end
-
-  defp model_context_window(model) when is_map(model) do
-    [
-      :context_window,
-      "context_window",
-      :contextWindow,
-      "contextWindow",
-      :context_length,
-      "context_length",
-      :contextLength,
-      "contextLength",
-      :max_context_tokens,
-      "max_context_tokens",
-      :maxContextTokens,
-      "maxContextTokens",
-      :input_token_limit,
-      "input_token_limit",
-      :inputTokenLimit,
-      "inputTokenLimit"
-    ]
-    |> Enum.find_value(fn key -> positive_integer(Map.get(model, key)) end)
-  end
-
-  defp model_context_window(_model), do: nil
-
-  defp positive_integer(value) when is_integer(value) and value > 0, do: value
-
-  defp positive_integer(value) when is_binary(value) do
-    case Integer.parse(value) do
-      {number, ""} when number > 0 -> number
-      _ -> nil
-    end
-  end
-
-  defp positive_integer(_value), do: nil
 
   defp run_compact(state, opts) do
     {to_summarize, to_keep} = find_compact_boundary(state.messages, 20)
@@ -2948,7 +2938,8 @@ defmodule Sigma.Agent do
     %{
       state
       | context_snapshot: snapshot,
-        context_policy: context_policy(snapshot, state.model, state.provider_options)
+        context_policy:
+          context_policy(snapshot, state.model, state.provider_options, state.context_limit)
     }
   end
 
@@ -2981,7 +2972,8 @@ defmodule Sigma.Agent do
     %{
       state
       | context_snapshot: snapshot,
-        context_policy: context_policy(snapshot, state.model, state.provider_options)
+        context_policy:
+          context_policy(snapshot, state.model, state.provider_options, state.context_limit)
     }
   end
 
@@ -2998,13 +2990,15 @@ defmodule Sigma.Agent do
     %{
       state
       | context_snapshot: snapshot,
-        context_policy: context_policy(snapshot, state.model, state.provider_options)
+        context_policy:
+          context_policy(snapshot, state.model, state.provider_options, state.context_limit)
     }
   end
 
-  defp context_policy(snapshot, model, options) do
+  defp context_policy(snapshot, model, options, limit) do
     ContextPolicy.policy(snapshot,
       model: model,
+      context_limit: limit,
       output_reserve: provider_output_reserve(options),
       check_phase: :before_provider_dispatch
     )

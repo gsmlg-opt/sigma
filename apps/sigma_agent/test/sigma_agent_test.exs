@@ -581,6 +581,64 @@ defmodule Sigma.AgentTest do
     assert changed.stale
   end
 
+  test "context changes persist before updating the runtime and preserve model caps" do
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        session_id: "context-limit",
+        model: %{context_window: 1_000_000},
+        context_limit: 256_000
+      )
+
+    Sigma.Agent.subscribe(agent)
+    initial = Sigma.Agent.status(agent).context_policy
+    assert initial.context_window == 256_000
+
+    assert {:error, :disk_full} =
+             Sigma.Agent.change_context_limit(agent, 384_000, fn -> {:error, :disk_full} end)
+
+    assert Sigma.Agent.status(agent).context_policy == initial
+
+    assert {:error, :invalid_context_limit} =
+             Sigma.Agent.change_context_limit(agent, 42, fn ->
+               flunk("invalid limit must not persist")
+             end)
+
+    assert :ok = Sigma.Agent.change_context_limit(agent, 384_000, fn -> :ok end)
+    assert_receive {:context_limit_changed, 384_000}
+    assert :ok = Sigma.Agent.ensure_context_limit(agent, 256_000)
+    assert Sigma.Agent.status(agent).context_policy.context_window == 384_000
+    assert Sigma.Agent.status(agent).context_policy.threshold == 307_200
+    Sigma.Agent.set_model(agent, %{context_window: 100_000})
+    assert Sigma.Agent.status(agent).context_policy.context_limit == 384_000
+    assert Sigma.Agent.status(agent).context_policy.context_window == 100_000
+    assert :ok = Sigma.Agent.begin_session_operation(agent)
+
+    assert {:error, :session_busy} =
+             Sigma.Agent.change_context_limit(agent, 500_000, fn ->
+               flunk("busy session must not persist")
+             end)
+
+    assert :ok = Sigma.Agent.end_session_operation(agent)
+  end
+
+  test "hard dispatch guard uses the session limit even with a larger model" do
+    state = %Sigma.Agent{
+      model: %{context_window: 1_000_000},
+      context_limit: 256_000,
+      provider_options: []
+    }
+
+    error =
+      Sigma.Agent.__backplane_context_error__(state, %{
+        system: "",
+        messages: [String.duplicate("x", 1_040_000)],
+        tools: []
+      })
+
+    assert %Sigma.Ai.ProviderError{} = error
+    assert inspect(error) =~ "context window 256000"
+  end
+
   test "status exposes the live request until its terminal fact is accepted" do
     test_pid = self()
 
@@ -603,6 +661,14 @@ defmodule Sigma.AgentTest do
            } = Sigma.Agent.status(agent)
 
     assert is_binary(request_id)
+
+    assert {:error, :session_busy} = Sigma.Agent.ensure_context_limit(agent, 256_000)
+
+    assert {:error, :session_busy} =
+             Sigma.Agent.change_context_limit(agent, 384_000, fn ->
+               flunk("running turn must not persist")
+             end)
+
     send(provider_task, :release_provider)
 
     assert_receive {:live_request_fact,

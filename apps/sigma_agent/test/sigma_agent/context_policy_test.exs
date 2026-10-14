@@ -3,6 +3,31 @@ defmodule Sigma.Agent.ContextPolicyTest do
 
   alias Sigma.Agent.ContextPolicy
 
+  test "session limit caps the model and supplies unknown capacity" do
+    snapshot = ContextPolicy.snapshot(next_request_estimated_input_tokens: 250_000)
+    policy = ContextPolicy.policy(snapshot, context_limit: 256_000, output_reserve: 8_000)
+    assert policy.context_limit == 256_000
+    assert policy.context_window == 256_000
+    assert policy.threshold == 204_800
+    assert policy.window_source == :session
+    assert policy.threshold_source == :session_ratio
+    assert policy.overflow == :hard_overflow
+
+    smaller =
+      ContextPolicy.policy(snapshot, context_limit: 256_000, model: %{context_window: 100_000})
+
+    assert smaller.context_window == 100_000
+    assert smaller.threshold == 80_000
+    assert smaller.window_source == :model
+    assert smaller.threshold_source == :model_ratio
+
+    larger =
+      ContextPolicy.policy(snapshot, context_limit: 384_000, model: %{context_window: 1_000_000})
+
+    assert larger.context_window == 384_000
+    assert larger.threshold == 307_200
+  end
+
   test "keeps provider measurement separate from next request estimate" do
     snapshot =
       ContextPolicy.snapshot(

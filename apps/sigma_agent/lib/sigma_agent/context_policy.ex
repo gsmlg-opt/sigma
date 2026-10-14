@@ -9,6 +9,16 @@ defmodule Sigma.Agent.ContextPolicy do
 
   @default_threshold 80_000
   @default_ratio 0.8
+  @context_limits [256_000, 384_000, 500_000, 768_000, 1_000_000]
+
+  def default_context_limit, do: 256_000
+
+  def parse_context_limit(value) do
+    case positive(value) do
+      limit when limit in @context_limits -> {:ok, limit}
+      _ -> {:error, :invalid_context_limit}
+    end
+  end
 
   defstruct context_revision: nil,
             active_leaf: nil,
@@ -85,10 +95,13 @@ defmodule Sigma.Agent.ContextPolicy do
   def policy(context, opts) when is_map(context) do
     opts = normalize_opts(opts)
     model = get(opts, :model) || Map.get(context, :model)
-    window = positive(get(opts, :context_window)) || model_context_window(model)
+    model_window = positive(get(opts, :context_window)) || model_context_window(model)
+    limit = positive(get(opts, :context_limit))
+    window = if limit, do: min(limit, model_window || limit), else: model_window
 
     window_source =
       cond do
+        limit && (is_nil(model_window) || limit < model_window) -> :session
         positive(get(opts, :context_window)) -> :runtime
         window -> :model
         true -> :unknown
@@ -99,10 +112,12 @@ defmodule Sigma.Agent.ContextPolicy do
         if(window, do: floor(window * @default_ratio), else: @default_threshold)
 
     threshold_source =
-      if(positive(get(opts, :threshold)),
-        do: :runtime,
-        else: if(window, do: :model_ratio, else: :runtime_default)
-      )
+      cond do
+        positive(get(opts, :threshold)) -> :runtime
+        window_source == :session -> :session_ratio
+        window -> :model_ratio
+        true -> :runtime_default
+      end
 
     estimate = positive(Map.get(context, :next_request_estimated_input_tokens))
 
@@ -114,6 +129,7 @@ defmodule Sigma.Agent.ContextPolicy do
     overflow = overflow_status(estimate, window, reserve)
 
     %{
+      context_limit: limit,
       context_window: window,
       window_source: window_source,
       threshold: threshold,

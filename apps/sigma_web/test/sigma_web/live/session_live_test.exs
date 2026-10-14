@@ -203,6 +203,106 @@ defmodule Sigma.Web.SessionLiveTest do
     :ok
   end
 
+  test "context limit defaults, synchronizes between views and survives runtime restart", %{
+    conn: conn
+  } do
+    session_id = unique_session_id("context-limit")
+    storage_path = session_storage_path(session_id)
+    File.mkdir_p!(Path.dirname(storage_path))
+    assert :ok = Log.persist_event(storage_path, {:agent_start, @workdir})
+    path = session_path(session_id)
+    {:ok, first, html} = live_loaded(conn, path)
+    assert has_element?(first, "#context-limit-select option[value='256000'][selected]", "256k")
+
+    assert html
+           |> Floki.parse_document!()
+           |> Floki.find("#context-limit-select option")
+           |> length() == 5
+
+    {:ok, second, _} = live_loaded(conn, path)
+    {:ok, {agent, _}} = Sigma.Web.SessionManager.get_agent(session_id, repo_path: @workdir)
+    assert Sigma.Agent.status(agent).context_policy.context_window == 256_000
+
+    for limit <- [384_000, 500_000, 768_000, 1_000_000, 256_000] do
+      first
+      |> element("#context-limit-form")
+      |> render_change(%{"context_limit" => to_string(limit)})
+
+      assert Sigma.Agent.status(agent).context_policy.context_limit == limit
+
+      assert_eventually(fn ->
+        has_element?(second, "#context-limit-select option[value='#{limit}'][selected]")
+      end)
+
+      metadata =
+        ConfigManager.sessions_dir(@workdir)
+        |> Path.join(session_id <> ".meta.json")
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert metadata["context_limit"] == limit
+    end
+
+    render_change(first, "select_context_limit", %{"context_limit" => "42"})
+    assert Sigma.Agent.status(agent).context_policy.context_limit == 256_000
+    render_change(first, "select_context_limit", %{"context_limit" => "768000"})
+    stop_repository_supervisors(@workdir)
+    {:ok, reopened, _} = live_loaded(conn, path)
+    assert has_element?(reopened, "#context-limit-select option[value='768000'][selected]")
+    {:ok, {restarted, _}} = Sigma.Web.SessionManager.get_agent(session_id, repo_path: @workdir)
+    assert Sigma.Agent.status(restarted).context_policy.context_limit == 768_000
+    assert Sigma.Agent.status(restarted).context_policy.threshold == 614_400
+  end
+
+  for active? <- [false, true] do
+    @context_limit_active active?
+    test "adopts the context default for an existing runtime with active=#{active?}", %{
+      conn: conn
+    } do
+      session_id = unique_session_id("context-limit-existing")
+      storage_path = session_storage_path(session_id)
+      File.mkdir_p!(Path.dirname(storage_path))
+      assert :ok = Log.persist_event(storage_path, {:agent_start, @workdir})
+      Application.put_env(:sigma_web, :blocking_provider_pid, self())
+      on_exit(fn -> Application.delete_env(:sigma_web, :blocking_provider_pid) end)
+
+      {:ok, %{agent: agent}} =
+        Sigma.Agent.Runtime.get_session(@workdir, session_id,
+          model: %{id: "mock-model", provider: "mock-provider", api: "mock-api"},
+          provider: BlockingTurnProvider,
+          transcript_path: storage_path,
+          cwd: @workdir
+        )
+
+      assert is_nil(Sigma.Agent.status(agent).context_policy.context_limit)
+      :ok = Sigma.Agent.subscribe(agent)
+
+      provider =
+        if @context_limit_active do
+          Sigma.Agent.prompt(agent, "working")
+          assert_receive {:web_provider_waiting, provider, "working"}, 2_000
+          provider
+        end
+
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+      if @context_limit_active do
+        assert is_nil(Sigma.Agent.status(agent).context_policy.context_limit)
+        assert render(view) =~ "Context limit applies after the current turn finishes."
+        assert has_element?(view, "#context-limit-select[disabled]")
+        send(provider, :release_web_provider)
+        assert_receive {:turn_completed, _}, 2_000
+      end
+
+      assert_eventually(fn ->
+        Sigma.Agent.status(agent).context_policy.context_limit == 256_000 and
+          has_element?(view, "#session-context-details", "Context window: 256K tokens")
+      end)
+
+      refute render(view) =~ "Context limit applies after the current turn finishes."
+    end
+  end
+
   test "rejects unregistered repository route", %{conn: conn} do
     path = System.tmp_dir!()
     encoded = Base.url_encode64(path, padding: false)
@@ -2912,11 +3012,31 @@ defmodule Sigma.Web.SessionLiveTest do
     assert has_element?(
              view,
              "#session-context-details",
-             "Next request estimate: #{estimate} tokens"
+             "Next request estimate:"
            )
 
-    assert has_element?(view, "#session-context-details", "Model window: unknown")
-    refute has_element?(view, "#session-context-details progress")
+    if estimate >= 1_000 do
+      exact =
+        estimate |> Integer.to_string() |> then(&Regex.replace(~r/\B(?=(\d{3})+(?!\d))/, &1, ","))
+
+      assert has_element?(view, "#session-context-details span[title='#{exact} tokens']")
+    else
+      assert has_element?(
+               view,
+               "#session-context-details",
+               "Next request estimate: #{estimate} tokens"
+             )
+    end
+
+    assert has_element?(view, "#session-context-details", "Context window: 256K tokens")
+    policy = Sigma.Agent.status(agent).context_policy
+
+    if policy.estimate_stale do
+      refute has_element?(view, "#session-context-details progress")
+    else
+      assert has_element?(view, "#session-context-details progress")
+    end
+
     estimate
   end
 
@@ -2934,6 +3054,8 @@ defmodule Sigma.Web.SessionLiveTest do
         context_trace: [],
         context_token_count: 0,
         context_window: nil,
+        context_limit: 256_000,
+        context_policy: %{context_limit: 256_000},
         current_model_value: nil,
         effective_cwd: @workdir,
         encoded_repository: @encoded_workdir,
