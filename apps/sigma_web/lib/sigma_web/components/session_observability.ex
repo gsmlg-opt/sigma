@@ -161,13 +161,13 @@ defmodule Sigma.Web.SessionObservability do
       <h2 class="text-xs font-semibold">Context and compaction</h2>
       <p class="font-mono text-sm">Next request estimate: {token_amount(value(@policy, :estimate))}</p>
       <p :if={value(@policy, :estimate_stale)} class="text-xs text-warning">estimate stale — current budget unknown</p>
-      <p class="font-mono text-sm">Model window: {token_amount(value(@policy, :context_window))}</p>
+      <p class="font-mono text-sm">Context window: {token_amount(value(@policy, :context_window))}</p>
       <progress
         :if={progress_available?(@policy)}
         class="w-full accent-primary"
         value={value(@policy, :estimate)}
         max={value(@policy, :context_window)}
-        aria-label="Next request estimate of model window"
+        aria-label="Next request estimate of context window"
       />
       <p class="font-mono text-sm">Auto-compaction threshold: {token_amount(value(@policy, :threshold))}</p>
       <p class="font-mono text-sm">Until compaction threshold: {remaining_label(@policy)}</p>
@@ -335,17 +335,61 @@ defmodule Sigma.Web.SessionObservability do
     """
   end
 
-  defp metric_value(map, key),
-    do: display(Map.get(map, key) || Map.get(map, Atom.to_string(key)), "unknown")
+  defp metric_value(map, key)
+       when key in [
+              :input_tokens_total,
+              :output_tokens_total,
+              :cache_read_tokens,
+              :cache_write_tokens,
+              :reasoning_tokens,
+              :visible_output_tokens,
+              :total_tokens
+            ],
+       do: token_value(value(map, key))
+
+  defp metric_value(map, key), do: display(value(map, key), "unknown")
+
+  defp token_value(amount) when is_number(amount) and amount >= 1_000 do
+    {divisor, unit} =
+      cond do
+        amount >= 1_000_000_000 -> {1_000_000_000, "B"}
+        amount >= 1_000_000 -> {1_000_000, "M"}
+        true -> {1_000, "K"}
+      end
+
+    # Keep a rounded value below the next unit until the count crosses its threshold.
+    rounded = Float.round(amount / divisor, 2)
+    rounded = if amount < divisor * 1_000, do: min(rounded, 999.99), else: rounded
+
+    label =
+      rounded
+      |> :erlang.float_to_binary(decimals: 2)
+      |> String.trim_trailing("0")
+      |> String.trim_trailing(".")
+
+    assigns = %{label: label <> unit, exact: display(amount, "unknown") <> " tokens"}
+    ~H"<span title={@exact}>{@label}</span>"
+  end
+
+  defp token_value(amount), do: display(amount, "unknown")
+
+  defp grouped_number(value) do
+    [whole | fraction] = String.split(value, ".", parts: 2)
+    whole = Regex.replace(~r/\B(?=(\d{3})+(?!\d))/, whole, ",")
+    Enum.join([whole | fraction], ".")
+  end
 
   defp display(nil, fallback), do: fallback
 
   defp display(value, _fallback) when is_float(value),
-    do: :erlang.float_to_binary(value, decimals: 2)
+    do: value |> :erlang.float_to_binary(decimals: 2) |> grouped_number()
+
+  defp display(value, _fallback) when is_integer(value),
+    do: value |> to_string() |> grouped_number()
 
   defp display(value, _fallback), do: to_string(value)
   defp duration(nil), do: "unknown"
-  defp duration(ms) when is_integer(ms) and ms >= 0, do: "#{ms}ms"
+  defp duration(ms) when is_integer(ms) and ms >= 0, do: "#{display(ms, "unknown")}ms"
   defp duration(_), do: "unknown"
   defp throughput(%{throughput: value}), do: throughput_value(value)
 
@@ -391,7 +435,11 @@ defmodule Sigma.Web.SessionObservability do
   end
 
   defp token_amount(nil), do: "unknown"
-  defp token_amount(amount), do: "#{display(amount, "unknown")} tokens"
+
+  defp token_amount(amount) do
+    assigns = %{amount: amount}
+    ~H"{token_value(@amount)} tokens"
+  end
 
   defp show_count?(summary, key, minimum) do
     case value(summary, key) do
@@ -442,7 +490,11 @@ defmodule Sigma.Web.SessionObservability do
     after_tokens = value(compaction, :after_tokens)
     finished_at = value(compaction, :finished_at)
 
-    "last: #{display(finished_at, "time unknown")} · #{display(before_tokens, "unknown")} -> #{display(after_tokens, "unknown")}"
+    assigns = %{before_tokens: before_tokens, after_tokens: after_tokens, finished_at: finished_at}
+
+    ~H"""
+    last: {display(@finished_at, "time unknown")} · {token_value(@before_tokens)} -> {token_value(@after_tokens)}
+    """
   end
 
   defp value(map, key) when is_map(map),
@@ -533,9 +585,14 @@ defmodule Sigma.Web.SessionObservability do
 
   defp coverage(snapshot) do
     case snapshot[:coverage] || snapshot["coverage"] do
-      %{known: known, total: total} -> "coverage: #{known}/#{total}"
-      %{"known" => known, "total" => total} -> "coverage: #{known}/#{total}"
-      _ -> "coverage: unknown"
+      %{known: known, total: total} ->
+        "coverage: #{display(known, "unknown")}/#{display(total, "unknown")}"
+
+      %{"known" => known, "total" => total} ->
+        "coverage: #{display(known, "unknown")}/#{display(total, "unknown")}"
+
+      _ ->
+        "coverage: unknown"
     end
   end
 

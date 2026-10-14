@@ -399,7 +399,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
     assert Floki.text(link) =~ "forked from: parent-session"
     overview = Floki.find(document, ".sigma-session-overview")
-    assert Floki.text(overview) =~ "inherited: 3000 tokens (2 requests)"
+    assert Floki.text(overview) =~ "inherited: 3K tokens (2 requests)"
     refute Floki.text(overview) =~ "Lineage"
     refute Floki.text(overview) =~ "forked from:"
   end
@@ -1346,7 +1346,9 @@ defmodule Sigma.Web.SessionLiveTest do
 
         assert_eventually(fn ->
           html = chat_footer_html(view)
-          html =~ "input: 90000" and html =~ "output: 1" and html =~ "Turn summary"
+
+          html |> Floki.parse_document!() |> Floki.text() =~ "input: 90K" and html =~ "output: 1" and
+            html =~ "Turn summary"
         end)
 
         assert {:ok, messages} = Sigma.Session.Log.replay(storage_path)
@@ -1418,7 +1420,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
         html = render_async(view, 2_000)
         assert html =~ "Successful compactions: 1"
-        assert html =~ "known total: 207000"
+        assert Floki.text(Floki.parse_document!(html)) =~ "known total: 207K"
 
         after_context =
           Sigma.Agent.status(agent).context_snapshot.next_request_estimated_input_tokens
@@ -1428,7 +1430,7 @@ defmodule Sigma.Web.SessionLiveTest do
         stop_repository_supervisors(@workdir)
         {:ok, _reloaded_view, reloaded_html} = live_loaded(conn, session_path(session_id))
         assert reloaded_html =~ "Successful compactions: 1"
-        assert reloaded_html =~ "known total: 207000"
+        assert Floki.text(Floki.parse_document!(reloaded_html)) =~ "known total: 207K"
       end)
     end)
   end
@@ -2254,7 +2256,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
     assert_eventually(fn ->
       summary = chat_footer_html(view)
-      summary =~ "completed" and summary =~ "wall: 1200ms"
+      summary =~ "completed" and summary =~ "wall: 1,200ms"
     end)
 
     send(view.pid, {

@@ -4,6 +4,50 @@ defmodule Sigma.Web.SessionObservabilityTest do
 
   alias Sigma.Web.SessionObservability
 
+  test "formats token units and exact tooltips at decimal boundaries" do
+    for {count, label} <- [
+          {0, "0"},
+          {999, "999"},
+          {1_000, "1K"},
+          {13_748, "13.75K"},
+          {999_999, "999.99K"},
+          {1_000_000, "1M"},
+          {999_999_999, "999.99M"},
+          {1_000_000_000, "1B"},
+          {1_250_000_000_000, "1250B"}
+        ] do
+      html =
+        render_component(
+          &SessionObservability.message_metrics_footer/1,
+          %{metrics: %{input_tokens_total: count}, elapsed_ms: 18_773}
+        )
+
+      assert Floki.text(Floki.parse_document!(html)) =~ "input: #{label}"
+      assert html =~ "18,773ms"
+
+      if count >= 1_000 do
+        assert [_] = Floki.find(Floki.parse_document!(html), "span[title]")
+      end
+    end
+
+    html =
+      render_component(
+        &SessionObservability.message_metrics_footer/1,
+        %{metrics: %{input_tokens_total: 251_973}}
+      )
+
+    assert html =~ ~s(title="251,973 tokens")
+
+    counts =
+      render_component(
+        &SessionObservability.turn_summary/1,
+        %{summary: %{request_count: 1_234, tool_count: 5_678}}
+      )
+
+    assert counts =~ "requests: 1,234"
+    assert counts =~ "tools: 5,678"
+  end
+
   test "renders complete message metrics and unknown values explicitly" do
     html =
       render_component(&SessionObservability.message_metrics_footer/1, %{
@@ -79,14 +123,16 @@ defmodule Sigma.Web.SessionObservabilityTest do
         }
       })
 
-    assert html =~ "Next request estimate: 19798 tokens"
-    assert html =~ ~r/Last measured input<\/dt>\s*<dd>20176 tokens/
-    assert html =~ "Model window: 512000 tokens"
-    assert html =~ "Auto-compaction threshold: 409600 tokens"
-    assert html =~ "Until compaction threshold: 389802 tokens"
-    assert html =~ ~r/Hard budget remaining<\/dt>\s*<dd>484202 tokens/
+    text = Floki.text(Floki.parse_document!(html))
+    assert html =~ ~s(title="19,798 tokens")
+    assert text =~ "Next request estimate: 19.8K tokens"
+    assert text =~ "20.18K tokens"
+    assert text =~ "Context window: 512K tokens"
+    assert text =~ "Auto-compaction threshold: 409.6K tokens"
+    assert text =~ "Until compaction threshold: 389.8K tokens"
+    assert text =~ "484.2K tokens"
     assert html =~ ~s(max="512000")
-    assert html =~ "100000 -&gt; 25000"
+    assert text =~ "100K -> 25K"
     assert html =~ "summary"
     assert html =~ "last_request_measurement"
   end
@@ -111,7 +157,7 @@ defmodule Sigma.Web.SessionObservabilityTest do
     refute stale =~ ~s(<progress)
 
     unknown = render_component(&SessionObservability.context_budget_card/1, %{policy: %{}})
-    assert unknown =~ "Model window: unknown"
+    assert unknown =~ "Context window: unknown"
     assert unknown =~ "Hard request budget: unknown"
     refute unknown =~ ~s(<progress)
 
@@ -147,11 +193,12 @@ defmodule Sigma.Web.SessionObservabilityTest do
         }
       })
 
-    assert html =~ "input: 40000"
-    assert html =~ "output: 1000"
-    assert html =~ "known total: 41000"
+    text = Floki.text(Floki.parse_document!(html))
+    assert text =~ "input: 40K"
+    assert text =~ "output: 1K"
+    assert text =~ "known total: 41K"
     assert html =~ "coverage: 2/3"
-    assert html =~ "inherited: 3000 tokens (2 requests)"
+    assert text =~ "inherited: 3K tokens (2 requests)"
     assert html =~ "known portion only"
     refute html =~ "forked from: parent-session"
     assert html =~ "50.25 tok/s"
