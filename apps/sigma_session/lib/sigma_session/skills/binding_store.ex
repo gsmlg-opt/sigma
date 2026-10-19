@@ -4,9 +4,12 @@ defmodule Sigma.Session.Skills.BindingStore do
   alias Backplane.SkillProtocol.{Error, SkillRef}
 
   @spec get(String.t(), String.t(), String.t()) :: {:ok, SkillRef.t()} | {:error, Error.t()}
-  def get(path, source_id, skill_id) do
+  def get(path, source_id, skill_id), do: get(path, source_id, skill_id, nil)
+
+  def get(path, source_id, skill_id, access_scope) do
     with {:ok, bindings} <- read(path),
          %{} = binding <- Map.get(bindings, key(source_id, skill_id)),
+         true <- is_nil(access_scope) or binding["access_scope"] == access_scope,
          {:ok, ref} <- decode(binding),
          true <- ref.source_id == source_id and ref.skill_id == skill_id do
       {:ok, ref}
@@ -18,15 +21,24 @@ defmodule Sigma.Session.Skills.BindingStore do
   end
 
   @spec put(String.t(), SkillRef.t()) :: :ok | {:error, Error.t()}
-  def put(path, %SkillRef{} = ref) do
+  def put(path, %SkillRef{} = ref), do: put(path, ref, nil)
+
+  def put(path, %SkillRef{} = ref, access_scope) do
     with :ok <- exact(ref) do
-      :global.trans({{__MODULE__, Path.expand(path)}, self()}, fn -> put_locked(path, ref) end)
+      :global.trans({{__MODULE__, Path.expand(path)}, self()}, fn ->
+        put_locked(path, ref, access_scope)
+      end)
     end
   end
 
-  defp put_locked(path, ref) do
+  defp put_locked(path, ref, access_scope) do
     with {:ok, bindings} <- read(path),
-         content <- Map.put(bindings, key(ref.source_id, ref.skill_id), encode(ref)),
+         content <-
+           Map.put(
+             bindings,
+             key(ref.source_id, ref.skill_id),
+             Map.put(encode(ref), "access_scope", access_scope)
+           ),
          {:ok, json} <- Jason.encode(content),
          :ok <- atomic_write(path, json) do
       :ok

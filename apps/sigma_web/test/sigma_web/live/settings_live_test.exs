@@ -47,175 +47,110 @@ defmodule Sigma.Web.SettingsLiveTest do
   end
 
   @tag :tmp_dir
-  test "manages providers with modal forms and delete confirmation", %{
+  test "provider connections stay independent from models", %{conn: conn, tmp_dir: tmp_dir} do
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, view, _} = live(conn, "/settings/providers")
+      render_async(view)
+      render_click(view, "add_provider")
+      html = render(view)
+      refute html =~ "Current Model"
+      refute html =~ "provider[model]"
+
+      render_submit(view, "save_provider", %{
+        "provider" => %{
+          "name" => "Backplane connection",
+          "api_type" => "openai",
+          "kind" => "backplane",
+          "service_origin" => "https://services.example",
+          "base_url" => "https://llm.example/v1"
+        }
+      })
+
+      html = render_async(view)
+      assert html =~ "Backplane connection"
+      assert html =~ "https://services.example"
+      assert html =~ "https://llm.example/v1"
+      refute html =~ "set_active_provider"
+      [provider] = Map.values(Sigma.Session.ConfigManager.get_config()["providers"])
+      assert provider["kind"] == "backplane"
+      assert provider["service_origin"] == "https://services.example"
+      assert Sigma.Session.Models.list() == []
+    end)
+  end
+
+  @tag :tmp_dir
+  test "editing a connection preserves models and credential authentication", %{
     conn: conn,
     tmp_dir: tmp_dir
   } do
     with_agent_dir(tmp_dir, fn ->
-      {:ok, _} = Sigma.Session.ConfigManager.add_credential("OpenAI Key", "secret-token")
-      [credential_id] = Sigma.Session.ConfigManager.get_config()["credentials"] |> Map.keys()
+      {:ok, config} =
+        Sigma.Session.ConfigManager.add_credential("Provider key", "secret-provider-key")
+
+      [credential_id] = Map.keys(config["credentials"])
 
       {:ok, config} =
         Sigma.Session.ConfigManager.add_provider(%{
-          "name" => "Test OpenAI",
+          "name" => "Editable connection",
           "api_type" => "openai",
-          "credential_id" => credential_id,
-          "model" => "gpt-4o-mini",
-          "base_url" => "https://api.openai.com/v1"
+          "credential_id" => credential_id
         })
 
-      [provider_id] = config["providers"] |> Map.keys()
-      {:ok, _} = Sigma.Session.ConfigManager.set_active_provider(provider_id)
+      [provider_id] = Map.keys(config["providers"])
 
-      {:ok, view, html} = live(conn, "/settings/providers")
+      {:ok, _} =
+        Sigma.Session.Models.add(provider_id, [
+          %{"id" => "kept-model", "defaultContextLimit" => 42000}
+        ])
 
-      assert html =~ "Loading settings data"
+      {:ok, _} = Sigma.Session.Models.set_default(provider_id, "kept-model")
+      {:ok, view, _} = live(conn, "/settings/providers")
+      html = render_async(view, 1000)
+      assert html =~ "Provider key"
+      refute html =~ "kept-model"
+      refute html =~ "secret-provider-key"
+      render_click(view, "edit_provider", %{"id" => provider_id})
 
-      html = render_async(view)
+      html =
+        render_change(view, "change_provider_form", %{
+          "provider" => %{"auth_type" => "custom_header", "auth_header_name" => "X-Token"}
+        })
 
-      assert html =~ ~s(id="providers-table")
-      assert html =~ "Test OpenAI"
-      assert html =~ "gpt-4o-mini"
-      assert html =~ "OpenAI Key"
-      assert html =~ "ACTIVE"
-      assert_settings_table(html, "providers-table")
-      assert_icon_tooltip_action(html, "provider-edit-#{provider_id}", "Edit")
-      assert_icon_tooltip_action(html, "provider-delete-#{provider_id}", "Delete")
+      assert html =~ "provider[auth_header_name]"
+      render_submit(view, "save_provider", %{"provider" => %{"name" => "Renamed connection"}})
+      config = Sigma.Session.ConfigManager.get_config()
+      assert config["providers"][provider_id]["auth_type"] == "custom_header"
+      assert config["providers"][provider_id]["auth_header_name"] == "X-Token"
+      assert config["providers"][provider_id]["credential_id"] == credential_id
 
-      render_click(view, "add_provider")
+      assert [%{model_id: "kept-model", default_context_limit: 42000}] =
+               Sigma.Session.Models.list()
 
-      new_provider_html = render(view)
-
-      assert new_provider_html =~ "New Provider"
-      assert new_provider_html =~ ~s(id="provider-settings-modal")
-      assert new_provider_html =~ ~s(id="provider-settings-form")
-      assert new_provider_html =~ "Auth Type"
-      assert new_provider_html =~ ~s(name="provider[auth_type]")
-      refute new_provider_html =~ ~s(name="provider[auth_header_name]")
+      assert config["default_model_id"] == "kept-model"
+      render_async(view, 1000)
+      render_click(view, "edit_provider", %{"id" => provider_id})
 
       render_change(view, "change_provider_form", %{
-        "provider" => %{
-          "mode" => "new",
-          "id" => "",
-          "name" => "Default OpenAI",
-          "api_type" => "openai",
-          "credential_id" => credential_id,
-          "auth_type" => "x-api-key",
-          "auth_header_name" => "",
-          "model" => "gpt-4.1-mini",
-          "base_url" => "https://api.openai.com/v1"
-        }
+        "provider" => %{"api_type" => "anthropic", "auth_type" => "custom_header"}
       })
 
-      render_submit(view, "save_provider", %{
-        "provider" => %{
-          "mode" => "new",
-          "id" => "",
-          "name" => "Default OpenAI",
-          "api_type" => "openai",
-          "credential_id" => credential_id,
-          "model" => "gpt-4.1-mini",
-          "base_url" => "https://api.openai.com/v1"
-        }
-      })
+      render_submit(view, "save_provider", %{"provider" => %{"auth_type" => "x-api-key"}})
 
-      config = Sigma.Session.ConfigManager.get_config()
-      default_provider_id = provider_id_by_name(config["providers"], "Default OpenAI")
-      assert config["providers"][default_provider_id]["auth_type"] == "bearer"
+      assert Sigma.Session.ConfigManager.get_config()["providers"][provider_id]["auth_type"] ==
+               "x-api-key"
 
-      render_click(view, "add_provider")
-
-      custom_auth_html =
-        render_change(view, "change_provider_form", %{
-          "provider" => %{
-            "mode" => "new",
-            "id" => "",
-            "name" => "Modal OpenAI",
-            "api_type" => "openai",
-            "credential_id" => credential_id,
-            "auth_type" => "custom_header",
-            "auth_header_name" => "X-API-Key",
-            "model" => "gpt-4.1-mini",
-            "base_url" => "https://api.openai.com/v1"
-          }
-        })
-
-      assert custom_auth_html =~ "Header Name"
-      assert custom_auth_html =~ ~s(name="provider[auth_header_name]")
-
-      render_submit(view, "save_provider", %{
-        "provider" => %{
-          "mode" => "new",
-          "id" => "",
-          "name" => "Modal OpenAI",
-          "api_type" => "openai",
-          "credential_id" => credential_id,
-          "auth_type" => "custom_header",
-          "auth_header_name" => "X-API-Key",
-          "model" => "gpt-4.1-mini",
-          "base_url" => "https://api.openai.com/v1"
-        }
-      })
-
-      html = render_async(view)
-
-      assert html =~ "Modal OpenAI"
-      assert html =~ "gpt-4.1-mini"
-
-      config = Sigma.Session.ConfigManager.get_config()
-      provider_id = provider_id_by_name(config["providers"], "Modal OpenAI")
-      assert config["providers"][provider_id]["auth_type"] == "custom_header"
-      assert config["providers"][provider_id]["auth_header_name"] == "X-API-Key"
-
-      view
-      |> element("el-dm-button[phx-click='edit_provider'][phx-value-id='#{provider_id}']")
-      |> render_click()
-
-      edit_provider_html = render(view)
-
-      assert edit_provider_html =~ "Edit Provider"
-      assert edit_provider_html =~ "Modal OpenAI"
-
-      render_submit(view, "save_provider", %{
-        "provider" => %{
-          "mode" => "edit",
-          "id" => provider_id,
-          "name" => "Modal Anthropic",
-          "api_type" => "anthropic",
-          "credential_id" => credential_id,
-          "auth_type" => "bearer",
-          "auth_header_name" => "X-Ignored",
-          "model" => "claude-3-5-sonnet-latest",
-          "base_url" => "https://api.anthropic.com"
-        }
-      })
-
-      html = render_async(view)
-
-      assert html =~ "Modal Anthropic"
-      refute html =~ "Modal OpenAI"
-      config = Sigma.Session.ConfigManager.get_config()
-      assert config["providers"][provider_id]["auth_type"] == "bearer"
-      assert config["providers"][provider_id]["auth_header_name"] == ""
-
-      view
-      |> element(
-        "el-dm-button[phx-click='confirm_delete_provider'][phx-value-id='#{provider_id}']"
-      )
-      |> render_click()
-
-      delete_provider_html = render(view)
-
-      assert delete_provider_html =~ "Delete Provider"
-      assert delete_provider_html =~ "Modal Anthropic"
-
-      view
-      |> element("el-dm-button[phx-click='delete_provider'][phx-value-id='#{provider_id}']")
-      |> render_click()
-
-      html = render_async(view)
-
-      refute html =~ "Modal Anthropic"
+      render_async(view, 1000)
+      render_click(view, "confirm_delete_provider", %{"id" => provider_id})
+      assert render(view) =~ "Delete Provider"
+      assert Map.has_key?(Sigma.Session.ConfigManager.get_config()["providers"], provider_id)
+      render_click(view, "delete_provider", %{"id" => provider_id})
+      assert render(view) =~ "Remove these references before deleting"
+      assert render(view) =~ "kept-model"
+      assert Map.has_key?(Sigma.Session.ConfigManager.get_config()["providers"], provider_id)
+      {:ok, _} = Sigma.Session.Models.remove(provider_id, "kept-model")
+      render_async(view, 1000)
+      render_click(view, "delete_provider", %{"id" => provider_id})
+      render_async(view, 1000)
       refute Map.has_key?(Sigma.Session.ConfigManager.get_config()["providers"], provider_id)
     end)
   end
@@ -373,8 +308,8 @@ defmodule Sigma.Web.SettingsLiveTest do
       assert html =~ "other-skill"
       assert html =~ ~s(id="settings-remote-skill-sources")
       assert html =~ "Remote One"
-      assert html =~ "configured"
-      refute html =~ "skills.example.test"
+      assert html =~ "Configured"
+      assert html =~ "skills.example.test"
       refute html =~ global_skills_dir
       assert html =~ "global"
       assert_settings_table(html, "skills-table")
@@ -752,14 +687,6 @@ defmodule Sigma.Web.SettingsLiveTest do
     |> Floki.parse_document!()
     |> Floki.find("##{id}")
     |> Enum.any?()
-  end
-
-  defp provider_id_by_name(providers, name) do
-    providers
-    |> Enum.find_value(fn
-      {id, %{"name" => ^name}} -> id
-      _ -> nil
-    end)
   end
 
   defp credential_id_by_name(credentials, name) do

@@ -53,6 +53,35 @@ defmodule Sigma.Session.Skills.RemoteSourceTest do
     assert reused.manifest.ref == prepared.manifest.ref
   end
 
+  test "offline binding rejects changed origin, access context, and credential", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = bundle_fixture(tmp_dir, "scope")
+    assert {:ok, remote} = remote(tmp_dir, fixture_transport(fixture, self()))
+    assert {:ok, _} = RemoteSource.prepare(remote, "remote-skill")
+
+    for changes <- [
+          [endpoint: "https://other.example.test"],
+          [access_context_id: "tenant:other"],
+          [credential_supplier: fn -> "rotated-token" end]
+        ] do
+      assert {:ok, changed} =
+               remote(
+                 tmp_dir,
+                 Keyword.put(changes, :transport, fn _ ->
+                   flunk("offline must not use transport")
+                 end)
+               )
+
+      assert {:error, %Error{code: :integrity_mismatch}} =
+               RemoteSource.prepare(changed, "remote-skill", offline: true)
+    end
+
+    binding = File.read!(remote.binding_path)
+    refute binding =~ "test-token"
+    refute binding =~ "rotated-token"
+  end
+
   test "digest mismatch publishes neither cache nor binding", %{tmp_dir: tmp_dir} do
     fixture = bundle_fixture(tmp_dir, "rev-bad")
     wrong = Map.put(fixture.manifest, "artifact_digest", "sha256:" <> String.duplicate("0", 64))

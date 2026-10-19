@@ -1,12 +1,62 @@
 defmodule Sigma.Web.ProtocolSessionOptions do
   @moduledoc false
 
-  alias Sigma.Agent.SessionContext
-  alias Sigma.Session.{ConfigManager, RepoManager, SessionFiles, Skills}
+  alias Sigma.Agent.{ContextPolicy, SessionContext}
+  alias Sigma.Session.{ConfigManager, Models, RepoManager, SessionFiles, Skills}
 
-  def resolve(snapshot, workdir, sessions_dir, session_id) do
+  def validate_agent_model(agent) do
+    with %{context_snapshot: %{model: model}} when is_map(model) <- Sigma.Agent.status(agent),
+         provider_id <- model[:provider] || model["provider"] || model[:api] || model["api"],
+         model_id <- model[:id] || model["id"] do
+      case Application.get_env(:sigma_web, :test_provider_config) do
+        %{"id" => ^provider_id, "model" => ^model_id} ->
+          :ok
+
+        _ ->
+          case Models.resolve(provider_id, model_id) do
+            {:ok, _} -> :ok
+            error -> error
+          end
+      end
+    else
+      _ -> {:error, :model_unavailable}
+    end
+  catch
+    :exit, _ -> {:error, :session_unavailable}
+  end
+
+  def prepare_create(payload) do
+    config = ConfigManager.get_config()
+
+    {provider_id, model_id} =
+      if Map.has_key?(payload, "providerId") or Map.has_key?(payload, "modelId"),
+        do: {payload["providerId"], payload["modelId"]},
+        else: {config["active_provider_id"], config["default_model_id"]}
+
+    with %{} = model <-
+           Enum.find(
+             Models.list(config),
+             &(&1.provider_id == provider_id and &1.model_id == model_id)
+           ),
+         {:ok, _} <- Models.resolve(provider_id, model_id),
+         metadata when is_map(metadata) <- payload["metadata"] || %{},
+         {:ok, limit} <-
+           ContextPolicy.new_session_limit(model.metadata, metadata["context_limit"]) do
+      {:ok,
+       payload
+       |> Map.put("providerId", provider_id)
+       |> Map.put("modelId", model_id)
+       |> Map.put("metadata", Map.put(metadata, "context_limit", limit))}
+    else
+      nil -> {:error, :model_unavailable}
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_session_metadata}
+    end
+  end
+
+  def resolve(snapshot, workdir, sessions_dir, session_id, initial_metadata \\ nil) do
     with {:ok, meta_path} <- SessionFiles.meta_path(sessions_dir, session_id),
-         metadata <- read_metadata(meta_path),
+         metadata <- initial_metadata || read_metadata(meta_path),
          %{} = config <- provider_config(snapshot, metadata),
          {:ok, provider} <- provider_module(config),
          model_id when is_binary(model_id) and model_id != "" <- config["model"] do
@@ -29,6 +79,7 @@ defmodule Sigma.Web.ProtocolSessionOptions do
 
       [
         model: agent_model(config, model_id),
+        context_limit: existing_context_limit(metadata),
         provider: provider,
         options: provider_options(config),
         system_prompt: nil,
@@ -43,22 +94,29 @@ defmodule Sigma.Web.ProtocolSessionOptions do
     end
   end
 
-  defp provider_config(%{provider_id: provider_id, model_id: model_id}, metadata)
+  defp provider_config(%{provider_id: provider_id, model_id: model_id}, _metadata)
        when is_binary(provider_id) and is_binary(model_id) do
-    case ConfigManager.get_provider_config(provider_id) do
-      %{} = provider -> Map.put(provider, "model", model_id)
-      nil -> provider_config(%{}, metadata)
+    case Models.resolve(provider_id, model_id) do
+      {:ok, config} -> config
+      _ -> nil
     end
   end
 
   defp provider_config(_snapshot, %{"provider_id" => provider_id, "model_id" => model_id}) do
-    case ConfigManager.get_provider_config(provider_id) do
-      %{} = provider -> Map.put(provider, "model", model_id)
-      nil -> ConfigManager.get_active_provider_config()
+    case Models.resolve(provider_id, model_id) do
+      {:ok, config} -> config
+      _ -> nil
     end
   end
 
   defp provider_config(_snapshot, _metadata), do: ConfigManager.get_active_provider_config()
+
+  defp existing_context_limit(metadata) do
+    case ContextPolicy.parse_context_limit(metadata["context_limit"]) do
+      {:ok, limit} -> limit
+      _ -> ContextPolicy.default_context_limit()
+    end
+  end
 
   defp provider_module(%{"api_type" => "anthropic"}), do: {:ok, Sigma.Ai.Providers.Anthropic}
   defp provider_module(%{"api_type" => "openai"}), do: {:ok, Sigma.Ai.Providers.OpenAIResponses}
@@ -88,7 +146,8 @@ defmodule Sigma.Web.ProtocolSessionOptions do
   end
 
   defp default_auth_type(api_type)
-       when api_type in ["openai", "openai-responses", "openai-completions"], do: "bearer"
+       when api_type in ["openai", "openai-responses", "openai-completions"],
+       do: "bearer"
 
   defp default_auth_type(_api_type), do: "x-api-key"
 

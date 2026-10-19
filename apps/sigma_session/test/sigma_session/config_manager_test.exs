@@ -176,12 +176,12 @@ defmodule Sigma.Session.ConfigManagerTest do
       |> File.read!()
       |> Jason.decode!()
 
-    assert saved_settings["defaultModel"] == "expert"
+    assert saved_settings["defaultModel"] == "smart"
 
     assert Enum.map(saved_models["providers"]["openai"]["models"], & &1["id"]) == [
-             "expert",
              "fast",
-             "smart"
+             "smart",
+             "expert"
            ]
 
     assert %{"contextWindow" => 1_000_000} =
@@ -189,7 +189,7 @@ defmodule Sigma.Session.ConfigManagerTest do
   end
 
   @tag :tmp_dir
-  test "enriches known bare model ids with output token metadata" do
+  test "does not infer capabilities from model IDs" do
     File.mkdir_p!(ConfigManager.agent_dir())
 
     File.write!(
@@ -219,15 +219,14 @@ defmodule Sigma.Session.ConfigManagerTest do
       }
     } = ConfigManager.get_config()
 
-    assert %{"contextWindow" => 512_000, "maxTokens" => 128_000} =
-             Enum.find(models, &(&1["id"] == "MiniMax-M3"))
+    assert %{"id" => "MiniMax-M3"} == Enum.find(models, &(&1["id"] == "MiniMax-M3"))
 
-    assert %{"contextWindow" => 204_800, "maxTokens" => 64_000} =
+    assert %{"id" => "MiniMax-M2.7", "maxTokens" => 64_000} ==
              Enum.find(models, &(&1["id"] == "MiniMax-M2.7"))
   end
 
   @tag :tmp_dir
-  test "persists inactive provider current model as first configured model" do
+  test "provider current model edits preserve collection order and global default" do
     File.mkdir_p!(ConfigManager.agent_dir())
 
     File.write!(
@@ -265,14 +264,14 @@ defmodule Sigma.Session.ConfigManagerTest do
       |> Jason.decode!()
 
     assert Enum.map(saved_models["providers"]["anthropic"]["models"], & &1["id"]) == [
-             "opus",
-             "claude"
+             "claude",
+             "opus"
            ]
 
     assert %{
              "active_provider_id" => "openai",
              "providers" => %{
-               "anthropic" => %{"model" => "opus"},
+               "anthropic" => %{"model" => ""},
                "openai" => %{"model" => "fast"}
              }
            } = ConfigManager.get_config()
@@ -325,6 +324,38 @@ defmodule Sigma.Session.ConfigManagerTest do
 
     assert saved_models["providers"]["openai"]["authType"] == "bearer"
     assert saved_models["providers"]["openai"]["authHeaderName"] == ""
+  end
+
+  @tag :tmp_dir
+  test "all OpenAI API names default to Bearer authentication when loading and saving" do
+    File.mkdir_p!(ConfigManager.agent_dir())
+    apis = ["openai", "openai-completions", "openai-responses"]
+
+    File.write!(
+      Path.join(ConfigManager.agent_dir(), "models.json"),
+      Jason.encode!(%{"providers" => Map.new(apis, &{&1, %{"api" => &1, "models" => []}})})
+    )
+
+    config = ConfigManager.get_config()
+
+    for api <- apis do
+      assert config["providers"][api]["auth_type"] == "bearer"
+
+      assert {:ok, saved} =
+               ConfigManager.add_provider(%{"name" => "saved-" <> api, "api_type" => api})
+
+      {_id, provider} =
+        Enum.find(saved["providers"], fn {_id, p} -> p["name"] == "saved-" <> api end)
+
+      assert provider["auth_type"] == "bearer"
+    end
+
+    persisted =
+      Path.join(ConfigManager.agent_dir(), "models.json") |> File.read!() |> Jason.decode!()
+
+    assert Enum.all?(persisted["providers"], fn {_id, provider} ->
+             provider["authType"] == "bearer"
+           end)
   end
 
   @tag :tmp_dir

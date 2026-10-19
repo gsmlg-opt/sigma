@@ -92,11 +92,54 @@ defmodule Sigma.Web.SessionChannel do
 
     context = Map.merge(context, Sigma.Agent.SkillInvocationService.callbacks(context))
 
-    result = PublicRuntime.execute(command, context)
+    result =
+      case prepare_command(command, socket) do
+        {:ok, prepared} ->
+          context =
+            if prepared.type == "session.create",
+              do:
+                Map.put(
+                  context,
+                  :session_opts,
+                  protocol_session_opts(socket, prepared.payload["metadata"])
+                ),
+              else: context
+
+          PublicRuntime.execute(prepared, context)
+
+        {:error, reason} ->
+          {:error, protocol_error(socket, to_string(reason))}
+      end
+
     {result, track_subscription(socket, command, result)}
   end
 
-  defp protocol_session_opts(socket) do
+  defp prepare_command(%Envelope{type: "session.create"} = command, _socket) do
+    with {:ok, payload} <- Sigma.Web.ProtocolSessionOptions.prepare_create(command.payload),
+         do: {:ok, %{command | payload: payload}}
+  end
+
+  defp prepare_command(%Envelope{type: type} = command, socket)
+       when type in [
+              "prompt.submit",
+              "prompt.steer",
+              "prompt.follow_up",
+              "skill.invoke",
+              "session.retry"
+            ] do
+    case Sigma.Agent.Runtime.lookup(socket.assigns.workdir, command.session_id, :agent) do
+      nil ->
+        {:ok, command}
+
+      agent ->
+        with :ok <- Sigma.Web.ProtocolSessionOptions.validate_agent_model(agent),
+             do: {:ok, command}
+    end
+  end
+
+  defp prepare_command(command, _socket), do: {:ok, command}
+
+  defp protocol_session_opts(socket, initial_metadata \\ nil) do
     case Application.get_env(:sigma_web, :protocol_session_opts) do
       opts when is_list(opts) ->
         opts
@@ -110,7 +153,8 @@ defmodule Sigma.Web.SessionChannel do
             snapshot,
             socket.assigns.workdir,
             socket.assigns.sessions_dir,
-            socket.assigns.session_id
+            socket.assigns.session_id,
+            initial_metadata
           )
         end
     end

@@ -5,6 +5,7 @@ defmodule Sigma.Web.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      %{id: Sigma.Session.ConfigEvents, start: {:pg, :start_link, [Sigma.Session.ConfigEvents]}},
       {Phoenix.PubSub, name: Sigma.Web.PubSub},
       Sigma.Web.Endpoint
     ]

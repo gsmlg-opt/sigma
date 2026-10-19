@@ -16,170 +16,197 @@ defmodule Sigma.Session.ConfigManager do
 
   @default_system_prompt ""
   @default_permissions %{"default" => "allow", "rules" => %{}}
-  @known_model_metadata %{
-    "MiniMax-M3" => %{"contextWindow" => 512_000, "maxTokens" => 128_000},
-    "MiniMax-M2.7" => %{"contextWindow" => 204_800, "maxTokens" => 131_072},
-    "deepseek-v4-flash" => %{"contextWindow" => 1_000_000, "maxTokens" => 384_000},
-    "deepseek-v4-pro" => %{"contextWindow" => 1_000_000, "maxTokens" => 384_000},
-    "GLM-5.1" => %{"contextWindow" => 202_752, "maxTokens" => 65_536},
-    "claude-3-5-sonnet-latest" => %{"contextWindow" => 200_000, "maxTokens" => 8_192},
-    "claude-3-5-sonnet-20241022" => %{"contextWindow" => 200_000, "maxTokens" => 8_192}
-  }
+
+  @doc false
+  def transaction(operation) when is_function(operation, 0) do
+    resource = {__MODULE__, Path.expand(agent_dir())}
+    marker = {resource, :transaction}
+
+    # Reuse outer ownership: releasing a nested :global lock would unlock the transaction.
+    if Process.get(marker) do
+      operation.()
+    else
+      :global.trans(
+        {resource, self()},
+        fn ->
+          Process.put(marker, true)
+
+          try do
+            operation.()
+          after
+            Process.delete(marker)
+          end
+        end,
+        [node()]
+      )
+    end
+  end
 
   def get_config do
-    settings = load_json(@settings_file, %{})
-    auth = load_json(@auth_file, %{})
-    models_data = load_json(@models_file, %{"providers" => %{}})
-    system_prompt = load_text(@agents_file, @default_system_prompt)
+    transaction(fn ->
+      settings = load_json(@settings_file, %{})
+      auth = load_json(@auth_file, %{})
+      models_data = load_json(@models_file, %{"providers" => %{}})
+      system_prompt = load_text(@agents_file, @default_system_prompt)
 
-    active_provider_id = settings["defaultProvider"] || ""
-    default_model = settings["defaultModel"] || ""
+      active_provider_id = settings["defaultProvider"] || ""
+      default_model = settings["defaultModel"] || ""
 
-    # Credentials from auth.json (API keys only for now)
-    credentials =
-      Enum.into(auth, %{}, fn {id, data} ->
-        case data do
-          %{"type" => "api_key", "key" => key} ->
-            {id, %{"id" => id, "name" => data["name"] || id, "key" => key}}
+      # Credentials from auth.json (API keys only for now)
+      credentials =
+        Enum.into(auth, %{}, fn {id, data} ->
+          case data do
+            %{"type" => "api_key", "key" => key} ->
+              {id, %{"id" => id, "name" => data["name"] || id, "key" => key}}
 
-          _ ->
-            {id, %{"id" => id, "name" => data["name"] || id, "key" => ""}}
-        end
-      end)
-
-    # Providers from models.json
-    providers =
-      Enum.into(models_data["providers"] || %{}, %{}, fn {id, p} ->
-        models =
-          p
-          |> Map.get("models", [])
-          |> List.wrap()
-          |> Enum.map(&normalize_model_entry/1)
-          |> Enum.reject(&(model_id(&1) == ""))
-
-        model_ids = Enum.map(models, &model_id/1)
-
-        selected_model =
-          if id == active_provider_id and default_model != "" do
-            default_model
-          else
-            List.first(model_ids) || ""
+            _ ->
+              {id, %{"id" => id, "name" => data["name"] || id, "key" => ""}}
           end
+        end)
 
-        api_type =
-          case p["api"] do
-            "anthropic-messages" -> "anthropic"
-            "openai-completions" -> "openai-completions"
-            "openai-responses" -> "openai"
-            _ -> p["api"] || "anthropic"
-          end
+      # Providers from models.json
+      providers =
+        Enum.into(models_data["providers"] || %{}, %{}, fn {id, p} ->
+          models =
+            p
+            |> Map.get("models", [])
+            |> List.wrap()
+            |> Enum.map(&normalize_model_entry/1)
+            |> Enum.reject(&(model_id(&1) == ""))
 
-        auth_type =
-          normalize_provider_auth_type(
-            p["authType"] || p["auth_type"],
-            default_auth_type(api_type)
-          )
+          model_ids = Enum.map(models, &model_id/1)
 
-        {id,
-         %{
-           "id" => id,
-           # pi uses provider ID as name in many places
-           "name" => p["name"] || id,
-           "api_type" => api_type,
-           # pi usually stores key under provider ID in auth.json
-           "credential_id" => p["credential_id"] || id,
-           "model" => selected_model,
-           "models" => models,
-           "base_url" => p["baseUrl"] || "",
-           "auth_type" => auth_type,
-           "auth_header_name" =>
-             normalize_provider_auth_header_name(
-               auth_type,
-               p["authHeaderName"] || p["auth_header_name"]
-             )
-         }}
-      end)
+          selected_model =
+            if id == active_provider_id and default_model in model_ids do
+              default_model
+            else
+              ""
+            end
 
-    %{
-      "active_provider_id" => active_provider_id,
-      "system_prompt" => system_prompt,
-      "disabled_global_skills" => disabled_global_skill_names(settings),
-      "permissions" => permission_settings(settings),
-      "credentials" => credentials,
-      "providers" => providers
-    }
+          api_type =
+            case p["api"] do
+              "anthropic-messages" -> "anthropic"
+              "openai-completions" -> "openai-completions"
+              "openai-responses" -> "openai"
+              _ -> p["api"] || "anthropic"
+            end
+
+          auth_type =
+            normalize_provider_auth_type(
+              p["authType"] || p["auth_type"],
+              default_auth_type(api_type)
+            )
+
+          {id,
+           Map.merge(p, %{
+             "id" => id,
+             "kind" => p["kind"] || "custom",
+             "service_origin" => p["serviceOrigin"] || "",
+             # pi uses provider ID as name in many places
+             "name" => p["name"] || id,
+             "api_type" => api_type,
+             # pi usually stores key under provider ID in auth.json
+             "credential_id" => p["credential_id"] || id,
+             "model" => selected_model,
+             "models" => models,
+             "base_url" => p["baseUrl"] || "",
+             "auth_type" => auth_type,
+             "auth_header_name" =>
+               normalize_provider_auth_header_name(
+                 auth_type,
+                 p["authHeaderName"] || p["auth_header_name"]
+               )
+           })}
+        end)
+
+      %{
+        "active_provider_id" => active_provider_id,
+        "default_model_id" => default_model,
+        "system_prompt" => system_prompt,
+        "disabled_global_skills" => disabled_global_skill_names(settings),
+        "permissions" => permission_settings(settings),
+        "credentials" => credentials,
+        "providers" => providers
+      }
+    end)
   end
 
   def save_config(config) do
-    # 1. Save AGENTS.md (overwrite)
-    save_text(@agents_file, config["system_prompt"])
+    transaction(fn ->
+      # 1. Save AGENTS.md (overwrite)
+      save_text(@agents_file, config["system_prompt"])
 
-    # We need to know what to drop
-    old_config = get_config()
-    deleted_cred_ids = Map.keys(old_config["credentials"]) -- Map.keys(config["credentials"])
-    deleted_provider_ids = Map.keys(old_config["providers"]) -- Map.keys(config["providers"])
+      # We need to know what to drop
+      old_config = get_config()
+      deleted_cred_ids = Map.keys(old_config["credentials"]) -- Map.keys(config["credentials"])
+      deleted_provider_ids = Map.keys(old_config["providers"]) -- Map.keys(config["providers"])
 
-    # 2. Save settings.json (merge)
-    active_provider = config["providers"][config["active_provider_id"]]
-    existing_settings = load_json(@settings_file, %{})
+      # 2. Save settings.json (merge)
+      active_provider = config["providers"][config["active_provider_id"]]
+      existing_settings = load_json(@settings_file, %{})
 
-    settings =
-      Map.merge(existing_settings, %{
-        "defaultProvider" => config["active_provider_id"],
-        "defaultModel" => (active_provider && active_provider["model"]) || "",
-        "permissions" =>
-          normalized_permission_settings(
-            config["permissions"],
-            permission_settings(existing_settings)
-          )
-      })
+      settings =
+        Map.merge(existing_settings, %{
+          "defaultProvider" => config["active_provider_id"],
+          "defaultModel" =>
+            config["default_model_id"] || (active_provider && active_provider["model"]) || "",
+          "permissions" =>
+            normalized_permission_settings(
+              config["permissions"],
+              permission_settings(existing_settings)
+            )
+        })
 
-    save_json(@settings_file, settings)
+      save_json(@settings_file, settings)
 
-    # 3. Save auth.json (merge)
-    existing_auth = load_json(@auth_file, %{})
-    existing_auth = Map.drop(existing_auth, deleted_cred_ids)
+      # 3. Save auth.json (merge)
+      existing_auth = load_json(@auth_file, %{})
+      existing_auth = Map.drop(existing_auth, deleted_cred_ids)
 
-    new_auth_entries =
-      Enum.into(config["credentials"], %{}, fn {id, c} ->
-        {id, %{"type" => "api_key", "key" => c["key"], "name" => c["name"]}}
-      end)
+      new_auth_entries =
+        Enum.into(config["credentials"], %{}, fn {id, c} ->
+          {id, %{"type" => "api_key", "key" => c["key"], "name" => c["name"]}}
+        end)
 
-    auth = Map.merge(existing_auth, new_auth_entries)
-    save_json(@auth_file, auth)
+      auth = Map.merge(existing_auth, new_auth_entries)
+      save_json(@auth_file, auth)
 
-    # 4. Save models.json (merge providers)
-    existing_models = load_json(@models_file, %{"providers" => %{}})
-    existing_providers = Map.drop(existing_models["providers"] || %{}, deleted_provider_ids)
+      # 4. Save models.json (merge providers)
+      existing_models = load_json(@models_file, %{"providers" => %{}})
+      existing_providers = Map.drop(existing_models["providers"] || %{}, deleted_provider_ids)
 
-    new_providers =
-      Enum.into(config["providers"], %{}, fn {id, p} ->
-        auth_type =
-          normalize_provider_auth_type(p["auth_type"], default_auth_type(p["api_type"]))
+      new_providers =
+        Enum.into(config["providers"], %{}, fn {id, p} ->
+          auth_type =
+            normalize_provider_auth_type(p["auth_type"], default_auth_type(p["api_type"]))
 
-        {id,
-         %{
-           "name" => p["name"],
-           "baseUrl" => p["base_url"],
-           "credential_id" => p["credential_id"],
-           "api" =>
-             case p["api_type"] do
-               "anthropic" -> "anthropic-messages"
-               "openai" -> "openai-responses"
-               _ -> p["api_type"]
-             end,
-           "authType" => auth_type,
-           "authHeaderName" =>
-             normalize_provider_auth_header_name(auth_type, p["auth_header_name"]),
-           "models" => provider_models(p)
-         }}
-      end)
+          {id,
+           Map.merge(existing_providers[id] || %{}, %{
+             "name" => p["name"],
+             "kind" => p["kind"] || "custom",
+             "serviceOrigin" => p["service_origin"] || "",
+             "baseUrl" => p["base_url"],
+             "credential_id" => p["credential_id"],
+             "api" =>
+               case p["api_type"] do
+                 "anthropic" -> "anthropic-messages"
+                 "openai" -> "openai-responses"
+                 _ -> p["api_type"]
+               end,
+             "authType" => auth_type,
+             "authHeaderName" =>
+               normalize_provider_auth_header_name(auth_type, p["auth_header_name"]),
+             "models" => get_in(existing_providers, [id, "models"]) || []
+           })}
+        end)
 
-    providers = Map.merge(existing_providers, new_providers)
-    models_data = Map.put(existing_models, "providers", providers)
-    save_json(@models_file, models_data)
+      providers = Map.merge(existing_providers, new_providers)
+      models_data = Map.put(existing_models, "providers", providers)
+      save_json(@models_file, models_data)
 
-    {:ok, config}
+      Sigma.Session.ConfigEvents.broadcast()
+      {:ok, get_config()}
+    end)
   end
 
   @doc "Returns the effective closed-set permission policy with atom actions."
@@ -197,15 +224,18 @@ defmodule Sigma.Session.ConfigManager do
 
   @doc "Validates and persists the permission policy in settings.json."
   def update_permissions(config) when is_map(config) do
-    with {:ok, _policy, permission_settings} <- parse_permissions(config) do
-      settings =
-        @settings_file
-        |> load_json(%{})
-        |> Map.put("permissions", permission_settings)
+    transaction(fn ->
+      with {:ok, _policy, permission_settings} <- parse_permissions(config) do
+        settings =
+          @settings_file
+          |> load_json(%{})
+          |> Map.put("permissions", permission_settings)
 
-      :ok = save_json(@settings_file, settings)
-      {:ok, permission_settings}
-    end
+        :ok = save_json(@settings_file, settings)
+        Sigma.Session.ConfigEvents.broadcast()
+        {:ok, permission_settings}
+      end
+    end)
   end
 
   def update_permissions(_config), do: {:error, :invalid_permission_config}
@@ -213,91 +243,156 @@ defmodule Sigma.Session.ConfigManager do
   # Credentials Management
 
   def add_credential(name, key) do
-    id = "cred_#{System.unique_integer([:positive])}"
-    config = get_config()
-    credentials = Map.get(config, "credentials", %{})
-    new_cred = %{"id" => id, "name" => name, "key" => key}
+    transaction(fn ->
+      id = "cred_#{System.unique_integer([:positive])}"
+      config = get_config()
+      credentials = Map.get(config, "credentials", %{})
+      new_cred = %{"id" => id, "name" => name, "key" => key}
 
-    config
-    |> Map.put("credentials", Map.put(credentials, id, new_cred))
-    |> save_config()
+      config
+      |> Map.put("credentials", Map.put(credentials, id, new_cred))
+      |> save_config()
+    end)
   end
 
   def update_credential(id, updates) do
-    config = get_config()
-    credentials = config["credentials"]
-    cred = credentials[id] || %{"id" => id}
-    new_cred = Map.merge(cred, updates)
+    transaction(fn ->
+      config = get_config()
+      credentials = config["credentials"]
+      cred = credentials[id] || %{"id" => id}
+      new_cred = Map.merge(cred, updates)
 
-    config
-    |> Map.put("credentials", Map.put(credentials, id, new_cred))
-    |> save_config()
+      config
+      |> Map.put("credentials", Map.put(credentials, id, new_cred))
+      |> save_config()
+    end)
   end
 
   def delete_credential(id) do
-    config = get_config()
-    credentials = Map.delete(config["credentials"], id)
+    transaction(fn ->
+      config = get_config()
+      credentials = Map.delete(config["credentials"], id)
 
-    # Also clear credential_id from any providers using it
-    providers =
-      Enum.into(config["providers"], %{}, fn {pid, p} ->
-        if p["credential_id"] == id do
-          {pid, Map.put(p, "credential_id", "")}
-        else
-          {pid, p}
-        end
-      end)
+      # Also clear credential_id from any providers using it
+      providers =
+        Enum.into(config["providers"], %{}, fn {pid, p} ->
+          if p["credential_id"] == id do
+            {pid, Map.put(p, "credential_id", "")}
+          else
+            {pid, p}
+          end
+        end)
 
-    config
-    |> Map.put("credentials", credentials)
-    |> Map.put("providers", providers)
-    |> save_config()
+      config
+      |> Map.put("credentials", credentials)
+      |> Map.put("providers", providers)
+      |> save_config()
+    end)
   end
 
   # Providers Management
 
   def add_provider(params) do
-    id = "prov_#{System.unique_integer([:positive])}"
-    config = get_config()
-    providers = Map.get(config, "providers", %{})
-    new_provider = Map.put(params, "id", id)
+    transaction(fn ->
+      id = "prov_#{System.unique_integer([:positive])}"
+      config = get_config()
+      providers = Map.get(config, "providers", %{})
+      new_provider = Map.put(params, "id", id)
 
-    config
-    |> Map.put("providers", Map.put(providers, id, new_provider))
-    |> save_config()
+      config
+      |> Map.put("providers", Map.put(providers, id, new_provider))
+      |> save_config()
+    end)
   end
 
   def update_provider(id, updates) do
-    config = get_config()
-    providers = config["providers"]
-    provider = providers[id] || %{"id" => id}
-    new_provider = Map.merge(provider, updates)
+    transaction(fn ->
+      config = get_config()
+      providers = config["providers"]
+      provider = providers[id] || %{"id" => id}
+      new_provider = Map.merge(provider, Map.drop(updates, ["model", "models"]))
 
-    config
-    |> Map.put("providers", Map.put(providers, id, new_provider))
-    |> save_config()
+      config
+      |> Map.put("providers", Map.put(providers, id, new_provider))
+      |> save_config()
+    end)
   end
 
   def delete_provider(id) do
-    config = get_config()
-    providers = Map.delete(config["providers"], id)
+    transaction(fn ->
+      config = get_config()
+      references = provider_references(id, config)
 
-    # Reset active provider if deleted
-    active_id = if config["active_provider_id"] == id, do: "", else: config["active_provider_id"]
+      if references == [] do
+        config
+        |> Map.put("providers", Map.delete(config["providers"], id))
+        |> save_config()
+      else
+        {:error, {:provider_in_use, references}}
+      end
+    end)
+  end
 
-    config
-    |> Map.put("providers", providers)
-    |> Map.put("active_provider_id", active_id)
-    |> save_config()
+  def provider_references(id, config \\ get_config()) do
+    models = get_in(config, ["providers", id, "models"]) || []
+    model_refs = Enum.map(models, &{:model, model_id(&1)})
+
+    mcp_refs =
+      for {server_id, server} <- list_mcp_servers(),
+          server["providerId"] == id,
+          do: {:mcp, server_id}
+
+    skill_refs =
+      for source <- skill_sources(), source.provider_id == id, do: {:skills, source.source_id}
+
+    model_refs ++ mcp_refs ++ skill_refs
   end
 
   def set_active_provider(id) do
-    get_config()
-    |> Map.put("active_provider_id", id)
-    |> save_config()
+    transaction(fn ->
+      config = get_config()
+
+      if id == config["active_provider_id"] and config["default_model_id"] != "" do
+        Sigma.Session.Models.set_default(id, config["default_model_id"])
+      else
+        {:error, :model_unavailable}
+      end
+    end)
   end
 
-  defp default_auth_type("openai"), do: "bearer"
+  @doc false
+  def put_provider_models(id, models) do
+    transaction(fn ->
+      data = load_json(@models_file, %{"providers" => %{}})
+
+      if is_map(get_in(data, ["providers", id])) do
+        save_json(@models_file, put_in(data, ["providers", id, "models"], models))
+        Sigma.Session.ConfigEvents.broadcast()
+        {:ok, get_config()}
+      else
+        {:error, :provider_unavailable}
+      end
+    end)
+  end
+
+  @doc false
+  def put_default_model(provider_id, model_id) do
+    transaction(fn ->
+      settings = load_json(@settings_file, %{})
+
+      save_json(
+        @settings_file,
+        Map.merge(settings, %{"defaultProvider" => provider_id, "defaultModel" => model_id})
+      )
+
+      Sigma.Session.ConfigEvents.broadcast()
+      {:ok, get_config()}
+    end)
+  end
+
+  defp default_auth_type(api) when api in ["openai", "openai-completions", "openai-responses"],
+    do: "bearer"
+
   defp default_auth_type(_api_type), do: "x-api-key"
 
   defp normalize_provider_auth_type(value, fallback) do
@@ -345,10 +440,62 @@ defmodule Sigma.Session.ConfigManager do
   @doc "Returns configured remote Skill sources without resolving credentials."
   @spec skill_sources() :: [map()]
   def skill_sources do
-    @settings_file
-    |> load_json(%{})
-    |> Map.get("skillSources", %{})
-    |> normalize_skill_sources()
+    transaction(fn ->
+      @settings_file
+      |> load_json(%{})
+      |> Map.get("skillSources", %{})
+      |> normalize_skill_sources()
+    end)
+  end
+
+  def put_skill_source(id, attrs) when is_binary(id) and is_map(attrs) do
+    transaction(fn ->
+      id = String.trim(id)
+
+      if id == "" do
+        {:error, :invalid_id}
+      else
+        settings = load_json(@settings_file, %{})
+        sources = settings["skillSources"] || %{}
+        source = Map.merge(sources[id] || %{}, stringify_keys(attrs))
+
+        source =
+          source
+          |> Map.put_new("kind", "backplane")
+          |> Map.put_new("accessContextId", "sigma:" <> id)
+
+        source =
+          Map.take(source, [
+            "kind",
+            "name",
+            "providerId",
+            "baseUrl",
+            "credentialId",
+            "accessContextId",
+            "enabled",
+            "offline"
+          ])
+
+        source =
+          if trim_config_value(source["providerId"]) != "",
+            do: Map.drop(source, ["baseUrl", "credentialId"]),
+            else: Map.delete(source, "providerId")
+
+        save_json(@settings_file, Map.put(settings, "skillSources", Map.put(sources, id, source)))
+        Sigma.Session.ConfigEvents.broadcast()
+        {:ok, skill_sources()}
+      end
+    end)
+  end
+
+  def delete_skill_source(id) when is_binary(id) do
+    transaction(fn ->
+      settings = load_json(@settings_file, %{})
+      sources = Map.delete(settings["skillSources"] || %{}, id)
+      save_json(@settings_file, Map.put(settings, "skillSources", sources))
+      Sigma.Session.ConfigEvents.broadcast()
+      {:ok, skill_sources()}
+    end)
   end
 
   @doc false
@@ -373,40 +520,44 @@ defmodule Sigma.Session.ConfigManager do
   end
 
   def set_global_skills_enabled(names, enabled?) when is_list(names) do
-    settings = load_json(@settings_file, %{})
-    current = settings |> disabled_global_skill_names() |> MapSet.new()
+    transaction(fn ->
+      settings = load_json(@settings_file, %{})
+      current = settings |> disabled_global_skill_names() |> MapSet.new()
 
-    changed =
-      names |> Enum.map(&normalize_skill_name/1) |> Enum.reject(&(&1 == "")) |> MapSet.new()
+      changed =
+        names |> Enum.map(&normalize_skill_name/1) |> Enum.reject(&(&1 == "")) |> MapSet.new()
 
-    disabled =
-      if enabled? do
-        MapSet.difference(current, changed)
-      else
-        MapSet.union(current, changed)
-      end
+      disabled =
+        if enabled? do
+          MapSet.difference(current, changed)
+        else
+          MapSet.union(current, changed)
+        end
 
-    disabled_scopes =
-      case settings["disabledSkills"] do
-        scopes when is_map(scopes) -> scopes
-        _ -> %{}
-      end
+      disabled_scopes =
+        case settings["disabledSkills"] do
+          scopes when is_map(scopes) -> scopes
+          _ -> %{}
+        end
 
-    settings =
-      Map.put(
-        settings,
-        "disabledSkills",
-        Map.put(disabled_scopes, "global", disabled |> MapSet.to_list() |> Enum.sort())
-      )
+      settings =
+        Map.put(
+          settings,
+          "disabledSkills",
+          Map.put(disabled_scopes, "global", disabled |> MapSet.to_list() |> Enum.sort())
+        )
 
-    save_json(@settings_file, settings)
-    :ok
+      save_json(@settings_file, settings)
+      :ok
+    end)
   end
 
   def update_system_prompt(prompt) do
-    get_config()
-    |> Map.put("system_prompt", prompt)
-    |> save_config()
+    transaction(fn ->
+      get_config()
+      |> Map.put("system_prompt", prompt)
+      |> save_config()
+    end)
   end
 
   @doc """
@@ -428,52 +579,18 @@ defmodule Sigma.Session.ConfigManager do
   "default" silently so a bad config never breaks the app.
   """
   def set_theme(theme) do
-    settings = load_json(@settings_file, %{})
-    save_json(@settings_file, Map.put(settings, "theme", normalize_theme(theme)))
-    :ok
-  end
-
-  defp provider_models(provider) do
-    models =
-      provider
-      |> Map.get("models", [])
-      |> List.wrap()
-      |> Enum.map(&normalize_model_entry/1)
-      |> Enum.reject(&(model_id(&1) == ""))
-
-    active_model_id = model_id(provider["model"])
-
-    active_model =
-      case {active_model_id, Enum.find(models, &(model_id(&1) == active_model_id))} do
-        {"", _} -> nil
-        {_id, nil} -> %{"id" => active_model_id}
-        {_id, model} -> model
-      end
-
-    [active_model | models]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.uniq_by(&model_id/1)
+    transaction(fn ->
+      settings = load_json(@settings_file, %{})
+      save_json(@settings_file, Map.put(settings, "theme", normalize_theme(theme)))
+      :ok
+    end)
   end
 
   defp normalize_model_entry(model) when is_map(model) do
-    string_model = Enum.into(model, %{}, fn {key, value} -> {to_string(key), value} end)
-    id = model_id(model)
-
-    id
-    |> known_model_metadata()
-    |> Map.merge(string_model)
-    |> Map.put("id", id)
+    model |> stringify_keys() |> Map.put("id", model_id(model))
   end
 
-  defp normalize_model_entry(model) do
-    id = model_id(model)
-
-    id
-    |> known_model_metadata()
-    |> Map.put("id", id)
-  end
-
-  defp known_model_metadata(id), do: Map.get(@known_model_metadata, id, %{})
+  defp normalize_model_entry(model), do: %{"id" => model_id(model)}
 
   defp model_id(%{"id" => id}) when is_binary(id), do: id
   defp model_id(%{id: id}) when is_binary(id), do: id
@@ -525,16 +642,30 @@ defmodule Sigma.Session.ConfigManager do
   defp normalize_skill_source(source_id, %{"kind" => "backplane"} = source) do
     name = trim_config_value(source["name"])
 
-    %{
+    normalized = %{
       source_id: source_id,
       kind: "backplane",
       name: if(name == "", do: source_id, else: name),
+      provider_id: trim_config_value(source["providerId"]),
       base_url: trim_config_value(source["baseUrl"]),
       credential_id: trim_config_value(source["credentialId"]),
       access_context_id: trim_config_value(source["accessContextId"]),
       enabled?: source["enabled"] != false,
-      offline?: source["offline"] == true
+      offline?: source["offline"] == true,
+      resolution_error: nil
     }
+
+    if normalized.provider_id == "" do
+      normalized
+    else
+      case Sigma.Session.Providers.resolve_service(normalized.provider_id, :skills) do
+        {:ok, service} ->
+          %{normalized | base_url: service.url, credential_id: service.credential_id}
+
+        {:error, reason} ->
+          %{normalized | base_url: "", credential_id: "", resolution_error: reason}
+      end
+    end
   end
 
   defp normalize_skill_source(_source_id, _source), do: nil
@@ -549,19 +680,24 @@ defmodule Sigma.Session.ConfigManager do
   files into the pi config directory.
   """
   def get_mcp_config do
-    @mcp_file
-    |> load_json(%{})
-    |> normalize_mcp_config()
+    transaction(fn ->
+      @mcp_file
+      |> load_json(%{})
+      |> normalize_mcp_config()
+    end)
   end
 
   def save_mcp_config(config) do
-    servers =
-      config
-      |> normalize_mcp_config()
-      |> Map.fetch!("servers")
+    transaction(fn ->
+      servers =
+        config
+        |> normalize_mcp_config()
+        |> Map.fetch!("servers")
 
-    save_json(@mcp_file, %{"mcpServers" => servers})
-    {:ok, %{"servers" => servers}}
+      save_json(@mcp_file, %{"mcpServers" => servers})
+      Sigma.Session.ConfigEvents.broadcast()
+      {:ok, %{"servers" => servers}}
+    end)
   end
 
   def list_mcp_servers do
@@ -573,58 +709,66 @@ defmodule Sigma.Session.ConfigManager do
   end
 
   def put_mcp_server(id, server_config) do
-    id = normalize_mcp_server_id(id)
+    transaction(fn ->
+      id = normalize_mcp_server_id(id)
 
-    if id == "" do
-      {:error, :invalid_id}
-    else
-      config = get_mcp_config()
-      servers = Map.put(config["servers"], id, normalize_mcp_server(server_config))
-      save_mcp_config(%{"servers" => servers})
-    end
+      if id == "" do
+        {:error, :invalid_id}
+      else
+        config = get_mcp_config()
+        servers = Map.put(config["servers"], id, normalize_mcp_server(server_config))
+        save_mcp_config(%{"servers" => servers})
+      end
+    end)
   end
 
   def update_mcp_server(old_id, updates) do
-    config = get_mcp_config()
-    old_id = normalize_mcp_server_id(old_id)
-    new_id = updates |> Map.get("id", old_id) |> normalize_mcp_server_id()
+    transaction(fn ->
+      config = get_mcp_config()
+      old_id = normalize_mcp_server_id(old_id)
+      new_id = updates |> Map.get("id", old_id) |> normalize_mcp_server_id()
 
-    cond do
-      new_id == "" ->
-        {:error, :invalid_id}
+      cond do
+        new_id == "" ->
+          {:error, :invalid_id}
 
-      old_id != new_id and Map.has_key?(config["servers"], new_id) ->
-        {:error, :id_conflict}
+        old_id != new_id and Map.has_key?(config["servers"], new_id) ->
+          {:error, :id_conflict}
 
-      true ->
-        server =
-          config["servers"]
-          |> Map.get(old_id, %{})
-          |> Map.merge(Map.drop(updates, ["id"]))
-          |> normalize_mcp_server()
+        true ->
+          server =
+            config["servers"]
+            |> Map.get(old_id, %{})
+            |> Map.merge(Map.drop(updates, ["id"]))
+            |> normalize_mcp_server()
 
-        servers =
-          config["servers"]
-          |> Map.delete(old_id)
-          |> Map.put(new_id, server)
+          servers =
+            config["servers"]
+            |> Map.delete(old_id)
+            |> Map.put(new_id, server)
 
-        save_mcp_config(%{"servers" => servers})
-    end
+          save_mcp_config(%{"servers" => servers})
+      end
+    end)
   end
 
   def delete_mcp_server(id) do
-    config = get_mcp_config()
-    servers = Map.delete(config["servers"], id)
-    save_mcp_config(%{"servers" => servers})
+    transaction(fn ->
+      config = get_mcp_config()
+      servers = Map.delete(config["servers"], id)
+      save_mcp_config(%{"servers" => servers})
+    end)
   end
 
   def mcp_servers_for(server_ids) when is_list(server_ids) do
-    servers = list_mcp_servers()
-    credentials = get_config()["credentials"] || %{}
+    transaction(fn ->
+      servers = list_mcp_servers()
+      credentials = get_config()["credentials"] || %{}
 
-    server_ids
-    |> Enum.filter(&Map.has_key?(servers, &1))
-    |> Enum.into(%{}, fn id -> {id, resolve_mcp_credentials(servers[id], credentials)} end)
+      server_ids
+      |> Enum.filter(&Map.has_key?(servers, &1))
+      |> Enum.into(%{}, fn id -> {id, resolve_mcp_server(servers[id], credentials)} end)
+    end)
   end
 
   def mcp_servers_for(_), do: %{}
@@ -805,7 +949,7 @@ defmodule Sigma.Session.ConfigManager do
 
     if provider do
       credential =
-        config["credentials"][provider["credential_id"]] || config["credentials"][provider_id]
+        config["credentials"][provider["credential_id"]]
 
       Map.put(provider, "resolved_key", (credential && credential["key"]) || "")
     end
@@ -814,22 +958,24 @@ defmodule Sigma.Session.ConfigManager do
   # Specialized persistence helpers
 
   defp load_json(filename, default) do
-    path = Path.join(get_config_dir(), filename)
+    transaction(fn ->
+      path = Path.join(get_config_dir(), filename)
 
-    if File.exists?(path) do
-      case File.read(path) do
-        {:ok, content} ->
-          case Jason.decode(content) do
-            {:ok, data} -> data
-            {:error, _} -> default
-          end
+      if File.exists?(path) do
+        case File.read(path) do
+          {:ok, content} ->
+            case Jason.decode(content) do
+              {:ok, data} -> data
+              {:error, _} -> default
+            end
 
-        _ ->
-          default
+          _ ->
+            default
+        end
+      else
+        default
       end
-    else
-      default
-    end
+    end)
   end
 
   defp save_json(filename, data) do
@@ -941,10 +1087,14 @@ defmodule Sigma.Session.ConfigManager do
     server = stringify_keys(server)
 
     type =
-      case server["type"] do
-        nil -> if server["url"], do: "http", else: "stdio"
-        transport when transport in ["streamable-http", "sse"] -> "http"
-        other -> other
+      if trim_config_value(server["providerId"]) != "" do
+        "http"
+      else
+        case server["type"] do
+          nil -> if server["url"], do: "http", else: "stdio"
+          transport when transport in ["streamable-http", "sse"] -> "http"
+          other -> other
+        end
       end
 
     server
@@ -957,17 +1107,31 @@ defmodule Sigma.Session.ConfigManager do
 
   defp normalize_mcp_server_fields(server, "stdio") do
     server
-    |> Map.drop(["url", "headers", "authType", "authHeaderName"])
+    |> Map.drop(["url", "headers", "authType", "authHeaderName", "providerId", "urlOverride"])
     |> Map.put("command", server["command"] || "")
     |> Map.put("args", normalize_list(server["args"]))
     |> Map.put("env", normalize_map(server["env"]))
   end
 
   defp normalize_mcp_server_fields(server, "http") do
-    server
-    |> Map.drop(["command", "args", "env"])
-    |> Map.put("url", server["url"] || "")
-    |> Map.put("headers", normalize_map(server["headers"]))
+    server = Map.drop(server, ["command", "args", "env"])
+    provider_id = trim_config_value(server["providerId"])
+
+    if provider_id != "" do
+      override = trim_config_value(server["urlOverride"])
+
+      server =
+        server
+        |> Map.drop(["url", "headers", "authType", "authHeaderName", "urlOverride"])
+        |> Map.put("providerId", provider_id)
+
+      if override == "", do: server, else: Map.put(server, "urlOverride", override)
+    else
+      server
+      |> Map.drop(["providerId", "urlOverride"])
+      |> Map.put("url", server["url"] || "")
+      |> Map.put("headers", normalize_map(server["headers"]))
+    end
   end
 
   defp normalize_mcp_server_fields(server, _type), do: server
@@ -992,6 +1156,40 @@ defmodule Sigma.Session.ConfigManager do
 
   defp normalize_map(value) when is_map(value), do: stringify_keys(value)
   defp normalize_map(_), do: %{}
+
+  defp resolve_mcp_server(%{"providerId" => id} = server, credentials)
+       when is_binary(id) and id != "" do
+    case Sigma.Session.Providers.resolve_service(id, :mcp) do
+      {:ok, service} ->
+        override = trim_config_value(server["urlOverride"])
+        url = if override == "", do: service.url, else: override
+
+        if Sigma.Session.Providers.valid_http_url?(url) do
+          headers = server["headers"] || %{}
+          rejected = ["authorization", "x-api-key", String.downcase(service.auth_header_name)]
+          headers = Map.reject(headers, fn {name, _} -> String.downcase(name) in rejected end)
+
+          server
+          |> Map.put("type", "http")
+          |> Map.put("url", url)
+          |> Map.put("headers", Map.merge(headers, Sigma.Session.Providers.auth_headers(service)))
+          |> resolve_mcp_credentials(credentials)
+        else
+          invalid_mcp_server(server, :invalid_service_url)
+        end
+
+      {:error, reason} ->
+        invalid_mcp_server(server, reason)
+    end
+  end
+
+  defp resolve_mcp_server(server, credentials), do: resolve_mcp_credentials(server, credentials)
+
+  defp invalid_mcp_server(server, reason) do
+    server
+    |> Map.drop(["url", "headers", "command", "args", "env"])
+    |> Map.put("configuration_error", reason)
+  end
 
   defp resolve_mcp_credentials(server, credentials) do
     server

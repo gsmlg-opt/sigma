@@ -2,14 +2,15 @@ defmodule Sigma.Web.SettingsLive do
   use Sigma.Web, :live_view
 
   alias Sigma.Agent.ContextBuilder
-  alias Sigma.Session.{ConfigManager, Skills}
-  alias Sigma.Session.Skills.Facade
+  alias Sigma.Session.{ConfigEvents, ConfigManager, Providers, Skills}
   alias Phoenix.LiveView.AsyncResult
 
   @credential_ref_regex ~r/^\{\{credential:([^}]+)\}\}$/
 
   @impl true
   def mount(_params, _session, socket) do
+    if connected?(socket), do: ConfigEvents.subscribe()
+
     {:ok,
      socket
      |> assign(:active_tab, :settings)
@@ -45,10 +46,36 @@ defmodule Sigma.Web.SettingsLive do
   end
 
   @impl true
+  def handle_info({:models_changed, agent_dir}, socket) do
+    if agent_dir == ConfigManager.agent_dir() do
+      socket =
+        case socket.assigns.live_action do
+          :models ->
+            send_update(Sigma.Web.ModelsSettingsComponent, id: "settings-models")
+            socket
+
+          :skills ->
+            send_update(Sigma.Web.RemoteSkillSourcesComponent,
+              id: "settings-remote-skill-sources"
+            )
+
+            socket
+
+          _ ->
+            reload_current_settings_data(socket)
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
   def render(assigns) do
     ~H"""
-    <div class="flex min-h-[calc(100vh-64px)]">
-      <aside class="w-64 lg:w-72 bg-secondary text-secondary-content border-r border-outline-variant p-5 shrink-0 flex flex-col">
+    <div class="flex flex-col md:flex-row min-h-[calc(100vh-64px)]">
+      <aside class="w-full md:w-56 lg:w-64 bg-secondary text-secondary-content border-r border-outline-variant p-5 shrink-0 flex flex-col">
         <div class="flex items-center gap-2 mb-6 text-on-secondary">
           <.dm_mdi name="cog-outline" class="w-4 h-4 opacity-70" />
           <span class="text-xs uppercase tracking-widest font-bold opacity-70">Settings</span>
@@ -66,6 +93,11 @@ defmodule Sigma.Web.SettingsLive do
           <.dm_link patch={~p"/settings/providers"} class={settings_nav_class(@live_action, :providers)}>
             <.dm_mdi name="robot-outline" class="w-5 h-5" />
             <span>Providers</span>
+          </.dm_link>
+
+          <.dm_link patch={~p"/settings/models"} class={settings_nav_class(@live_action, :models)}>
+            <.dm_mdi name="view-grid-outline" class="w-5 h-5" />
+            <span>Models</span>
           </.dm_link>
 
           <.dm_link
@@ -101,7 +133,7 @@ defmodule Sigma.Web.SettingsLive do
         </nav>
       </aside>
 
-      <main class="flex-1 p-8 bg-surface text-on-surface font-sans overflow-x-hidden">
+      <main class="min-w-0 flex-1 p-4 md:p-8 bg-surface text-on-surface font-sans overflow-x-hidden">
         <div class="max-w-6xl mx-auto">
           <div class="mb-10 flex justify-between items-end text-on-surface border-b border-outline-variant pb-6">
             <div>
@@ -118,11 +150,12 @@ defmodule Sigma.Web.SettingsLive do
                 <.render_providers
                   providers={data.providers}
                   credentials={data.credentials}
-                  active_id={data.active_provider_id}
                   form={@provider_form}
                   deleting_provider={@deleting_provider}
                 />
               </.settings_async_result>
+            <% :models -> %>
+              <.live_component module={Sigma.Web.ModelsSettingsComponent} id="settings-models" />
             <% :credentials -> %>
               <.settings_async_result :let={data} assign={@settings_data}>
                 <.render_credentials
@@ -138,6 +171,7 @@ defmodule Sigma.Web.SettingsLive do
               />
             <% :skills -> %>
               <.settings_async_result :let={data} assign={@settings_data}>
+                <.live_component module={Sigma.Web.RemoteSkillSourcesComponent} id="settings-remote-skill-sources" />
                 <.render_skills
                   result={data}
                   query={@skills_query}
@@ -148,6 +182,7 @@ defmodule Sigma.Web.SettingsLive do
               <.settings_async_result :let={data} assign={@settings_data}>
                 <.render_mcp
                   servers={data.servers}
+                  providers={data.providers}
                   credentials={data.credentials}
                   deleting_server_id={@deleting_mcp_server}
                   file={data.file}
@@ -183,13 +218,13 @@ defmodule Sigma.Web.SettingsLive do
       <:loading>
         <.settings_loading_state />
       </:loading>
-      <:failed :let={reason}>
+      <:failed>
         <div class="rounded-2xl border border-error/30 bg-error/10 p-6 text-error">
           <div class="flex items-center gap-2 font-bold">
             <.dm_mdi name="alert-circle-outline" class="w-5 h-5" />
             <span>Could not load settings data</span>
           </div>
-          <p class="mt-2 text-sm font-mono break-all">{inspect(reason)}</p>
+          <p class="mt-2 text-sm">Please try loading this page again.</p>
         </div>
       </:failed>
       {render_slot(@inner_block, data)}
@@ -283,128 +318,21 @@ defmodule Sigma.Web.SettingsLive do
         <p class="font-semibold text-on-surface">No providers configured</p>
       </div>
 
-      <div :if={!Enum.empty?(@providers)} class="overflow-x-auto rounded-2xl border border-outline-variant bg-surface-container-low">
-        <.dm_table id="providers-table" data={@providers} compact hover zebra class="settings-table min-w-[60rem]">
-          <:col :let={row} label="Name" class="min-w-52">
-            <div class="font-semibold text-on-surface">{row.provider["name"] || row.id}</div>
-            <div class="text-xs text-on-surface-variant font-mono">{row.id}</div>
-          </:col>
-          <:col :let={row} label="API" class="min-w-36">
-            {format_api_type(row.provider["api_type"])}
-          </:col>
-          <:col :let={row} label="Credential" class="min-w-52">
-            {credential_name(@credentials, row.provider["credential_id"])}
-          </:col>
-          <:col :let={row} label="Model" class="min-w-52">
-            <span class="font-mono text-xs">{row.provider["model"] || "-"}</span>
-          </:col>
-          <:col :let={row} label="Base URL" class="min-w-64">
-            <span class="font-mono text-xs text-on-surface-variant">
-              {blank_fallback(row.provider["base_url"], "Default endpoint")}
-            </span>
-          </:col>
-          <:col :let={row} label="Status" class="min-w-28">
-            <div :if={@active_id == row.id} class="inline-flex bg-success/20 text-success text-[10px] font-bold px-3 py-1 rounded-full border border-success/30">
-              ACTIVE
-            </div>
-            <span
-              :if={@active_id != row.id}
-              interestfor={"provider-activate-#{row.id}-tooltip"}
-              aria-describedby={"provider-activate-#{row.id}-tooltip"}
-              title="Activate"
-              style={"anchor-name: --provider-activate-#{row.id}-tooltip"}
-              class="inline-flex"
-            >
-              <.dm_btn
-                :if={@active_id != row.id}
-                id={"provider-activate-#{row.id}"}
-                phx-click="set_active_provider"
-                phx-value-id={row.id}
-                phx-hook="WebComponentHook"
-                variant="outline"
-                size="xs"
-                shape="circle"
-                aria-label="Activate"
-              >
-                <.dm_mdi name="check-circle-outline" />
-              </.dm_btn>
-            </span>
-            <div
-              :if={@active_id != row.id}
-              id={"provider-activate-#{row.id}-tooltip"}
-              popover="hint"
-              role="tooltip"
-              class="tooltip tooltip-bottom"
-              style={"position-anchor: --provider-activate-#{row.id}-tooltip"}
-            >
-              Activate
-            </div>
-          </:col>
-          <:col :let={row} label="Actions" class="min-w-32">
-            <div class="flex items-center gap-2">
-              <span
-                interestfor={"provider-edit-#{row.id}-tooltip"}
-                aria-describedby={"provider-edit-#{row.id}-tooltip"}
-                title="Edit"
-                style={"anchor-name: --provider-edit-#{row.id}-tooltip"}
-                class="inline-flex"
-              >
-                <.dm_btn
-                  id={"provider-edit-#{row.id}"}
-                  type="button"
-                  phx-click="edit_provider"
-                  phx-value-id={row.id}
-                  phx-hook="WebComponentHook"
-                  variant="outline"
-                  size="xs"
-                  shape="circle"
-                  aria-label="Edit"
-                >
-                  <.dm_mdi name="pencil-outline" />
-                </.dm_btn>
-              </span>
-              <div
-                id={"provider-edit-#{row.id}-tooltip"}
-                popover="hint"
-                role="tooltip"
-                class="tooltip tooltip-bottom"
-                style={"position-anchor: --provider-edit-#{row.id}-tooltip"}
-              >
-                Edit
-              </div>
-              <span
-                interestfor={"provider-delete-#{row.id}-tooltip"}
-                aria-describedby={"provider-delete-#{row.id}-tooltip"}
-                title="Delete"
-                style={"anchor-name: --provider-delete-#{row.id}-tooltip"}
-                class="inline-flex"
-              >
-                <.dm_btn
-                  id={"provider-delete-#{row.id}"}
-                  type="button"
-                  phx-click="confirm_delete_provider"
-                  phx-value-id={row.id}
-                  phx-hook="WebComponentHook"
-                  variant="error"
-                  size="xs"
-                  shape="circle"
-                  aria-label="Delete"
-                >
-                  <.dm_mdi name="delete-outline" />
-                </.dm_btn>
-              </span>
-              <div
-                id={"provider-delete-#{row.id}-tooltip"}
-                popover="hint"
-                role="tooltip"
-                class="tooltip tooltip-bottom"
-                style={"position-anchor: --provider-delete-#{row.id}-tooltip"}
-              >
-                Delete
-              </div>
-            </div>
-          </:col>
-        </.dm_table>
+      <div id="providers-list" class="grid gap-4 lg:grid-cols-2">
+        <.dm_card :for={row <- @providers} variant="bordered" class="bg-surface-container-low min-w-0">
+          <:title>{row.provider["name"] || row.id}</:title>
+          <dl class="space-y-2 text-sm break-all">
+            <div><dt class="text-on-surface-variant">API</dt><dd>{format_api_type(row.provider["api_type"])}</dd></div>
+            <div><dt class="text-on-surface-variant">Connection kind</dt><dd>{row.provider["kind"] || "custom"}</dd></div>
+            <div><dt class="text-on-surface-variant">LLM Base URL</dt><dd>{blank_fallback(row.provider["base_url"], "Default endpoint")}</dd></div>
+            <div :if={row.provider["kind"] == "backplane"}><dt class="text-on-surface-variant">Backplane service origin</dt><dd>{blank_fallback(row.provider["service_origin"], "Not configured")}</dd></div>
+            <div><dt class="text-on-surface-variant">Credential</dt><dd>{credential_name(@credentials, row.provider["credential_id"])}</dd></div>
+          </dl>
+          <div class="mt-4 flex gap-2">
+            <.dm_btn id={"provider-edit-#{row.id}"} phx-click="edit_provider" phx-value-id={row.id} phx-hook="WebComponentHook" variant="outline" size="sm">Edit</.dm_btn>
+            <.dm_btn id={"provider-delete-#{row.id}"} phx-click="confirm_delete_provider" phx-value-id={row.id} phx-hook="WebComponentHook" variant="error" size="sm">Delete</.dm_btn>
+          </div>
+        </.dm_card>
       </div>
 
       <.dm_modal :if={@form} id="provider-settings-modal" phx-hook="ModalHook" size="lg" hide_close={true}>
@@ -460,18 +388,12 @@ defmodule Sigma.Web.SettingsLive do
               class="w-full"
               size="sm"
             />
-            <.dm_input
-              name="provider[model]"
-              value={@form["model"]}
-              label="Current Model"
-              placeholder="claude-3-5-sonnet-latest"
-              class="w-full"
-              size="sm"
-            />
+            <.dm_select name="provider[kind]" value={@form["kind"]} label="Connection kind" options={[{"custom", "Custom"}, {"backplane", "Backplane"}]} />
+            <.dm_input :if={@form["kind"] == "backplane"} name="provider[service_origin]" value={@form["service_origin"]} label="Backplane service origin" placeholder="https://backplane.example" />
             <.dm_input
               name="provider[base_url]"
               value={@form["base_url"]}
-              label="Base URL"
+              label="LLM Base URL"
               placeholder="https://api.anthropic.com"
               class="w-full"
               size="sm"
@@ -510,6 +432,15 @@ defmodule Sigma.Web.SettingsLive do
           <p class="text-on-surface">
             Delete the provider <span class="font-bold">"{@deleting_provider["name"]}"</span>?
           </p>
+          <p :if={@deleting_provider["error"]} class="mt-3 text-error" role="alert">{@deleting_provider["error"]}</p>
+          <div :if={@deleting_provider["references"] != []} class="mt-3 space-y-2 text-sm">
+            <p>Remove these references before deleting this connection:</p>
+            <ul class="list-disc pl-5">
+              <li :for={{kind, id} <- @deleting_provider["references"]}>
+                <.dm_link patch={provider_reference_path(kind)}>{provider_reference_label(kind)}: {id}</.dm_link>
+              </li>
+            </ul>
+          </div>
         </:body>
         <:footer>
           <.dm_btn
@@ -536,6 +467,13 @@ defmodule Sigma.Web.SettingsLive do
     </div>
     """
   end
+
+  defp provider_reference_label(:model), do: "Model"
+  defp provider_reference_label(:mcp), do: "MCP server"
+  defp provider_reference_label(:skills), do: "Skill source"
+  defp provider_reference_path(:model), do: ~p"/settings/models"
+  defp provider_reference_path(:mcp), do: ~p"/settings/mcp"
+  defp provider_reference_path(:skills), do: ~p"/settings/skills"
 
   defp render_credentials(assigns) do
     ~H"""
@@ -828,17 +766,6 @@ defmodule Sigma.Web.SettingsLive do
           <h2 class="text-2xl font-bold font-display">Skills</h2>
           <p class="text-sm text-on-surface-variant mt-1">Globally available Skills</p>
         </div>
-      </div>
-
-      <div :if={Map.get(@result, :remote_sources, []) != []} id="settings-remote-skill-sources" class="border-y border-outline-variant py-4">
-        <h3 class="text-sm font-bold text-on-surface">Remote sources</h3>
-        <ul class="mt-2 space-y-1 text-sm text-on-surface-variant">
-          <li :for={source <- @result.remote_sources}>
-            <span class="font-medium text-on-surface">{source.name}</span>
-            <span class="font-mono text-xs">{source.source_id}</span>
-            <span>{source.status}</span>
-          </li>
-        </ul>
       </div>
 
       <div
@@ -1235,6 +1162,14 @@ defmodule Sigma.Web.SettingsLive do
             </div>
 
             <div :if={@form["type"] == "http"} class="space-y-5">
+              <.dm_select name="mcp[source]" value={@form["source"]} label="Connection source" options={[{"standalone", "Standalone"}, {"provider", "Saved provider"}]} />
+              <div :if={@form["source"] == "provider"} class="space-y-4">
+                <.dm_select name="mcp[provider_id]" value={@form["provider_id"]} label="Provider" options={[{"", "Select a Backplane provider"} | backplane_provider_options(@providers)]} />
+                <.provider_service_preview provider_id={@form["provider_id"]} service={:mcp} credentials={@credentials} />
+                <.dm_select name="mcp[override_enabled]" value={@form["override_enabled"]} label="Override URL" options={[{"false", "Use inherited endpoint"}, {"true", "Override this MCP server URL"}]} />
+                <.dm_input :if={@form["override_enabled"] == "true"} name="mcp[url_override]" value={@form["url_override"]} label="MCP URL override" placeholder="https://example.com/mcp" />
+              </div>
+              <div :if={@form["source"] != "provider"} class="space-y-5">
               <div class="space-y-1">
                 <label class="text-[10px] font-bold opacity-40 uppercase tracking-wider text-on-surface">URL</label>
                 <.dm_input name="mcp[url]" value={@form["url"] || ""} placeholder="https://example.com/mcp" class="w-full" size="sm" />
@@ -1315,6 +1250,7 @@ defmodule Sigma.Web.SettingsLive do
                 rows={@form["headers"]}
                 credentials={@credentials}
               />
+              </div>
             </div>
 
             <div class="flex justify-end gap-3 pt-4 border-t border-outline-variant">
@@ -1370,6 +1306,30 @@ defmodule Sigma.Web.SettingsLive do
       </.dm_modal>
     </div>
     """
+  end
+
+  defp provider_service_preview(assigns) do
+    assigns =
+      assign(assigns, :resolved, Providers.resolve_service(assigns.provider_id, assigns.service))
+
+    ~H"""
+    <div class="rounded-lg bg-surface-container-high p-3 text-sm break-all">
+      <%= case @resolved do %>
+        <% {:ok, service} -> %>
+          <p>Inherited endpoint: {service.url}</p>
+          <p>Credential: {credential_name(@credentials, service.credential_id)}</p>
+        <% _ -> %>
+          <p class="text-error" role="status">Provider unavailable. Select a configured Backplane connection with a credential and service origin.</p>
+      <% end %>
+    </div>
+    """
+  end
+
+  defp backplane_provider_options(providers) do
+    providers
+    |> Enum.filter(fn {_, p} -> p["kind"] == "backplane" end)
+    |> Enum.map(fn {id, p} -> {id, p["name"] || id} end)
+    |> Enum.sort_by(&elem(&1, 1))
   end
 
   defp render_hooks(assigns) do
@@ -1620,13 +1580,20 @@ defmodule Sigma.Web.SettingsLive do
       |> Map.merge(params)
       |> normalize_provider_form()
 
-    {:ok, _} = save_provider_form(form)
+    case save_provider_form(form) do
+      {:ok, _} ->
+        {:noreply,
+         socket
+         |> assign(:provider_form, nil)
+         |> reload_current_settings_data()
+         |> put_flash(:info, provider_saved_message(form))}
 
-    {:noreply,
-     socket
-     |> assign(:provider_form, nil)
-     |> reload_current_settings_data()
-     |> put_flash(:info, provider_saved_message(form))}
+      {:error, _} ->
+        {:noreply,
+         socket
+         |> assign(:provider_form, form)
+         |> put_flash(:error, "Check the connection fields and service origin.")}
+    end
   end
 
   @impl true
@@ -1637,7 +1604,9 @@ defmodule Sigma.Web.SettingsLive do
     {:noreply,
      assign(socket, :deleting_provider, %{
        "id" => id,
-       "name" => provider["name"] || id
+       "name" => provider["name"] || id,
+       "references" => ConfigManager.provider_references(id),
+       "error" => nil
      })}
   end
 
@@ -1648,21 +1617,22 @@ defmodule Sigma.Web.SettingsLive do
 
   @impl true
   def handle_event("delete_provider", %{"id" => id}, socket) do
-    ConfigManager.delete_provider(id)
+    case ConfigManager.delete_provider(id) do
+      {:ok, _} ->
+        {:noreply, socket |> assign(:deleting_provider, nil) |> reload_current_settings_data()}
 
-    {:noreply,
-     socket
-     |> assign(:deleting_provider, nil)
-     |> reload_current_settings_data()}
+      {:error, {:provider_in_use, references}} ->
+        provider = ConfigManager.get_config()["providers"][id] || %{}
+
+        {:noreply,
+         assign(socket, :deleting_provider, %{
+           "id" => id,
+           "name" => provider["name"] || id,
+           "references" => references,
+           "error" => "This connection is still in use."
+         })}
+    end
   end
-
-  @impl true
-  def handle_event("set_active_provider", %{"id" => id}, socket) do
-    ConfigManager.set_active_provider(id)
-    {:noreply, reload_current_settings_data(socket)}
-  end
-
-  # Credential Handlers
 
   @impl true
   def handle_event("add_credential", _, socket) do
@@ -1872,8 +1842,13 @@ defmodule Sigma.Web.SettingsLive do
       {:error, :id_conflict} ->
         {:noreply, put_flash(socket, :error, "Another MCP server already uses that ID.")}
 
-      {:error, message} ->
-        {:noreply, put_flash(socket, :error, message)}
+      {:error, _} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "MCP server could not be saved. Check its provider, endpoint, and fields."
+         )}
     end
   end
 
@@ -2001,8 +1976,7 @@ defmodule Sigma.Web.SettingsLive do
 
     %{
       providers: provider_rows(config["providers"]),
-      credentials: config["credentials"] || %{},
-      active_provider_id: config["active_provider_id"] || ""
+      credentials: config["credentials"] || %{}
     }
   end
 
@@ -2015,7 +1989,7 @@ defmodule Sigma.Web.SettingsLive do
   end
 
   defp load_settings_data(:skills) do
-    Skills.list_global() |> Map.put(:remote_sources, Facade.remote_sources())
+    Skills.list_global()
   end
 
   defp load_settings_data(:mcp) do
@@ -2024,6 +1998,7 @@ defmodule Sigma.Web.SettingsLive do
 
     %{
       servers: mcp_server_rows(mcp_config["servers"]),
+      providers: config["providers"] || %{},
       credentials: config["credentials"] || %{},
       file: ConfigManager.mcp_file()
     }
@@ -2215,7 +2190,8 @@ defmodule Sigma.Web.SettingsLive do
       "credential_id" => "",
       "auth_type" => "x-api-key",
       "auth_header_name" => "",
-      "model" => "claude-3-5-sonnet-latest",
+      "kind" => "custom",
+      "service_origin" => "",
       "base_url" => "https://api.anthropic.com"
     }
   end
@@ -2234,19 +2210,33 @@ defmodule Sigma.Web.SettingsLive do
       "auth_type" => auth_type,
       "auth_header_name" =>
         normalize_provider_auth_header_name(auth_type, provider["auth_header_name"]),
-      "model" => provider["model"] || "",
+      "kind" => provider["kind"] || "custom",
+      "service_origin" => provider["service_origin"] || "",
       "base_url" => provider["base_url"] || ""
     })
   end
 
   defp save_provider_form(%{"mode" => "edit", "id" => id} = form)
        when is_binary(id) and id != "" do
-    ConfigManager.update_provider(id, provider_form_updates(form))
+    with :ok <- validate_provider_form(form),
+         do: ConfigManager.update_provider(id, provider_form_updates(form))
   end
 
   defp save_provider_form(form) do
-    ConfigManager.add_provider(provider_form_updates(form))
+    with :ok <- validate_provider_form(form),
+         do: ConfigManager.add_provider(provider_form_updates(form))
   end
+
+  defp validate_provider_form(%{"kind" => "backplane"} = form) do
+    origin = String.trim(form["service_origin"] || "")
+    uri = URI.parse(origin)
+
+    if Providers.valid_http_url?(origin) and uri.path in [nil, "", "/"] and is_nil(uri.query),
+      do: :ok,
+      else: {:error, :invalid_service_origin}
+  end
+
+  defp validate_provider_form(_), do: :ok
 
   defp provider_form_updates(form) do
     auth_type =
@@ -2259,7 +2249,8 @@ defmodule Sigma.Web.SettingsLive do
       "auth_type" => auth_type,
       "auth_header_name" =>
         normalize_provider_auth_header_name(auth_type, form["auth_header_name"]),
-      "model" => trim_form_value(form["model"]),
+      "kind" => form["kind"] || "custom",
+      "service_origin" => trim_form_value(form["service_origin"]),
       "base_url" => trim_form_value(form["base_url"])
     }
   end
@@ -2283,7 +2274,8 @@ defmodule Sigma.Web.SettingsLive do
   end
 
   defp default_auth_type(api_type)
-       when api_type in ["openai", "openai-responses", "openai-completions"], do: "bearer"
+       when api_type in ["openai", "openai-responses", "openai-completions"],
+       do: "bearer"
 
   defp default_auth_type(_api_type), do: "x-api-key"
 
@@ -2389,6 +2381,10 @@ defmodule Sigma.Web.SettingsLive do
       "id" => "server_#{System.unique_integer([:positive])}",
       "type" => "stdio",
       "command" => "",
+      "source" => "standalone",
+      "provider_id" => "",
+      "override_enabled" => "false",
+      "url_override" => "",
       "url" => "",
       "auth_type" => "",
       "auth_header_name" => "",
@@ -2420,6 +2416,10 @@ defmodule Sigma.Web.SettingsLive do
       "id" => id,
       "type" => type,
       "command" => server["command"] || "",
+      "source" => if(server["providerId"], do: "provider", else: "standalone"),
+      "provider_id" => server["providerId"] || "",
+      "override_enabled" => if(server["urlOverride"] not in [nil, ""], do: "true", else: "false"),
+      "url_override" => server["urlOverride"] || "",
       "url" => server["url"] || "",
       "auth_type" => auth_type,
       "auth_header_name" => auth_header_name,
@@ -2440,6 +2440,10 @@ defmodule Sigma.Web.SettingsLive do
         "id",
         "command",
         "url",
+        "source",
+        "provider_id",
+        "override_enabled",
+        "url_override",
         "auth_type",
         "auth_header_name",
         "auth_value",
@@ -2483,11 +2487,32 @@ defmodule Sigma.Web.SettingsLive do
     id = form["id"] |> to_string() |> String.trim()
     type = normalize_mcp_type(form["type"])
 
-    if id == "" do
-      {:error, :invalid_id}
-    else
-      {:ok, mcp_server_updates_for_type(id, type, form)}
+    cond do
+      id == "" ->
+        {:error, :invalid_id}
+
+      type == "http" and form["source"] == "provider" ->
+        with {:ok, _} <- Providers.resolve_service(form["provider_id"], :mcp),
+             true <-
+               form["override_enabled"] != "true" or
+                 Providers.valid_http_url?(String.trim(form["url_override"] || "")) do
+          {:ok, mcp_server_updates_for_type(id, type, form)}
+        else
+          _ -> {:error, :provider_unavailable}
+        end
+
+      true ->
+        {:ok, mcp_server_updates_for_type(id, type, form)}
     end
+  end
+
+  defp mcp_server_updates_for_type(id, "http", %{"source" => "provider"} = form) do
+    %{"id" => id, "type" => "http", "providerId" => form["provider_id"]}
+    |> then(fn server ->
+      if form["override_enabled"] == "true",
+        do: Map.put(server, "urlOverride", String.trim(form["url_override"] || "")),
+        else: server
+    end)
   end
 
   defp mcp_server_updates_for_type(id, "http", form) do
@@ -2524,6 +2549,12 @@ defmodule Sigma.Web.SettingsLive do
   end
 
   defp save_mcp_server_form(%{"original_id" => original_id}, updates) do
+    updates =
+      Map.merge(
+        %{"providerId" => nil, "urlOverride" => nil, "authType" => nil, "authHeaderName" => nil},
+        updates
+      )
+
     ConfigManager.update_mcp_server(original_id, updates)
   end
 
@@ -2772,5 +2803,12 @@ defmodule Sigma.Web.SettingsLive do
     |> Enum.join(" ")
   end
 
-  defp mcp_server_summary(server), do: inspect(server)
+  defp mcp_server_summary(%{"providerId" => id} = server) do
+    case Providers.resolve_service(id, :mcp) do
+      {:ok, service} -> "http: " <> (server["urlOverride"] || service.url)
+      _ -> "Provider unavailable"
+    end
+  end
+
+  defp mcp_server_summary(_server), do: "Unavailable configuration"
 end

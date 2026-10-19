@@ -42,7 +42,7 @@ defmodule Sigma.Session.Skills.RemoteAdapter do
          remote_sources: sources()
        }}
     else
-      {:error, %Error{} = error} -> {:error, Protocol.error_map(error)}
+      {:error, %Error{} = error} -> {:error, remote_error(error)}
       {:error, %{code: _code} = error} -> {:error, error}
       {:error, code} when is_atom(code) -> {:error, safe_error(code)}
     end
@@ -73,7 +73,7 @@ defmodule Sigma.Session.Skills.RemoteAdapter do
          ]
        }}
     else
-      {:error, %Error{} = error} -> {:error, Protocol.error_map(error)}
+      {:error, %Error{} = error} -> {:error, remote_error(error)}
       {:error, %{code: _code} = error} -> {:error, error}
       {:error, code} when is_atom(code) -> {:error, safe_error(code)}
     end
@@ -127,7 +127,8 @@ defmodule Sigma.Session.Skills.RemoteAdapter do
         endpoint: source.base_url,
         source_id: source.source_id,
         access_context_id: source.access_context_id,
-        credential_supplier: ConfigManager.credential_supplier(source.credential_id)
+        credential_supplier: ConfigManager.credential_supplier(source.credential_id),
+        credential_id: source.credential_id
       )
 
     RemoteSource.new(source_opts)
@@ -193,6 +194,7 @@ defmodule Sigma.Session.Skills.RemoteAdapter do
   defp source_status(source) do
     cond do
       not source.enabled? -> "disabled"
+      source.resolution_error != nil -> "provider_unavailable"
       source.base_url == "" -> "invalid_configuration"
       source.credential_id == "" -> "invalid_configuration"
       source.access_context_id == "" -> "invalid_configuration"
@@ -207,6 +209,11 @@ defmodule Sigma.Session.Skills.RemoteAdapter do
     |> :crypto.hash(:erlang.term_to_binary({items, cursor}))
     |> Base.encode16(case: :lower)
   end
+
+  defp remote_error(%Error{code: code} = error) when code in [:unauthorized, :forbidden],
+    do: Map.put(Protocol.error_map(error), :reason, code)
+
+  defp remote_error(error), do: Protocol.error_map(error)
 
   defp safe_error(code) do
     messages = %{

@@ -1,7 +1,8 @@
 defmodule Sigma.Web.NewSessionLive do
   use Sigma.Web, :live_view
 
-  alias Sigma.Session.{ConfigManager, RepoManager, SessionFiles}
+  alias Sigma.Session.{ConfigEvents, ConfigManager, Models, RepoManager, SessionFiles}
+  alias Sigma.Agent.ContextPolicy
   alias Phoenix.LiveView.AsyncResult
   import Sigma.Web.ProjectSidebar
 
@@ -9,6 +10,7 @@ defmodule Sigma.Web.NewSessionLive do
   def mount(%{"repository" => encoded_repository} = params, _session, socket) do
     case fetch_registered_repo(encoded_repository) do
       {:ok, workdir, _repo} ->
+        if connected?(socket), do: ConfigEvents.subscribe()
         sessions_dir = get_sessions_dir(workdir)
 
         socket =
@@ -27,6 +29,7 @@ defmodule Sigma.Web.NewSessionLive do
           |> assign(:selected_mcp_server_ids, [])
           |> assign(:model_options, [])
           |> assign(:selected_model_value, nil)
+          |> assign(:context_limit_input, "")
           |> assign(:skill_reference, params["skill"])
           |> assign(:session_options_loading, true)
           |> assign(:session_options, AsyncResult.loading())
@@ -63,6 +66,8 @@ defmodule Sigma.Web.NewSessionLive do
 
   @impl true
   def handle_async(:session_options, {:ok, {:ok, options}}, socket) do
+    config = ConfigManager.get_config()
+
     {:noreply,
      socket
      |> assign(:branches, options.branches)
@@ -71,8 +76,8 @@ defmodule Sigma.Web.NewSessionLive do
      |> assign(:selected_worktree, List.first(options.worktrees))
      |> assign(:mcp_servers, options.mcp_servers)
      |> assign(:selected_mcp_server_ids, options.selected_mcp_server_ids)
-     |> assign(:model_options, options.model_options)
-     |> assign(:selected_model_value, options.selected_model_value)
+     |> assign(:model_options, model_options(config, config["active_provider_id"]))
+     |> assign(:selected_model_value, default_model_value(config, config["active_provider_id"]))
      |> assign(:session_options_loading, false)
      |> assign(:session_options, AsyncResult.ok(socket.assigns.session_options, true))}
   end
@@ -262,6 +267,7 @@ defmodule Sigma.Web.NewSessionLive do
                     value={@selected_model_value}
                     class="w-full"
                   >
+                    <option :if={is_nil(@selected_model_value)} value="" disabled selected>Choose a model</option>
                     <option
                       :for={option <- @model_options}
                       value={option.value}
@@ -274,8 +280,17 @@ defmodule Sigma.Web.NewSessionLive do
                 <p class="mt-2 text-xs text-on-surface-variant">
                   Stored with this session and restored when the session opens.
                 </p>
+                <form id="session-context-budget-form" phx-change="select_context_limit" class="mt-4">
+                  <.dm_input id="session-context-budget" type="number" name="context_limit" min="1" step="1"
+                    label="Context budget (tokens)" value={@context_limit_input}
+                    placeholder={to_string(default_context_budget(assigns))} />
+                  <p class="mt-2 text-xs text-on-surface-variant">Leave empty to use the model default ({default_context_budget(assigns)} tokens). You can adjust this in the session.</p>
+                </form>
               </div>
             </.dm_card>
+            <div :if={!@session_options_loading and Enum.empty?(@model_options)} class="rounded-xl border border-outline-variant p-4 text-sm">
+              No configured models. <.link navigate={~p"/settings/models"} class="text-primary underline">Configure models</.link>
+            </div>
 
             <!-- MCP server overrides -->
             <.dm_card :if={map_size(@mcp_servers) > 0} variant="bordered" class="bg-surface-container-low">
@@ -404,50 +419,38 @@ defmodule Sigma.Web.NewSessionLive do
 
   defp model_options(system_config, active_provider_id) do
     system_config
-    |> Map.get("providers", %{})
-    |> Enum.sort_by(fn {provider_id, provider} ->
-      {provider_id != active_provider_id, provider["name"] || provider_id}
+    |> Models.list()
+    |> Enum.sort_by(fn model ->
+      {model.provider_id != active_provider_id, model.provider_name, model.provider_id}
     end)
-    |> Enum.flat_map(fn {provider_id, provider} ->
-      provider
-      |> Map.get("models", [])
-      |> List.wrap()
-      |> Enum.map(&to_model_id/1)
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.uniq()
-      |> Enum.map(&model_option(provider_id, provider, &1))
+    |> Enum.map(fn model ->
+      Map.merge(model, %{
+        value: model_option_value(model.provider_id, model.model_id),
+        label: "#{model.provider_name}: #{model.name}"
+      })
     end)
   end
 
   defp default_model_value(system_config, active_provider_id) do
-    provider = get_in(system_config, ["providers", active_provider_id])
-    model_id = provider && provider["model"]
+    model_id = system_config["default_model_id"]
 
-    if is_binary(active_provider_id) and active_provider_id != "" and is_binary(model_id) and
-         model_id != "" do
+    if Enum.any?(
+         Models.list(system_config),
+         &(&1.provider_id == active_provider_id and &1.model_id == model_id)
+       ) do
       model_option_value(active_provider_id, model_id)
     end
   end
 
-  defp model_option(provider_id, provider, model_id) do
-    provider_name = provider["name"] || provider_id
-
-    %{
-      value: model_option_value(provider_id, model_id),
-      label: "#{provider_name}: #{model_id}",
-      provider_id: provider_id,
-      model_id: model_id
-    }
+  defp default_context_budget(assigns) do
+    model = selected_model(assigns.model_options, assigns.selected_model_value)
+    {:ok, limit} = ContextPolicy.new_session_limit(if(model, do: model.metadata, else: %{}))
+    limit
   end
 
   defp model_option_value(provider_id, model_id) do
     Jason.encode!(%{"provider_id" => provider_id, "model_id" => model_id})
   end
-
-  defp to_model_id(%{"id" => id}) when is_binary(id), do: id
-  defp to_model_id(%{id: id}) when is_binary(id), do: id
-  defp to_model_id(id) when is_binary(id), do: id
-  defp to_model_id(_), do: ""
 
   defp effective_path(assigns) do
     case assigns.mode do
@@ -515,11 +518,18 @@ defmodule Sigma.Web.NewSessionLive do
 
   @impl true
   def handle_event("select_model", %{"model" => selected}, socket) do
-    if valid_model_value?(socket.assigns.model_options, selected) do
+    options = model_options(ConfigManager.get_config(), nil)
+
+    if valid_model_value?(options, selected) do
       {:noreply, assign(socket, :selected_model_value, selected)}
     else
       {:noreply, put_flash(socket, :error, "Unknown model selection.")}
     end
+  end
+
+  @impl true
+  def handle_event("select_context_limit", %{"context_limit" => value}, socket) do
+    {:noreply, assign(socket, :context_limit_input, value)}
   end
 
   @impl true
@@ -534,35 +544,64 @@ defmodule Sigma.Web.NewSessionLive do
     mode = socket.assigns.mode
     sessions_dir = socket.assigns.sessions_dir
 
-    case session_workdir(socket, workdir, branch, mode) do
-      {:ok, cwd, is_worktree} ->
-        meta = %{
-          cwd: cwd,
-          branch: branch,
-          worktree: is_worktree,
-          mcp_server_ids: socket.assigns.selected_mcp_server_ids
-        }
+    options = model_options(ConfigManager.get_config(), nil)
 
-        case create_session_files(
-               sessions_dir,
-               meta,
-               cwd,
-               socket.assigns.model_options,
-               socket.assigns.selected_model_value
-             ) do
-          {:ok, session_id} ->
-            {:noreply,
-             push_navigate(socket,
-               to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{session_id}"
-             )}
+    with %{} = model <- selected_model(options, socket.assigns.selected_model_value),
+         {:ok, _config} <- Models.resolve(model.provider_id, model.model_id),
+         {:ok, limit} <-
+           ContextPolicy.new_session_limit(model.metadata, socket.assigns.context_limit_input),
+         {:ok, cwd, is_worktree} <- session_workdir(socket, workdir, branch, mode) do
+      meta = %{
+        cwd: cwd,
+        branch: branch,
+        worktree: is_worktree,
+        mcp_server_ids: socket.assigns.selected_mcp_server_ids,
+        context_limit: limit
+      }
 
-          {:error, _reason} ->
-            {:noreply, put_flash(socket, :error, "Could not create session.")}
-        end
+      case create_session_files(
+             sessions_dir,
+             meta,
+             cwd,
+             {model.provider_id, model.model_id}
+           ) do
+        {:ok, session_id} ->
+          {:noreply,
+           push_navigate(socket,
+             to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{session_id}"
+           )}
+
+        {:error, _reason} ->
+          {:noreply, put_flash(socket, :error, "Could not create session.")}
+      end
+    else
+      nil ->
+        {:noreply,
+         put_flash(socket, :error, "Choose a configured model before creating a session.")}
+
+      {:error, :model_unavailable} ->
+        {:noreply,
+         put_flash(socket, :error, "Choose a configured model before creating a session.")}
+
+      {:error, :invalid_context_limit} ->
+        {:noreply, put_flash(socket, :error, "Context budget must be a positive integer.")}
 
       {:error, message} ->
         {:noreply, put_flash(socket, :error, message)}
     end
+  end
+
+  @impl true
+  def handle_info({:models_changed, _agent_dir}, socket) do
+    config = ConfigManager.get_config()
+    options = model_options(config, config["active_provider_id"])
+    selected = socket.assigns.selected_model_value
+
+    {:noreply,
+     assign(socket,
+       model_options: options,
+       selected_model_value: if(valid_model_value?(options, selected), do: selected)
+     )}
   end
 
   defp session_workdir(socket, workdir, branch, :create_worktree) do
@@ -592,26 +631,20 @@ defmodule Sigma.Web.NewSessionLive do
 
   defp session_workdir(_socket, workdir, _branch, _mode), do: {:ok, workdir, false}
 
-  defp create_session_files(sessions_dir, meta, cwd, model_options, selected, attempts \\ 8)
+  defp create_session_files(sessions_dir, meta, cwd, initial_model, attempts \\ 8)
 
-  defp create_session_files(_sessions_dir, _meta, _cwd, _model_options, _selected, 0),
+  defp create_session_files(_sessions_dir, _meta, _cwd, _model, 0),
     do: {:error, :session_id_conflict}
 
-  defp create_session_files(sessions_dir, meta, cwd, model_options, selected, attempts) do
+  defp create_session_files(sessions_dir, meta, cwd, initial_model, attempts) do
     session_id = generate_session_id()
-
-    initial_model =
-      case selected_model(model_options, selected) do
-        %{provider_id: provider_id, model_id: model_id} -> {provider_id, model_id}
-        nil -> nil
-      end
 
     case SessionFiles.create(sessions_dir, session_id, meta, cwd, model: initial_model) do
       :ok ->
         {:ok, session_id}
 
       {:error, :already_exists} ->
-        create_session_files(sessions_dir, meta, cwd, model_options, selected, attempts - 1)
+        create_session_files(sessions_dir, meta, cwd, initial_model, attempts - 1)
 
       {:error, _reason} = error ->
         error

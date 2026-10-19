@@ -95,7 +95,12 @@ defmodule Sigma.Web.NewSessionLiveTest do
       log_path = Path.join(ConfigManager.sessions_dir(workdir), "#{session_id}.jsonl")
 
       assert %{"mcp_server_ids" => []} = meta_path |> File.read!() |> Jason.decode!()
-      assert {:ok, [%{"type" => "session", "cwd" => ^workdir}]} = JsonlFile.read(log_path)
+
+      assert {:ok,
+              [
+                %{"type" => "session", "cwd" => ^workdir},
+                %{"type" => "model_change", "model" => "test/mock-model"}
+              ]} = JsonlFile.read(log_path)
 
       {:ok, session_view, _session_html} =
         live(conn, "/repository/#{encoded_repository}/sessions/#{session_id}")
@@ -156,6 +161,71 @@ defmodule Sigma.Web.NewSessionLiveTest do
 
       assert {:ok, snapshot} = Log.snapshot(log_path)
       assert %{provider_id: "anthropic", model_id: "opus"} = snapshot
+    end)
+  end
+
+  @tag :tmp_dir
+  test "model budget is persisted once and stale selections fail before worktree effects", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    workdir =
+      Path.join(System.tmp_dir!(), "sigma-model-budget-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workdir)
+    init_git_repo!(workdir)
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      write_provider_configs("openai", "smart", %{
+        "openai" => [%{"id" => "smart", "defaultContextLimit" => 131_072}]
+      })
+
+      {:ok, _} = RepoManager.add_repo(workdir, name: "Repo")
+      encoded = Base.url_encode64(workdir, padding: false)
+      {:ok, view, _} = live(conn, "/repository/#{encoded}/sessions/new")
+      render_async(view, 1_000)
+      assert {:error, {:live_redirect, _}} = render_click(view, "create_session")
+      [path] = Path.wildcard(Path.join(ConfigManager.sessions_dir(workdir), "*.meta.json"))
+      assert Jason.decode!(File.read!(path))["context_limit"] == 131_072
+
+      {:ok, stale, _} = live(conn, "/repository/#{encoded}/sessions/new")
+      render_async(stale, 1_000)
+      render_click(stale, "set_mode", %{"mode" => "create_worktree"})
+      render_change(stale, "update_worktree_name", %{"worktree_name" => "must-not-exist"})
+      assert {:ok, _} = Sigma.Session.Models.remove("openai", "smart")
+      assert render_click(stale, "create_session") =~ "Choose a configured model"
+      refute File.exists?(Path.join([workdir, ".trees", "must-not-exist"]))
+
+      assert [^path] =
+               Path.wildcard(Path.join(ConfigManager.sessions_dir(workdir), "*.meta.json"))
+    end)
+  end
+
+  @tag :tmp_dir
+  test "explicit custom session budget overrides the model default", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    workdir =
+      Path.join(System.tmp_dir!(), "sigma-explicit-budget-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workdir)
+    on_exit(fn -> File.rm_rf!(workdir) end)
+
+    with_agent_dir(tmp_dir, fn ->
+      write_provider_configs("openai", "smart", %{
+        "openai" => [%{"id" => "smart", "defaultContextLimit" => 128_000}]
+      })
+
+      {:ok, _} = RepoManager.add_repo(workdir, name: "Repo")
+      encoded = Base.url_encode64(workdir, padding: false)
+      {:ok, view, _} = live(conn, "/repository/#{encoded}/sessions/new")
+      render_async(view, 1_000)
+      render_change(view, "select_context_limit", %{"context_limit" => "65536"})
+      assert {:error, {:live_redirect, _}} = render_click(view, "create_session")
+      [path] = Path.wildcard(Path.join(ConfigManager.sessions_dir(workdir), "*.meta.json"))
+      assert Jason.decode!(File.read!(path))["context_limit"] == 65_536
     end)
   end
 
@@ -410,7 +480,11 @@ defmodule Sigma.Web.NewSessionLiveTest do
       assert %{"cwd" => ^worktree_path, "worktree" => true} =
                meta_path |> File.read!() |> Jason.decode!()
 
-      assert {:ok, [%{"type" => "session", "cwd" => ^worktree_path}]} = JsonlFile.read(log_path)
+      assert {:ok,
+              [
+                %{"type" => "session", "cwd" => ^worktree_path},
+                %{"type" => "model_change", "model" => "test/mock-model"}
+              ]} = JsonlFile.read(log_path)
     end)
   end
 
@@ -501,6 +575,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
     Application.put_env(:sigma_session, :agent_dir, Path.join(tmp_dir, "agent"))
 
     try do
+      write_provider_configs("test", "mock-model", %{"test" => ["mock-model"]})
       fun.()
     after
       if previous do

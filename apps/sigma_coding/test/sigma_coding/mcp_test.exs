@@ -1,6 +1,37 @@
 defmodule Sigma.Coding.MCPTest do
   use ExUnit.Case, async: true
 
+  test "invalid provider configuration is surfaced without constructing a client" do
+    owner = self()
+    handler = "invalid-mcp-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:sigma, :mcp, :server, :error],
+      fn _, _, metadata, _ -> send(owner, {:invalid_mcp, metadata}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    assert {:ok, [], %{clients: clients, handles: []}} =
+             Sigma.Coding.MCP.start_session("invalid-#{System.unique_integer([:positive])}", %{
+               "missing" => %{
+                 "configuration_error" => :provider_unavailable,
+                 "type" => "stdio",
+                 "command" => "must-not-execute"
+               }
+             })
+
+    assert clients == %{}
+
+    assert_receive {:invalid_mcp,
+                    %{
+                      server_id: "missing",
+                      reason: "{:invalid_configuration, :provider_unavailable}"
+                    }}
+  end
+
   @tag :tmp_dir
   test "discovers and dispatches stdio MCP tools", %{tmp_dir: tmp_dir} do
     python = System.find_executable("python3") || System.find_executable("python")

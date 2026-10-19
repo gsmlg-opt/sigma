@@ -243,8 +243,11 @@ defmodule Sigma.Web.SessionLiveTest do
       assert metadata["context_limit"] == limit
     end
 
-    render_change(first, "select_context_limit", %{"context_limit" => "42"})
-    assert Sigma.Agent.status(agent).context_policy.context_limit == 256_000
+    render_change(first, "select_context_limit", %{"context_limit" => "131072"})
+    assert Sigma.Agent.status(agent).context_policy.context_limit == 131_072
+    assert has_element?(first, "#context-limit-select option[value='131072'][selected]")
+    render_change(first, "select_context_limit", %{"context_limit" => "0"})
+    assert Sigma.Agent.status(agent).context_policy.context_limit == 131_072
     render_change(first, "select_context_limit", %{"context_limit" => "768000"})
     stop_repository_supervisors(@workdir)
     {:ok, reopened, _} = live_loaded(conn, path)
@@ -1168,12 +1171,66 @@ defmodule Sigma.Web.SessionLiveTest do
         |> File.read!()
         |> Jason.decode!()
 
-      assert settings["defaultProvider"] == "anthropic"
-      assert settings["defaultModel"] == "opus"
+      assert settings["defaultProvider"] == "openai"
+      assert settings["defaultModel"] == "smart"
 
       assert {:ok, snapshot} = Log.snapshot(storage_path)
       assert %{provider_id: "anthropic", model_id: "opus"} = snapshot
       assert File.read!(meta_path) == meta_bytes
+    end)
+  end
+
+  @tag :tmp_dir
+  test "forged and removed models cannot enter session choices or receive subsequent prompts", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    with_agent_config(tmp_dir, fn ->
+      write_provider_configs("openai", "smart", %{"openai" => ["smart", "fast"]})
+      session_id = unique_session_id("configured-only")
+      {:ok, view, _} = live_loaded(conn, session_path(session_id))
+      storage_path = session_storage_path(session_id)
+      before_config = File.read!(Path.join(ConfigManager.agent_dir(), "models.json"))
+      before_log = if File.exists?(storage_path), do: File.read!(storage_path)
+
+      value = Jason.encode!(%{"provider_id" => "openai", "model_id" => "unadded"})
+      assert render_change(view, "select_model", %{"model" => value}) =~ "Unknown model selection"
+      assert File.read!(Path.join(ConfigManager.agent_dir(), "models.json")) == before_config
+      assert if(File.exists?(storage_path), do: File.read!(storage_path)) == before_log
+
+      assert {:ok, _} = Sigma.Session.Models.remove("openai", "smart")
+      assert_eventually(fn -> not has_element?(view, "#model-select option", "openai: smart") end)
+      assert render(view) =~ "Model unavailable"
+
+      html = render_hook(view, "send_prompt", %{"value" => "Do not run", "images" => []})
+      assert html =~ "Choose a configured model"
+      assert if(File.exists?(storage_path), do: File.read!(storage_path)) == before_log
+
+      selected = Jason.encode!(%{"provider_id" => "openai", "model_id" => "fast"})
+      render_change(view, "select_model", %{"model" => selected})
+      refute render(view) =~ "Model unavailable"
+    end)
+  end
+
+  @tag :tmp_dir
+  test "a removed historical model is unavailable instead of using the global default", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    with_agent_config(tmp_dir, fn ->
+      write_provider_configs("openai", "smart", %{"openai" => ["smart"]})
+      session_id = unique_session_id("removed-history")
+      path = session_storage_path(session_id)
+      File.mkdir_p!(Path.dirname(path))
+      assert :ok = Log.persist_event(path, {:agent_start, @workdir})
+      assert {:ok, _} = Log.append_model_change(path, "openai", "removed")
+      before_log = File.read!(path)
+      {:ok, view, html} = live_loaded(conn, session_path(session_id))
+      assert html =~ "Model unavailable"
+      assert has_element?(view, "a[href='/settings/models']")
+      refute has_element?(view, "#model-select option[value*='removed']")
+      assert is_nil(Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent))
+      assert File.read!(path) == before_log
     end)
   end
 
@@ -2682,6 +2739,61 @@ defmodule Sigma.Web.SessionLiveTest do
     assert Enum.count(entries, fn entry ->
              get_in(entry, ["message", "metadata", "retry_of_turn_id"]) == "turn-first"
            end) == 1
+  end
+
+  @tag :tmp_dir
+  test "removing the current model after preparing Retry leaves the checkpoint unchanged", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    with_agent_config(tmp_dir, fn ->
+      write_provider_configs("openai", "smart", %{"openai" => ["smart"]})
+      session_id = unique_session_id("removed-retry")
+      storage_path = session_storage_path(session_id)
+      File.mkdir_p!(Path.dirname(storage_path))
+
+      user = %{
+        Message.user("removed-retry-user", "try again")
+        | metadata: %{turn_id: "turn-retry"}
+      }
+
+      assert :ok = Log.persist_event(storage_path, {:agent_start, @workdir})
+      assert {:ok, _} = Log.append_model_change(storage_path, "openai", "smart")
+      assert :ok = Log.persist_event(storage_path, {:message_end, user})
+      {:ok, view, _} = live_loaded(conn, session_path(session_id))
+      assert render_click(view, "prepare_retry", %{"msg-id" => user.id}) =~ "Retry once"
+      before_log = File.read!(storage_path)
+
+      assert {:ok, _} = Sigma.Session.Models.remove("openai", "smart")
+      html = render_click(view, "confirm_retry")
+      assert html =~ "Choose a configured model before retrying."
+      assert File.read!(storage_path) == before_log
+      refute has_element?(view, "#retry-turn-modal")
+    end)
+  end
+
+  @tag :tmp_dir
+  test "manual compaction rejects a removed model before issuing a request", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    with_agent_config(tmp_dir, fn ->
+      with_mock_provider(CaptureProvider, fn ->
+        with_capture_provider_pid(self(), fn ->
+          write_provider_configs("openai", "smart", %{"openai" => ["smart"]})
+          session_id = unique_session_id("removed-compact")
+          storage_path = preload_compactable_history(session_id)
+          {:ok, view, _} = live_loaded(conn, session_path(session_id))
+          before_log = File.read!(storage_path)
+          assert {:ok, _} = Sigma.Session.Models.remove("openai", "smart")
+
+          html = render_click(view, "compact_session")
+          assert html =~ "Choose a configured model before compacting."
+          refute_receive {:provider_params, _}, 100
+          assert File.read!(storage_path) == before_log
+        end)
+      end)
+    end)
   end
 
   test "renders and answers an AskUserQuestion request", %{conn: conn} do

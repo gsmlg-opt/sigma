@@ -3,6 +3,8 @@ defmodule Sigma.Web.SessionLive do
 
   alias Sigma.Agent.SessionContext
   alias Sigma.Session.ConfigManager
+  alias Sigma.Session.ConfigEvents
+  alias Sigma.Session.Models
   alias Sigma.Session.RepoManager
   alias Sigma.Session.SessionFiles
   alias Sigma.Session.SkillExpander
@@ -64,6 +66,7 @@ defmodule Sigma.Web.SessionLive do
     log_session_id = Sigma.Logs.session_key(repo_key, session_id)
 
     if connected?(socket) do
+      ConfigEvents.subscribe()
       Phoenix.PubSub.subscribe(Sigma.Web.PubSub, logs_topic(repo_key, session_id))
       Sigma.Logs.start_session(log_session_id)
     end
@@ -240,7 +243,7 @@ defmodule Sigma.Web.SessionLive do
              context_trace: context_discovery.trace,
              effective_cwd: effective_cwd,
              mcp_server_ids: mcp_server_ids,
-             model_options: ensure_model_option(model_options, provider_id, model_id),
+             model_options: model_options,
              subagents: snapshot.subagents,
              subagents_available: snapshot.subagents_available,
              pending_user_questions: pending_user_questions,
@@ -309,6 +312,10 @@ defmodule Sigma.Web.SessionLive do
       |> assign(:effective_cwd, session_data.effective_cwd)
       |> assign(:mcp_server_ids, session_data.mcp_server_ids)
       |> assign(:model_options, session_data.model_options)
+      |> assign(
+        :model_unavailable,
+        not configured_model?(session_data.active_provider_id, session_data.current_model)
+      )
       |> assign(:subagents, session_data.subagents)
       |> assign(:subagents_available, session_data.subagents_available)
       |> assign(:pending_user_questions, session_data.pending_user_questions)
@@ -336,6 +343,14 @@ defmodule Sigma.Web.SessionLive do
       |> initialize_chat()
 
     {:noreply, socket}
+  end
+
+  def handle_async(:session_load, {:ok, {:error, {:provider_config, :model_unavailable}}}, socket) do
+    {:noreply,
+     socket
+     |> assign(:session_load, AsyncResult.failed(socket.assigns.session_load, :model_unavailable))
+     |> assign(:model_unavailable, true)
+     |> put_flash(:error, "Model unavailable. Restore this session's model in Models settings.")}
   end
 
   def handle_async(:session_load, {:ok, {:error, {:provider_config, reason}}}, socket) do
@@ -601,10 +616,11 @@ defmodule Sigma.Web.SessionLive do
                 <.dm_select
                   id="model-select"
                   name="model"
-                  value={@current_model_value}
+                  value={if(@model_unavailable, do: "", else: @current_model_value)}
                   size="xs"
                   disabled={not @session_ready or @turn_in_flight}
                 >
+                  <option :if={@model_unavailable} value="" selected disabled>Choose a configured model</option>
                   <option
                     :for={option <- @model_options}
                     value={option.value}
@@ -612,6 +628,9 @@ defmodule Sigma.Web.SessionLive do
                   >{option.label}</option>
                 </.dm_select>
               </form>
+              <span :if={@model_unavailable} id="session-model-unavailable" class="text-xs text-error" role="status">
+                Model unavailable. <.link navigate={~p"/settings/models"} class="underline">Models settings</.link>
+              </span>
 
               <button
                 id="session-subagents-open-btn"
@@ -672,7 +691,7 @@ defmodule Sigma.Web.SessionLive do
 
         <footer class="sigma-session-composer border-t border-outline-variant bg-surface px-4 py-3 md:px-6">
           <div class="relative mx-auto max-w-4xl">
-            <div :if={not @session_ready} class="mb-3 flex items-center gap-3 text-sm text-on-surface-variant">
+            <div :if={not @session_ready and is_nil(@session_load.failed)} class="mb-3 flex items-center gap-3 text-sm text-on-surface-variant">
               <.dm_loading_spinner size="sm" />
               <span>Loading session...</span>
             </div>
@@ -740,9 +759,14 @@ defmodule Sigma.Web.SessionLive do
             <.dm_select id="context-limit-select" name="context_limit" label="Context limit"
               value={to_string(@context_limit)} size="sm"
               disabled={not @session_ready or @turn_in_flight}>
-              <option :for={{label, limit} <- [{"256k", 256_000}, {"384k", 384_000}, {"500k", 500_000}, {"768k", 768_000}, {"1M", 1_000_000}]}
+              <option :for={{label, limit} <- context_limit_options(@context_limit)}
                 value={limit} selected={limit == @context_limit}>{label}</option>
             </.dm_select>
+          </form>
+          <form id="custom-context-limit-form" phx-submit="select_context_limit" class="mb-2 flex items-end gap-2">
+            <.dm_input id="custom-context-limit" type="number" name="context_limit" label="Custom budget (tokens)"
+              value={@context_limit} min="1" step="1" disabled={not @session_ready or @turn_in_flight} />
+            <.dm_btn native_submit size="sm" disabled={not @session_ready or @turn_in_flight}>Apply</.dm_btn>
           </form>
           <p :if={@session_ready and is_nil(@context_policy[:context_limit])} class="mb-2 text-xs text-on-surface-variant">
             Context limit applies after the current turn finishes.
@@ -1635,42 +1659,32 @@ defmodule Sigma.Web.SessionLive do
 
   defp model_options(system_config, active_provider_id) do
     system_config
-    |> Map.get("providers", %{})
-    |> Enum.sort_by(fn {provider_id, provider} ->
-      {provider_id != active_provider_id, provider["name"] || provider_id}
+    |> Models.list()
+    |> Enum.sort_by(fn model ->
+      {model.provider_id != active_provider_id, model.provider_name, model.provider_id}
     end)
-    |> Enum.flat_map(fn {provider_id, provider} ->
-      provider
-      |> Map.get("models", [])
-      |> List.wrap()
-      |> Enum.map(&to_model_id/1)
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.uniq()
-      |> Enum.map(&model_option(provider_id, provider, &1))
+    |> Enum.map(fn model ->
+      %{
+        value: model_option_value(model.provider_id, model.model_id),
+        label: "#{model.provider_name}: #{model.name}",
+        provider_id: model.provider_id,
+        model_id: model.model_id
+      }
     end)
   end
 
-  defp ensure_model_option(options, _provider_id, nil), do: options
+  defp context_limit_options(current) do
+    quick = [
+      {"256k", 256_000},
+      {"384k", 384_000},
+      {"500k", 500_000},
+      {"768k", 768_000},
+      {"1M", 1_000_000}
+    ]
 
-  defp ensure_model_option(options, provider_id, model_id) do
-    value = model_option_value(provider_id, model_id)
-
-    if Enum.any?(options, &(&1.value == value)) do
-      options
-    else
-      [%{value: value, label: model_id, provider_id: provider_id, model_id: model_id} | options]
-    end
-  end
-
-  defp model_option(provider_id, provider, model_id) do
-    provider_name = provider["name"] || provider_id
-
-    %{
-      value: model_option_value(provider_id, model_id),
-      label: "#{provider_name}: #{model_id}",
-      provider_id: provider_id,
-      model_id: model_id
-    }
+    if Enum.any?(quick, &(elem(&1, 1) == current)),
+      do: quick,
+      else: [{"#{current} tokens", current} | quick]
   end
 
   defp model_option_value(provider_id, model_id) do
@@ -1859,7 +1873,8 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp submit_prompt(socket, prompt, prompt_opts) do
-    with {:ok, command} <-
+    with :ok <- Sigma.Web.ProtocolSessionOptions.validate_agent_model(socket.assigns.agent),
+         {:ok, command} <-
            Sigma.Protocol.Envelope.command("prompt.submit", socket.assigns.session_id, %{
              "content" => prompt
            }),
@@ -1889,8 +1904,10 @@ defmodule Sigma.Web.SessionLive do
   defp retry_message(socket, msg_id) do
     with {:ok, messages} <- Sigma.Session.Log.replay(socket.assigns.storage_path),
          {:ok, prompt} <- find_retry_prompt(messages, msg_id) do
-      submit_prompt(socket, prompt)
-      {:noreply, assign(socket, :turn_in_flight, true)}
+      case prompt_admission(socket, submit_prompt(socket, prompt)) do
+        {:accepted, _status, socket} -> {:noreply, socket}
+        {:rejected, socket} -> {:noreply, socket}
+      end
     else
       {:error, :not_found} ->
         {:noreply, put_flash(socket, :error, "Could not find that message to retry.")}
@@ -2347,20 +2364,22 @@ defmodule Sigma.Web.SessionLive do
     pending = socket.assigns.pending_retry
 
     result =
-      Sigma.Agent.Runtime.retry_turn(
-        socket.assigns.workdir,
-        socket.assigns.session_id,
-        socket.assigns.sessions_dir,
-        pending.message_id,
-        prompt_opts:
-          Sigma.Agent.PublicRuntime.prompt_opts(
-            interactive_prompt_context(socket),
-            socket.assigns.agent
-          ),
-        operation_id: pending.operation_id,
-        expected_source_revision: pending.expected_source_revision,
-        expected_source_leaf: pending.expected_source_leaf
-      )
+      with :ok <- Sigma.Web.ProtocolSessionOptions.validate_agent_model(socket.assigns.agent) do
+        Sigma.Agent.Runtime.retry_turn(
+          socket.assigns.workdir,
+          socket.assigns.session_id,
+          socket.assigns.sessions_dir,
+          pending.message_id,
+          prompt_opts:
+            Sigma.Agent.PublicRuntime.prompt_opts(
+              interactive_prompt_context(socket),
+              socket.assigns.agent
+            ),
+          operation_id: pending.operation_id,
+          expected_source_revision: pending.expected_source_revision,
+          expected_source_leaf: pending.expected_source_leaf
+        )
+      end
 
     case result do
       {:ok, _retry} ->
@@ -2658,28 +2677,28 @@ defmodule Sigma.Web.SessionLive do
         session_id = socket.assigns.session_id
         sessions_dir = socket.assigns.sessions_dir
 
-        case Sigma.Session.Log.snapshot(socket.assigns.storage_path) do
-          {:ok, snapshot} ->
-            expected_revision =
-              length(snapshot.branch_entry_ids) + if(is_map(snapshot.header), do: 1, else: 0)
+        with :ok <- Sigma.Web.ProtocolSessionOptions.validate_agent_model(socket.assigns.agent),
+             {:ok, snapshot} <- Sigma.Session.Log.snapshot(socket.assigns.storage_path) do
+          expected_revision =
+            length(snapshot.branch_entry_ids) + if(is_map(snapshot.header), do: 1, else: 0)
 
-            socket =
-              socket
-              |> assign(pending_compaction: true, runtime_status: :compacting)
-              |> refresh_continue_button()
-              |> start_async(:manual_compaction, fn ->
-                Sigma.Agent.Runtime.compact_session(
-                  workdir,
-                  session_id,
-                  sessions_dir,
-                  operation_id: operation_id,
-                  expected_source_revision: expected_revision,
-                  expected_source_leaf: snapshot.active_leaf_id
-                )
-              end)
+          socket =
+            socket
+            |> assign(pending_compaction: true, runtime_status: :compacting)
+            |> refresh_continue_button()
+            |> start_async(:manual_compaction, fn ->
+              Sigma.Agent.Runtime.compact_session(
+                workdir,
+                session_id,
+                sessions_dir,
+                operation_id: operation_id,
+                expected_source_revision: expected_revision,
+                expected_source_leaf: snapshot.active_leaf_id
+              )
+            end)
 
-            {:noreply, socket}
-
+          {:noreply, socket}
+        else
           {:error, reason} ->
             {:noreply, put_flash(socket, :error, compact_error_message(reason))}
         end
@@ -2762,9 +2781,7 @@ defmodule Sigma.Web.SessionLive do
 
   defp select_model(selected, socket) do
     with {:ok, provider_id, model_id} <- parse_model_option_value(selected),
-         provider_config when is_map(provider_config) <-
-           ConfigManager.get_provider_config(provider_id),
-         selected_config = Map.put(provider_config, "model", model_id),
+         {:ok, selected_config} <- Models.resolve(provider_id, model_id),
          selected_agent_model = agent_model(selected_config, provider_id, model_id),
          {:ok, {provider_mod, _model_id, _provider_id, provider_options}} <-
            resolve_provider(selected_config),
@@ -2777,14 +2794,12 @@ defmodule Sigma.Web.SessionLive do
              selected_agent_model,
              provider_options
            ) do
-      ConfigManager.set_active_provider(provider_id)
-      ConfigManager.update_provider(provider_id, %{"model" => model_id})
-
       socket =
         assign(socket,
           active_provider_id: provider_id,
           current_model: model_id,
           current_model_value: selected,
+          model_unavailable: false,
           context_window: model_context_window(selected_agent_model),
           context_token_count: nil
         )
@@ -2868,8 +2883,24 @@ defmodule Sigma.Web.SessionLive do
      |> put_flash(:info, "Prompt queued as follow-up.")}
   end
 
+  defp prompt_admission(socket, {:rejected, :model_unavailable}) do
+    {:rejected, put_flash(socket, :error, "Choose a configured model before sending a message.")}
+  end
+
   defp prompt_admission(socket, {:rejected, reason}) do
     {:rejected, put_flash(socket, :error, "Prompt rejected: #{inspect(reason)}")}
+  end
+
+  @impl true
+  def handle_info({:models_changed, _agent_dir}, socket) do
+    options = model_options(ConfigManager.get_config(), socket.assigns.active_provider_id)
+
+    {:noreply,
+     assign(socket,
+       model_options: options,
+       model_unavailable:
+         not configured_model?(socket.assigns.active_provider_id, socket.assigns.current_model)
+     )}
   end
 
   @impl true
@@ -3430,6 +3461,9 @@ defmodule Sigma.Web.SessionLive do
   defp retry_error_message(:session_busy),
     do: "Wait for the active turn to finish before retrying."
 
+  defp retry_error_message(:model_unavailable),
+    do: "Choose a configured model before retrying."
+
   defp retry_error_message({:revision_conflict, _details}),
     do: "The session changed before retrying. Refresh and choose Retry again."
 
@@ -3938,6 +3972,7 @@ defmodule Sigma.Web.SessionLive do
     |> assign(:current_model, nil)
     |> assign(:current_model_value, nil)
     |> assign(:model_options, [])
+    |> assign(:model_unavailable, false)
     |> assign(:context_token_count, nil)
     |> assign(:context_window, nil)
     |> assign(:context_limit, Sigma.Agent.ContextPolicy.default_context_limit())
@@ -4117,6 +4152,9 @@ defmodule Sigma.Web.SessionLive do
   defp compact_error_message(:session_not_running),
     do: "The session is not available for compaction."
 
+  defp compact_error_message(:model_unavailable),
+    do: "Choose a configured model before compacting."
+
   defp compact_error_message(reason), do: "Compaction failed: #{inspect(reason)}"
 
   defp ensure_metrics_session(%Sigma.Session.Metrics{} = state, session_id),
@@ -4215,6 +4253,8 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp coerce_mcp_field_value(value), do: value
+
+  defp resolve_provider({:error, :model_unavailable}), do: {:error, :model_unavailable}
 
   defp resolve_provider(nil) do
     case Application.get_env(:sigma_web, :test_provider_config) do
@@ -4358,11 +4398,9 @@ defmodule Sigma.Web.SessionLive do
 
   defp session_provider_config(%{"provider_id" => provider_id, "model_id" => model_id})
        when is_binary(provider_id) and is_binary(model_id) do
-    with provider when is_map(provider) <- ConfigManager.get_provider_config(provider_id),
-         true <- provider_has_model?(provider, model_id) do
-      Map.put(provider, "model", model_id)
-    else
-      _ -> ConfigManager.get_active_provider_config()
+    case Models.resolve(provider_id, model_id) do
+      {:ok, config} -> config
+      error -> error
     end
   end
 
@@ -4382,12 +4420,11 @@ defmodule Sigma.Web.SessionLive do
   defp session_provider_config(_snapshot, session_meta),
     do: session_provider_config(session_meta)
 
-  defp provider_has_model?(provider, model_id) do
-    provider
-    |> Map.get("models", [])
-    |> List.wrap()
-    |> Enum.map(&to_model_id/1)
-    |> Enum.any?(&(&1 == model_id))
+  defp configured_model?(provider_id, model_id) do
+    case Application.get_env(:sigma_web, :test_provider_config) do
+      %{"id" => ^provider_id, "model" => ^model_id} -> true
+      _ -> match?({:ok, _}, Models.resolve(provider_id, model_id))
+    end
   end
 
   defp entry_matches?(_entry, nil, ""), do: true

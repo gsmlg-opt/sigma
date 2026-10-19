@@ -141,6 +141,61 @@ defmodule Sigma.Web.SessionChannelTest do
              receive_type("session.snapshot")
   end
 
+  test "WebSocket creation persists the configured budget and rejects a subsequently removed model",
+       context do
+    alias Sigma.Session.Models
+    assert {:ok, _} = Models.update("mock", "mock-model", %{"defaultContextLimit" => 131_072})
+    session_id = "configured-budget"
+    socket = join_session!(context, session_id)
+    push_command(socket, command!("session.create", session_id, %{"cwd" => context.repo}))
+    assert %{type: "session.snapshot"} = receive_type("session.snapshot")
+
+    metadata =
+      Path.join(context.sessions_dir, session_id <> ".meta.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert metadata["context_limit"] == 131_072
+    agent = Sigma.Agent.Runtime.lookup(context.repo, session_id, :agent)
+    assert Sigma.Agent.status(agent).context_policy.context_limit == 131_072
+    assert {:ok, _} = Models.remove("mock", "mock-model")
+    push_command(socket, command!("prompt.submit", session_id, %{"content" => "must not run"}))
+
+    assert %{type: "session.error", error: %{code: "model_unavailable"}} =
+             receive_type("session.error")
+  end
+
+  test "WebSocket Retry rejects a removed current model without changing the checkpoint",
+       context do
+    session_id = "removed-model-retry"
+    create_session!(context, session_id, provider: ChannelProvider)
+    socket = join_session!(context, session_id)
+    push_command(socket, command!("subscription.attach", session_id))
+    receive_type("session.snapshot")
+    push_command(socket, command!("prompt.submit", session_id, %{"content" => "original"}))
+    receive_until("turn.completed", [])
+    storage_path = Path.join(context.sessions_dir, session_id <> ".jsonl")
+    assert {:ok, snapshot} = Sigma.Session.Log.snapshot(storage_path)
+    message_id = Enum.find(snapshot.messages, &(&1.role == :user)).id
+    assert {:ok, checkpoint} = Sigma.Session.Log.retry_checkpoint(storage_path, message_id)
+    before_log = File.read!(storage_path)
+    assert {:ok, _} = Sigma.Session.Models.remove("mock", "mock-model")
+
+    push_command(
+      socket,
+      command!("session.retry", session_id, %{
+        "messageId" => message_id,
+        "expectedSourceRevision" => checkpoint.source_revision,
+        "expectedSourceLeaf" => checkpoint.source_leaf_id
+      })
+    )
+
+    assert %{type: "session.error", error: %{code: "model_unavailable"}} =
+             receive_type("session.error")
+
+    assert File.read!(storage_path) == before_log
+  end
+
   test "WebSocket disconnect does not cancel a turn and a reconnected client can cancel explicitly",
        context do
     session_id = "websocket-cancel"
@@ -291,7 +346,7 @@ defmodule Sigma.Web.SessionChannelTest do
       session_opts:
         Keyword.merge(
           [
-            model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+            model: %{id: "mock-model", api: "mock", provider: "mock"},
             provider: ChannelProvider
           ],
           opts

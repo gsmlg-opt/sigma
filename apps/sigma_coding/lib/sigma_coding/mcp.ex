@@ -247,6 +247,9 @@ defmodule Sigma.Coding.MCP do
     Enum.reduce([:roots, :elicitation, :sampling], %{}, &Client.parse_capability/2)
   end
 
+  defp ensure_client(_session_id, _server_id, %{"configuration_error" => reason}, _opts),
+    do: {:error, {:invalid_configuration, reason}}
+
   defp ensure_client(session_id, server_id, server, opts) do
     ensure_client(session_id, server_id, server, opts, :auto)
   end

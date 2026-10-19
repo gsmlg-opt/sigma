@@ -11,6 +11,43 @@
 
 ---
 
+## 共享 Provider 与模型配置
+
+`/settings/providers` 只管理连接、认证引用和服务类型，允许连接暂时没有模型。`/settings/models` 选择已保存的 Provider，发现候选后选择性加入，或手动添加模型 ID。发现操作本身不修改可用模型集合。
+
+会话选择器只列出已配置模型；当前模型、历史 journal 和过期的全局默认值不会补回集合。会话内切换只修改该会话的 journal，不修改全局默认模型。移除当前模型后正在执行的一轮继续，下一次提交需要先选一个仍可用的模型；缺失历史模型时恢复页面会明确提示不可用，并提供 Models 设置入口。
+
+模型的 `defaultContextLimit` 是新会话预算，与能力上限 `contextWindow` 分开。新会话使用显式预算，否则使用模型默认预算，再否则为 256000；创建时写入 `meta.context_limit`。既有会话保留已保存预算，缺少预算的旧会话使用 256000。会话内支持任意正整数和五档快捷值，切换模型保留预算，有效窗口为预算与已知模型窗口的较小值。
+
+Backplane 连接需要明确的 `serviceOrigin`，例如：
+
+```json
+{
+  "providers": {
+    "backplane": {
+      "name": "Backplane",
+      "kind": "backplane",
+      "serviceOrigin": "https://backplane.example",
+      "api": "openai-responses",
+      "baseUrl": "https://backplane.example/v1",
+      "credential_id": "backplane-token",
+      "authType": "bearer",
+      "models": [{"id": "model-a", "defaultContextLimit": 131072}]
+    }
+  }
+}
+```
+
+保留 pi 的 `models.json` 布局作为存储适配；模型集合由 `Sigma.Session.Models` 修改，连接表单不会隐式添加模型。全局默认 pair 单独保存在 `settings.defaultProvider/defaultModel`。删除被 Models、MCP 或 Skills 引用的连接会显示引用并拒绝删除。
+
+MCP 配置可以使用 `providerId` 和可选的 `urlOverride`。默认连接 `<serviceOrigin>/mcp`，覆盖只影响该 MCP server；认证在使用时从 Provider 的凭据引用解析。独立 HTTP/stdio 配置仍可用。
+
+Skills 页通过 `settings.json.skillSources` 保存稳定来源 ID 和 `providerId`，显式浏览远程目录后使用 `source_id:skill_id` 引用。现有 Skill Protocol 客户端接收 HTTP origin，并自行追加 `/skill-protocol/v1/catalog`、`/resolve`、`/artifact`；不要填写 `/skills`。MCP 与 Skills 的引用不复制 URL 或密钥。来源名称变更保持身份，origin、credential 或 access context 变更后需要在线刷新访问绑定，不能复用其他访问范围的离线绑定。
+
+升级前未记录访问范围的旧远程绑定需要先在线刷新一次，之后继续支持精确离线复用。
+
+## Provider 适配器
+
 ## 1. 决策树（先配置，后适配器）
 
 ```text
@@ -121,9 +158,9 @@ Phase 1 **禁止**同时新增多个厂商适配器；多数「新模型」应�
 }
 ```
 
-`settings.json` 里用 `defaultProvider` / `defaultModel` 选中上述 id。Settings UI（`/settings/providers`）写回同一 pi 文件格式。
+`settings.json` 里用 `defaultProvider` / `defaultModel` 选中上述 id。Providers 和 Models 设置页写回同一 pi 文件格式。
 
-**映射：** `api: "openai-completions"` → 运行时 `api_type: "openai"` → `Sigma.Ai.Providers.OpenAI`。
+**映射：** `api: "openai-completions"` → 运行时 `api_type: "openai-completions"` → `Sigma.Ai.Providers.OpenAI`；`api: "openai-responses"` → `api_type: "openai"` → `Sigma.Ai.Providers.OpenAIResponses`。
 
 ---
 

@@ -9,14 +9,25 @@ defmodule Sigma.Agent.ContextPolicy do
 
   @default_threshold 80_000
   @default_ratio 0.8
-  @context_limits [256_000, 384_000, 500_000, 768_000, 1_000_000]
 
   def default_context_limit, do: 256_000
 
   def parse_context_limit(value) do
     case positive(value) do
-      limit when limit in @context_limits -> {:ok, limit}
+      limit when is_integer(limit) and limit > 0 -> {:ok, limit}
       _ -> {:error, :invalid_context_limit}
+    end
+  end
+
+  @doc "Resolves a new session budget independently of the model's capacity."
+  def new_session_limit(model, explicit \\ nil) do
+    if explicit in [nil, ""] do
+      case parse_context_limit(model_value(model, :default_context_limit)) do
+        {:ok, _} = result -> result
+        _ -> {:ok, default_context_limit()}
+      end
+    else
+      parse_context_limit(explicit)
     end
   end
 

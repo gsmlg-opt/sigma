@@ -6,7 +6,7 @@ defmodule Sigma.Session.Skills.RemoteSource do
   alias Sigma.Session.Skills.{BindingStore, RemoteCache}
 
   @enforce_keys [:source, :source_id, :cache_root, :binding_path]
-  defstruct [:source, :source_id, :cache_root, :binding_path]
+  defstruct [:source, :source_id, :cache_root, :binding_path, :access_scope]
 
   @type t :: %__MODULE__{}
 
@@ -37,6 +37,7 @@ defmodule Sigma.Session.Skills.RemoteSource do
        %__MODULE__{
          source: source,
          source_id: client.source_id,
+         access_scope: access_scope(opts),
          cache_root: Keyword.get(opts, :cache_root, Path.join(agent_dir, "skill-cache")),
          binding_path:
            Keyword.get(opts, :binding_path, Path.join(agent_dir, "skill-bindings.json"))
@@ -63,6 +64,8 @@ defmodule Sigma.Session.Skills.RemoteSource do
   end
 
   defp prepare_online(remote, skill_id, opts) do
+    access_scope = remote.access_scope.()
+
     with {:ok, operation} <- allocate_operation(remote.cache_root),
          stage = Path.join(operation, "entry"),
          :ok <- File.mkdir(stage) do
@@ -73,9 +76,11 @@ defmodule Sigma.Session.Skills.RemoteSource do
         opts |> Keyword.drop([:offline, :revision]) |> Keyword.put(:destination, destination)
 
       result =
-        with {:ok, prepared} <- Backplane.prepare(remote.source, skill_id, revision, package_opts),
+        with {:ok, prepared} <-
+               Backplane.prepare(remote.source, skill_id, revision, package_opts),
              {:ok, cached} <- RemoteCache.publish(remote.cache_root, prepared, stage),
-             :ok <- BindingStore.put(remote.binding_path, cached.manifest.ref) do
+             :ok <-
+               BindingStore.put(remote.binding_path, cached.manifest.ref, access_scope) do
           {:ok, cached}
         end
 
@@ -94,7 +99,12 @@ defmodule Sigma.Session.Skills.RemoteSource do
     requested_revision = Keyword.get(opts, :revision)
 
     with {:ok, %SkillRef{} = ref} <-
-           BindingStore.get(remote.binding_path, remote.source_id, skill_id),
+           BindingStore.get(
+             remote.binding_path,
+             remote.source_id,
+             skill_id,
+             remote.access_scope.()
+           ),
          :ok <- requested_revision(ref, requested_revision),
          {:ok, prepared} <- RemoteCache.load(remote.cache_root, ref) do
       {:ok, prepared}
@@ -112,6 +122,23 @@ defmodule Sigma.Session.Skills.RemoteSource do
 
     with :ok <- File.mkdir_p(operations) do
       TemporaryStorage.directory(operations, "prepare")
+    end
+  end
+
+  # Persist only an opaque access identity. The credential remains in auth.json and
+  # is read afresh so rotation invalidates old offline bindings as well.
+  defp access_scope(opts) do
+    supplier = Keyword.get(opts, :credential_supplier, fn -> nil end)
+
+    identity =
+      {Keyword.get(opts, :endpoint), Keyword.get(opts, :access_context_id),
+       Keyword.get(opts, :credential_id)}
+
+    fn ->
+      credential = supplier.()
+
+      :crypto.hash(:sha256, :erlang.term_to_binary({identity, credential}))
+      |> Base.encode16(case: :lower)
     end
   end
 

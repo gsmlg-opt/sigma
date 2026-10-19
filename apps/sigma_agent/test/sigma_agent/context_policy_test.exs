@@ -3,6 +3,27 @@ defmodule Sigma.Agent.ContextPolicyTest do
 
   alias Sigma.Agent.ContextPolicy
 
+  test "new session budget precedence does not conflate model window with its default budget" do
+    model = %{"defaultContextLimit" => 131_072, "contextWindow" => 1_000_000}
+    assert {:ok, 131_072} = ContextPolicy.new_session_limit(model)
+    assert {:ok, 64_000} = ContextPolicy.new_session_limit(model, "64000")
+    assert {:ok, 256_000} = ContextPolicy.new_session_limit(%{"contextWindow" => 1_000_000})
+    assert {:error, :invalid_context_limit} = ContextPolicy.new_session_limit(model, "0")
+  end
+
+  test "context budgets accept custom positive integers without changing zero token measurements" do
+    for value <- [128_000, "128000", 1, "1000000"] do
+      assert {:ok, limit} = ContextPolicy.parse_context_limit(value)
+      assert is_integer(limit) and limit > 0
+    end
+
+    for value <- [0, "0", -1, "-1", 1.5, "128000x", "", nil] do
+      assert {:error, :invalid_context_limit} = ContextPolicy.parse_context_limit(value)
+    end
+
+    assert ContextPolicy.snapshot(last_request_input_tokens: 0).last_request_input_tokens == 0
+  end
+
   test "session limit caps the model and supplies unknown capacity" do
     snapshot = ContextPolicy.snapshot(next_request_estimated_input_tokens: 250_000)
     policy = ContextPolicy.policy(snapshot, context_limit: 256_000, output_reserve: 8_000)

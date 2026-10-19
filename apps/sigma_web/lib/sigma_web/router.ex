@@ -21,7 +21,12 @@ defmodule Sigma.Web.Router do
     get("/skills", SkillsController, :index)
     get("/skills/:id", SkillsController, :show)
     post("/sessions/:session_id/skill-invocations", SkillsController, :create_invocation)
-    get("/sessions/:session_id/skill-invocations/:invocation_id", SkillsController, :show_invocation)
+
+    get(
+      "/sessions/:session_id/skill-invocations/:invocation_id",
+      SkillsController,
+      :show_invocation
+    )
   end
 
   scope "/", Sigma.Web do
@@ -32,6 +37,7 @@ defmodule Sigma.Web.Router do
     live("/settings/credentials", SettingsLive, :credentials)
     live("/settings/hooks", SettingsLive, :hooks)
     live("/settings/mcp", SettingsLive, :mcp)
+    live("/settings/models", SettingsLive, :models)
     live("/settings/providers", SettingsLive, :providers)
     live("/settings/skills", SettingsLive, :skills)
     live("/settings/system_prompt", SettingsLive, :system_prompt)

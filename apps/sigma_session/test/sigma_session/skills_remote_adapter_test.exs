@@ -155,6 +155,89 @@ defmodule Sigma.Session.Skills.RemoteAdapterTest do
     assert offline_expansion.skill.digest == expansion.skill.digest
   end
 
+  @tag :tmp_dir
+  test "provider source resolves current origin and Bearer credential and marks missing refs unavailable",
+       %{tmp_dir: tmp_dir} do
+    alias Sigma.Session.ConfigManager
+
+    File.write!(
+      Path.join([tmp_dir, "agent", "models.json"]),
+      Jason.encode!(%{
+        "providers" => %{
+          "bp" => %{
+            "kind" => "backplane",
+            "serviceOrigin" => "https://shared.example.test",
+            "credential_id" => "remote-token"
+          }
+        }
+      })
+    )
+
+    assert {:ok, _} =
+             ConfigManager.put_skill_source("shared", %{
+               "providerId" => "bp",
+               "name" => "Shared",
+               "accessContextId" => "sigma"
+             })
+
+    owner = self()
+
+    transport = fn request ->
+      send(owner, {:shared_request, request.url, request.headers})
+
+      {:ok,
+       %{
+         status: 200,
+         body: Jason.encode!(%{"protocol_version" => "1", "data" => [], "next_cursor" => nil})
+       }}
+    end
+
+    assert {:ok, _} =
+             RemoteAdapter.catalog(%{source_id: "shared"},
+               source_options: [transport: transport, max_attempts: 1]
+             )
+
+    assert_receive {:shared_request, "https://shared.example.test/skill-protocol/v1/catalog" <> _,
+                    headers}
+
+    assert headers["authorization"] == "Bearer test-secret"
+    refute Map.has_key?(headers, "x-api-key")
+    refute File.read!(Path.join([tmp_dir, "agent", "settings.json"])) =~ "test-secret"
+
+    assert {:ok, _} =
+             ConfigManager.put_skill_source("shared", %{
+               "providerId" => "missing",
+               "offline" => true
+             })
+
+    assert Enum.find(RemoteAdapter.sources(), &(&1.source_id == "shared")).status ==
+             "provider_unavailable"
+
+    assert {:error, _} =
+             RemoteAdapter.prepare("shared:review", "",
+               source_options: [
+                 transport: fn _ -> flunk("missing provider must not use network") end
+               ]
+             )
+  end
+
+  @tag :tmp_dir
+  test "remote authorization status remains distinguishable without exposing response bodies" do
+    for {status, reason} <- [{401, :unauthorized}, {403, :forbidden}] do
+      transport = fn _ -> {:ok, %{status: status, body: "private token details"}} end
+
+      assert {:error, error} =
+               RemoteAdapter.catalog(%{source_id: "remote-one"},
+                 source_options: [transport: transport, max_attempts: 1]
+               )
+
+      assert error.code == :remote_unavailable
+      assert error.reason == reason
+      refute inspect(error) =~ "private token details"
+      refute inspect(error) =~ "test-secret"
+    end
+  end
+
   defp write_config!(tmp_dir) do
     agent_dir = Path.join(tmp_dir, "agent")
     File.mkdir_p!(agent_dir)
