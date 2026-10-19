@@ -689,7 +689,7 @@ el-dm-button:focus-within {
 }
 .sigma-session-header > div > div:last-child {
   flex: 0 0 auto;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   max-width: 100%;
 }
 .sigma-session-overview > section {

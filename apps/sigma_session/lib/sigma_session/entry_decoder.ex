@@ -168,6 +168,18 @@ defmodule Sigma.Session.EntryDecoder do
 
   def metrics(_entry), do: {:error, :invalid_metrics}
 
+  @doc "Decodes a lifecycle fact without creating a conversation message."
+  def subagent(%{"type" => "subagent"} = entry), do: Sigma.Protocol.Subagents.event(entry)
+  def subagent(_entry), do: {:error, {:invalid_event, :invalid_subagent}}
+
+  def subagent_admission(%{"type" => "subagent_admission"} = entry) do
+    entry
+    |> Map.drop(["type", "id", "parentId", "timestamp"])
+    |> Sigma.Session.SubagentAdmissions.normalize()
+  end
+
+  def subagent_admission(_), do: {:error, {:invalid_subagent_admission, :invalid_entry}}
+
   defp decode_metrics_data(data) do
     Map.new(data, fn {key, value} -> {key, decode_metrics_value(key, value)} end)
   end

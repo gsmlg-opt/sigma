@@ -119,7 +119,9 @@ defmodule Sigma.Agent.RepositoryProcess do
         :ok ->
           result =
             safely_perform_operation(fn ->
-              with :ok <- flush_session(handle),
+              with :ok <-
+                     close_subagents_for_operation(state.repo_path, source_session_id, operation),
+                   :ok <- flush_session(handle),
                    :ok <- validate_operation_checkpoint(source_session_id, operation),
                    :ok <- persist_operation_started(handle, source_session_id, operation) do
                 performed =
@@ -264,6 +266,32 @@ defmodule Sigma.Agent.RepositoryProcess do
   catch
     kind, reason -> {:error, {:session_operation_failure, kind, reason}}
   end
+
+  defp close_subagents_for_operation(repo_path, session_id, operation)
+       when elem(operation, 0) in [:rename, :delete, :adopt] do
+    case Sigma.Agent.Runtime.close_subagents(repo_path, session_id) do
+      :ok ->
+        :ok
+
+      {:ok, %{status: :confirmed}} ->
+        :ok
+
+      {:error, _reason} = error ->
+        error
+
+      _other ->
+        {:error,
+         Backplane.AgentRuntime.Error.new(:unknown_outcome, "subagent closure was not confirmed")}
+    end
+  catch
+    :exit, reason ->
+      {:error,
+       Backplane.AgentRuntime.Error.new(:unknown_outcome, "subagent closure unavailable",
+         cause: reason
+       )}
+  end
+
+  defp close_subagents_for_operation(_repo_path, _session_id, _operation), do: :ok
 
   defp flush_session(nil), do: :ok
   defp flush_session(%{writer: nil}), do: :ok

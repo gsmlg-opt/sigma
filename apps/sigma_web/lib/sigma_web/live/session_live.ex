@@ -11,6 +11,7 @@ defmodule Sigma.Web.SessionLive do
   alias Sigma.Web.ImageAttachments
   alias Sigma.Web.Session.TerminalBinding
   alias Sigma.Web.SessionObservability
+  alias Sigma.Web.SessionSubagents
   alias Sigma.Web.SessionTerminalComponents
   alias Phoenix.LiveView.AsyncResult
 
@@ -102,7 +103,8 @@ defmodule Sigma.Web.SessionLive do
          repo_key,
          log_session_id
        ) do
-    with {:ok, snapshot} <- Sigma.Session.Log.snapshot(storage_path) do
+    with {:ok, snapshot} <-
+           Sigma.Agent.Runtime.session_snapshot(workdir, session_id, storage_path) do
       load_session_data(
         snapshot,
         session_id,
@@ -239,6 +241,8 @@ defmodule Sigma.Web.SessionLive do
              effective_cwd: effective_cwd,
              mcp_server_ids: mcp_server_ids,
              model_options: ensure_model_option(model_options, provider_id, model_id),
+             subagents: snapshot.subagents,
+             subagents_available: snapshot.subagents_available,
              pending_user_questions: pending_user_questions,
              pending_mcp_elicitations: load_pending_mcp_elicitations(agent),
              sessions: sessions,
@@ -275,7 +279,8 @@ defmodule Sigma.Web.SessionLive do
       refresh_loaded_transcript(
         session_data,
         socket.assigns.storage_path,
-        socket.assigns.session_id
+        socket.assigns.session_id,
+        socket.assigns.workdir
       )
 
     agent_ref = Process.monitor(agent)
@@ -304,6 +309,8 @@ defmodule Sigma.Web.SessionLive do
       |> assign(:effective_cwd, session_data.effective_cwd)
       |> assign(:mcp_server_ids, session_data.mcp_server_ids)
       |> assign(:model_options, session_data.model_options)
+      |> assign(:subagents, session_data.subagents)
+      |> assign(:subagents_available, session_data.subagents_available)
       |> assign(:pending_user_questions, session_data.pending_user_questions)
       |> assign(:pending_mcp_elicitations, session_data.pending_mcp_elicitations)
       |> assign(:sessions, session_data.sessions)
@@ -389,9 +396,9 @@ defmodule Sigma.Web.SessionLive do
 
   def handle_async(:agent_status, _result, socket), do: {:noreply, socket}
 
-  defp refresh_loaded_transcript(session_data, storage_path, session_id) do
+  defp refresh_loaded_transcript(session_data, storage_path, session_id, workdir) do
     # Recover messages committed between the async load and this subscription.
-    case Sigma.Session.Log.snapshot(storage_path) do
+    case Sigma.Agent.Runtime.session_snapshot(workdir, session_id, storage_path) do
       {:ok, snapshot} ->
         {messages, tool_results, tool_call_to_msg} = split_messages(snapshot.messages)
         {display_messages, turn_last_message_ids} = index_display_messages(messages)
@@ -405,7 +412,11 @@ defmodule Sigma.Web.SessionLive do
             tool_results: tool_results,
             tool_call_to_msg: tool_call_to_msg,
             session_metrics_state: metrics,
-            session_metrics: Sigma.Session.Metrics.snapshot(metrics)
+            session_metrics: Sigma.Session.Metrics.snapshot(metrics),
+            subagents: snapshot.subagents,
+            subagents_available: snapshot.subagents_available,
+            pending_user_questions:
+              load_session_questions(session_data.agent, workdir, session_id)
         }
 
       {:error, _reason} ->
@@ -567,7 +578,7 @@ defmodule Sigma.Web.SessionLive do
         <button type="button" data-session-panel-close class="m-3 rounded px-3 py-2 text-xs focus-visible:outline md:hidden" aria-label="Close navigation">Close navigation</button>
       </aside>
 
-      <section class="sigma-session-main grid min-w-0 flex-1 bg-surface-container-lowest">
+      <section class="sigma-session-main grid min-w-0 flex-1 grid-cols-1 bg-surface-container-lowest">
         <header class="sigma-session-header border-b border-outline-variant bg-surface px-4 py-2">
           <div class="flex min-w-0 flex-wrap items-center justify-between gap-3">
             <div class="flex min-w-0 items-center gap-3">
@@ -601,6 +612,31 @@ defmodule Sigma.Web.SessionLive do
                   >{option.label}</option>
                 </.dm_select>
               </form>
+
+              <button
+                id="session-subagents-open-btn"
+                type="button"
+                data-session-panel-toggle="details"
+                data-session-subagents-open
+                aria-controls="session-details"
+                aria-expanded="false"
+                class="rounded px-2 py-1 text-xs focus-visible:outline"
+              >
+                <%= if @subagents_available do %>
+                  Subagents · {@subagents.counts.created} created · {@subagents.counts.executing} executing
+                <% else %>
+                  Subagents unavailable
+                <% end %>
+              </button>
+              <.dm_btn
+                :if={not @turn_in_flight and subagent_execution?(@subagents_available, @subagents)}
+                id="stop-subagents-btn"
+                type="button"
+                phx-click="cancel_turn"
+                phx-hook="WebComponentHook"
+                variant="error"
+                size="xs"
+              >Stop subagents</.dm_btn>
 
               <SessionTerminalComponents.terminal_trigger
                 catalog={@terminal_catalog}
@@ -692,6 +728,12 @@ defmodule Sigma.Web.SessionLive do
             <.dm_mdi name="close" class="h-4 w-4" />
           </button>
         </div>
+        <SessionSubagents.subagents
+          id="session-subagents"
+          snapshot={@subagents}
+          available={@subagents_available}
+          filter={@subagent_filter}
+        />
         <SessionObservability.session_overview_rail snapshot={session_observability_snapshot(assigns)} />
         <section id="session-context-details" class="mt-4" tabindex="-1" aria-label="Context details">
           <form id="context-limit-form" phx-change="select_context_limit" class="mb-2">
@@ -888,6 +930,9 @@ defmodule Sigma.Web.SessionLive do
           </div>
           <div class="min-w-0">
             <p class="text-xs font-semibold uppercase text-on-surface-variant">Agent question</p>
+            <p :if={question[:source]} class="break-all font-mono text-xs text-on-surface-variant" data-question-source={question.source.agent_id}>
+              From {question.source.agent_path}
+            </p>
             <p class="text-sm font-medium text-on-surface">{question.question}</p>
           </div>
         </div>
@@ -1699,7 +1744,10 @@ defmodule Sigma.Web.SessionLive do
       question: Map.get(request, :question, ""),
       options: options,
       allow_freeform: Map.get(request, :allow_freeform, true),
-      placeholder: placeholder
+      placeholder: placeholder,
+      source: request[:source],
+      tool_call_id: request[:tool_call_id],
+      arguments: request[:arguments]
     }
   end
 
@@ -1767,9 +1815,21 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp reply_to_user_question(socket, question_id, reply) do
-    Sigma.Agent.answer_user_question(socket.assigns.agent, question_id, reply)
+    case Sigma.Agent.Runtime.answer_question(
+           socket.assigns.workdir,
+           socket.assigns.session_id,
+           socket.assigns.agent,
+           question_id,
+           reply
+         ) do
+      :ok ->
+        {:noreply,
+         update(socket, :pending_user_questions, &remove_user_question(&1, question_id))}
 
-    {:noreply, update(socket, :pending_user_questions, &remove_user_question(&1, question_id))}
+      {:error, reason} ->
+        {:noreply,
+         put_flash(socket, :error, "Could not answer question: #{format_load_error(reason)}")}
+    end
   end
 
   defp user_question_answer(params) do
@@ -2125,6 +2185,12 @@ defmodule Sigma.Web.SessionLive do
   @impl true
   def handle_event("cancel_rename", _, socket) do
     {:noreply, assign(socket, :renaming_session, nil)}
+  end
+
+  @impl true
+  def handle_event("filter_subagents", %{"filter" => filter}, socket)
+      when filter in ["all", "running", "stopped", "unknown"] do
+    {:noreply, assign(socket, :subagent_filter, filter)}
   end
 
   @impl true
@@ -2891,20 +2957,53 @@ defmodule Sigma.Web.SessionLive do
       |> normalize_user_question_request()
       |> Map.put(:id, question_id)
 
-    {:noreply,
-     socket
-     |> assign(:runtime_status, :waiting_permission)
-     |> update(:pending_user_questions, &upsert_user_question(&1, question))
-     |> queue_chat_state()}
+    socket = update(socket, :pending_user_questions, &upsert_user_question(&1, question))
+
+    if question.source do
+      {:noreply, socket}
+    else
+      {:noreply, socket |> assign(:runtime_status, :waiting_permission) |> queue_chat_state()}
+    end
   end
 
   @impl true
   def handle_info({:ask_user_question_resolved, question_id}, socket) do
-    {:noreply,
-     socket
-     |> assign(:runtime_status, resumed_runtime_status(socket))
-     |> update(:pending_user_questions, &remove_user_question(&1, question_id))
-     |> queue_chat_state()}
+    child? =
+      String.starts_with?(question_id, "subagent_question_") or
+        Enum.any?(
+          socket.assigns.pending_user_questions,
+          &(&1.id == question_id and &1[:source] != nil)
+        )
+
+    socket = update(socket, :pending_user_questions, &remove_user_question(&1, question_id))
+
+    if child? do
+      {:noreply, socket}
+    else
+      {:noreply,
+       socket |> assign(:runtime_status, resumed_runtime_status(socket)) |> queue_chat_state()}
+    end
+  end
+
+  @impl true
+  def handle_info({:subagent, _fact}, socket) do
+    # These events are commit notifications. Read the authoritative projection
+    # without rebuilding either React island or resetting the conversation.
+    case Sigma.Agent.Runtime.session_snapshot(
+           socket.assigns.workdir,
+           socket.assigns.session_id,
+           socket.assigns.storage_path
+         ) do
+      {:ok, snapshot} ->
+        {:noreply,
+         assign(socket,
+           subagents: snapshot.subagents,
+           subagents_available: snapshot.subagents_available
+         )}
+
+      {:error, _reason} ->
+        {:noreply, assign(socket, :subagents_available, false)}
+    end
   end
 
   @impl true
@@ -3850,6 +3949,9 @@ defmodule Sigma.Web.SessionLive do
     |> assign(:context_policy, %{})
     |> assign(:context_diagnostics, [])
     |> assign(:context_trace, [])
+    |> assign(:subagents, Sigma.Session.Subagents.snapshot(Sigma.Session.Subagents.new()))
+    |> assign(:subagents_available, false)
+    |> assign(:subagent_filter, "all")
     |> assign(:pending_user_questions, [])
     |> assign(:pending_mcp_elicitations, [])
     |> assign(:logs_available, true)
@@ -4040,6 +4142,20 @@ defmodule Sigma.Web.SessionLive do
 
   defp format_load_error(reason) when is_binary(reason), do: reason
   defp format_load_error(reason), do: inspect(reason)
+
+  defp subagent_execution?(true, roster),
+    do: roster.counts.executing + roster.counts.pending > 0
+
+  defp subagent_execution?(_available, _roster), do: false
+
+  defp load_session_questions(agent, workdir, session_id) do
+    (load_pending_user_questions(agent) ++
+       Sigma.Agent.Runtime.pending_subagent_questions(workdir, session_id))
+    |> Enum.map(fn request ->
+      request |> normalize_user_question_request() |> Map.put(:id, request.id)
+    end)
+    |> Enum.uniq_by(& &1.id)
+  end
 
   defp load_pending_user_questions(agent) do
     Sigma.Agent.pending_user_questions(agent, 100)

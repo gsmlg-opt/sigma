@@ -1,7 +1,7 @@
 defmodule Sigma.Agent.ProtocolEventMapper do
   @moduledoc "Pure mapping from Agent domain events to bounded Protocol V1 events."
 
-  alias Sigma.Protocol.{Codec, Envelope, Error, Metrics}
+  alias Sigma.Protocol.{Codec, Envelope, Error, Metrics, Subagents}
 
   @max_text_bytes 16_384
   @max_parts 100
@@ -43,6 +43,13 @@ defmodule Sigma.Agent.ProtocolEventMapper do
 
   def map({:message_end, message}, session_id, turn_id),
     do: event("message.completed", session_id, %{"message" => public_message(message)}, turn_id)
+
+  def map({:subagent, attrs}, session_id, turn_id) do
+    case Subagents.event(attrs) do
+      {:ok, fact} -> event("subagents.changed", session_id, Subagents.to_map(fact), turn_id)
+      {:error, _} -> {nil, turn_id}
+    end
+  end
 
   def map({:metrics, fact, attrs}, session_id, turn_id)
       when fact in [
@@ -180,7 +187,7 @@ defmodule Sigma.Agent.ProtocolEventMapper do
     }
   end
 
-  def snapshot_payload(snapshot, session_id \\ nil) do
+  def snapshot_payload(snapshot, session_id \\ nil, capabilities \\ []) do
     message_count = length(snapshot.messages)
     messages = snapshot.messages |> Enum.take(-5) |> Enum.map(&snapshot_message/1)
 
@@ -205,7 +212,25 @@ defmodule Sigma.Agent.ProtocolEventMapper do
       "diagnostics" => snapshot.diagnostics |> Enum.take(10) |> Enum.map(&snapshot_value/1)
     }
 
-    fit_snapshot_payload(payload, snapshot.session_id)
+    payload
+    |> maybe_subagents_snapshot(snapshot, capabilities)
+    |> fit_snapshot_payload(snapshot.session_id)
+  end
+
+  defp maybe_subagents_snapshot(payload, snapshot, capabilities) do
+    if "subagents.v1" in capabilities do
+      case Subagents.snapshot(Map.get(snapshot, :subagents)) do
+        {:ok, roster} ->
+          payload
+          |> Map.put("subagents", Subagents.to_map(roster))
+          |> Map.put("subagentsAvailable", Map.get(snapshot, :subagents_available, false))
+
+        {:error, _} ->
+          payload
+      end
+    else
+      payload
+    end
   end
 
   defp fit_snapshot_payload(payload, session_id) do

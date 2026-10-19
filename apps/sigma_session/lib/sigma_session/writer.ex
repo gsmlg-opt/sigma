@@ -9,7 +9,7 @@ defmodule Sigma.Session.Writer do
 
   use GenServer
 
-  alias Sigma.Session.{EntryEncoder, Log}
+  alias Sigma.Session.{EntryEncoder, Log, SubagentAdmissions, Subagents}
   alias Sigma.Session.Storage.JsonlFile
 
   defstruct [
@@ -19,9 +19,13 @@ defmodule Sigma.Session.Writer do
     :cwd,
     :active_leaf_id,
     :last_append_result,
+    :subagent_roster,
     header?: false,
     sequence: 0,
     message_entry_ids: %{},
+    subagent_entry_ids: %{},
+    subagent_admissions: %{},
+    subagent_admission_entry_ids: %{},
     diagnostics: []
   ]
 
@@ -46,6 +50,9 @@ defmodule Sigma.Session.Writer do
     GenServer.call(writer, :flush, :infinity)
   end
 
+  @doc "Returns the acknowledged internal subagent projections for the session host."
+  def subagent_state(writer), do: GenServer.call(writer, :subagent_state, :infinity)
+
   @doc "Checks out a persisted branch boundary without rewriting journal history."
   def checkout(writer, checkpoint_entry_id, expected_leaf_id) do
     GenServer.call(writer, {:checkout, checkpoint_entry_id, expected_leaf_id}, :infinity)
@@ -68,6 +75,10 @@ defmodule Sigma.Session.Writer do
            active_leaf_id: snapshot.active_leaf_id,
            sequence: length(snapshot.branch_entry_ids) + if(snapshot.header, do: 1, else: 0),
            message_entry_ids: snapshot.message_entry_ids,
+           subagent_roster: snapshot.subagent_roster,
+           subagent_entry_ids: snapshot.subagent_entry_ids,
+           subagent_admissions: snapshot.subagent_admissions,
+           subagent_admission_entry_ids: snapshot.subagent_admission_entry_ids,
            diagnostics: blocking_diagnostics(snapshot.diagnostics)
          }}
 
@@ -77,13 +88,20 @@ defmodule Sigma.Session.Writer do
   end
 
   @impl true
+  def handle_call(:subagent_state, _from, state) do
+    {:reply, {:ok, %{roster: state.subagent_roster, admissions: state.subagent_admissions}},
+     state}
+  end
+
   def handle_call(:flush, _from, state) do
     {:reply,
      {:ok,
       %{
         active_leaf_id: state.active_leaf_id,
         sequence: state.sequence,
-        last_append_result: state.last_append_result
+        last_append_result: state.last_append_result,
+        subagents: Subagents.snapshot(state.subagent_roster),
+        subagent_admissions: state.subagent_admissions
       }}, state}
   end
 
@@ -100,7 +118,7 @@ defmodule Sigma.Session.Writer do
             {:reply, :ok,
              %{
                state
-               | active_leaf_id: checkpoint_entry_id,
+               | active_leaf_id: snapshot.active_leaf_id,
                  message_entry_ids: snapshot.message_entry_ids
              }}
 
@@ -110,7 +128,71 @@ defmodule Sigma.Session.Writer do
     end
   end
 
-  def handle_call({:append, event}, _from, state) do
+  def handle_call({:append, {:subagent_admission, attrs}}, _from, state) do
+    with {:ok, event} <- SubagentAdmissions.normalize(attrs),
+         {:ok, admissions, roster} <-
+           SubagentAdmissions.apply_event(state.subagent_admissions, state.subagent_roster, event) do
+      key = SubagentAdmissions.key(event)
+
+      if admissions == state.subagent_admissions do
+        result = {:ok, Map.fetch!(state.subagent_admission_entry_ids, key)}
+        {:reply, result, %{state | last_append_result: result}}
+      else
+        case append_event({:subagent_admission, event}, state) do
+          {:reply, {:ok, entry_id} = result, committed} ->
+            fact_ids =
+              Enum.reduce(event.facts, committed.subagent_entry_ids, fn fact, acc ->
+                Map.put_new(acc, fact.event_id, entry_id)
+              end)
+
+            {:reply, result,
+             %{
+               committed
+               | subagent_admissions: admissions,
+                 subagent_roster: roster,
+                 subagent_entry_ids: fact_ids,
+                 subagent_admission_entry_ids:
+                   Map.put(committed.subagent_admission_entry_ids, key, entry_id)
+             }}
+
+          reply ->
+            reply
+        end
+      end
+    else
+      {:error, _} = result -> {:reply, result, %{state | last_append_result: result}}
+    end
+  end
+
+  def handle_call({:append, {:subagent, attrs}}, _from, state) do
+    with {:ok, event} <- Sigma.Protocol.Subagents.event(attrs),
+         {:ok, projection} <- Subagents.apply_event(state.subagent_roster, event) do
+      if projection == state.subagent_roster do
+        result = {:ok, Map.fetch!(state.subagent_entry_ids, event.event_id)}
+        {:reply, result, %{state | last_append_result: result}}
+      else
+        case append_event({:subagent, event}, state) do
+          {:reply, {:ok, entry_id} = result, committed} ->
+            {:reply, result,
+             %{
+               committed
+               | subagent_roster: projection,
+                 subagent_entry_ids:
+                   Map.put(committed.subagent_entry_ids, event.event_id, entry_id)
+             }}
+
+          reply ->
+            reply
+        end
+      end
+    else
+      {:error, _reason} = result -> {:reply, result, %{state | last_append_result: result}}
+    end
+  end
+
+  def handle_call({:append, event}, _from, state), do: append_event(event, state)
+
+  defp append_event(event, state) do
     event = normalize_event(event, state)
 
     case EntryEncoder.encode(event, state.active_leaf_id, state.header?) do
@@ -172,7 +254,10 @@ defmodule Sigma.Session.Writer do
         state = %{
           state
           | active_leaf_id:
-              if(entry_type in [:session, :metrics], do: state.active_leaf_id, else: entry_id),
+              if(entry_type in [:session, :metrics, :subagent, :subagent_admission],
+                do: state.active_leaf_id,
+                else: entry_id
+              ),
             header?: state.header? or entry_type == :session,
             sequence: state.sequence + 1,
             message_entry_ids: put_message_entry_id(state.message_entry_ids, entry),
@@ -235,5 +320,7 @@ defmodule Sigma.Session.Writer do
   defp entry_type("branch_summary"), do: :branch_summary
   defp entry_type("skill_invocation"), do: :skill_invocation
   defp entry_type("metrics"), do: :metrics
+  defp entry_type("subagent"), do: :subagent
+  defp entry_type("subagent_admission"), do: :subagent_admission
   defp entry_type(_type), do: :unknown
 end

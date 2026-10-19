@@ -37,6 +37,8 @@ Protocol V1 remains envelope version `1`. Session snapshots advertise the
 server's closed capability set in `capabilities`:
 
 - `metrics.v1`
+- `skills.v1`
+- `subagents.v1`
 - `subscription.cursor.v1`
 - `subscription.resync.v1`
 
@@ -95,6 +97,58 @@ relay sends `session.error` with `error.code == "resync_required"` and
 applying deltas, fetch `session.status` with its `subscriptionId`, replace its
 projection with that snapshot, then continue with events after the returned
 watermark. Duplicate identical metrics facts are suppressed.
+
+## Subagents V1
+
+Clients request `subagents.v1` in `requiredCapabilities` on each full snapshot
+command (`session.create`, `session.resume`, `session.status`, `session.switch`,
+`session.fork`, or `subscription.attach`). Only opted-in snapshots include
+`subagents`; only opted-in subscriptions receive `subagents.changed`. Roster
+facts consume no cursor for legacy subscriptions.
+
+The snapshot roster is the committed journal projection, with `revision`,
+`agents` (safe display rows), and `counts`: `created`, `executing`, `pending`,
+`stopped`, and `unknown`. Counts come from that same projection. Rows identify
+`agent_id`, `agent_path`, parent/root/child session identities, `run_id`,
+`incarnation`, lifecycle `status`, `activity`, `closure`, and the last committed
+`event_id`, `revision`, and `observer_incarnation`. Only allowlisted fields and
+validated scalar values enter payloads; arbitrary host maps are not serialized.
+
+`subagents.changed` carries `fact`, `data`, `event_id`, `revision`, and
+`observer_incarnation` (plus the relay `cursor`). Facts are `registered`,
+`run_started`, `run_finished`, `closed`, and `recovered`. Completion and closure
+are separate observations; terminal status does not imply closure.
+
+Attachment subscribes before reading the journal, seeds the roster revision
+from the attachment snapshot, and suppresses buffered facts already covered by
+that revision. Duplicate/old revisions, stale runs, and retired observer
+incarnations are suppressed. Revision gaps or an unacknowledged observer change
+require resync. A fresh owned `session.status` snapshot resets this roster
+watermark. Queue overflow can drop even terminal roster increments and requires
+resync; roster events and their error marker respect the sink queue bound.
+A single pending retry timer checks for sink capacity until the marker can be
+delivered, even when the dropped terminal fact is the last event. Successful
+resync snapshots and relay shutdown cancel that retry. A lifecycle delta that
+fails final codec validation is withheld and triggers the same bounded resync
+notification; committed journal values are not truncated.
+
+PublicRuntime validates the final snapshot envelope after adding runtime and
+subscription fields. A roster that exceeds the protocol collection or 64 KiB
+encoding limit returns an encodable `session.error` with `payload_too_large`.
+Failed attachment snapshots detach their newly created relay. An owned status
+snapshot validates the exact response inside the relay before reseeding its
+watermark; a rejected response leaves the relay blocked until a valid resync.
+Rows and counts
+are preserved completely for in-range snapshots; oversized snapshots are not
+truncated, and this version provides no roster pagination.
+
+This observation slice does not admit or execute child agents. Production host
+integration remains blocked on [gsmlg-opt/backplane#71](https://github.com/gsmlg-opt/backplane/issues/71); the host adapter must
+supply acknowledged lifecycle facts and authoritative live ownership before
+T3/T5 integration is complete. Journal replay currently marks previously active
+rows `unknown_outcome` on owner recovery. It does not infer a running child from
+a recovered journal or replay child side effects. Stdio and WebSocket inherit
+the PublicRuntime contract; LiveView host wiring remains pending.
 
 ## Metrics V1
 

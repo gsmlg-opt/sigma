@@ -62,3 +62,56 @@ test('close cancels pending focus frames before restoring the opener', () => {
     else globalThis.window = original
   }
 })
+
+for (const width of [390, 1440]) {
+  test(`subagent entry opens and focuses the roster at ${width}px without toggling it closed`, async () => {
+    const previousWindow = globalThis.window
+    const previousDocument = globalThis.document
+    const frames = new Map()
+    let nextFrame = 0
+    const focused = []
+    const roster = {
+      tagName: 'DETAILS', open: false,
+      scrollIntoView: options => expect(options).toEqual({ block: 'nearest' }),
+      focus: options => focused.push(options)
+    }
+    const target = {
+      dataset: { sessionPanelToggle: 'details' },
+      matches: () => true,
+      hasAttribute: name => name === 'data-session-subagents-open'
+    }
+    const el = {
+      addEventListener() {}, removeEventListener() {},
+      querySelector(selector) {
+        expect(selector).toBe('#session-subagents')
+        return roster
+      }
+    }
+    globalThis.window = {
+      innerWidth: width, addEventListener() {}, removeEventListener() {},
+      requestAnimationFrame(callback) { frames.set(++nextFrame, callback); return nextFrame },
+      cancelAnimationFrame(id) { frames.delete(id) }
+    }
+    globalThis.document = { addEventListener() {}, removeEventListener() {} }
+    const hook = { ...SessionPanels, el, _applyPanels() {} }
+    try {
+      hook.mounted()
+      // Start with the desktop rail collapsed too: entry must force it open.
+      hook._panelState.details = false
+      await hook._panelClick({ composedPath: () => [target] })
+      for (const callback of [...frames.values()]) callback()
+      expect(panelVisible(hook._panelState, 'details', width)).toBe(true)
+      expect(roster.open).toBe(true)
+      expect(focused).toEqual([{ preventScroll: true }])
+      await hook._panelClick({ composedPath: () => [target] })
+      expect(panelVisible(hook._panelState, 'details', width)).toBe(true)
+      expect(hook._panelState.modal).toBe(width < 1280 ? 'details' : null)
+      hook.destroyed()
+    } finally {
+      if (previousWindow === undefined) delete globalThis.window
+      else globalThis.window = previousWindow
+      if (previousDocument === undefined) delete globalThis.document
+      else globalThis.document = previousDocument
+    }
+  })
+}

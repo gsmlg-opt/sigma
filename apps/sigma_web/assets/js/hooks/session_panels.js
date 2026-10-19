@@ -66,17 +66,21 @@ export const SessionPanels = {
       const panel = target.dataset.sessionPanelToggle
       if (panel) {
         const previous = this._panelState.modal
-        this._panelState = target.hasAttribute('data-session-context-open')
+        const focusSelector = target.hasAttribute('data-session-context-open')
+          ? '#session-context-details'
+          : target.hasAttribute('data-session-subagents-open') ? '#session-subagents' : null
+        this._panelState = focusSelector
           ? { ...this._panelState, details: true, modal: this._panelWidth < widths.details ? 'details' : null }
           : changePanel(this._panelState, panel, this._panelWidth)
         if (this._panelState.modal && !previous) this._opener = target
         this._applyPanels(previous)
-        if (target.hasAttribute('data-session-context-open')) {
+        if (focusSelector) {
           this._contextFrame = window.requestAnimationFrame(() => {
             if (!panelVisible(this._panelState, 'details', this._panelWidth)) return
-            const context = this.el.querySelector('#session-context-details')
-            context?.scrollIntoView({ block: 'nearest' })
-            context?.focus({ preventScroll: true })
+            const section = this.el.querySelector(focusSelector)
+            if (section?.tagName === 'DETAILS') section.open = true
+            section?.scrollIntoView({ block: 'nearest' })
+            section?.focus({ preventScroll: true })
           })
         }
       } else this._closePanel()

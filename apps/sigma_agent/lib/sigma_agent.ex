@@ -48,6 +48,7 @@ defmodule Sigma.Agent do
     :backplane_store,
     :backplane_store_owned,
     :backplane_request,
+    :subagents,
     messages: [],
     subscribers: [],
     current_turn_assistant_message: nil,
@@ -321,7 +322,8 @@ defmodule Sigma.Agent do
       resume_source: Keyword.get(opts, :resume_source, :startup),
       execution_engine: Keyword.fetch!(opts, :execution_engine),
       backplane_store: backplane_store,
-      backplane_store_owned: backplane_store_owned
+      backplane_store_owned: backplane_store_owned,
+      subagents: opts[:subagents]
     }
 
     {:ok, state, {:continue, :session_start}}
@@ -401,7 +403,8 @@ defmodule Sigma.Agent do
 
   @impl true
   def handle_call(:begin_session_operation, _from, state) do
-    if is_nil(state.current_turn_task) and state.turn_state.phase != :session_operation do
+    if is_nil(state.current_turn_task) and state.turn_state.phase != :session_operation and
+         subagents_can_stop?(state) do
       {:reply, :ok,
        %{state | turn_state: TurnState.transition(state.turn_state, :session_operation)}}
     else
@@ -3050,12 +3053,12 @@ defmodule Sigma.Agent do
     do: set_turn_phase(state, state.turn_state.turn_id, phase)
 
   @doc false
-  def __backplane_build_context__(state, messages) do
+  def __backplane_build_context__(state, messages, tools \\ nil) do
     ContextBuilder.build(
       messages: messages,
       session_context: state.session_context,
       system_prompt: state.system_prompt,
-      tools: Enum.map(state.tools, &Sigma.Coding.Tool.ai_definition/1),
+      tools: tools || Enum.map(state.tools, &Sigma.Coding.Tool.ai_definition/1),
       cwd: state.cwd,
       model: state.model
     )
@@ -3172,6 +3175,9 @@ defmodule Sigma.Agent do
       engine -> {:error, {:invalid_execution_engine, engine}}
     end
   end
+
+  defp subagents_can_stop?(%{subagents: nil}), do: true
+  defp subagents_can_stop?(state), do: Sigma.Agent.Subagents.can_stop(state.subagents) == :ok
 
   defp init_backplane_store(opts) do
     if Keyword.fetch!(opts, :execution_engine) == :sigma do

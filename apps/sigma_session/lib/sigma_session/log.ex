@@ -180,7 +180,10 @@ defmodule Sigma.Session.Log do
     end
   end
 
-  defp conversation_node?(%{entry: %{"type" => "metrics"}}), do: false
+  defp conversation_node?(%{entry: %{"type" => type}})
+       when type in ["metrics", "subagent", "subagent_admission"],
+    do: false
+
   defp conversation_node?(_node), do: true
 
   defp conversation_parent_ids(nodes) do
@@ -515,7 +518,7 @@ defmodule Sigma.Session.Log do
          :ok <-
            write_fork_entries(
              target_storage_id,
-             [header | Enum.map(nodes, & &1.entry)],
+             [header | nodes |> Enum.filter(&conversation_node?/1) |> Enum.map(& &1.entry)],
              storage_mod
            ) do
       {:ok, header["id"]}
@@ -771,7 +774,7 @@ defmodule Sigma.Session.Log do
   end
 
   defp fork_entries(entries, nodes) do
-    selected_entries = Enum.map(nodes, & &1.entry)
+    selected_entries = nodes |> Enum.filter(&conversation_node?/1) |> Enum.map(& &1.entry)
     selected_entry_ids = MapSet.new(selected_entries, & &1["id"])
 
     selected_message_ids =

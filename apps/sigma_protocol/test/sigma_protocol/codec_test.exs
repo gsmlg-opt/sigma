@@ -60,6 +60,7 @@ defmodule Sigma.Protocol.CodecTest do
     assert Envelope.capabilities() == [
              "metrics.v1",
              "skills.v1",
+             "subagents.v1",
              "subscription.cursor.v1",
              "subscription.resync.v1"
            ]
@@ -95,5 +96,46 @@ defmodule Sigma.Protocol.CodecTest do
 
     assert {:ok, encoded} = Codec.encode(event)
     assert {:ok, ^event} = Codec.decode(encoded)
+  end
+
+  test "subagents v1 event round trips and snapshot DTO strips arbitrary fields" do
+    row = %{
+      agent_id: "child",
+      run_id: "run",
+      incarnation: 1,
+      status: :completed,
+      revision: 1,
+      event_id: "event",
+      observer_incarnation: "owner",
+      credentials: "secret",
+      pid: self(),
+      reference: make_ref(),
+      callback: fn -> :secret end
+    }
+
+    roster = %{
+      revision: 1,
+      agents: [row],
+      counts: %{created: 1, executing: 0, pending: 0, stopped: 1, unknown: 0},
+      secret: "hidden"
+    }
+
+    assert {:ok, safe} = Sigma.Protocol.Subagents.snapshot(roster)
+    refute inspect(safe) =~ "secret"
+    refute inspect(safe) =~ "#PID"
+
+    assert {:ok, event} =
+             Envelope.event("subagents.changed", "root", Sigma.Protocol.Subagents.to_map(safe))
+
+    assert {:ok, encoded} = Codec.encode(event)
+    assert {:ok, ^event} = Codec.decode(encoded)
+
+    assert {:error, _} =
+             Sigma.Protocol.Subagents.snapshot(
+               put_in(roster, [:agents], [%{row | agent_id: self()}])
+             )
+
+    assert {:error, _} =
+             Sigma.Protocol.Subagents.snapshot(put_in(roster, [:counts, :stopped], self()))
   end
 end

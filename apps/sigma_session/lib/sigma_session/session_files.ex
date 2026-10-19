@@ -48,21 +48,22 @@ defmodule Sigma.Session.SessionFiles do
          {:ok, old_meta_path} <- meta_path(sessions_dir, old_id),
          {:ok, new_meta_path} <- meta_path(sessions_dir, new_id),
          :ok <- ensure_absent(new_jsonl_path),
-         :ok <- ensure_absent(new_meta_path),
-         :ok <-
-           run_operation_hook(:before_jsonl_move, %{
-             source: old_jsonl_path,
-             target: new_jsonl_path
-           }),
-         :ok <- move_file_no_overwrite(old_jsonl_path, new_jsonl_path),
-         :ok <-
-           rename_metadata_with_rollback(
-             old_meta_path,
-             new_meta_path,
-             new_jsonl_path,
-             old_jsonl_path
-           ) do
-      :ok
+         :ok <- ensure_absent(new_meta_path) do
+      with_subagents_move(old_jsonl_path, new_jsonl_path, fn ->
+        with :ok <-
+               run_operation_hook(:before_jsonl_move, %{
+                 source: old_jsonl_path,
+                 target: new_jsonl_path
+               }),
+             :ok <- move_file_no_overwrite(old_jsonl_path, new_jsonl_path) do
+          rename_metadata_with_rollback(
+            old_meta_path,
+            new_meta_path,
+            new_jsonl_path,
+            old_jsonl_path
+          )
+        end
+      end)
     end
   end
 
@@ -70,7 +71,8 @@ defmodule Sigma.Session.SessionFiles do
     with {:ok, jsonl_path} <- jsonl_path(sessions_dir, id),
          {:ok, meta_path} <- meta_path(sessions_dir, id),
          :ok <- rm_optional(jsonl_path),
-         :ok <- rm_optional(meta_path) do
+         :ok <- rm_optional(meta_path),
+         :ok <- remove_subagents(jsonl_path <> ".subagents") do
       :ok
     end
   end
@@ -83,6 +85,7 @@ defmodule Sigma.Session.SessionFiles do
          :ok <- require_regular(source_jsonl_path),
          :ok <- ensure_absent(target_jsonl_path),
          :ok <- ensure_absent(target_meta_path),
+         :ok <- ensure_absent(target_jsonl_path <> ".subagents"),
          {:ok, metadata} <- read_metadata(source_meta_path),
          {:ok, cwd} <- fork_cwd(metadata, source_jsonl_path, opts),
          {:ok, new_session_id} <-
@@ -115,14 +118,16 @@ defmodule Sigma.Session.SessionFiles do
       if source_jsonl_path == target_jsonl_path do
         adopt_in_place(target_meta_path, metadata_content, opts)
       else
-        adopt_across_directories(
-          source_jsonl_path,
-          source_meta_path,
-          target_jsonl_path,
-          target_meta_path,
-          metadata_content,
-          opts
-        )
+        with_subagents_move(source_jsonl_path, target_jsonl_path, fn ->
+          adopt_across_directories(
+            source_jsonl_path,
+            source_meta_path,
+            target_jsonl_path,
+            target_meta_path,
+            metadata_content,
+            opts
+          )
+        end)
       end
     else
       false -> {:error, :invalid_replacement_cwd}
@@ -149,6 +154,124 @@ defmodule Sigma.Session.SessionFiles do
   end
 
   def update_metadata(_sessions_dir, _id, _updates, _opts), do: {:error, :invalid_arguments}
+
+  # Reserve the destination directory before rename so an existing or raced
+  # destination is never replaced. Root-file publication remains responsible
+  # for its own rollback; this transaction rolls retained children back with it.
+  defp with_subagents_move(source_jsonl, target_jsonl, operation) do
+    source = source_jsonl <> ".subagents"
+    target = target_jsonl <> ".subagents"
+
+    with {:ok, moved?} <- move_optional_subagents(source, target) do
+      case operation.() do
+        :ok ->
+          :ok
+
+        {:error, _reason} = error when not moved? ->
+          error
+
+        {:error, _reason} = error ->
+          case move_optional_subagents(target, source) do
+            {:ok, true} -> error
+            rollback -> {:error, {:subagents_rollback_failed, error, rollback}}
+          end
+      end
+    end
+  end
+
+  defp move_optional_subagents(source, target) do
+    case File.lstat(source) do
+      {:error, :enoent} ->
+        with :ok <- ensure_absent(target), do: {:ok, false}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      {:ok, %{type: :directory} = stat} ->
+        with :ok <- run_operation_hook(:before_subagents_move, %{source: source, target: target}),
+             :ok <- reserve_subagents_directory(target) do
+          result =
+            with :ok <-
+                   run_operation_hook(:after_subagents_reserve, %{source: source, target: target}),
+                 :ok <- File.rename(source, target) do
+              :ok
+            end
+
+          case result do
+            :ok ->
+              {:ok, true}
+
+            {:error, :exdev} ->
+              with :ok <- copy_subagents_across_devices(source, target, stat.mode),
+                   do: {:ok, true}
+
+            {:error, _reason} = error ->
+              cleanup_subagents_target(target, error)
+          end
+        end
+
+      {:ok, _stat} ->
+        {:error, :enotdir}
+    end
+  end
+
+  defp reserve_subagents_directory(path) do
+    case File.mkdir(path) do
+      :ok -> :ok
+      {:error, :eexist} -> {:error, :already_exists}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp copy_subagents_across_devices(source, target, mode) do
+    copied =
+      with :ok <- File.chmod(target, Bitwise.band(mode, 0o7777)),
+           {:ok, names} <- File.ls(source) do
+        Enum.reduce_while(names, :ok, fn name, :ok ->
+          case File.cp_r(Path.join(source, name), Path.join(target, name), fn _, conflict ->
+                 throw({:subagents_copy_conflict, conflict})
+               end) do
+            {:ok, _paths} -> {:cont, :ok}
+            {:error, reason, path} -> {:halt, {:error, {:subagents_copy_failed, reason, path}}}
+          end
+        end)
+      end
+
+    case copied do
+      :ok ->
+        case remove_subagents(source) do
+          :ok ->
+            :ok
+
+          error ->
+            # The target is a complete copy. Keep it as evidence if source
+            # deletion was partial; never discard the only remaining bytes.
+            {:error, {:subagents_source_cleanup_failed, error, target}}
+        end
+
+      error ->
+        cleanup_subagents_target(target, error)
+    end
+  catch
+    {:subagents_copy_conflict, _path} ->
+      cleanup_subagents_target(target, {:error, :already_exists})
+  end
+
+  defp cleanup_subagents_target(target, error) do
+    # Only the empty reservation is ours to remove. Preserve partial copies
+    # and files created by another owner after reservation.
+    case File.rmdir(target) do
+      :ok -> error
+      cleanup -> {:error, {:subagents_cleanup_uncertain, error, cleanup, target}}
+    end
+  end
+
+  defp remove_subagents(path) do
+    case File.rm_rf(path) do
+      {:ok, _paths} -> :ok
+      {:error, reason, failed_path} -> {:error, {:subagents_remove_failed, reason, failed_path}}
+    end
+  end
 
   defp safe_path(sessions_dir, id, suffix) do
     if valid_session_id?(id) do
@@ -503,7 +626,8 @@ defmodule Sigma.Session.SessionFiles do
          opts
        ) do
     result =
-      with :ok <- run_adopt_hook(opts, :before_adopt_source_cleanup, %{source: source_jsonl_path}),
+      with :ok <-
+             run_adopt_hook(opts, :before_adopt_source_cleanup, %{source: source_jsonl_path}),
            :ok <- File.rm(source_jsonl_path),
            :ok <- rm_optional(source_meta_path) do
         :ok
