@@ -54,7 +54,76 @@ defmodule Sigma.Agent.Runtime do
   @doc "Reports whether an automatic stop may proceed without abandoning terminal resources."
   def can_stop_session(repo_path, session_id)
       when is_binary(repo_path) and is_binary(session_id) do
-    Sigma.Agent.Terminals.can_stop(repo_path, session_id)
+    with :ok <- Sigma.Agent.Terminals.can_stop(repo_path, session_id) do
+      case lookup(repo_path, session_id, :subagents) do
+        nil -> :ok
+        host -> Sigma.Agent.Subagents.can_stop(host)
+      end
+    end
+  end
+
+  @doc "Loads journal state with the acknowledged live subagent projection when available."
+  def session_snapshot(repo_path, session_id, storage_path) do
+    with {:ok, snapshot} <- apply(Sigma.Session.Log, :snapshot, [storage_path]) do
+      case lookup(repo_path, session_id, :subagents) do
+        nil ->
+          {:ok, Map.put(snapshot, :subagents_available, false)}
+
+        host ->
+          with {:ok, live} <- Sigma.Agent.Subagents.snapshot(host) do
+            current? =
+              live.available and current_subagent_roster?(live.subagents, snapshot.subagents)
+
+            {:ok,
+             snapshot
+             |> Map.put(:subagents, if(current?, do: live.subagents, else: snapshot.subagents))
+             |> Map.put(:subagents_available, current?)}
+          end
+      end
+    end
+  end
+
+  defp current_subagent_roster?(live, durable) do
+    live_agents = Map.new(live.agents, &{&1.agent_id, &1})
+
+    live.revision >= durable.revision and
+      Enum.all?(durable.agents, fn row ->
+        case live_agents[row.agent_id] do
+          nil ->
+            false
+
+          current ->
+            current.revision > row.revision or
+              (current.revision == row.revision and current.event_id == row.event_id)
+        end
+      end)
+  end
+
+  def pending_subagent_questions(repo_path, session_id) do
+    case lookup(repo_path, session_id, :subagents) do
+      nil -> []
+      host -> Sigma.Agent.Subagents.pending(host)
+    end
+  end
+
+  def answer_question(repo_path, session_id, agent, request_id, reply) do
+    result =
+      case lookup(repo_path, session_id, :subagents) do
+        nil -> {:error, :question_not_found}
+        host -> Sigma.Agent.Subagents.answer(host, request_id, reply)
+      end
+
+    case result do
+      {:error, :question_not_found} -> Sigma.Agent.answer_user_question(agent, request_id, reply)
+      other -> other
+    end
+  end
+
+  def close_subagents(repo_path, session_id) do
+    case lookup(repo_path, session_id, :subagents) do
+      nil -> :ok
+      host -> Sigma.Agent.Subagents.close(host)
+    end
   end
 
   @doc "Rejects a stale client session incarnation without creating a runtime."
@@ -236,7 +305,8 @@ defmodule Sigma.Agent.Runtime do
   end
 
   defp ensure_runtime_processes_started do
-    with registry_pid when is_pid(registry_pid) <- Process.whereis(Sigma.Agent.RepositoryRegistry),
+    with registry_pid when is_pid(registry_pid) <-
+           Process.whereis(Sigma.Agent.RepositoryRegistry),
          supervisor_pid when is_pid(supervisor_pid) <-
            Process.whereis(Sigma.Agent.DynamicSupervisor) do
       _ = {registry_pid, supervisor_pid}

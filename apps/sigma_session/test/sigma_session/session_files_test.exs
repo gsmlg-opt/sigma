@@ -150,6 +150,288 @@ defmodule Sigma.Session.SessionFilesTest do
     refute File.exists?(meta_path(tmp_dir, "old"))
   end
 
+  test "rename moves retained child transcripts and runtime sidecars", %{tmp_dir: dir} do
+    write_session!(dir, "old")
+    child = write_child_artifacts!(jsonl_path(dir, "old"))
+
+    assert :ok = SessionFiles.rename(dir, "old", "new")
+
+    assert File.read!(Path.join(jsonl_path(dir, "new") <> ".subagents", "child/session.jsonl")) ==
+             "child transcript\n"
+
+    assert File.read!(
+             Path.join(jsonl_path(dir, "new") <> ".subagents", "child/runtime/run.runtime")
+           ) == "runtime evidence"
+
+    refute File.exists?(child)
+  end
+
+  test "rename rolls child artifacts back when metadata publication fails", %{tmp_dir: dir} do
+    write_session!(dir, "old")
+    write_meta!(dir, "old", %{"cwd" => "/tmp/original"})
+    child = write_child_artifacts!(jsonl_path(dir, "old"))
+
+    with_session_file_hook(
+      fn
+        :before_meta_move, _ -> {:error, :injected_metadata_failure}
+        _, _ -> :ok
+      end,
+      fn ->
+        assert {:error, :injected_metadata_failure} = SessionFiles.rename(dir, "old", "new")
+      end
+    )
+
+    assert File.read!(Path.join(child, "child/session.jsonl")) == "child transcript\n"
+    assert File.exists?(jsonl_path(dir, "old"))
+    refute File.exists?(jsonl_path(dir, "new"))
+    refute File.exists?(jsonl_path(dir, "new") <> ".subagents")
+  end
+
+  test "rename preserves a child target created after preflight", %{tmp_dir: dir} do
+    write_session!(dir, "old")
+    write_child_artifacts!(jsonl_path(dir, "old"))
+    target = jsonl_path(dir, "new") <> ".subagents"
+
+    with_session_file_hook(
+      fn
+        :before_subagents_move, %{target: path} ->
+          File.mkdir_p!(path)
+          File.write!(Path.join(path, "foreign"), "racing owner")
+
+        _, _ ->
+          :ok
+      end,
+      fn ->
+        assert {:error, :already_exists} = SessionFiles.rename(dir, "old", "new")
+      end
+    )
+
+    assert File.read!(Path.join(target, "foreign")) == "racing owner"
+    assert File.exists?(jsonl_path(dir, "old"))
+    assert File.exists?(jsonl_path(dir, "old") <> ".subagents")
+    refute File.exists?(jsonl_path(dir, "new"))
+  end
+
+  test "rename rollback does not claim a raced child directory when source had none", %{
+    tmp_dir: dir
+  } do
+    write_session!(dir, "old")
+    target = jsonl_path(dir, "new") <> ".subagents"
+
+    with_session_file_hook(
+      fn
+        :before_meta_move, _ ->
+          File.mkdir_p!(target)
+          File.write!(Path.join(target, "foreign"), "racing owner")
+          {:error, :injected_metadata_failure}
+
+        _, _ ->
+          :ok
+      end,
+      fn ->
+        assert {:error, :injected_metadata_failure} = SessionFiles.rename(dir, "old", "new")
+      end
+    )
+
+    assert File.read!(Path.join(target, "foreign")) == "racing owner"
+    refute File.exists?(jsonl_path(dir, "old") <> ".subagents")
+  end
+
+  test "rename preserves foreign contents added after child target reservation", %{tmp_dir: dir} do
+    source = write_session!(dir, "old")
+    original_log = File.read!(source)
+    child = write_child_artifacts!(source)
+    target = jsonl_path(dir, "new") <> ".subagents"
+
+    with_session_file_hook(
+      fn
+        :after_subagents_reserve, %{target: path} ->
+          File.write!(Path.join(path, "foreign"), "racing owner")
+
+        _, _ ->
+          :ok
+      end,
+      fn ->
+        assert {:error,
+                {:subagents_cleanup_uncertain, {:error, rename_reason}, {:error, cleanup_reason},
+                 ^target}} = SessionFiles.rename(dir, "old", "new")
+
+        assert rename_reason in [:eexist, :enotempty]
+        assert cleanup_reason in [:eexist, :enotempty]
+      end
+    )
+
+    assert File.read!(Path.join(target, "foreign")) == "racing owner"
+    assert File.read!(Path.join(child, "child/session.jsonl")) == "child transcript\n"
+    assert File.read!(Path.join(child, "child/runtime/run.runtime")) == "runtime evidence"
+    assert File.read!(source) == original_log
+    refute File.exists?(jsonl_path(dir, "new"))
+  end
+
+  test "rename removes an empty child reservation when the operation hook fails", %{tmp_dir: dir} do
+    source = write_session!(dir, "old")
+    child = write_child_artifacts!(source)
+
+    with_session_file_hook(
+      fn
+        :after_subagents_reserve, _ -> {:error, :injected_reservation_failure}
+        _, _ -> :ok
+      end,
+      fn ->
+        assert {:error, :injected_reservation_failure} = SessionFiles.rename(dir, "old", "new")
+      end
+    )
+
+    assert File.exists?(source)
+    assert File.exists?(child)
+    refute File.exists?(jsonl_path(dir, "new") <> ".subagents")
+  end
+
+  @tag skip: not File.dir?("/dev/shm")
+  test "cross-device adoption preserves foreign contents on child copy conflict", %{tmp_dir: dir} do
+    source_dir = Path.join(dir, "source")
+    File.mkdir_p!(source_dir)
+    source = write_session!(source_dir, "session")
+    original_log = File.read!(source)
+    child = write_child_artifacts!(source)
+
+    target_dir =
+      Path.join("/dev/shm", "sigma-session-files-#{System.unique_integer([:positive])}")
+
+    File.mkdir!(target_dir)
+    on_exit(fn -> File.rm_rf!(target_dir) end)
+    assert File.stat!(source_dir).major_device != File.stat!(target_dir).major_device
+    target = jsonl_path(target_dir, "session") <> ".subagents"
+
+    with_session_file_hook(
+      fn
+        :after_subagents_reserve, %{target: path} ->
+          File.mkdir_p!(Path.join(path, "child"))
+          File.write!(Path.join(path, "child/session.jsonl"), "foreign transcript\n")
+
+        _, _ ->
+          :ok
+      end,
+      fn ->
+        assert {:error,
+                {:subagents_cleanup_uncertain, {:error, :already_exists},
+                 {:error, cleanup_reason},
+                 ^target}} = SessionFiles.adopt(source_dir, target_dir, "session", dir)
+
+        assert cleanup_reason in [:eexist, :enotempty]
+      end
+    )
+
+    assert File.read!(Path.join(target, "child/session.jsonl")) == "foreign transcript\n"
+    assert File.read!(Path.join(child, "child/session.jsonl")) == "child transcript\n"
+    assert File.read!(Path.join(child, "child/runtime/run.runtime")) == "runtime evidence"
+    assert File.read!(source) == original_log
+    refute File.exists?(jsonl_path(target_dir, "session"))
+    refute File.exists?(meta_path(target_dir, "session"))
+  end
+
+  test "adoption relocates child artifacts and rolls them back with failed source cleanup", %{
+    tmp_dir: dir
+  } do
+    source = Path.join(dir, "source")
+    target = Path.join(dir, "target")
+    replacement = Path.join(dir, "replacement")
+    File.mkdir_p!(source)
+    File.mkdir_p!(replacement)
+    write_session!(source, "session")
+    child = write_child_artifacts!(jsonl_path(source, "session"))
+
+    assert {:error, :injected_cleanup_failure} =
+             SessionFiles.adopt(source, target, "session", replacement,
+               operation_hook: fn
+                 :before_adopt_source_cleanup, _ -> {:error, :injected_cleanup_failure}
+                 _, _ -> :ok
+               end
+             )
+
+    assert File.read!(Path.join(child, "child/runtime/run.runtime")) == "runtime evidence"
+    refute File.exists?(jsonl_path(target, "session") <> ".subagents")
+
+    assert :ok = SessionFiles.adopt(source, target, "session", replacement)
+
+    assert File.read!(
+             Path.join(jsonl_path(target, "session") <> ".subagents", "child/session.jsonl")
+           ) == "child transcript\n"
+
+    refute File.exists?(child)
+  end
+
+  test "artifact-only target conflicts block rename adoption and fork", %{tmp_dir: dir} do
+    source = write_session!(dir, "source")
+    target_artifacts = jsonl_path(dir, "target") <> ".subagents"
+    File.mkdir_p!(target_artifacts)
+    File.write!(Path.join(target_artifacts, "foreign"), "retained target")
+    assert {:error, :already_exists} = SessionFiles.rename(dir, "source", "target")
+    assert {:error, :already_exists} = SessionFiles.fork(dir, "source", "target", :all)
+
+    target_dir = Path.join(dir, "adopted")
+    File.mkdir_p!(jsonl_path(target_dir, "source") <> ".subagents")
+    assert {:error, :already_exists} = SessionFiles.adopt(dir, target_dir, "source", dir)
+    assert File.exists?(source)
+    assert File.read!(Path.join(target_artifacts, "foreign")) == "retained target"
+  end
+
+  test "delete removes child artifacts and fork retains no child artifacts or roster", %{
+    tmp_dir: dir
+  } do
+    source = write_session!(dir, "source")
+    child = write_child_artifacts!(source)
+
+    event = %{
+      fact: :registered,
+      event_id: "registered",
+      revision: 1,
+      observer_incarnation: "owner",
+      data: %{
+        agent_id: "child",
+        agent_path: "/root/child",
+        root_session_id: "source",
+        parent_agent_id: "root",
+        child_session_id: "child-session",
+        origin_turn_id: "turn",
+        origin_tool_call_id: "spawn",
+        task: "child",
+        depth: 1,
+        agent_type: "default",
+        run_id: "run",
+        incarnation: 1,
+        status: :pending_init,
+        closure: :open
+      }
+    }
+
+    writer =
+      start_supervised!(
+        {Sigma.Session.Writer, storage_id: source, session_id: "source", cwd: "/tmp/project"}
+      )
+
+    assert {:ok, _} = Sigma.Session.Writer.append(writer, {:subagent, event})
+    assert {:ok, before_fork} = Log.snapshot(source)
+    assert before_fork.subagents.agents != []
+
+    assert {:ok, _} = SessionFiles.fork(dir, "source", "fork", :all)
+    assert {:ok, forked} = Log.snapshot(jsonl_path(dir, "fork"))
+    assert forked.subagents.agents == []
+    refute File.exists?(jsonl_path(dir, "fork") <> ".subagents")
+    assert File.exists?(child)
+    assert :ok = SessionFiles.delete(dir, "source")
+    refute File.exists?(child)
+    assert File.exists?(jsonl_path(dir, "fork"))
+  end
+
+  defp write_child_artifacts!(root_jsonl) do
+    directory = root_jsonl <> ".subagents"
+    File.mkdir_p!(Path.join(directory, "child/runtime"))
+    File.write!(Path.join(directory, "child/session.jsonl"), "child transcript\n")
+    File.write!(Path.join(directory, "child/runtime/run.runtime"), "runtime evidence")
+    directory
+  end
+
   test "rename preserves metrics identity, ownership, and totals", %{tmp_dir: tmp_dir} do
     source_path = write_session!(tmp_dir, "old")
     assert {:ok, initial_snapshot} = Log.snapshot(source_path)

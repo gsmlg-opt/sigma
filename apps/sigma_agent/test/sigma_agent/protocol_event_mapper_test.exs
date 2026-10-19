@@ -215,4 +215,59 @@ defmodule Sigma.Agent.ProtocolEventMapperTest do
                "turn-1"
              )
   end
+
+  test "subagent events and capable snapshots use only validated DTO fields" do
+    fact = %{
+      fact: :registered,
+      revision: 1,
+      event_id: "event",
+      observer_incarnation: "owner",
+      data: %{
+        agent_id: "child",
+        run_id: "run",
+        incarnation: 1,
+        status: :pending_init,
+        credentials: "private-secret",
+        pid: self(),
+        reference: make_ref(),
+        callback: fn -> :secret end
+      }
+    }
+
+    assert {%{type: "subagents.changed"} = event, "turn"} =
+             ProtocolEventMapper.map({:subagent, fact}, "session", "turn")
+
+    assert event.payload["revision"] == 1
+    assert {:ok, encoded} = Codec.encode(event)
+    refute encoded =~ "private-secret"
+    refute encoded =~ "#PID"
+
+    assert {nil, "turn"} =
+             ProtocolEventMapper.map(
+               {:subagent, put_in(fact, [:data, :agent_id], self())},
+               "session",
+               "turn"
+             )
+
+    {:ok, safe_fact} = Sigma.Protocol.Subagents.event(fact)
+
+    row =
+      Map.merge(
+        safe_fact.data,
+        Map.take(safe_fact, [:revision, :event_id, :observer_incarnation])
+      )
+
+    roster = %{
+      revision: 1,
+      agents: [row],
+      counts: %{created: 1, executing: 0, pending: 1, stopped: 0, unknown: 0},
+      credentials: "private-secret"
+    }
+
+    snapshot = %Sigma.Session.Snapshot{session_id: "session", subagents: roster}
+    refute Map.has_key?(ProtocolEventMapper.snapshot_payload(snapshot), "subagents")
+    capable = ProtocolEventMapper.snapshot_payload(snapshot, "session", ["subagents.v1"])
+    assert capable["subagents"]["counts"]["pending"] == 1
+    refute inspect(capable) =~ "private-secret"
+  end
 end

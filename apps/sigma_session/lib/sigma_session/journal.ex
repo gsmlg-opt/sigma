@@ -3,7 +3,7 @@ defmodule Sigma.Session.Journal do
   Pure validation and replay of one active session-journal branch.
   """
 
-  alias Sigma.Session.{EntryDecoder, Metrics, Snapshot}
+  alias Sigma.Session.{EntryDecoder, Metrics, Snapshot, SubagentAdmissions, Subagents}
   alias Sigma.Session.Journal.Index
 
   @service_tier_values ~w(auto default flex scale priority)
@@ -30,6 +30,16 @@ defmodule Sigma.Session.Journal do
       }
 
       snapshot = %{snapshot | metrics: metrics_snapshot(index, snapshot.session_id)}
+      {roster, receipts, admissions, admission_ids, subagent_diagnostics} = subagent_roster(index)
+
+      snapshot = %{
+        snapshot
+        | subagent_roster: roster,
+          subagents: Subagents.snapshot(roster),
+          subagent_entry_ids: receipts,
+          subagent_admissions: admissions,
+          subagent_admission_entry_ids: admission_ids
+      }
 
       {snapshot, payload_diagnostics_rev} =
         Enum.reduce(nodes, {snapshot, []}, &reduce_entry/2)
@@ -42,7 +52,7 @@ defmodule Sigma.Session.Journal do
         |> merge_diagnostics(payload_diagnostics)
         |> merge_diagnostics(message_diagnostics)
 
-      diagnostics = Enum.uniq(caller_diagnostics ++ journal_diagnostics)
+      diagnostics = Enum.uniq(caller_diagnostics ++ journal_diagnostics ++ subagent_diagnostics)
 
       {:ok,
        %{
@@ -182,11 +192,51 @@ defmodule Sigma.Session.Journal do
     |> Metrics.finalize_in_flight()
   end
 
-  defp conversation_leaf_id(nodes, fallback) do
+  defp subagent_roster(index) do
+    {roster, receipts, admissions, admission_ids, diagnostics} =
+      Enum.reduce(index.ordered, {Subagents.new(), %{}, %{}, %{}, []}, fn
+        %{entry: %{"type" => "subagent_admission"} = entry} = node,
+        {roster, receipts, admissions, admission_ids, diagnostics} ->
+          with {:ok, event} <- EntryDecoder.subagent_admission(entry),
+               {:ok, admissions, updated} <-
+                 SubagentAdmissions.apply_event(admissions, roster, event) do
+            receipts =
+              Enum.reduce(event.facts, receipts, fn fact, acc ->
+                Map.put_new(acc, fact.event_id, entry["id"])
+              end)
+
+            {updated, receipts, admissions,
+             Map.put_new(admission_ids, SubagentAdmissions.key(event), entry["id"]), diagnostics}
+          else
+            {:error, reason} ->
+              {roster, receipts, admissions, admission_ids,
+               [payload_diagnostic(node, reason) | diagnostics]}
+          end
+
+        %{entry: %{"type" => "subagent"} = entry} = node,
+        {roster, receipts, admissions, admission_ids, diagnostics} ->
+          with {:ok, event} <- EntryDecoder.subagent(entry),
+               {:ok, updated} <- Subagents.apply_event(roster, event) do
+            {updated, Map.put_new(receipts, event.event_id, entry["id"]), admissions,
+             admission_ids, diagnostics}
+          else
+            {:error, reason} ->
+              {roster, receipts, admissions, admission_ids,
+               [payload_diagnostic(node, reason) | diagnostics]}
+          end
+
+        _node, acc ->
+          acc
+      end)
+
+    {Subagents.recover(roster), receipts, admissions, admission_ids, Enum.reverse(diagnostics)}
+  end
+
+  defp conversation_leaf_id(nodes, _fallback) do
     nodes
     |> Enum.reverse()
-    |> Enum.find_value(fallback, fn %{entry: %{"type" => type, "id" => id}} ->
-      if type != "metrics", do: id
+    |> Enum.find_value(nil, fn %{entry: %{"type" => type, "id" => id}} ->
+      if type not in ["metrics", "subagent", "subagent_admission"], do: id
     end)
   end
 

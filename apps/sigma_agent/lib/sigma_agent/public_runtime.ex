@@ -9,7 +9,7 @@ defmodule Sigma.Agent.PublicRuntime do
   """
 
   alias Sigma.Agent.{ProtocolEventMapper, ProtocolSubscription, Runtime}
-  alias Sigma.Protocol.Envelope
+  alias Sigma.Protocol.{Codec, Envelope}
 
   @skill_callbacks %{
     "skill.invoke" => :skill_invoke,
@@ -61,9 +61,24 @@ defmodule Sigma.Agent.PublicRuntime do
 
   def execute(%Envelope{kind: :command} = command, context) when is_map(context) do
     case dispatch(command, context) do
-      {:ok, %Envelope{} = event} -> {:ok, event}
-      {:error, %Envelope{} = event} -> {:error, event}
-      {:error, reason} -> {:error, error_event(command, reason)}
+      {:ok, %Envelope{type: "session.snapshot"} = event} ->
+        case Codec.encode(event) do
+          {:ok, _encoded} ->
+            {:ok, event}
+
+          {:error, reason} ->
+            detach_failed_attachment(command, context, event)
+            {:error, error_event(command, reason)}
+        end
+
+      {:ok, %Envelope{} = event} ->
+        {:ok, event}
+
+      {:error, %Envelope{} = event} ->
+        {:error, event}
+
+      {:error, reason} ->
+        {:error, error_event(command, reason)}
     end
   rescue
     exception -> {:error, error_event(command, {:command_exception, exception.__struct__})}
@@ -76,8 +91,15 @@ defmodule Sigma.Agent.PublicRuntime do
 
   def execute(_command, _context), do: {:error, :invalid_command}
 
+  defp detach_failed_attachment(%Envelope{type: "subscription.attach"}, context, event) do
+    ProtocolSubscription.detach(event.payload["subscriptionId"], context[:subscriber] || self())
+  end
+
+  defp detach_failed_attachment(_command, _context, _event), do: :ok
+
   defp dispatch(%Envelope{type: "session.create"} = command, context) do
-    with {:ok, repo_path, sessions_dir} <- paths(command, context),
+    with :ok <- validate_capabilities(command),
+         {:ok, repo_path, sessions_dir} <- paths(command, context),
          {:ok, cwd} <- create_cwd(command.payload["cwd"] || repo_path, repo_path, context),
          {:ok, storage_path} <- session_path(sessions_dir, command.session_id),
          metadata <- Map.put(command.payload["metadata"] || %{}, "cwd", cwd),
@@ -106,7 +128,8 @@ defmodule Sigma.Agent.PublicRuntime do
   end
 
   defp dispatch(%Envelope{type: "session.resume"} = command, context) do
-    with {:ok, repo_path, sessions_dir} <- paths(command, context),
+    with :ok <- validate_capabilities(command),
+         {:ok, repo_path, sessions_dir} <- paths(command, context),
          {:ok, storage_path} <- session_path(sessions_dir, command.session_id) do
       resume(command, context, repo_path, storage_path)
     end
@@ -121,7 +144,8 @@ defmodule Sigma.Agent.PublicRuntime do
   end
 
   defp dispatch(%Envelope{type: "session.switch"} = command, context) do
-    with {:ok, repo_path, sessions_dir} <- paths(command, context),
+    with :ok <- validate_capabilities(command),
+         {:ok, repo_path, sessions_dir} <- paths(command, context),
          target_id when is_binary(target_id) and target_id != "" <-
            command.payload["targetSessionId"],
          {:ok, %{snapshot: snapshot}} <-
@@ -133,9 +157,14 @@ defmodule Sigma.Agent.PublicRuntime do
              operation_opts(command)
            ),
          {:ok, target_path} <- session_path(sessions_dir, target_id),
-         {:ok, target_command} <- Envelope.command("session.resume", target_id),
+         {:ok, target_command} <-
+           Envelope.command(
+             "session.resume",
+             target_id,
+             Map.take(command.payload, ["requiredCapabilities"])
+           ),
          {:ok, _target_event} <- resume(target_command, context, repo_path, target_path) do
-      snapshot_event(target_id, snapshot)
+      snapshot_event(target_id, snapshot, %{}, requested_capabilities(command))
     else
       nil -> {:error, :missing_target_session_id}
       false -> {:error, :missing_target_session_id}
@@ -144,7 +173,8 @@ defmodule Sigma.Agent.PublicRuntime do
   end
 
   defp dispatch(%Envelope{type: "session.fork"} = command, context) do
-    with {:ok, repo_path, sessions_dir} <- paths(command, context),
+    with :ok <- validate_capabilities(command),
+         {:ok, repo_path, sessions_dir} <- paths(command, context),
          target_id when is_binary(target_id) and target_id != "" <-
            command.payload["targetSessionId"],
          {:ok, %{session_id: ^target_id}} <-
@@ -158,7 +188,7 @@ defmodule Sigma.Agent.PublicRuntime do
            ),
          {:ok, target_path} <- session_path(sessions_dir, target_id),
          {:ok, snapshot} <- apply(Sigma.Session.Log, :snapshot, [target_path]) do
-      snapshot_event(target_id, snapshot)
+      snapshot_event(target_id, snapshot, %{}, requested_capabilities(command))
     else
       nil -> {:error, :missing_target_session_id}
       false -> {:error, :missing_target_session_id}
@@ -222,7 +252,7 @@ defmodule Sigma.Agent.PublicRuntime do
 
   defp dispatch(%Envelope{type: "turn.cancel"} = command, context) do
     with {:ok, agent} <- running_agent(command, context),
-         result <- Sigma.Agent.cancel(agent),
+         result <- cancel_session(agent, command, context),
          {:ok, payload} <- cancel_payload(result),
          {:ok, event} <-
            Envelope.event("session.snapshot", command.session_id, %{"cancellation" => payload},
@@ -236,7 +266,7 @@ defmodule Sigma.Agent.PublicRuntime do
     with {:ok, agent} <- running_agent(command, context),
          request_id when is_binary(request_id) <- command.payload["requestId"],
          {:ok, reply} <- permission_reply(command.payload["decision"]),
-         :ok <- Sigma.Agent.answer_user_question(agent, request_id, reply) do
+         :ok <- answer_question(agent, command, context, request_id, reply) do
       status_event(command.session_id, agent)
     else
       nil -> {:error, :missing_request_id}
@@ -313,14 +343,16 @@ defmodule Sigma.Agent.PublicRuntime do
            ProtocolSubscription.attach_snapshot(agent, command.session_id, sink,
              max_sink_queue: context[:max_subscriber_queue] || 256,
              capabilities: capabilities,
-             snapshot_loader: fn -> apply(Sigma.Session.Log, :snapshot, [storage_path]) end
+             snapshot_loader: fn ->
+               Runtime.session_snapshot(repo_path, command.session_id, storage_path)
+             end
            ),
          {:ok, event} <-
            Envelope.event(
              "session.snapshot",
              command.session_id,
              session_snapshot
-             |> ProtocolEventMapper.snapshot_payload(command.session_id)
+             |> ProtocolEventMapper.snapshot_payload(command.session_id, capabilities)
              |> Map.merge(%{
                "subscriptionId" => subscription_id,
                "attached" => true,
@@ -370,8 +402,9 @@ defmodule Sigma.Agent.PublicRuntime do
     with {:ok, snapshot} <- apply(Sigma.Session.Log, :snapshot, [storage_path]),
          :ok <- require_session_header(snapshot),
          :ok <- recover_skill_invocations(context, command.session_id),
-         :ok <- ensure_runtime_session(command, context, repo_path, storage_path, snapshot) do
-      snapshot_event(command.session_id, snapshot)
+         :ok <- ensure_runtime_session(command, context, repo_path, storage_path, snapshot),
+         {:ok, snapshot} <- Runtime.session_snapshot(repo_path, command.session_id, storage_path) do
+      snapshot_event(command.session_id, snapshot, %{}, requested_capabilities(command))
     end
   end
 
@@ -392,7 +425,8 @@ defmodule Sigma.Agent.PublicRuntime do
     if is_pid(Runtime.lookup(repo_path, command.session_id, :agent)) do
       :ok
     else
-      with {:ok, session_opts} <- runtime_session_opts(context, snapshot, storage_path, repo_path),
+      with {:ok, session_opts} <-
+             runtime_session_opts(context, snapshot, storage_path, repo_path),
            {:ok, _handle} <- Runtime.get_session(repo_path, command.session_id, session_opts) do
         :ok
       end
@@ -460,6 +494,47 @@ defmodule Sigma.Agent.PublicRuntime do
     end)
   end
 
+  defp cancel_session(agent, command, context) do
+    case Sigma.Agent.cancel(agent) do
+      {:error, :no_active_turn} ->
+        cancel_detached_children(command, context)
+
+      {:already_cancelled, _} = result ->
+        case cancel_detached_children(command, context) do
+          {:error, :no_active_turn} -> result
+          other -> other
+        end
+
+      result ->
+        result
+    end
+  end
+
+  defp answer_question(agent, command, context, request_id, reply) do
+    case paths(command, context) do
+      {:ok, repo_path, _sessions_dir} ->
+        Runtime.answer_question(repo_path, command.session_id, agent, request_id, reply)
+
+      {:error, _} ->
+        Sigma.Agent.answer_user_question(agent, request_id, reply)
+    end
+  end
+
+  defp cancel_detached_children(command, context) do
+    with {:ok, repo, _dir} <- paths(command, context),
+         host when is_pid(host) <- Runtime.lookup(repo, command.session_id, :subagents),
+         {:ok, %{subagents: roster}} <- Sigma.Agent.Subagents.snapshot(host),
+         true <- roster.counts.executing + roster.counts.pending > 0,
+         {:ok, %{status: :confirmed}} <- Sigma.Agent.Subagents.close(host) do
+      {:cancelled_children, nil}
+    else
+      false -> {:error, :no_active_turn}
+      nil -> {:error, :no_active_turn}
+      {:error, _} = error -> error
+      _ -> {:error, :subagent_cleanup_unconfirmed}
+    end
+  end
+
   defp call_prompt(agent, :submit, content, opts), do: Sigma.Agent.prompt(agent, content, opts)
   defp call_prompt(agent, :steer, content, opts), do: Sigma.Agent.steer(agent, content, opts)
 
@@ -475,7 +550,7 @@ defmodule Sigma.Agent.PublicRuntime do
       end
 
     dispatcher_opts =
-      []
+      [interactive_approvals: context[:interactive_approvals] == true]
       |> maybe_put_resolver(:permission_request_fn, permission_resolver)
       |> maybe_put_resolver(:ask_user_question_fn, context[:question_resolver])
 
@@ -519,7 +594,7 @@ defmodule Sigma.Agent.PublicRuntime do
   defp admission_payload(_result), do: {:error, :invalid_admission_result}
 
   defp cancel_payload({status, turn_id})
-       when status in [:cancelling, :already_cancelling, :already_cancelled],
+       when status in [:cancelling, :already_cancelling, :already_cancelled, :cancelled_children],
        do: {:ok, %{"status" => Atom.to_string(status), "turnId" => turn_id}}
 
   defp cancel_payload({:error, reason}), do: {:error, reason}
@@ -603,8 +678,9 @@ defmodule Sigma.Agent.PublicRuntime do
     end
   end
 
-  defp snapshot_event(session_id, snapshot, extra \\ %{}) do
-    payload = Map.merge(ProtocolEventMapper.snapshot_payload(snapshot, session_id), extra)
+  defp snapshot_event(session_id, snapshot, extra, capabilities) do
+    payload =
+      Map.merge(ProtocolEventMapper.snapshot_payload(snapshot, session_id, capabilities), extra)
 
     case Envelope.event("session.snapshot", session_id, payload) do
       {:ok, event} -> {:ok, event}
@@ -617,42 +693,65 @@ defmodule Sigma.Agent.PublicRuntime do
       subscription_id when is_binary(subscription_id) and subscription_id != "" ->
         sink = context[:subscriber] || self()
 
-        with true <- is_pid(sink),
-             {:ok, cursor, turn_snapshot, snapshot} <-
-               ProtocolSubscription.snapshot(subscription_id, sink, fn ->
-                 apply(Sigma.Session.Log, :snapshot, [storage_path])
-               end) do
-          runtime_status = Runtime.session_status(repo_path, command.session_id)
-          turn = public_turn_snapshot(turn_snapshot)
+        with true <- is_pid(sink) do
+          ProtocolSubscription.snapshot(
+            subscription_id,
+            sink,
+            fn -> Runtime.session_snapshot(repo_path, command.session_id, storage_path) end,
+            fn cursor, turn_snapshot, snapshot ->
+              runtime_status = Runtime.session_status(repo_path, command.session_id)
+              turn = public_turn_snapshot(turn_snapshot)
 
-          snapshot_event(command.session_id, snapshot, %{
-            "subscriptionId" => subscription_id,
-            "cursor" => cursor,
-            "watermark" => cursor,
-            "runtime" => public_runtime_status(runtime_status),
-            "turn" => turn,
-            "metrics" =>
-              ProtocolEventMapper.metrics_snapshot(snapshot.metrics, command.session_id),
-            "runtimeSnapshot" => runtime_snapshot(runtime_status, turn_snapshot, snapshot, cursor)
-          })
+              with {:ok, event} <-
+                     snapshot_event(
+                       command.session_id,
+                       snapshot,
+                       %{
+                         "subscriptionId" => subscription_id,
+                         "cursor" => cursor,
+                         "watermark" => cursor,
+                         "runtime" => public_runtime_status(runtime_status),
+                         "turn" => turn,
+                         "metrics" =>
+                           ProtocolEventMapper.metrics_snapshot(
+                             snapshot.metrics,
+                             command.session_id
+                           ),
+                         "runtimeSnapshot" =>
+                           runtime_snapshot(runtime_status, turn_snapshot, snapshot, cursor)
+                       },
+                       requested_capabilities(command)
+                     ),
+                   {:ok, _encoded} <- Codec.encode(event) do
+                {:ok, event}
+              end
+            end
+          )
         else
           false -> {:error, :subscriber_required}
-          {:error, _reason} = error -> error
         end
 
       _subscription_id ->
-        with {:ok, snapshot} <- apply(Sigma.Session.Log, :snapshot, [storage_path]) do
+        with {:ok, snapshot} <-
+               Runtime.session_snapshot(repo_path, command.session_id, storage_path) do
           runtime_status = Runtime.session_status(repo_path, command.session_id)
           turn = agent_status(repo_path, command.session_id)
 
-          snapshot_event(command.session_id, snapshot, %{
-            "runtime" => public_runtime_status(runtime_status),
-            "turn" => turn,
-            "runtimeSnapshot" => runtime_snapshot(runtime_status, turn, snapshot)
-          })
+          snapshot_event(
+            command.session_id,
+            snapshot,
+            %{
+              "runtime" => public_runtime_status(runtime_status),
+              "turn" => turn,
+              "runtimeSnapshot" => runtime_snapshot(runtime_status, turn, snapshot)
+            },
+            requested_capabilities(command)
+          )
         end
     end
   end
+
+  defp requested_capabilities(command), do: command.payload["requiredCapabilities"] || []
 
   defp validate_capabilities(%Envelope{payload: payload}) do
     case negotiate_capabilities(payload) do

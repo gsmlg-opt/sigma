@@ -52,6 +52,11 @@ defmodule Sigma.Session.Snapshot do
     :compaction,
     :branch_summary,
     :metrics,
+    :subagents,
+    :subagent_roster,
+    subagent_admissions: %{},
+    subagent_admission_entry_ids: %{},
+    subagent_entry_ids: %{},
     branch_entry_ids: [],
     message_entry_ids: %{},
     messages: [],
@@ -81,6 +86,11 @@ defmodule Sigma.Session.Snapshot do
           compaction: map() | nil,
           branch_summary: map() | nil,
           metrics: Sigma.Session.Metrics.t(),
+          subagents: map(),
+          subagent_roster: Sigma.Session.Subagents.t(),
+          subagent_admissions: map(),
+          subagent_admission_entry_ids: map(),
+          subagent_entry_ids: %{optional(String.t()) => String.t()},
           diagnostics: [diagnostic()]
         }
 end

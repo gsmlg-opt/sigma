@@ -1,15 +1,28 @@
 defmodule Sigma.Agent.Backplane.Engine do
   @moduledoc false
 
-  alias Backplane.AgentRuntime.{Conversation, Error, InputSchema, ToolRegistry}
+  alias Backplane.AgentRuntime.{Conversation, Error}
+  alias Sigma.Agent.Backplane.ToolCatalog
   alias Sigma.Agent.Message
   alias Sigma.Coding.Tool
 
   @poll_interval 10
 
   def run(state, turn_id) do
-    with {:ok, registry} <- registry(state, turn_id),
-         {:ok, conversation} <- start_conversation(state, turn_id, registry) do
+    authority = authority(state, turn_id)
+
+    with {:ok, collaboration} <- prepare_collaboration(state, authority) do
+      run_prepared(state, turn_id, authority, collaboration)
+    else
+      {:error, error} ->
+        Sigma.Agent.__backplane_emit__(state, {:turn_error, normalize_error(error)})
+        {state, :failed}
+    end
+  end
+
+  defp run_prepared(state, turn_id, authority, collaboration) do
+    with {:ok, catalog} <- catalog(state, turn_id, authority, collaboration.contracts),
+         {:ok, conversation} <- start_conversation(state, turn_id, catalog, collaboration.binding) do
       try do
         case Conversation.prompt(conversation, List.last(state.messages).content) do
           {:ok, admission} ->
@@ -33,12 +46,22 @@ defmodule Sigma.Agent.Backplane.Engine do
       end
     else
       {:error, error} ->
+        error =
+          if collaboration.binding do
+            case Sigma.Agent.Subagents.close(state.subagents) do
+              {:error, cleanup_error} -> cleanup_error
+              _ -> error
+            end
+          else
+            error
+          end
+
         Sigma.Agent.__backplane_emit__(state, {:turn_error, normalize_error(error)})
         {state, :failed}
     end
   end
 
-  defp start_conversation(state, turn_id, registry) do
+  defp start_conversation(state, turn_id, catalog, binding) do
     initial_prompt = :atomics.new(1, signed: false)
     stop_hook_active = :atomics.new(1, signed: false)
     initial_message = List.last(state.messages)
@@ -52,89 +75,79 @@ defmodule Sigma.Agent.Backplane.Engine do
       initial_prompt: initial_prompt,
       stop_hook_active: stop_hook_active,
       initial_message: initial_message,
-      build_context: &Sigma.Agent.__backplane_build_context__(state, &1),
+      build_context: &Sigma.Agent.__backplane_build_context__(state, &1, catalog.tools),
       context_error: &Sigma.Agent.__backplane_context_error__(state, &1),
       stop_hook: &Sigma.Agent.__backplane_stop_hook__(state, turn_id, &1, &2)
     }
 
-    Conversation.start_link(
+    opts = [
       run_id: turn_id,
       store: Sigma.Agent.Backplane.Store,
       context: state.backplane_store,
       provider: Sigma.Agent.Backplane.Provider,
       provider_context: %{host: host, owner: self()},
       hooks: Sigma.Agent.Backplane.Hooks,
-      registry: registry,
+      registry: catalog.registry,
+      tools: catalog.tools,
       subscriber: self(),
       messages: Enum.drop(state.messages, -1),
-      authority: %{
-        caller: state.session_id || "sigma",
-        run_id: turn_id,
-        grants: Enum.map(state.tools, &Tool.name/1),
-        tool_revision: 1
-      },
+      authority: catalog.authority,
       work: 100,
       provider_output_limit: :infinity,
-      # TODO(upstream): gsmlg-opt/backplane#65 support disabling whole-run deadlines.
-      # WORKAROUND(upstream): gsmlg-opt/backplane#65 use the maximum finite run timeout.
-      run_timeout: 3_600_000,
+      run_timeout: :infinity,
       effect_timeout: 300_000
-    )
+    ]
+
+    opts = if binding, do: Keyword.put(opts, :session_binding, binding), else: opts
+    Conversation.start_link(opts)
   end
 
-  defp registry(state, turn_id) do
+  defp authority(state, turn_id) do
+    collaboration = if state.subagents, do: Sigma.Agent.Subagents.collaboration_tools(), else: []
+
+    %{
+      caller: state.session_id || "sigma",
+      run_id: turn_id,
+      grants: Enum.map(state.tools, &Tool.name/1) ++ collaboration,
+      tool_revision: 1
+    }
+  end
+
+  defp prepare_collaboration(%{subagents: nil}, _authority),
+    do: {:ok, %{contracts: [], binding: nil}}
+
+  defp prepare_collaboration(state, authority) do
+    Sigma.Agent.Subagents.prepare_root(state.subagents, %{
+      authority: authority,
+      config: Sigma.Agent.Subagents.configuration(state),
+      store: state.backplane_store
+    })
+  end
+
+  defp catalog(state, turn_id, authority, contracts) do
     owner = self()
 
-    Enum.reduce_while(state.tools, {:ok, %ToolRegistry{}}, fn tool, {:ok, registry} ->
-      schema = Tool.schema(tool)
+    ToolCatalog.admit(
+      state.tools,
+      authority,
+      fn operation ->
+        ref = make_ref()
+        send(owner, {:backplane_tool_context, self(), ref})
 
-      case InputSchema.validate(schema, %{}) do
-        {:error, %Error{class: :unsupported_capability} = error} ->
-          {:halt, {:error, error}}
-
-        _valid_schema_or_value_error ->
-          metadata =
-            Tool.metadata(tool, %{arguments: %{}, id: "schema", name: Tool.name(tool)}, [])
-
-          descriptor = %{
-            tool_name: Tool.name(tool),
-            tool_revision: 1,
-            backend: Sigma.Agent.Backplane.ToolBackend,
-            backend_context: %{
-              execute: fn operation ->
-                ref = make_ref()
-                send(owner, {:backplane_tool_context, self(), ref})
-
-                current =
-                  receive do
-                    {:backplane_tool_context, ^ref, current} -> current
-                  end
-
-                result =
-                  Sigma.Agent.__backplane_dispatch_tool__(current, turn_id, operation, owner)
-
-                send(owner, {:backplane_tool_boundary, self(), ref})
-
-                receive do
-                  {:backplane_tool_continue, ^ref} -> result
-                end
-              end
-            },
-            schema: schema,
-            safety: %{
-              read_only: metadata.effect == :read,
-              retry_safe: metadata.effect == :read,
-              parallel_safe: metadata.concurrency == :shared,
-              requires_approval: false
-            }
-          }
-
-          case ToolRegistry.register(registry, descriptor) do
-            {:ok, registry} -> {:cont, {:ok, registry}}
-            {:error, error} -> {:halt, {:error, error}}
+        current =
+          receive do
+            {:backplane_tool_context, ^ref, current} -> current
           end
-      end
-    end)
+
+        result = Sigma.Agent.__backplane_dispatch_tool__(current, turn_id, operation, owner)
+        send(owner, {:backplane_tool_boundary, self(), ref})
+
+        receive do
+          {:backplane_tool_continue, ^ref} -> result
+        end
+      end,
+      contracts: contracts
+    )
   end
 
   defp loop(state, conversation, turn_id, users, forwarded, assistant) do
@@ -151,6 +164,24 @@ defmodule Sigma.Agent.Backplane.Engine do
 
       {:backplane_request_started, request, context} ->
         state = Sigma.Agent.__backplane_request_started__(state, request, context)
+        loop(state, conversation, turn_id, users, forwarded, assistant)
+
+      {:backplane_collaboration_messages, messages} ->
+        state =
+          Enum.reduce(
+            Sigma.Agent.Backplane.Provider.normalize_messages(messages),
+            state,
+            fn message, acc ->
+              if Enum.any?(acc.messages, &(&1.id == message.id)) do
+                acc
+              else
+                Sigma.Agent.__backplane_emit__(acc, {:message_start, message})
+                Sigma.Agent.__backplane_emit__(acc, {:message_end, message})
+                %{acc | messages: acc.messages ++ [message]}
+              end
+            end
+          )
+
         loop(state, conversation, turn_id, users, forwarded, assistant)
 
       {:backplane_tool_context, worker, ref} ->
@@ -418,26 +449,11 @@ defmodule Sigma.Agent.Backplane.Engine do
   end
 
   defp tool_message(%{role: :tool} = message, turn_id) do
-    result = Map.get(message, :result, %{})
-
-    Message.tool_result("msg_tool_res_#{turn_id}_#{message.tool_call_id}", %{
-      tool_call_id: message.tool_call_id,
-      tool_name: message.name,
-      content: result_content(result),
-      is_error: Map.get(result, :is_error, false),
-      timestamp: System.system_time(:millisecond)
-    })
+    [normalized] = Sigma.Agent.Backplane.Provider.normalize_messages([message])
+    %{normalized | id: "msg_tool_res_#{turn_id}_#{message.tool_call_id}"}
   end
 
   defp to_user_message(message), do: Message.user(message.id, message.content)
-
-  defp result_content(%{content: content}) when is_list(content), do: content
-
-  defp result_content(%{content: content}) when is_binary(content),
-    do: [%{type: :text, text: content}]
-
-  defp result_content(%{error: error}), do: [%{type: :text, text: "Error: #{inspect(error)}"}]
-  defp result_content(_), do: [%{type: :text, text: "Error: malformed tool result"}]
 
   defp legacy_event(%{type: :content_text_delta} = event),
     do: {:text_delta, Map.get(event, :index, 0), Map.get(event, :delta, ""), event.message}

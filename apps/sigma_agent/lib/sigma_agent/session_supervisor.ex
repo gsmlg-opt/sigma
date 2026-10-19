@@ -34,6 +34,7 @@ defmodule Sigma.Agent.SessionSupervisor do
     policy_name = Sigma.Agent.Runtime.via(repo_path, session_id, :policy)
     tasks_name = Sigma.Agent.Runtime.via(repo_path, session_id, :tasks)
     agent_name = Sigma.Agent.Runtime.via(repo_path, session_id, :agent)
+    subagents_name = Sigma.Agent.Runtime.via(repo_path, session_id, :subagents)
     transcript_path = Keyword.get(opts, :transcript_path)
     writer_name = if transcript_path, do: Sigma.Agent.Runtime.via(repo_path, session_id, :writer)
     permission_config = permission_config(opts)
@@ -45,6 +46,7 @@ defmodule Sigma.Agent.SessionSupervisor do
       |> Keyword.put(:task_supervisor, tasks_name)
       |> Keyword.put(:name, agent_name)
       |> Keyword.put(:writer, writer_name)
+      |> Keyword.put(:subagents, subagents_name)
       |> Keyword.put(:on_event, fn event ->
         Sigma.Agent.SessionProcess.record_event(session_name, event, original_on_event)
       end)
@@ -89,6 +91,29 @@ defmodule Sigma.Agent.SessionSupervisor do
           %{
             id: :task_supervisor,
             start: {Task.Supervisor, :start_link, [[name: tasks_name]]},
+            restart: :transient
+          },
+          %{
+            id: :subagents,
+            start:
+              {Sigma.Agent.Subagents, :start_link,
+               [
+                 [
+                   name: subagents_name,
+                   repo_path: repo_path,
+                   session_id: session_id,
+                   writer: writer_name,
+                   transcript_path: transcript_path,
+                   enabled:
+                     Keyword.get(
+                       opts,
+                       :execution_engine,
+                       Application.get_env(:sigma_agent, :execution_engine, :backplane)
+                     ) == :backplane,
+                   max_concurrent_threads_per_session:
+                     Keyword.get(opts, :max_concurrent_threads_per_session, 4)
+                 ]
+               ]},
             restart: :transient
           },
           %{

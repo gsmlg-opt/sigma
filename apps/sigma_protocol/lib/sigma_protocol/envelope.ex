@@ -31,6 +31,7 @@ defmodule Sigma.Protocol.Envelope do
   @events ~w(
     session.snapshot
     metrics.changed
+    subagents.changed
     prompt.admitted
     turn.started
     message.started
@@ -47,7 +48,7 @@ defmodule Sigma.Protocol.Envelope do
     skill.invocation.updated
   )
 
-  @capabilities ~w(metrics.v1 skills.v1 subscription.cursor.v1 subscription.resync.v1)
+  @capabilities ~w(metrics.v1 skills.v1 subagents.v1 subscription.cursor.v1 subscription.resync.v1)
 
   @enforce_keys [:version, :id, :session_id, :timestamp, :type, :kind]
   defstruct [

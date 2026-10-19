@@ -83,6 +83,18 @@ defmodule Sigma.Session.EntryEncoder do
 
   alias Sigma.Protocol.Metrics
 
+  def encode({:subagent_admission, attrs}, parent_id, _header?) do
+    with {:ok, event} <- Sigma.Session.SubagentAdmissions.normalize(attrs) do
+      {:ok, entry("subagent_admission", parent_id, Sigma.Protocol.Subagents.to_map(event))}
+    end
+  end
+
+  def encode({:subagent, attrs}, parent_id, _header?) do
+    with {:ok, event} <- Sigma.Protocol.Subagents.event(attrs) do
+      {:ok, entry("subagent", parent_id, Sigma.Protocol.Subagents.to_map(event))}
+    end
+  end
+
   @metrics_facts ~w(request_started request_finished request_usage turn_started turn_finished tool_finished compaction operation_started operation_finished)
   @request_metrics_facts ~w(request_started request_finished request_usage)
 

@@ -96,7 +96,10 @@ defmodule Sigma.Session.Journal.Index do
     end
   end
 
-  defp conversation_node?(%{entry: %{"type" => "metrics"}}), do: false
+  defp conversation_node?(%{entry: %{"type" => type}})
+       when type in ["metrics", "subagent", "subagent_admission"],
+       do: false
+
   defp conversation_node?(_node), do: true
 
   defp insert({entry, entry_index}, index) do

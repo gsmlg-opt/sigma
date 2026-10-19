@@ -175,7 +175,7 @@ defmodule Sigma.Agent.BackplaneEngineTest do
   end
 
   @tag :tmp_dir
-  test "a long turn retains a valid deadline beyond five minutes", %{tmp_dir: dir} do
+  test "ordinary turns have no whole-run deadline", %{tmp_dir: dir} do
     {:ok, agent} =
       start_supervised(
         {Sigma.Agent,
@@ -194,14 +194,11 @@ defmodule Sigma.Agent.BackplaneEngineTest do
     store = :sys.get_state(agent).backplane_store
     assert {:ok, %{run: run}} = Sigma.Agent.Backplane.Store.load(store, turn_id)
 
+    assert run.deadline == :infinity
+
     assert :ok =
              Backplane.AgentRuntime.Execution.validate_deadline(run,
-               wall_now: fn -> started_at + :timer.minutes(6) end
-             )
-
-    assert {:error, %{class: :timeout}} =
-             Backplane.AgentRuntime.Execution.validate_deadline(run,
-               wall_now: fn -> run.deadline + 1 end
+               wall_now: fn -> started_at + :timer.hours(48) end
              )
 
     send(worker, {:release_backplane_provider, "long task completed"})

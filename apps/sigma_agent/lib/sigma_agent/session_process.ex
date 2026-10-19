@@ -93,7 +93,7 @@ defmodule Sigma.Agent.SessionProcess do
   end
 
   def handle_call(:can_stop, _from, state) do
-    {:reply, Sigma.Agent.Terminals.can_stop(state.repo_path, state.session_id), state}
+    {:reply, Sigma.Agent.Runtime.can_stop_session(state.repo_path, state.session_id), state}
   end
 
   def handle_call(

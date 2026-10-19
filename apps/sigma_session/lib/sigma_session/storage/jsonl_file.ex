@@ -1,6 +1,9 @@
 defmodule Sigma.Session.Storage.JsonlFile do
   @moduledoc """
   JSONL file implementation of `Sigma.Session.Storage`.
+
+  Subagent facts and admission entries acknowledge only after file data sync.
+  This syncs the containing file, not its parent directory.
   """
 
   @behaviour Sigma.Session.Storage
@@ -12,15 +15,17 @@ defmodule Sigma.Session.Storage.JsonlFile do
   @impl Storage
   def append(path, entry) do
     with {:ok, json} <- Jason.encode(entry) do
-      append_line(path, json <> "\n")
+      sync? = entry["type"] in ["subagent", "subagent_admission"]
+      append_line(path, json <> "\n", sync?)
     end
   end
 
-  defp append_line(path, line) do
+  defp append_line(path, line, sync?) do
     case File.open(path, [:read, :append], fn io ->
            with {:ok, size} <- :file.position(io, :eof),
-                :ok <- validate_append_position(io, size) do
-             IO.binwrite(io, line)
+                :ok <- validate_append_position(io, size),
+                :ok <- IO.binwrite(io, line) do
+             if sync?, do: :file.sync(io), else: :ok
            end
          end) do
       {:ok, result} -> result
