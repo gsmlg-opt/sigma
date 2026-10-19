@@ -93,6 +93,43 @@ defmodule Sigma.Agent.SubagentHostTest do
 
   @moduletag :tmp_dir
 
+  test "writerless Runtime sessions run with only their available tools", ctx do
+    session_id = "writerless"
+
+    {:ok, handle} =
+      Runtime.get_session(ctx.repo, session_id,
+        cwd: ctx.repo,
+        backplane_runtime_path: Path.join(ctx.repo, "writerless-runtime"),
+        provider: Provider,
+        execution_engine: :backplane,
+        model: %{id: "test", provider: "test", api: "test"},
+        tools: [Sigma.Tools.Read],
+        hook_specs: [],
+        options: [test_pid: self()]
+      )
+
+    assert handle.writer == nil
+    host = Runtime.lookup(ctx.repo, session_id, :subagents)
+    assert {:ok, %{available: false}} = Subagents.snapshot(host)
+    :ok = Sigma.Agent.subscribe(handle.agent)
+    assert {:accepted, _} = Sigma.Agent.prompt(handle.agent, "ordinary writerless turn")
+    root = provider(session_id)
+    assert Enum.map(root.params.context.tools, & &1.name) == ["read"]
+    finish(root.pid)
+
+    assert_receive {:agent_end, messages}, 5_000
+
+    assert [
+             %{role: :user},
+             %{role: :assistant, content: [%{type: :text, text: "done"}]}
+           ] = messages
+
+    assert Sigma.Agent.status(handle.agent).phase == :completed
+
+    assert {:ok, %{available: false, subagents: %{counts: %{created: 0}}}} =
+             Subagents.snapshot(host)
+  end
+
   test "real nested conversations share slots and publish only confirmed durable identities",
        ctx do
     assert {:accepted, _} = Sigma.Agent.prompt(ctx.agent, "delegate")

@@ -1,7 +1,7 @@
 defmodule Sigma.Agent.Backplane.Engine do
   @moduledoc false
 
-  alias Backplane.AgentRuntime.{Conversation, Error}
+  alias Backplane.AgentRuntime.{Codex.Contract, Conversation, Error}
   alias Sigma.Agent.Backplane.ToolCatalog
   alias Sigma.Agent.Message
   alias Sigma.Coding.Tool
@@ -21,6 +21,13 @@ defmodule Sigma.Agent.Backplane.Engine do
   end
 
   defp run_prepared(state, turn_id, authority, collaboration) do
+    authority = %{
+      authority
+      | grants:
+          Enum.map(state.tools, &Tool.name/1) ++
+            Enum.map(collaboration.contracts, &Contract.canonical_name(&1.namespace, &1.name))
+    }
+
     with {:ok, catalog} <- catalog(state, turn_id, authority, collaboration.contracts),
          {:ok, conversation} <- start_conversation(state, turn_id, catalog, collaboration.binding) do
       try do
