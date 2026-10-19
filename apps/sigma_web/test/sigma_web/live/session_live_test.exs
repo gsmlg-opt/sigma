@@ -1983,7 +1983,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
       {:ok, %{agent: agent}} =
         Sigma.Agent.Runtime.get_session(@workdir, session_id,
-          model: %{id: "mock-model", provider: "mock-provider", api: "mock-api"},
+          model: %{id: "mock-model", provider: "test", api: "mock"},
           provider: BlockingTurnProvider,
           messages: messages,
           transcript_path: storage_path,
@@ -3175,6 +3175,7 @@ defmodule Sigma.Web.SessionLiveTest do
         log_filter: nil,
         log_search: "",
         model_options: [],
+        model_unavailable: false,
         branch_summaries: [],
         pending_mcp_elicitations: [],
         pending_compaction: false,
@@ -3187,6 +3188,7 @@ defmodule Sigma.Web.SessionLiveTest do
         parent_session_id: nil,
         runtime_status: :idle,
         session_id: "render_session",
+        session_load: Phoenix.LiveView.AsyncResult.loading(),
         session_ready: true,
         sessions: [],
         show_logs: false,

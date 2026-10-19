@@ -599,9 +599,21 @@ defmodule Sigma.AgentTest do
     assert Sigma.Agent.status(agent).context_policy == initial
 
     assert {:error, :invalid_context_limit} =
-             Sigma.Agent.change_context_limit(agent, 42, fn ->
+             Sigma.Agent.change_context_limit(agent, 0, fn ->
                flunk("invalid limit must not persist")
              end)
+
+    test_pid = self()
+
+    assert :ok =
+             Sigma.Agent.change_context_limit(agent, 131_072, fn ->
+               send(test_pid, :custom_context_limit_persisted)
+               :ok
+             end)
+
+    assert_receive :custom_context_limit_persisted
+    assert_receive {:context_limit_changed, 131_072}
+    assert Sigma.Agent.status(agent).context_policy.context_window == 131_072
 
     assert :ok = Sigma.Agent.change_context_limit(agent, 384_000, fn -> :ok end)
     assert_receive {:context_limit_changed, 384_000}
