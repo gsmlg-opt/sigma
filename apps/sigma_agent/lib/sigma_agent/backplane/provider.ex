@@ -40,7 +40,7 @@ defmodule Sigma.Agent.Backplane.Provider do
       |> ProviderRequest.new()
       |> ProviderRequest.begin(System.monotonic_time(:millisecond), DateTime.utc_now())
 
-    send_owner(owner, {:backplane_request_started, request, context})
+    acknowledge_request_start(owner, request, context)
 
     host.provider
     |> Provider.stream(request)
@@ -162,6 +162,28 @@ defmodule Sigma.Agent.Backplane.Provider do
 
   defp send_owner({owner, key}, event), do: send(owner, {:child_io, key, event})
   defp send_owner(owner, event), do: send(owner, event)
+
+  defp acknowledge_request_start(owner, request, context) do
+    owner_pid = if is_tuple(owner), do: elem(owner, 0), else: owner
+    monitor = Process.monitor(owner_pid)
+    ref = make_ref()
+    send_owner(owner, {:backplane_request_started, self(), ref, request, context})
+
+    try do
+      receive do
+        {:backplane_request_ready, ^ref, :ok} ->
+          :ok
+
+        {:backplane_request_ready, ^ref, {:error, reason}} ->
+          raise Sigma.Ai.ProviderError.from_exception(reason)
+
+        {:DOWN, ^monitor, :process, ^owner_pid, reason} ->
+          raise Sigma.Ai.ProviderError.from_exception({:backplane_owner_down, reason})
+      end
+    after
+      Process.demonitor(monitor, [:flush])
+    end
+  end
 
   defp normalize_message(%Message{} = message), do: message
 

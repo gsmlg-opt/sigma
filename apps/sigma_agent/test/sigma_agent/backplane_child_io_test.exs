@@ -41,6 +41,15 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
 
     @impl true
     def stream(request) do
+      if path = request.options[:assert_started_path] do
+        {:ok, entries} = Sigma.Session.Storage.JsonlFile.read(path)
+
+        send(
+          request.options[:test_pid],
+          {:child_request_at_dispatch, request.request_id, entries}
+        )
+      end
+
       send(request.options[:test_pid], {:child_provider, request})
 
       message = %{
@@ -157,7 +166,12 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
   end
 
   test "provider handshake finishes through child IO without root Engine participation", ctx do
-    io = start_supervised!({ChildIO, ctx.opts})
+    config =
+      Map.update!(ctx.config, :provider_options, fn options ->
+        Keyword.put(options, :assert_started_path, ctx.opts[:transcript_path])
+      end)
+
+    io = start_supervised!({ChildIO, Keyword.put(ctx.opts, :config, config)})
     assert {:ok, prepared} = ChildIO.prepare(io, ctx.identity, ctx.authority, [])
     options = prepared.options
 
@@ -176,6 +190,12 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
              Task.await(task, 5_000)
 
     assert_receive {:child_provider, request}
+    request_id = request.request_id
+    assert_receive {:child_request_at_dispatch, ^request_id, dispatched_entries}
+
+    assert [%{"fact" => "request_started", "data" => %{"request_id" => ^request_id}}] =
+             Enum.filter(dispatched_entries, &(&1["type"] == "metrics"))
+
     assert request.session_id == ctx.identity.child_session_id
     assert request.log_session_id == ctx.identity.child_session_id
     assert request.turn_id == ctx.identity.public_run_id

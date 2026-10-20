@@ -169,8 +169,11 @@ defmodule Sigma.Agent.Backplane.Engine do
           outcome -> finish(state, conversation, outcome)
         end
 
-      {:backplane_request_started, request, context} ->
+      {:backplane_request_started, worker, ref, request, context} ->
         state = Sigma.Agent.__backplane_request_started__(state, request, context)
+        # Flush request state to the control process before provider dispatch.
+        if is_pid(state.control_pid), do: Sigma.Agent.status(state.control_pid)
+        send(worker, {:backplane_request_ready, ref, :ok})
         loop(state, conversation, turn_id, users, forwarded, assistant)
 
       {:backplane_collaboration_messages, messages} ->

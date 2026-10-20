@@ -221,6 +221,11 @@ defmodule Sigma.Agent.Backplane.ChildIO do
   def handle_info({:child_io, key, event}, %{key: key} = state),
     do: {:noreply, provider_event(event, state)}
 
+  def handle_info({:child_io, _key, {:backplane_request_started, worker, ref, _, _}}, state) do
+    send(worker, {:backplane_request_ready, ref, {:error, :stale_child_io}})
+    {:noreply, state}
+  end
+
   def handle_info({:child_io, _key, {:backplane_provider_boundary, worker, ref, _request}}, state) do
     send(worker, {:backplane_provider_continue, ref})
     {:noreply, state}
@@ -363,13 +368,18 @@ defmodule Sigma.Agent.Backplane.ChildIO do
     end
   end
 
-  defp provider_event({:backplane_request_started, request, _context}, state) do
+  defp provider_event({:backplane_request_started, worker, ref, request, _context}, state) do
     notify(state, :streaming_provider)
 
+    state =
+      state
+      |> Map.put(:request, request)
+      |> Map.put(:current_request_id, request.request_id)
+      |> append({:metrics, :request_started, request_fact(request)})
+
+    result = if state.persistence_error, do: {:error, state.persistence_error}, else: :ok
+    send(worker, {:backplane_request_ready, ref, result})
     state
-    |> Map.put(:request, request)
-    |> Map.put(:current_request_id, request.request_id)
-    |> append({:metrics, :request_started, request_fact(request)})
   end
 
   defp provider_event({:backplane_request_progress, request}, state),

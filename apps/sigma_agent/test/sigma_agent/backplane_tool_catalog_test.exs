@@ -55,12 +55,58 @@ defmodule Sigma.Agent.BackplaneToolCatalogTest do
         |> Enum.to_list()
       end)
 
+    assert_receive {:backplane_request_started, worker, started_ref, _request, _context}, 5_000
+    refute_receive {:provider_catalog, _}
+    send(worker, {:backplane_request_ready, started_ref, :ok})
     assert_receive {:provider_catalog, context}, 5_000
     assert_receive {:backplane_provider_boundary, worker, ref, _}, 5_000
     send(worker, {:backplane_provider_continue, ref})
     Task.await(task, 5_000)
     assert context.tools == tools
     assert context.catalog_revision == 7
+  end
+
+  test "provider dispatch fails when its owner exits before acknowledging request start" do
+    parent = self()
+
+    owner =
+      spawn(fn ->
+        receive do
+          {:backplane_request_started, _, _, _, _} ->
+            send(parent, :owner_received_request_start)
+            receive do: (:stop -> :ok)
+        end
+      end)
+
+    host = %{
+      model: %{id: "fixture", api: "fixture", provider: "fixture"},
+      provider: CatalogProvider,
+      provider_options: [test_pid: self()],
+      session_id: "root",
+      log_session_id: "root",
+      build_context: fn _ -> %{messages: [], tools: [], system: []} end,
+      context_error: fn _ -> nil end
+    }
+
+    request = %{
+      run_id: "turn-1",
+      attempt_id: "attempt-1",
+      messages: [],
+      tools: [],
+      catalog_revision: 1
+    }
+
+    task =
+      Task.async(fn ->
+        Sigma.Agent.Backplane.Provider.stream(request, %{host: host, owner: owner})
+        |> Enum.to_list()
+      end)
+
+    assert_receive :owner_received_request_start, 1_000
+    send(owner, :stop)
+
+    assert [%{type: :response_failed, error: %Sigma.Ai.ProviderError{}}] = Task.await(task, 1_000)
+    refute_receive {:provider_catalog, _}
   end
 
   test "one admitted bundle defines both provider tools and executable authority" do
