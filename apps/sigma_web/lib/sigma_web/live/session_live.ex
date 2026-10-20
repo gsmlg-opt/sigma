@@ -542,14 +542,10 @@ defmodule Sigma.Web.SessionLive do
                   title={"Forked from #{s.parent_session_id}"}
                 />
               </.dm_link>
-              <.dm_btn
+              <.dm_link
                 :if={not is_renaming and session_id != @session_id}
                 id={"switch-session-#{session_dom_id(session_id)}"}
-                type="button"
-                phx-click="switch_session"
-                phx-value-session={session_id}
-                phx-hook="WebComponentHook"
-                variant="ghost"
+                navigate={~p"/repository/#{@encoded_repository}/sessions/#{session_id}"}
                 class="flex min-w-0 flex-1 items-center justify-start gap-2 truncate rounded-lg px-3 py-2 text-on-surface transition-colors hover:bg-surface-container-high"
               >
                 <.dm_mdi name="chat-outline" class="h-4 w-4 shrink-0 opacity-70" />
@@ -561,7 +557,7 @@ defmodule Sigma.Web.SessionLive do
                   class="h-3 w-3 shrink-0 opacity-70"
                   title={"Forked from #{s.parent_session_id}"}
                 />
-              </.dm_btn>
+              </.dm_link>
               <.dm_btn
                 :if={not is_renaming}
                 id={menu_button_id}
@@ -2092,39 +2088,6 @@ defmodule Sigma.Web.SessionLive do
            |> assign(:pending_fork, nil)
            |> handle_fork_result({:error, reason})}
       end
-    end
-  end
-
-  @impl true
-  def handle_event("switch_session", %{"session" => target_session_id}, socket) do
-    result =
-      Sigma.Agent.Runtime.switch_session(
-        socket.assigns.workdir,
-        socket.assigns.session_id,
-        target_session_id,
-        socket.assigns.sessions_dir
-      )
-
-    case result do
-      {:ok, %{session_id: session_id}} ->
-        {:noreply,
-         push_navigate(socket,
-           to: ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{session_id}"
-         )}
-
-      {:error, :session_busy} ->
-        {:noreply,
-         put_flash(
-           socket,
-           :error,
-           "Wait for the active turn to finish before switching sessions."
-         )}
-
-      {:error, :invalid_session_id} ->
-        {:noreply, put_flash(socket, :error, "Invalid session id")}
-
-      {:error, _reason} ->
-        {:noreply, put_flash(socket, :error, "Unable to switch session")}
     end
   end
 

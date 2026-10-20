@@ -1763,16 +1763,11 @@ defmodule Sigma.Web.SessionLiveTest do
     end)
   end
 
-  test "shows busy errors for switch and fork without navigating or publishing a fork", %{
+  test "rejects forking an active session without publishing a fork", %{
     conn: conn
   } do
     write_selectable_provider_configs()
     session_id = unique_session_id("busy-session-operation")
-    target_id = unique_session_id("switch-target")
-    target_path = session_storage_path(target_id)
-    File.mkdir_p!(Path.dirname(target_path))
-    :ok = Sigma.Session.Log.persist_event(target_path, {:agent_start, @workdir})
-
     Application.put_env(:sigma_web, :blocking_provider_pid, self())
     on_exit(fn -> Application.delete_env(:sigma_web, :blocking_provider_pid) end)
 
@@ -1783,9 +1778,6 @@ defmodule Sigma.Web.SessionLiveTest do
         assert_reply(view, %{status: "accepted"})
         assert_receive {:web_provider_waiting, provider, "working"}, 1_000
 
-        html = render_hook(view, "switch_session", %{"session" => target_id})
-        assert html =~ "Wait for the active turn to finish before switching sessions."
-
         html = render_hook(view, "fork_session", %{})
         assert html =~ "Wait for the active turn to finish before forking."
         refute File.exists?(session_storage_path("busy_fork_target"))
@@ -1795,7 +1787,95 @@ defmodule Sigma.Web.SessionLiveTest do
     end)
   end
 
-  test "switches an idle session through the runtime operation boundary", %{conn: conn} do
+  test "switches away from and back to an active Backplane session", %{conn: conn} do
+    write_selectable_provider_configs()
+    session_id = unique_session_id("active-switch")
+    target_id = unique_session_id("background-switch-target")
+    storage_path = session_storage_path(session_id)
+    target_path = session_storage_path(target_id)
+    File.mkdir_p!(Path.dirname(target_path))
+    :ok = Log.persist_event(target_path, {:agent_start, @workdir})
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+
+    Application.put_env(:sigma_web, :blocking_provider_pid, self())
+    on_exit(fn -> Application.delete_env(:sigma_web, :blocking_provider_pid) end)
+
+    with_mock_provider(BlockingTurnProvider, fn ->
+      {:ok, first, _html} = live_loaded(conn, session_path(session_id))
+      agent = Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent)
+      render_hook(first, "send_prompt", %{"value" => "working in background", "images" => []})
+      assert_reply(first, %{status: "accepted"})
+      assert_receive {:web_provider_waiting, provider, "working in background"}, 1_000
+      turn_id = Sigma.Agent.status(agent).turn_id
+      assert is_binary(turn_id)
+
+      {:ok, second, _html} =
+        first
+        |> element("#switch-session-#{Base.url_encode64(target_id, padding: false)}")
+        |> render_click()
+        |> follow_redirect(conn, session_path(target_id))
+
+      render_async(second, 3_000)
+      assert Process.alive?(agent)
+      assert Process.alive?(provider)
+      assert Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent) == agent
+      refute Enum.any?(chat_snapshot(second).messages, &(&1.content == "working in background"))
+
+      {:ok, returned, _html} =
+        second
+        |> element("#switch-session-#{Base.url_encode64(session_id, padding: false)}")
+        |> render_click()
+        |> follow_redirect(conn, session_path(session_id))
+
+      render_async(returned, 3_000)
+      assert Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent) == agent
+      assert Sigma.Agent.status(agent).turn_id == turn_id
+      assert chat_snapshot(returned).runtime.active
+      assert Process.alive?(provider)
+
+      {:ok, background, _html} =
+        returned
+        |> element("#switch-session-#{Base.url_encode64(target_id, padding: false)}")
+        |> render_click()
+        |> follow_redirect(conn, session_path(target_id))
+
+      render_async(background, 3_000)
+      send(provider, :release_web_provider)
+      assert_receive {:turn_completed, _}, 2_000
+
+      refute Enum.any?(
+               chat_snapshot(background).messages,
+               &(&1.content == "I am a mock response.")
+             )
+
+      assert_eventually(fn ->
+        {:ok, persisted} = Log.replay(storage_path)
+
+        Enum.any?(persisted, fn message ->
+          message.role == :assistant and
+            message.content == [%{type: :text, text: "I am a mock response."}]
+        end)
+      end)
+
+      {:ok, completed, _html} =
+        background
+        |> element("#switch-session-#{Base.url_encode64(session_id, padding: false)}")
+        |> render_click()
+        |> follow_redirect(conn, session_path(session_id))
+
+      render_async(completed, 3_000)
+      assert Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent) == agent
+
+      assert Enum.any?(
+               chat_snapshot(completed).messages,
+               &(&1.content == "I am a mock response.")
+             )
+
+      refute chat_snapshot(completed).runtime.active
+    end)
+  end
+
+  test "switches an idle session through the sidebar link", %{conn: conn} do
     session_id = unique_session_id("idle-session-operation")
     target_id = unique_session_id("idle-switch-target")
     target_path = session_storage_path(target_id)
@@ -1806,7 +1886,9 @@ defmodule Sigma.Web.SessionLiveTest do
     expected_path = "/repository/#{@encoded_workdir}/sessions/#{target_id}"
 
     assert {:error, {:live_redirect, %{to: ^expected_path}}} =
-             render_hook(view, "switch_session", %{"session" => target_id})
+             view
+             |> element("#switch-session-#{Base.url_encode64(target_id, padding: false)}")
+             |> render_click()
   end
 
   @tag :tmp_dir
