@@ -103,6 +103,8 @@ defmodule Sigma.Agent.RuntimeTest do
       [
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: EmptyProvider,
+        backplane_runtime_path:
+          Path.join(Keyword.fetch!(extra, :cwd), "runtime-#{System.unique_integer([:positive])}"),
         idle_timeout_ms: 30_000
       ],
       extra
@@ -503,8 +505,10 @@ defmodule Sigma.Agent.RuntimeTest do
                )
              )
 
+    :ok = Sigma.Agent.subscribe(handle.agent)
     assert {:accepted, _admission} = Sigma.Agent.prompt(handle.agent, "stay busy")
     assert_receive {:runtime_provider_waiting, _provider}, 1_000
+    assert_receive {:metrics, :request_started, _}, 1_000
     source_before = File.read!(source_path)
     mutation_opts = mutation_opts(source_path, "busy-fork")
 

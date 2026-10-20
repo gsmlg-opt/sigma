@@ -46,6 +46,7 @@ defmodule Sigma.Web.SessionSupervisorTest do
       Sigma.Agent.Runtime.get_session(repo, session_id,
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: EmptyProvider,
+        backplane_runtime_path: Path.join(repo, "#{session_id}.runtime"),
         cwd: repo
       )
 
@@ -97,6 +98,7 @@ defmodule Sigma.Web.SessionSupervisorTest do
     [
       model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
       provider: Sigma.Web.MockProvider,
+      backplane_runtime_path: Path.expand(storage_path <> ".runtime"),
       options: [mock_input: 100_000, mock_response: "mock integration response"],
       on_event: fn event ->
         Log.persist_event(storage_path, event)
@@ -165,7 +167,8 @@ defmodule Sigma.Web.SessionSupervisorTest do
   test "Runtime rebuilds session after subtree crash", %{repo: repo} do
     session_id = unique_session_id()
 
-    {:ok, handle1} = Sigma.Agent.Runtime.get_session(repo, session_id, cwd: repo)
+    opts = [cwd: repo, backplane_runtime_path: Path.join(repo, "#{session_id}.runtime")]
+    {:ok, handle1} = Sigma.Agent.Runtime.get_session(repo, session_id, opts)
     assert is_pid(handle1.agent)
 
     ref = Process.monitor(handle1.session_supervisor)
@@ -173,7 +176,7 @@ defmodule Sigma.Web.SessionSupervisorTest do
     assert_receive {:DOWN, ^ref, :process, _pid, _}, 1_000
     wait_for_session_process_count(repo, session_id, 0)
 
-    {:ok, handle2} = Sigma.Agent.Runtime.get_session(repo, session_id, cwd: repo)
+    {:ok, handle2} = Sigma.Agent.Runtime.get_session(repo, session_id, opts)
     assert is_pid(handle2.agent)
     refute handle1.agent == handle2.agent
   end
@@ -200,6 +203,7 @@ defmodule Sigma.Web.SessionSupervisorTest do
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: EmptyProvider,
         cwd: repo,
+        backplane_runtime_path: Path.join(repo, "#{guarded_id}.runtime"),
         permission_config: %{default: :allow, rules: %{"bash" => :ask, "write" => :deny}}
       )
 
@@ -207,6 +211,7 @@ defmodule Sigma.Web.SessionSupervisorTest do
       Sigma.Agent.Runtime.get_session(repo, default_id,
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: EmptyProvider,
+        backplane_runtime_path: Path.join(repo, "#{default_id}.runtime"),
         cwd: repo
       )
 

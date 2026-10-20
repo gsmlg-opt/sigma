@@ -73,7 +73,7 @@ try do
             Sigma.Agent.SessionProcess.status(handle.session)
 
           true = event_count > 0
-          %{execution_engine: :backplane, backplane_store: store} = :sys.get_state(handle.agent)
+          %{backplane_store: store} = :sys.get_state(handle.agent)
 
           {:ok, %{run: %{state: :completed}}} =
             Sigma.Agent.Backplane.Store.load(store, turn_id)

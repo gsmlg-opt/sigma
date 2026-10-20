@@ -67,7 +67,6 @@ defmodule Sigma.Agent.SubagentHostTest do
         transcript_path: path,
         storage_mod: FaultStorage,
         provider: Provider,
-        execution_engine: :backplane,
         model: %{id: "test", provider: "test", api: "test"},
         tools: Map.get(tags, :tools, []),
         permission_config: Map.get(tags, :permission_config),
@@ -101,7 +100,6 @@ defmodule Sigma.Agent.SubagentHostTest do
         cwd: ctx.repo,
         backplane_runtime_path: Path.join(ctx.repo, "writerless-runtime"),
         provider: Provider,
-        execution_engine: :backplane,
         model: %{id: "test", provider: "test", api: "test"},
         tools: [Sigma.Tools.Read],
         hook_specs: [],
@@ -306,6 +304,51 @@ defmodule Sigma.Agent.SubagentHostTest do
     assert [%{status: :rejected, process_started: false}] = attempt.receipts
     finish(next.pid)
     refute_receive {:host_provider, _, %{session_id: "child_" <> _}}, 50
+  end
+
+  test "supervisor shutdown closes the collaboration session before stopping its manager", ctx do
+    assert {:accepted, _} = Sigma.Agent.prompt(ctx.agent, "prepare collaboration")
+    root = provider("root")
+
+    call(root.pid, "spawn_agent", %{
+      "task_name" => "shutdown_child",
+      "message" => "remain active",
+      "fork_turns" => "none"
+    })
+
+    child = child_provider()
+    root_next = provider("root")
+    finish(root_next.pid)
+    assert eventually(fn -> Sigma.Agent.status(ctx.agent).phase == :completed end)
+
+    %{session: session, manager: manager, children: children} = :sys.get_state(ctx.host)
+    [%{io: child_io}] = Map.values(children)
+    child_provider = child.pid
+    assert Process.alive?(child_provider)
+    assert is_pid(session) and is_pid(manager)
+    session_ref = Process.monitor(session)
+    manager_ref = Process.monitor(manager)
+    child_io_ref = Process.monitor(child_io)
+    child_provider_ref = Process.monitor(child_provider)
+    repository = Runtime.lookup(ctx.repo, :supervisor)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert :ok = DynamicSupervisor.terminate_child(Sigma.Agent.DynamicSupervisor, repository)
+        assert_receive {:DOWN, ^session_ref, :process, ^session, _}, 5_000
+        assert_receive {:DOWN, ^manager_ref, :process, ^manager, _}, 5_000
+        assert_receive {:DOWN, ^child_io_ref, :process, ^child_io, _}, 5_000
+        assert_receive {:DOWN, ^child_provider_ref, :process, ^child_provider, _}, 5_000
+      end)
+
+    refute log =~ "no process"
+    refute log =~ "noproc"
+    refute log =~ "cleanup is unconfirmed"
+    refute log =~ "owner stop failed"
+    refute Process.alive?(session)
+    refute Process.alive?(manager)
+    refute Process.alive?(child_io)
+    refute Process.alive?(child_provider)
   end
 
   test "confirmed Stop retains history and an explicit prompt creates a fresh generation", ctx do
@@ -646,7 +689,6 @@ defmodule Sigma.Agent.SubagentHostTest do
              Runtime.get_session(ctx.repo, "root",
                transcript_path: ctx.path,
                cwd: ctx.repo,
-               execution_engine: :backplane,
                tools: [],
                provider: Provider,
                model: %{id: "test"}

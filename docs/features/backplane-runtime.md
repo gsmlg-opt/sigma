@@ -1,17 +1,16 @@
 # Backplane execution engine
 
-Sigma uses `backplane_agent_runtime` 1.7.0 by default for newly started sessions. The existing Sigma engine remains available as an explicit fallback while Backplane is validated in use.
+Sigma uses `backplane_agent_runtime` as its only execution engine. The original Sigma turn loop and engine selector have been removed.
 
 ## Activation
 
-No engine option is required for Backplane. To select the Sigma fallback for a session, set `execution_engine: :sigma` in the trusted options supplied to `Sigma.Agent.Runtime.get_session/3` or `Sigma.Agent.PublicRuntime.execute/2`. Direct callers can pass it to `Sigma.Agent.start_link/1`.
+All session entry points execute through Backplane. Supply provider, model, and tool options without selecting an engine:
 
 ```elixir
 context = %{
   repo_path: repo_path,
   sessions_dir: sessions_dir,
   session_opts: [
-    execution_engine: :sigma,
     provider: provider_module,
     model: model,
     tools: tools
@@ -19,9 +18,9 @@ context = %{
 }
 ```
 
-To select the fallback across the application, set `SIGMA_AGENT_ENGINE=sigma` before starting Sigma. Unset it or set `SIGMA_AGENT_ENGINE=backplane` to use Backplane. An explicit session option takes precedence, and a running session keeps its selected engine. No engine selector is accepted from untrusted Protocol V1 payloads.
+The previous `SIGMA_AGENT_ENGINE` environment variable and `execution_engine` application/session settings no longer select an execution path. Stale settings cannot reactivate the removed loop.
 
-Sigma continues to own the session, prompt and follow-up admission, provider configuration, context assembly, journal, permission resolution, hooks, and Protocol V1 subscriptions. A Backplane `Conversation` owns the default turn's provider/tool loop. The original Sigma loop is not invoked on that path.
+Sigma continues to own the session, prompt and follow-up admission, provider configuration, context assembly, journal, permission resolution, hooks, and Protocol V1 subscriptions. A Backplane `Conversation` owns every turn's provider/tool loop.
 
 ## Runtime records and recovery
 
@@ -34,22 +33,20 @@ Store APIs can reopen runtime evidence. Sigma does not yet load/fence an interru
 ## Compatibility limits
 
 - Tools execute sequentially on the Backplane path.
-- Version 1.7.0 supports typed enum constraints used by the Todo action/status fields; invalid enum values are rejected before dispatch.
+- Typed enum constraints used by the Todo action/status fields are validated before dispatch.
 - Exact tool schemas are retained. Unsupported MCP schema keywords fail explicitly; constraints are never stripped to force acceptance.
 - Sigma's coding dispatcher remains the tool boundary for permissions and pre/post hooks.
-- Each turn has a work quota of 100 provider/tool invocations and five-minute run/effect timeouts. The quota does not measure billed tokens.
-- Sigma's repeated-tool-failure nudge is not wired into this engine; the runtime quota bounds repeated attempts.
-- Collaboration spawn/delegate/send/wait operations remain outside this integration.
+- The existing Bash tool stops its BEAM task on cancellation or timeout, but external shell descendants can continue. Reconcile shell effects before retrying a cancelled command.
+- Each turn has a work quota of 100 provider/tool invocations and a five-minute effect timeout. The root run has no wall-clock timeout. The quota does not measure billed tokens and bounds repeated failed tool attempts.
+- Writer-backed sessions expose the session-owned subagent collaboration tools; writerless sessions retain their ordinary tools without collaboration admission.
 - Real-provider and browser acceptance are separate from deterministic local integration tests.
 
-Fallback is explicit: a failed Backplane turn is not replayed automatically through Sigma because a tool may already have produced external effects. Changing the application setting affects newly started sessions; stop/reopen an existing session to change its engine, retaining its JSONL history. Review interrupted tool effects before retrying.
-
-Keep the Sigma engine until Backplane has passed representative live-provider/browser usage, configured MCP schemas, cancellation and approval flows, history operations, and recovery checks. Removing it is a later change after that evidence is available.
+Failed or interrupted turns are never replayed through a second engine. Review interrupted tool effects before retrying.
 
 ## Verified locally
 
-The scoped agent and protocol suites passed (238 tests, including 27 Backplane tests). Tests run a scripted provider through the actual public runtime and coding dispatcher: a real file is written, the provider continues with the tool result, Protocol V1 events encode, JSONL history persists, and runtime records reopen after the session stops. Approval denial/cancellation prevents the write. Separate tests cover steering at response completion, follow-ups, killed provider metrics, prompt/stop hooks, strict schema rejection, valid Todo enum execution and invalid enum rejection before dispatch, and store conformance/failure cases.
+Regression tests run a scripted provider through the actual public runtime and coding dispatcher: a real file is written, the provider continues with the tool result, Protocol V1 events encode, JSONL history persists, and runtime records reopen after the session stops. Approval denial/cancellation prevents the write. Separate tests cover steering at response completion, follow-ups, killed provider metrics, prompt/stop hooks, strict schema rejection, valid Todo enum execution and invalid enum rejection before dispatch, and store conformance/failure cases.
 
 These tests use no live model service. Browser and live-provider checks remain prerequisites for a broader rollout.
 
-The test environment explicitly selects Sigma for the legacy regression fixtures. The synchronous public-runtime suite clears that override and proves that omitted engine options execute Backplane, that the explicit Sigma fallback still performs a real tool write, and that session options override the application selection.
+The test environment uses the same engine as production. Standalone fixtures supply isolated runtime stores. Negative regressions retain obsolete engine settings as inputs and prove that they still execute through Backplane and create runtime records.

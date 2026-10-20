@@ -44,10 +44,12 @@ defmodule Sigma.AgentReconstructionTest do
     end
   end
 
-  test "performs 3 turns and reconstructs state from events" do
+  @tag :tmp_dir
+  test "performs 3 turns and reconstructs state from events", %{tmp_dir: tmp_dir} do
     # Isolate from user-global Stop/SessionStart hooks (e.g. ~/.pi/agent) that
     # otherwise stall turns long enough to trip the agent_end wait.
     opts = [
+      backplane_runtime_path: Path.join(tmp_dir, "runtime"),
       model: %{id: "mock-model", api: "mock", provider: "mock"},
       provider: MockProvider,
       system_prompt: "You are a helpful assistant.",

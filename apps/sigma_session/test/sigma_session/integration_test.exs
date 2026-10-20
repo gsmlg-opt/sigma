@@ -72,6 +72,11 @@ defmodule Sigma.Session.IntegrationTest do
     end
   end
 
+  defp start_agent(storage_id, opts) do
+    opts = Keyword.put(opts, :backplane_runtime_path, Path.expand(storage_id <> ".runtime"))
+    start_supervised({Sigma.Agent, opts}, id: make_ref())
+  end
+
   defp run_turn(agent, storage_id, prompt) do
     Sigma.Agent.prompt(agent, prompt)
 
@@ -107,7 +112,7 @@ defmodule Sigma.Session.IntegrationTest do
       model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
       # 1. Start agent and perform a turn
-      {:ok, agent1} = Sigma.Agent.start_link(model: model, provider: MockProvider)
+      {:ok, agent1} = start_agent(storage_id, model: model, provider: MockProvider)
       Sigma.Agent.subscribe(agent1)
       run_turn(agent1, storage_id, "Hello 1")
 
@@ -122,7 +127,7 @@ defmodule Sigma.Session.IntegrationTest do
 
       # 3. Restart new agent with replayed messages
       {:ok, agent2} =
-        Sigma.Agent.start_link(
+        start_agent(storage_id,
           model: model,
           provider: MockProvider,
           messages: replayed_messages
@@ -147,7 +152,7 @@ defmodule Sigma.Session.IntegrationTest do
       model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
       # 1. Perform 3 turns in a parent session
-      {:ok, parent_agent} = Sigma.Agent.start_link(model: model, provider: MockProvider)
+      {:ok, parent_agent} = start_agent(parent_storage_id, model: model, provider: MockProvider)
       Sigma.Agent.subscribe(parent_agent)
       run_turn(parent_agent, parent_storage_id, "P1")
       run_turn(parent_agent, parent_storage_id, "P2")
@@ -180,7 +185,7 @@ defmodule Sigma.Session.IntegrationTest do
       assert length(replayed_branch) == 4
 
       {:ok, branch_agent} =
-        Sigma.Agent.start_link(
+        start_agent(branch_storage_id,
           model: model,
           provider: MockProvider,
           messages: replayed_branch
@@ -211,7 +216,7 @@ defmodule Sigma.Session.IntegrationTest do
       model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
       # 1. Fork a session
-      {:ok, parent_agent} = Sigma.Agent.start_link(model: model, provider: MockProvider)
+      {:ok, parent_agent} = start_agent(parent_storage_id, model: model, provider: MockProvider)
       Sigma.Agent.subscribe(parent_agent)
       run_turn(parent_agent, parent_storage_id, "P1")
 

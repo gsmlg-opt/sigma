@@ -65,7 +65,6 @@ defmodule Sigma.Agent.BackplaneOutputErrorTest do
       {:ok, agent} =
         start_supervised(
           {Sigma.Agent,
-           execution_engine: :backplane,
            backplane_runtime_path: Path.join(dir, "runtime"),
            model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
            provider: SnapshotProvider,
@@ -145,7 +144,6 @@ defmodule Sigma.Agent.BackplaneOutputErrorTest do
     {:ok, agent} =
       start_supervised(
         {Sigma.Agent,
-         execution_engine: :backplane,
          backplane_runtime_path: Path.join(dir, "runtime"),
          model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
          provider: FailingProvider,

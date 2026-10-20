@@ -1,6 +1,13 @@
 defmodule Sigma.AgentTest do
   use ExUnit.Case, async: true
 
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp_dir} do
+    Process.put(:agent_test_runtime_root, tmp_dir)
+    :ok
+  end
+
   alias Sigma.Agent.Message
   alias Sigma.Agent.SessionContext
   alias Sigma.Coding.Hooks.Spec
@@ -59,7 +66,7 @@ defmodule Sigma.AgentTest do
     image = %{type: :image, data: "iVBORw0KGgo=", mime_type: "image/png"}
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: CapturingProvider,
         options: [test_pid: self()]
@@ -79,7 +86,7 @@ defmodule Sigma.AgentTest do
     spec = hook_spec("echo '{\"hookSpecificOutput\":{\"additionalContext\":\"extra\"}}'")
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: CapturingProvider,
         options: [test_pid: self()]
@@ -108,7 +115,7 @@ defmodule Sigma.AgentTest do
     assert_receive {:agent_end, _}
 
     {:ok, image_only_agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: CapturingProvider,
         options: [test_pid: self()]
@@ -131,7 +138,7 @@ defmodule Sigma.AgentTest do
     spec = hook_spec("sh -c 'printf blocked >&2; exit 2'")
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: CapturingProvider,
         options: [test_pid: self()]
@@ -347,28 +354,23 @@ defmodule Sigma.AgentTest do
     def execute(_tool_call_id, _params, _opts), do: raise("tool exploded")
   end
 
-  defmodule LoopBreakerProvider do
+  defmodule RepeatingTransportFailureProvider do
     @behaviour Sigma.Ai.Provider
 
     @impl true
     def stream(params) do
       tool_result_count = Enum.count(params.context.messages, &(&1.role == :tool_result))
 
-      content =
-        if tool_result_count < 3 do
-          [
-            %{
-              type: :tool_call,
-              id: "tc_loop_#{tool_result_count}",
-              name: "mcp__test__fail",
-              arguments: %{"query" => "same"}
-            }
-          ]
-        else
-          [%{type: :text, text: "Stopped"}]
-        end
+      content = [
+        %{
+          type: :tool_call,
+          id: "tc_repeat_#{tool_result_count}",
+          name: "mcp__test__fail",
+          arguments: %{"query" => "same"}
+        }
+      ]
 
-      stop_reason = if tool_result_count < 3, do: :tool_use, else: :stop
+      stop_reason = :tool_use
       msg = ai_msg(content, stop_reason)
       [{:start, msg}, {:done, stop_reason, msg}]
     end
@@ -414,7 +416,7 @@ defmodule Sigma.AgentTest do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: MockProvider,
         system_prompt: "You are a helpful assistant."
@@ -454,7 +456,7 @@ defmodule Sigma.AgentTest do
     test_pid = self()
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: MockProvider,
         on_event: fn event ->
@@ -501,7 +503,7 @@ defmodule Sigma.AgentTest do
     }
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         session_id: "runtime-context",
         active_leaf: "leaf-1",
         context_revision: 7,
@@ -583,7 +585,7 @@ defmodule Sigma.AgentTest do
 
   test "context changes persist before updating the runtime and preserve model caps" do
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         session_id: "context-limit",
         model: %{context_window: 1_000_000},
         context_limit: 256_000
@@ -655,7 +657,7 @@ defmodule Sigma.AgentTest do
     test_pid = self()
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         session_id: "live-request-status",
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: BlockingStatusProvider,
@@ -699,7 +701,7 @@ defmodule Sigma.AgentTest do
     test_pid = self()
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         session_id: "sampling-session",
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: MockProvider,
@@ -736,7 +738,7 @@ defmodule Sigma.AgentTest do
     test_pid = self()
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: RaisingRuntimeProvider,
         on_event: fn event ->
@@ -764,7 +766,7 @@ defmodule Sigma.AgentTest do
     }
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: CapturingProvider,
         system_prompt: "x",
@@ -784,7 +786,7 @@ defmodule Sigma.AgentTest do
     test_pid = self()
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: PromptDispatcherProvider,
         tools: [PromptDispatcherTool],
@@ -810,7 +812,7 @@ defmodule Sigma.AgentTest do
     test_pid = self()
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: EmptyProvider,
         on_event: fn event -> send(test_pid, {:empty_provider_fact, event}) end
@@ -842,7 +844,7 @@ defmodule Sigma.AgentTest do
       )
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: CapturingProvider,
         session_context: session_context,
@@ -894,7 +896,7 @@ defmodule Sigma.AgentTest do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: MockProvider
       )
@@ -919,7 +921,7 @@ defmodule Sigma.AgentTest do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: PromptDispatcherProvider,
         tools: [PromptDispatcherTool]
@@ -947,7 +949,7 @@ defmodule Sigma.AgentTest do
     test_pid = self()
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: PromptDispatcherProvider,
         tools: [PromptDispatcherTool],
@@ -977,7 +979,7 @@ defmodule Sigma.AgentTest do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: PromptDispatcherProvider,
         tools: [PartialPromptDispatcherTool]
@@ -1000,7 +1002,7 @@ defmodule Sigma.AgentTest do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: PromptDispatcherProvider,
         tools: [CrashingPromptDispatcherTool]
@@ -1021,30 +1023,32 @@ defmodule Sigma.AgentTest do
            end)
   end
 
-  test "injects a loop-breaker nudge after three identical transport failures" do
+  test "Backplane work quota bounds repeated transport failures" do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
-        provider: LoopBreakerProvider,
+        provider: RepeatingTransportFailureProvider,
         tools: [TransportFailureTool]
       )
 
     Sigma.Agent.subscribe(agent)
-    Sigma.Agent.prompt(agent, "Hi")
+    assert {:accepted, %{turn_id: turn_id}} = Sigma.Agent.prompt(agent, "Hi")
 
-    assert_receive {:message_end, %Message{role: :user, content: "[Loop breaker]" <> _ = nudge}},
-                   3_000
+    assert_receive {:turn_error, %Sigma.Ai.ProviderError{message: error}}, 10_000
+    assert error =~ "budget quota exceeded"
+    assert_receive {:agent_end, messages}, 5_000
+    failures = Enum.filter(messages, &(&1.role == :tool_result))
+    assert length(failures) > 3
+    assert Enum.all?(failures, & &1.is_error)
+    assert_receive {:tool_execution_end, _, "mcp__test__fail", _, true}
+    assert Sigma.Agent.status(agent).phase == :failed
 
-    assert nudge =~ "`mcp__test__fail` has failed 3 times"
-    assert_receive {:agent_end, messages}, 3_000
-    assert Enum.count(messages, &(&1.role == :tool_result)) == 3
-
-    assert Enum.count(
-             messages,
-             &match?(%Message{role: :user, content: "[Loop breaker]" <> _}, &1)
-           ) == 1
+    store = :sys.get_state(agent).backplane_store
+    assert {:ok, %{run: run}} = Sigma.Agent.Backplane.Store.load(store, turn_id)
+    assert run.state == :failed
+    assert run.execution_budget.used == run.execution_budget.quota
   end
 
   test "tool transcript path uses the provided transcript path" do
@@ -1057,11 +1061,11 @@ defmodule Sigma.AgentTest do
     assert captured_path == transcript_path
   end
 
-  test "agent does not dispatch partial tool call blocks" do
+  test "malformed tool call blocks fail the turn before tool dispatch" do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: PartialToolCallProvider,
         tools: [PromptDispatcherTool],
@@ -1073,21 +1077,10 @@ defmodule Sigma.AgentTest do
 
     assert_receive {:agent_end, messages}
     refute_received {:dispatcher_opts_seen, _}
-    refute_received {:turn_error, _}
-
-    assert [
-             %Message{role: :user, content: "Hi"},
-             %Message{
-               role: :assistant,
-               content: [
-                 %{
-                   type: :tool_call,
-                   id: "partial_tool_call",
-                   partial_json: "{}"
-                 }
-               ]
-             }
-           ] = messages
+    assert_received {:turn_error, %Sigma.Ai.ProviderError{message: error}}
+    assert error =~ "malformed tool call"
+    assert Sigma.Agent.status(agent).phase == :failed
+    assert [%Message{role: :user, content: "Hi"}] = messages
   end
 
   defmodule CompactMockProvider do
@@ -1150,7 +1143,7 @@ defmodule Sigma.AgentTest do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: CompactMockProvider,
         messages: compact_pre_messages()
@@ -1170,7 +1163,7 @@ defmodule Sigma.AgentTest do
     test_pid = self()
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: CompactMockProvider,
         messages: compact_pre_messages(),
@@ -1220,7 +1213,7 @@ defmodule Sigma.AgentTest do
     test_pid = self()
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: CompactFailingSummaryProvider,
         messages: compact_pre_messages(),
@@ -1251,7 +1244,7 @@ defmodule Sigma.AgentTest do
     }
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: CompactMockProvider,
         messages: compact_pre_messages()
@@ -1267,7 +1260,7 @@ defmodule Sigma.AgentTest do
 
   test "keeps a user question pending until it is answered" do
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: EmptyProvider
       )
@@ -1294,7 +1287,7 @@ defmodule Sigma.AgentTest do
 
   test "handles MCP elicitation accept and decline" do
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: EmptyProvider
       )
@@ -1339,7 +1332,7 @@ defmodule Sigma.AgentTest do
 
   test "rejects unsupported MCP elicitation schemas" do
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: EmptyProvider
       )
@@ -1353,7 +1346,7 @@ defmodule Sigma.AgentTest do
 
   test "ignores tools/list_changed when no MCP subscriptions are active" do
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: EmptyProvider
       )
@@ -1365,7 +1358,7 @@ defmodule Sigma.AgentTest do
 
   test "handles pending user questions after hot reload from older state" do
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: EmptyProvider
       )
@@ -1391,7 +1384,7 @@ defmodule Sigma.AgentTest do
 
   test "keeps a default user question pending until answered" do
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: EmptyProvider
       )
@@ -1438,7 +1431,7 @@ defmodule Sigma.AgentTest do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: PromptDispatcherProvider,
         tools: [PromptDispatcherTool],
@@ -1455,5 +1448,15 @@ defmodule Sigma.AgentTest do
     assert_receive {:agent_end, _messages}
 
     transcript_path
+  end
+
+  defp start_agent(opts) do
+    path =
+      Path.join(
+        Process.get(:agent_test_runtime_root),
+        "runtime-#{System.unique_integer([:positive])}"
+      )
+
+    Sigma.Agent.start_link(Keyword.put(opts, :backplane_runtime_path, path))
   end
 end

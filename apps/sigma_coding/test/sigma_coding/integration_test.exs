@@ -3,6 +3,8 @@ defmodule Sigma.Coding.IntegrationTest do
 
   alias Sigma.Agent.Message
 
+  @moduletag :tmp_dir
+
   defmodule MockProvider do
     @behaviour Sigma.Ai.Provider
 
@@ -48,8 +50,7 @@ defmodule Sigma.Coding.IntegrationTest do
     end
   end
 
-  setup do
-    tmp_dir = Path.expand("../../tmp/integration_test", __DIR__)
+  setup %{tmp_dir: tmp_dir} do
     File.mkdir_p!(tmp_dir)
     File.write!(Path.join(tmp_dir, "hello.txt"), "Hello world")
     
@@ -61,24 +62,21 @@ defmodule Sigma.Coding.IntegrationTest do
   test "agent executes a tool and continues", %{tmp_dir: tmp_dir} do
     model = %{id: "mock-model", api: "mock", provider: "mock"}
 
-    {:ok, agent} = Sigma.Agent.start_link(
-      model: model,
-      provider: MockProvider,
-      tools: [Sigma.Coding.Tools.Read],
-      system_prompt: "You are a helpful assistant.",
-      cwd: tmp_dir
-    )
+    {:ok, agent} =
+      start_supervised(
+        {Sigma.Agent,
+         [
+           model: model,
+           provider: MockProvider,
+           tools: [Sigma.Coding.Tools.Read],
+           system_prompt: "You are a helpful assistant.",
+           backplane_runtime_path: Path.join(tmp_dir, "runtime"),
+           cwd: tmp_dir
+         ]}
+      )
 
     Sigma.Agent.subscribe(agent)
 
-    # We need to pass the tmp_dir as cwd to tools.
-    # For now, let's assume Sigma.Agent or Dispatcher can be configured with cwd.
-    # Actually, the Dispatcher dispatch call needs opts.
-    # Let's update Sigma.Agent to allow passing opts to execute_tools.
-    
-    # Wait, the current implementation of execute_tools in Sigma.Agent doesn't pass cwd.
-    # I'll need to fix that.
-    
     Sigma.Agent.prompt(agent, "Read hello.txt")
 
     # Turn 1

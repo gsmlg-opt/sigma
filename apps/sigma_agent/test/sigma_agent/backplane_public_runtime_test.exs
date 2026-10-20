@@ -172,35 +172,36 @@ defmodule Sigma.Agent.BackplanePublicRuntimeTest do
     assert Enum.any?(snapshot.messages, &match?(%{role: :tool_result, is_error: true}, &1))
   end
 
-  test "explicit Sigma fallback executes without opening a Backplane sidecar", ctx do
+  test "legacy session engine option still executes through Backplane", ctx do
     {context, subscription} =
-      create_session(Map.put(ctx, :engine_opts, execution_engine: :sigma), "fallback")
+      create_session(Map.put(ctx, :engine_opts, execution_engine: :sigma), "legacy-option")
 
-    assert {:ok, _} = command(context, "prompt.submit", "fallback", %{"content" => "Save it"})
+    assert {:ok, admitted} =
+             command(context, "prompt.submit", "legacy-option", %{"content" => "Save it"})
+
     collect_until(subscription, "turn.completed")
     assert File.read!(Path.join(ctx.repo, "result.txt")) == "written by Sigma"
-    refute File.exists?(Path.join(ctx.sessions, "fallback.jsonl.runtime"))
-    assert :sys.get_state(Runtime.lookup(ctx.repo, "fallback", :agent)).execution_engine == :sigma
+    assert File.dir?(Path.join(ctx.sessions, "legacy-option.jsonl.runtime"))
+    store = :sys.get_state(Runtime.lookup(ctx.repo, "legacy-option", :agent)).backplane_store
+
+    assert {:ok, %{run: %{state: :completed}}} =
+             Sigma.Agent.Backplane.Store.load(store, admitted.turn_id)
   end
 
-  test "application fallback is overridable per session and existing sessions retain their engine",
-       ctx do
+  test "legacy application engine configuration still executes through Backplane", ctx do
     Application.put_env(:sigma_agent, :execution_engine, :sigma)
-    create_session(ctx, "app-fallback")
+    {context, subscription} = create_session(ctx, "legacy-app-config")
 
-    {context, subscription} =
-      create_session(Map.put(ctx, :engine_opts, execution_engine: :backplane), "override")
+    assert {:ok, admitted} =
+             command(context, "prompt.submit", "legacy-app-config", %{"content" => "Save it"})
 
-    assert {:ok, _} = command(context, "prompt.submit", "override", %{"content" => "Save it"})
     collect_until(subscription, "turn.completed")
-    assert File.dir?(Path.join(ctx.sessions, "override.jsonl.runtime"))
-    Application.delete_env(:sigma_agent, :execution_engine)
+    assert File.read!(Path.join(ctx.repo, "result.txt")) == "written by Sigma"
+    assert File.dir?(Path.join(ctx.sessions, "legacy-app-config.jsonl.runtime"))
+    store = :sys.get_state(Runtime.lookup(ctx.repo, "legacy-app-config", :agent)).backplane_store
 
-    assert :sys.get_state(Runtime.lookup(ctx.repo, "app-fallback", :agent)).execution_engine ==
-             :sigma
-
-    assert :sys.get_state(Runtime.lookup(ctx.repo, "override", :agent)).execution_engine ==
-             :backplane
+    assert {:ok, %{run: %{state: :completed}}} =
+             Sigma.Agent.Backplane.Store.load(store, admitted.turn_id)
   end
 
   defp create_session(ctx, id, permission \\ :allow) do

@@ -112,6 +112,7 @@ defmodule Sigma.Agent.Terminals.SupervisionTest do
       [
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: EmptyProvider,
+        backplane_runtime_path: Path.join(repo, "runtime"),
         cwd: repo,
         idle_timeout_ms: 30_000,
         terminal_backend: FakeBackend

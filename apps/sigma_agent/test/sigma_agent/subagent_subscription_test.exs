@@ -7,7 +7,7 @@ defmodule Sigma.Agent.SubagentSubscriptionTest do
 
   @moduletag :tmp_dir
 
-  setup %{tmp_dir: root} = tags do
+  setup %{tmp_dir: root} do
     repo = Path.join(root, "repo")
     sessions = Path.join(root, "sessions")
     File.mkdir_p!(repo)
@@ -17,7 +17,6 @@ defmodule Sigma.Agent.SubagentSubscriptionTest do
       repo_path: repo,
       sessions_dir: sessions,
       session_opts: [
-        execution_engine: Map.get(tags, :execution_engine, :sigma),
         model: %{id: "fixture", api: "fixture", provider: "fixture"},
         provider: Sigma.Agent.PublicRuntimeTest.ScriptedProvider
       ]
@@ -40,28 +39,25 @@ defmodule Sigma.Agent.SubagentSubscriptionTest do
     %{context: context, path: path, agent: Runtime.lookup(repo, "root", :agent)}
   end
 
-  for engine <- [:sigma, :backplane] do
-    @tag execution_engine: engine
-    test "#{engine} host cannot replace a newer committed roster with its stale projection", c do
-      host = Runtime.lookup(c.context.repo_path, "root", :subagents)
-      assert {:ok, live} = Sigma.Agent.Subagents.snapshot(host)
-      assert live.subagents.revision == 0
-      assert live.available == (unquote(engine) == :backplane)
-      assert {:ok, initial} = Runtime.session_snapshot(c.context.repo_path, "root", c.path)
-      assert initial.subagents_available == live.available
+  test "host cannot replace a newer committed roster with its stale projection", c do
+    host = Runtime.lookup(c.context.repo_path, "root", :subagents)
+    assert {:ok, live} = Sigma.Agent.Subagents.snapshot(host)
+    assert live.subagents.revision == 0
+    assert live.available
+    assert {:ok, initial} = Runtime.session_snapshot(c.context.repo_path, "root", c.path)
+    assert initial.subagents_available == live.available
 
-      persist!(c.path, fact(:registered, 1))
-      persist!(c.path, fact(:run_started, 2))
-      {:ok, committed} = Log.snapshot(c.path)
-      assert {:ok, snapshot} = Runtime.session_snapshot(c.context.repo_path, "root", c.path)
-      assert snapshot.subagents == committed.subagents
-      assert snapshot.subagents.revision == 2
-      assert [%{status: :unknown_outcome}] = snapshot.subagents.agents
-      refute snapshot.subagents_available
-      assert {:ok, public} = command("session.status", c.context, capabilities())
-      assert public.payload["subagents"] == Sigma.Protocol.Subagents.to_map(committed.subagents)
-      refute public.payload["subagentsAvailable"]
-    end
+    persist!(c.path, fact(:registered, 1))
+    persist!(c.path, fact(:run_started, 2))
+    {:ok, committed} = Log.snapshot(c.path)
+    assert {:ok, snapshot} = Runtime.session_snapshot(c.context.repo_path, "root", c.path)
+    assert snapshot.subagents == committed.subagents
+    assert snapshot.subagents.revision == 2
+    assert [%{status: :unknown_outcome}] = snapshot.subagents.agents
+    refute snapshot.subagents_available
+    assert {:ok, public} = command("session.status", c.context, capabilities())
+    assert public.payload["subagents"] == Sigma.Protocol.Subagents.to_map(committed.subagents)
+    refute public.payload["subagentsAvailable"]
   end
 
   test "legacy snapshots omit roster and unknown events do not consume cursors", c do

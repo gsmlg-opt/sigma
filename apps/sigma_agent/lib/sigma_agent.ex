@@ -44,21 +44,18 @@ defmodule Sigma.Agent do
     :control_pid,
     :last_cancelled_turn_id,
     :policy,
-    :execution_engine,
     :backplane_store,
     :backplane_store_owned,
     :backplane_request,
     :subagents,
     messages: [],
     subscribers: [],
-    current_turn_assistant_message: nil,
     current_turn_resources: [],
     pending_user_questions: %{},
     pending_mcp_elicitations: %{},
     prompt_queue: %PromptQueue{},
     turn_state: %TurnState{},
     hook_specs: [],
-    stop_hook_active: false,
     backplane_tool_results: [],
     resume_source: :startup,
     mcp_session: %{handles: [], subscriptions: [], clients: %{}}
@@ -78,11 +75,9 @@ defmodule Sigma.Agent do
   end
 
   def start_link(opts) do
-    with {:ok, engine} <- execution_engine(opts) do
-      {name, opts} = Keyword.pop(Keyword.put(opts, :execution_engine, engine), :name)
-      gen_opts = if name, do: [name: name], else: []
-      GenServer.start_link(__MODULE__, opts, gen_opts)
-    end
+    {name, opts} = Keyword.pop(opts, :name)
+    gen_opts = if name, do: [name: name], else: []
+    GenServer.start_link(__MODULE__, opts, gen_opts)
   end
 
   def subscribe(pid) do
@@ -320,7 +315,6 @@ defmodule Sigma.Agent do
       prompt_queue: PromptQueue.new(),
       turn_state: TurnState.idle(),
       resume_source: Keyword.get(opts, :resume_source, :startup),
-      execution_engine: Keyword.fetch!(opts, :execution_engine),
       backplane_store: backplane_store,
       backplane_store_owned: backplane_store_owned,
       subagents: opts[:subagents]
@@ -1313,8 +1307,6 @@ defmodule Sigma.Agent do
        }}
     )
 
-    state = %{state | stop_hook_active: false}
-
     user_msg =
       Message.user(item.message_id, item.content)
       |> Map.put(:attachments, item.attachments)
@@ -1362,78 +1354,8 @@ defmodule Sigma.Agent do
 
   defp notify_retry_admission(_item, _result), do: :ok
 
-  defp run_turn_loop(%{execution_engine: :backplane} = state, turn_id),
+  defp run_turn_loop(state, turn_id),
     do: Sigma.Agent.Backplane.Engine.run(state, turn_id)
-
-  defp run_turn_loop(state, turn_id) do
-    set_turn_phase(state, turn_id, :streaming_provider)
-    emit(state, {:turn_start})
-
-    ai_tools = Enum.map(state.tools, &Sigma.Coding.Tool.ai_definition/1)
-
-    context =
-      ContextBuilder.build(
-        messages: state.messages,
-        session_context: state.session_context,
-        system_prompt: state.system_prompt,
-        tools: ai_tools,
-        cwd: state.cwd,
-        model: state.model
-      )
-
-    state = refresh_context_from_assembly(state, context)
-
-    case context_budget_error(state, context) do
-      nil ->
-        run_provider_step(state, turn_id, context)
-
-      error ->
-        emit(state, {:turn_error, error})
-        {state, :failed}
-    end
-  end
-
-  defp run_provider_step(state, turn_id, context) do
-    params = %{
-      model: state.model,
-      session_id: state.session_id,
-      log_session_id: state.log_session_id,
-      turn_id: turn_id,
-      origin_session_id: state.session_id,
-      purpose: :turn,
-      context: context,
-      options: state.provider_options
-    }
-
-    case run_stream(state, params) do
-      {:error, state} ->
-        outcome = if turn_cancelled?(state, turn_id), do: :cancelled, else: :failed
-        {state, outcome}
-
-      {state, assistant_msg} ->
-        tool_calls = extract_tool_calls(assistant_msg)
-
-        if tool_calls != [] do
-          set_turn_phase(state, turn_id, :running_tools)
-          {state, tool_result_messages} = execute_tools(state, tool_calls)
-          emit(state, {:turn_end, assistant_msg, tool_result_messages})
-
-          if turn_cancelled?(state, turn_id) do
-            {state, :cancelled}
-          else
-            continue_after_safe_boundary(state, turn_id)
-          end
-        else
-          emit(state, {:turn_end, assistant_msg, []})
-
-          case consume_steering(state, turn_id) do
-            {:consumed, state} -> run_turn_loop(state, turn_id)
-            {:none, state} -> run_stop_hook(state, assistant_msg, turn_id)
-            {:cancelled, state} -> {state, :cancelled}
-          end
-        end
-    end
-  end
 
   defp context_budget_error(state, context) do
     snapshot =
@@ -1464,57 +1386,6 @@ defmodule Sigma.Agent do
     Keyword.get(options, :max_tokens) || Keyword.get(options, :max_output_tokens)
   end
 
-  defp continue_after_safe_boundary(state, turn_id) do
-    case consume_steering(state, turn_id) do
-      {:consumed, state} -> run_turn_loop(state, turn_id)
-      {:none, state} -> run_turn_loop(state, turn_id)
-      {:cancelled, state} -> {state, :cancelled}
-    end
-  end
-
-  defp consume_steering(%{control_pid: control_pid} = state, turn_id)
-       when is_pid(control_pid) do
-    case GenServer.call(control_pid, {:peek_steering, turn_id}, :infinity) do
-      nil ->
-        {:none, state}
-
-      :cancelled ->
-        {:cancelled, state}
-
-      item ->
-        user_msg = Message.user(item.message_id, item.content)
-
-        case run_user_prompt_submit_hook(state, user_msg) do
-          {:block, reason} ->
-            emit(state, {:prompt_rejected, item.message_id, reason})
-
-            :ok =
-              GenServer.call(control_pid, {:ack_steering, turn_id, item.message_id}, :infinity)
-
-            {:none, state}
-
-          {:ok, user_msg, state} ->
-            state = %{state | messages: state.messages ++ [user_msg]}
-            emit(state, {:message_start, user_msg})
-            emit(state, {:message_end, user_msg})
-            acknowledge_canonical(state)
-
-            :ok =
-              GenServer.call(control_pid, {:ack_steering, turn_id, item.message_id}, :infinity)
-
-            emit(state, {:prompt_consumed, :steering, prompt_info(item, turn_id)})
-            {:consumed, state}
-        end
-    end
-  end
-
-  defp consume_steering(state, _turn_id), do: {:none, state}
-
-  defp turn_cancelled?(%{control_pid: control_pid}, turn_id) when is_pid(control_pid),
-    do: GenServer.call(control_pid, {:cancelled?, turn_id}, :infinity)
-
-  defp turn_cancelled?(_state, _turn_id), do: false
-
   defp set_turn_phase(%{control_pid: control_pid}, turn_id, phase) when is_pid(control_pid),
     do: GenServer.cast(control_pid, {:turn_phase, turn_id, phase})
 
@@ -1525,279 +1396,6 @@ defmodule Sigma.Agent do
        do: GenServer.cast(control_pid, {:current_request, turn_id, request_id})
 
   defp set_current_request(_state, _turn_id, _request_id), do: :ok
-
-  defp run_stream(state, params) do
-    assistant_id = "msg_assistant_#{System.unique_integer([:positive])}"
-
-    request =
-      params
-      |> Map.put(:message_id, assistant_id)
-      |> ProviderRequest.new()
-      |> ProviderRequest.begin(System.monotonic_time(:millisecond), DateTime.utc_now())
-
-    state = %{state | current_request_id: request.request_id}
-    set_current_request(state, request.turn_id, request.request_id)
-    emit(state, {:metrics, :request_started, request_fact(request)})
-
-    run_stream_request(state, request, assistant_id)
-  end
-
-  defp run_stream_request(state, request, assistant_id) do
-    stream = Provider.stream(state.provider, request)
-
-    {final_state, failed?, final_request, terminal_status} =
-      Enum.reduce_while(stream, {state, false, request, nil}, fn event,
-                                                                 {acc_state, _failed?,
-                                                                  acc_request, terminal_status} ->
-        case event do
-          %ProviderEvent{type: :response_started, message: ai_msg} ->
-            agent_msg = ai_to_agent_message(ai_msg, assistant_id, request.turn_id)
-            emit(acc_state, {:message_start, agent_msg})
-
-            {:cont,
-             {%{acc_state | current_turn_assistant_message: agent_msg}, false, acc_request,
-              terminal_status}}
-
-          %ProviderEvent{type: :content_text_delta, message: ai_msg} = normalized_event ->
-            agent_msg = ai_to_agent_message(ai_msg, assistant_id, request.turn_id)
-            emit(acc_state, {:message_update, agent_msg, legacy_stream_event(normalized_event)})
-
-            next_request =
-              ProviderRequest.mark_output(acc_request, System.monotonic_time(:millisecond), :text)
-
-            {:cont,
-             {%{acc_state | current_turn_assistant_message: agent_msg}, false, next_request,
-              terminal_status}}
-
-          %ProviderEvent{type: :content_thinking_delta, message: ai_msg} = normalized_event ->
-            agent_msg = ai_to_agent_message(ai_msg, assistant_id, request.turn_id)
-            emit(acc_state, {:message_update, agent_msg, legacy_stream_event(normalized_event)})
-
-            next_request =
-              ProviderRequest.mark_output(
-                acc_request,
-                System.monotonic_time(:millisecond),
-                :thinking
-              )
-
-            {:cont,
-             {%{acc_state | current_turn_assistant_message: agent_msg}, false, next_request,
-              terminal_status}}
-
-          %ProviderEvent{type: :tool_call_started, message: ai_msg} = normalized_event ->
-            agent_msg = ai_to_agent_message(ai_msg, assistant_id, request.turn_id)
-            emit(acc_state, {:message_update, agent_msg, legacy_stream_event(normalized_event)})
-
-            next_request =
-              ProviderRequest.mark_output(
-                acc_request,
-                System.monotonic_time(:millisecond),
-                :tool_arguments
-              )
-
-            {:cont,
-             {%{acc_state | current_turn_assistant_message: agent_msg}, false, next_request,
-              terminal_status}}
-
-          %ProviderEvent{type: :tool_call_arguments_delta, message: ai_msg} = normalized_event ->
-            agent_msg = ai_to_agent_message(ai_msg, assistant_id, request.turn_id)
-            emit(acc_state, {:message_update, agent_msg, legacy_stream_event(normalized_event)})
-
-            next_request =
-              ProviderRequest.mark_output(
-                acc_request,
-                System.monotonic_time(:millisecond),
-                :tool_arguments
-              )
-
-            {:cont,
-             {%{acc_state | current_turn_assistant_message: agent_msg}, false, next_request,
-              terminal_status}}
-
-          %ProviderEvent{type: :tool_call_completed, message: ai_msg} = normalized_event ->
-            agent_msg = ai_to_agent_message(ai_msg, assistant_id, request.turn_id)
-            emit(acc_state, {:message_update, agent_msg, legacy_stream_event(normalized_event)})
-
-            next_request =
-              ProviderRequest.mark_output(
-                acc_request,
-                System.monotonic_time(:millisecond),
-                :tool_arguments
-              )
-
-            {:cont,
-             {%{acc_state | current_turn_assistant_message: agent_msg}, false, next_request,
-              terminal_status}}
-
-          %ProviderEvent{type: :usage_updated, usage: usage, message: ai_msg} ->
-            next_request =
-              case usage || (is_map(ai_msg) && ProviderUsage.from_map(ai_msg[:usage])) do
-                %ProviderUsage{} = normalized ->
-                  %{acc_request | usage: normalized, usage_revision: normalized.usage_revision}
-
-                _missing ->
-                  acc_request
-              end
-
-            next_state =
-              if is_map(ai_msg) do
-                %{
-                  acc_state
-                  | current_turn_assistant_message:
-                      ai_to_agent_message(ai_msg, assistant_id, request.turn_id)
-                }
-              else
-                acc_state
-              end
-
-            {:cont, {next_state, false, next_request, terminal_status}}
-
-          %ProviderEvent{
-            type: :response_completed,
-            message: ai_msg,
-            usage: usage,
-            stop_reason: stop_reason
-          } ->
-            agent_msg = ai_to_agent_message(ai_msg, assistant_id, request.turn_id, stop_reason)
-            emit(acc_state, {:message_end, agent_msg})
-
-            next_request =
-              put_request_usage(acc_request, usage || ProviderUsage.from_map(ai_msg[:usage]))
-
-            next_state = %{
-              acc_state
-              | messages: acc_state.messages ++ [agent_msg],
-                current_turn_assistant_message: agent_msg
-            }
-
-            acknowledge_canonical(next_state)
-
-            {:cont, {next_state, false, next_request, :completed}}
-
-          %ProviderEvent{type: :response_failed, error: %ProviderError{kind: :cancelled}} ->
-            {:halt, {acc_state, true, acc_request, :cancelled}}
-
-          %ProviderEvent{type: :response_failed, error: error} ->
-            emit(acc_state, {:turn_error, error})
-            {:halt, {acc_state, true, acc_request, :failed}}
-        end
-      end)
-
-    final_request =
-      ProviderRequest.finish(
-        final_request,
-        terminal_status || if(failed?, do: :failed, else: :completed),
-        System.monotonic_time(:millisecond),
-        DateTime.utc_now()
-      )
-
-    final_state = refresh_context_after_request(final_state, final_request)
-    emit(final_state, {:metrics, :request_finished, request_fact(final_request)})
-    set_current_request(final_state, request.turn_id, nil)
-    assistant_msg = final_state.current_turn_assistant_message
-
-    cond do
-      failed? ->
-        {:error, final_state}
-
-      assistant_msg ->
-        {%{final_state | current_turn_assistant_message: nil}, assistant_msg}
-
-      true ->
-        error = ProviderError.malformed(:empty_response)
-        emit(state, {:turn_error, error})
-        {:error, state}
-    end
-  rescue
-    exception ->
-      failed =
-        ProviderRequest.finish(
-          request,
-          :failed,
-          System.monotonic_time(:millisecond),
-          DateTime.utc_now()
-        )
-
-      emit(
-        state,
-        {:metrics, :request_finished, request_fact(failed)}
-      )
-
-      emit(state, {:turn_error, ProviderError.from_exception(exception)})
-      {:error, state}
-  catch
-    kind, reason ->
-      failed =
-        ProviderRequest.finish(
-          request,
-          :failed,
-          System.monotonic_time(:millisecond),
-          DateTime.utc_now()
-        )
-
-      emit(
-        state,
-        {:metrics, :request_finished, request_fact(failed)}
-      )
-
-      emit(state, {:turn_error, ProviderError.from_exception({kind, reason})})
-      {:error, state}
-  end
-
-  defp legacy_stream_event(%ProviderEvent{
-         type: :content_text_delta,
-         index: index,
-         delta: delta,
-         message: message
-       }),
-       do: {:text_delta, index, delta, message}
-
-  defp legacy_stream_event(%ProviderEvent{
-         type: :content_thinking_delta,
-         index: index,
-         delta: delta,
-         message: message
-       }),
-       do: {:thinking_delta, index, delta, message}
-
-  defp legacy_stream_event(%ProviderEvent{
-         type: :tool_call_started,
-         index: index,
-         message: message
-       }),
-       do: {:toolcall_start, index, message}
-
-  defp legacy_stream_event(%ProviderEvent{
-         type: :tool_call_arguments_delta,
-         index: index,
-         delta: delta,
-         message: message
-       }),
-       do: {:toolcall_delta, index, delta, message}
-
-  defp legacy_stream_event(%ProviderEvent{
-         type: :tool_call_completed,
-         index: index,
-         tool_call: tool_call,
-         message: message
-       }),
-       do: {:toolcall_end, index, tool_call, message}
-
-  defp extract_tool_calls(msg) do
-    case msg && msg.content do
-      content when is_list(content) ->
-        Enum.filter(content, &executable_tool_call?/1)
-
-      _ ->
-        []
-    end
-  end
-
-  defp executable_tool_call?(%{type: :tool_call, id: id, name: name, arguments: args})
-       when is_binary(id) and is_binary(name) and is_map(args),
-       do: true
-
-  defp executable_tool_call?(_block), do: false
 
   defp run_state_change(persist) do
     case persist.() do
@@ -1832,90 +1430,6 @@ defmodule Sigma.Agent do
     |> Enum.uniq()
   end
 
-  defp execute_tools(state, tool_calls) do
-    Enum.each(tool_calls, fn tc ->
-      emit(state, {:tool_execution_start, tc.id, tc.name, tc.arguments})
-    end)
-
-    tool_calls_by_id = Map.new(tool_calls, &{&1.id, &1})
-
-    opts =
-      state.dispatcher_opts
-      |> Keyword.put(:cwd, state.cwd)
-      |> Keyword.put(:permission_policy, resolve_policy(state.policy))
-      |> Keyword.put(:session_id, state.session_id)
-      |> Keyword.put(:log_session_id, state.log_session_id)
-      |> Keyword.put(:turn_id, state.turn_state.turn_id)
-      |> Keyword.put(
-        :skill_roots,
-        merge_skill_roots(
-          state.dispatcher_opts,
-          skill_grant_roots(state.tool_state, state.turn_state.turn_id)
-        )
-      )
-      |> Keyword.put(:transcript_path, transcript_path(state))
-      |> Keyword.put(:hook_specs, state.hook_specs)
-      |> Keyword.put(:tool_state, state.tool_state)
-      |> Keyword.put(:request_id, state.current_request_id)
-      |> Keyword.put(:on_tool_fact, fn fact -> emit(state, {:metrics, :tool_finished, fact}) end)
-      |> Keyword.put(:on_tool_update, fn update ->
-        case Map.get(tool_calls_by_id, update.tool_call_id) do
-          nil ->
-            :ok
-
-          tool_call ->
-            emit(
-              state,
-              {:tool_execution_update, tool_call.id, tool_call.name, tool_call.arguments, update}
-            )
-        end
-      end)
-
-    results = Sigma.Coding.Dispatcher.dispatch_batch(tool_calls, state.tools, opts)
-
-    {tool_result_messages, state} =
-      Enum.map_reduce(results, state, fn {tool_call, result}, acc_state ->
-        msg_id = "msg_tool_res_#{System.unique_integer([:positive])}"
-
-        {content, is_error, error_kind} =
-          case result do
-            {:ok, %{content: content} = result} ->
-              {content, Map.get(result, :is_error, false), nil}
-
-            {:error, %ToolError{message: message, kind: kind}} ->
-              maybe_emit_approval_required(acc_state, result, tool_call)
-              {[%{type: :text, text: "Error: #{message}"}], true, kind}
-
-            _malformed ->
-              {[%{type: :text, text: "Error: malformed tool runtime result"}], true, :malformed}
-          end
-
-        tool_res_msg =
-          Message.tool_result(msg_id, %{
-            tool_call_id: tool_call.id,
-            tool_name: tool_call.name,
-            content: content,
-            is_error: is_error,
-            timestamp: DateTime.to_unix(DateTime.utc_now(), :millisecond)
-          })
-
-        emit(acc_state, {:tool_execution_end, tool_call.id, tool_call.name, content, is_error})
-        emit(acc_state, {:message_start, tool_res_msg})
-        emit(acc_state, {:message_end, tool_res_msg})
-
-        acc_state =
-          acc_state
-          |> Map.update!(:messages, &(&1 ++ [tool_res_msg]))
-          |> track_tool_failure(tool_call, error_kind)
-
-        acknowledge_canonical(acc_state)
-        {tool_res_msg, acc_state}
-      end)
-
-    state = maybe_inject_loop_breaker_nudge(state, results)
-    {state, tool_result_messages}
-  end
-
   defp acknowledge_canonical(%{control_pid: control_pid, turn_state: %{turn_id: turn_id}} = state)
        when is_pid(control_pid) and is_binary(turn_id) do
     send(control_pid, {:canonical_messages, turn_id, state.messages})
@@ -1933,93 +1447,6 @@ defmodule Sigma.Agent do
   end
 
   defp maybe_emit_approval_required(_state, _result, _tool_call), do: :ok
-
-  # MCP transport-failure loop breaker
-  # -------------------------------------------------------------------------
-  # When an MCP tool call fails (e.g. transport down, server unreachable),
-  # a naive model will keep calling it. Track consecutive failures per
-  # `(tool_name, args)` key in `state.tool_state` (ETS) and, once the
-  # threshold is hit, inject a synthetic user-role message that tells the
-  # model to switch tools or stop and report.
-
-  @tool_loop_breaker_threshold 3
-  @tool_loop_breaker_window_ms 5 * 60 * 1_000
-
-  defp track_tool_failure(state, tool_call, error_kind) do
-    if error_kind in [:transport_failure, :execution, :malformed] do
-      key = tool_failure_key(tool_call)
-      :ets.update_counter(state.tool_state, key, {2, 1}, {key, 0})
-    else
-      :ets.delete(state.tool_state, tool_failure_key(tool_call))
-    end
-
-    state
-  end
-
-  defp tool_failure_key(%{name: name, arguments: args}) do
-    {:tool_loop, to_string(name), :erlang.phash2(args)}
-  end
-
-  defp maybe_inject_loop_breaker_nudge(state, results) do
-    triggers =
-      Enum.flat_map(results, fn {tool_call, result} ->
-        if failure_to_bump?(result) and
-             failure_count_at_least?(
-               state,
-               tool_failure_key(tool_call),
-               @tool_loop_breaker_threshold
-             ) and
-             never_nudged_recently?(state, tool_failure_key(tool_call)) do
-          record_nudge(state, tool_failure_key(tool_call))
-          [tool_call]
-        else
-          []
-        end
-      end)
-
-    Enum.reduce(triggers, state, fn tool_call, acc -> inject_nudge(acc, tool_call) end)
-  end
-
-  defp failure_to_bump?({:error, %ToolError{kind: :transport_failure}}), do: true
-  defp failure_to_bump?({:error, %ToolError{kind: :execution}}), do: true
-  defp failure_to_bump?(_), do: false
-
-  defp failure_count_at_least?(state, key, threshold) do
-    case :ets.lookup(state.tool_state, key) do
-      [{^key, count}] -> count >= threshold
-      _ -> false
-    end
-  end
-
-  defp never_nudged_recently?(state, key) do
-    case :ets.lookup(state.tool_state, {:tool_loop_nudge_at, key}) do
-      [] -> true
-      [{_, ts}] -> System.monotonic_time(:millisecond) - ts > @tool_loop_breaker_window_ms
-      _ -> true
-    end
-  end
-
-  defp record_nudge(state, key) do
-    :ets.insert(
-      state.tool_state,
-      {{:tool_loop_nudge_at, key}, System.monotonic_time(:millisecond)}
-    )
-
-    :ets.delete(state.tool_state, key)
-  end
-
-  defp inject_nudge(state, tool_call) do
-    text =
-      "[Loop breaker] The tool `#{tool_call.name}` has failed #{@tool_loop_breaker_threshold} times " <>
-        "in a row. Stop calling it and either pick a different tool, ask the user, or " <>
-        "report the failure. Arguments: #{inspect(tool_call.arguments)}."
-
-    msg = Message.user("loop_breaker_#{System.unique_integer([:positive])}", text)
-    state = %{state | messages: state.messages ++ [msg]}
-    emit(state, {:message_start, msg})
-    emit(state, {:message_end, msg})
-    state
-  end
 
   defp ai_to_agent_message(ai_msg, id, turn_id) do
     ai_to_agent_message(ai_msg, id, turn_id, nil)
@@ -2811,40 +2238,6 @@ defmodule Sigma.Agent do
     end
   end
 
-  defp run_stop_hook(state, assistant_msg, turn_id) do
-    if Sigma.Coding.Hooks.any_for_event?(state.hook_specs, :stop) do
-      ctx = hook_ctx(state)
-      last_text = message_text(assistant_msg)
-
-      event_data = %{
-        stop_hook_active: state.stop_hook_active,
-        last_assistant_message: last_text
-      }
-
-      {outcome, _warnings} =
-        Sigma.Coding.Hooks.dispatch(:stop, state.hook_specs, ctx, event_data)
-
-      case outcome do
-        {:halt, _} ->
-          {state, :completed}
-
-        {:block, reason} when not state.stop_hook_active ->
-          # Inject synthetic user turn and continue
-          synth_id = "hook_stop_#{System.unique_integer([:positive])}"
-          synth_msg = Message.user(synth_id, reason)
-          state = %{state | messages: state.messages ++ [synth_msg], stop_hook_active: true}
-          emit(state, {:message_start, synth_msg})
-          emit(state, {:message_end, synth_msg})
-          run_turn_loop(state, turn_id)
-
-        _ ->
-          {state, :completed}
-      end
-    else
-      {state, :completed}
-    end
-  end
-
   defp message_text(%{content: content}) when is_list(content) do
     Enum.map_join(content, "\n", fn
       %{type: :text, text: t} -> t
@@ -3043,6 +2436,10 @@ defmodule Sigma.Agent do
   end
 
   @doc false
+  def __backplane_messages_changed__(state),
+    do: invalidate_context(state, state.context_snapshot.source)
+
+  @doc false
   def __backplane_emit__(state, event), do: emit(state, event)
 
   @doc false
@@ -3133,7 +2530,6 @@ defmodule Sigma.Agent do
 
     opts =
       state.dispatcher_opts
-      |> Keyword.put(:observed_permission_denials, true)
       |> Keyword.put(:cwd, state.cwd)
       |> Keyword.put(:permission_policy, resolve_policy(state.policy))
       |> Keyword.put(:session_id, state.session_id)
@@ -3165,48 +2561,33 @@ defmodule Sigma.Agent do
     end
   end
 
-  defp execution_engine(opts) do
-    case Keyword.get(
-           opts,
-           :execution_engine,
-           Application.get_env(:sigma_agent, :execution_engine, :backplane)
-         ) do
-      engine when engine in [:sigma, :backplane] -> {:ok, engine}
-      engine -> {:error, {:invalid_execution_engine, engine}}
-    end
-  end
-
   defp subagents_can_stop?(%{subagents: nil}), do: true
   defp subagents_can_stop?(state), do: Sigma.Agent.Subagents.can_stop(state.subagents) == :ok
 
   defp init_backplane_store(opts) do
-    if Keyword.fetch!(opts, :execution_engine) == :sigma do
-      {:ok, nil, false}
-    else
-      case Keyword.get(opts, :backplane_store) do
-        pid when is_pid(pid) ->
-          if Process.alive?(pid),
-            do: {:ok, pid, false},
-            else: {:error, :backplane_store_unavailable}
+    case Keyword.get(opts, :backplane_store) do
+      pid when is_pid(pid) ->
+        if Process.alive?(pid),
+          do: {:ok, pid, false},
+          else: {:error, :backplane_store_unavailable}
 
-        nil ->
-          path =
-            Keyword.get(opts, :backplane_runtime_path) ||
-              backplane_runtime_path(opts[:transcript_path])
+      nil ->
+        path =
+          Keyword.get(opts, :backplane_runtime_path) ||
+            backplane_runtime_path(opts[:transcript_path])
 
-          if is_nil(path) do
-            {:error, :backplane_runtime_path_required}
-          else
-            case Sigma.Agent.Backplane.Store.start_link(path: path) do
-              {:ok, pid} -> {:ok, pid, true}
-              {:error, {:already_started, _pid}} -> {:error, :backplane_runtime_path_in_use}
-              {:error, reason} -> {:error, {:backplane_store_unavailable, reason}}
-            end
+        if is_nil(path) do
+          {:error, :backplane_runtime_path_required}
+        else
+          case Sigma.Agent.Backplane.Store.start_link(path: path) do
+            {:ok, pid} -> {:ok, pid, true}
+            {:error, {:already_started, _pid}} -> {:error, :backplane_runtime_path_in_use}
+            {:error, reason} -> {:error, {:backplane_store_unavailable, reason}}
           end
+        end
 
-        _invalid ->
-          {:error, :invalid_backplane_store}
-      end
+      _invalid ->
+        {:error, :invalid_backplane_store}
     end
   end
 

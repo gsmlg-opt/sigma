@@ -1,6 +1,13 @@
 defmodule Sigma.Agent.SkillInvocationTest do
   use ExUnit.Case, async: true
 
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp_dir} do
+    Process.put(:agent_test_runtime_root, tmp_dir)
+    :ok
+  end
+
   alias Sigma.Agent.{SkillInvocation, SkillInvocationService}
 
   defmodule CompletingProvider do
@@ -61,9 +68,8 @@ defmodule Sigma.Agent.SkillInvocationTest do
     @behaviour Sigma.Ai.Provider
 
     @impl true
-    def stream(_params) do
-      step = Process.get({__MODULE__, :step}, 0)
-      Process.put({__MODULE__, :step}, step + 1)
+    def stream(params) do
+      step = Enum.count(params.context.messages, &(&1.role == :tool_result))
 
       case step do
         0 -> tool_response("register_resource")
@@ -229,11 +235,15 @@ defmodule Sigma.Agent.SkillInvocationTest do
   test "prompt and model-activated roots merge and release after tool completion" do
     {:ok, agent} =
       Sigma.Agent.start_link(
+        backplane_runtime_path:
+          Path.join(
+            Process.get(:agent_test_runtime_root),
+            "runtime-#{System.unique_integer([:positive])}"
+          ),
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: ResourceProvider,
         tools: [RegisterResourceTool, CaptureRootsTool],
-        dispatcher_opts: [test_pid: self()],
-        execution_engine: :sigma
+        dispatcher_opts: [test_pid: self()]
       )
 
     Sigma.Agent.subscribe(agent)
@@ -410,10 +420,14 @@ defmodule Sigma.Agent.SkillInvocationTest do
   defp start_agent(provider) do
     {:ok, agent} =
       Sigma.Agent.start_link(
+        backplane_runtime_path:
+          Path.join(
+            Process.get(:agent_test_runtime_root),
+            "runtime-#{System.unique_integer([:positive])}"
+          ),
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: provider,
-        options: [test_pid: self()],
-        execution_engine: :sigma
+        options: [test_pid: self()]
       )
 
     agent

@@ -179,7 +179,6 @@ defmodule Sigma.Agent.BackplaneEngineTest do
     {:ok, agent} =
       start_supervised(
         {Sigma.Agent,
-         execution_engine: :backplane,
          backplane_runtime_path: Path.join(dir, "runtime"),
          model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
          provider: BlockingProvider,
@@ -215,7 +214,6 @@ defmodule Sigma.Agent.BackplaneEngineTest do
     {:ok, agent} =
       Sigma.Agent.start_link(
         session_id: "backplane-engine-test",
-        execution_engine: :backplane,
         backplane_runtime_path: Path.join(tmp_dir, "runtime"),
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: ToolProvider,
@@ -254,7 +252,6 @@ defmodule Sigma.Agent.BackplaneEngineTest do
     {:ok, agent} =
       Sigma.Agent.start_link(
         session_id: "backplane-queues-test",
-        execution_engine: :backplane,
         backplane_runtime_path: Path.join(tmp_dir, "runtime"),
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: BlockingProvider,
@@ -293,7 +290,6 @@ defmodule Sigma.Agent.BackplaneEngineTest do
 
       {:ok, agent} =
         Sigma.Agent.start_link(
-          execution_engine: :backplane,
           backplane_runtime_path: Path.join(tmp_dir, "runtime"),
           model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
           provider: BlockingProvider,
@@ -339,7 +335,6 @@ defmodule Sigma.Agent.BackplaneEngineTest do
 
     {:ok, agent} =
       Sigma.Agent.start_link(
-        execution_engine: :backplane,
         backplane_runtime_path: Path.join(dir, "runtime"),
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: ToolProvider,
@@ -394,7 +389,6 @@ defmodule Sigma.Agent.BackplaneEngineTest do
     {:ok, agent} =
       Sigma.Agent.start_link(
         session_id: "backplane-default-schema-test",
-        execution_engine: :backplane,
         backplane_runtime_path: Path.join(dir, "runtime"),
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: ToolProvider,
@@ -430,7 +424,6 @@ defmodule Sigma.Agent.BackplaneEngineTest do
     {:ok, agent} =
       Sigma.Agent.start_link(
         session_id: "backplane-one-of-schema-test",
-        execution_engine: :backplane,
         backplane_runtime_path: Path.join(dir, "runtime"),
         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
         provider: ToolProvider,
@@ -548,14 +541,11 @@ defmodule Sigma.Agent.BackplaneEngineTest do
   end
 
   @tag :tmp_dir
-  test "invalid engine and unavailable store return explicit start errors", %{tmp_dir: dir} do
+  test "missing and unavailable stores return explicit start errors", %{tmp_dir: dir} do
     Process.flag(:trap_exit, true)
 
-    assert {:error, {:invalid_execution_engine, :invalid}} =
-             Sigma.Agent.start_link(execution_engine: :invalid)
-
     assert {:error, :backplane_runtime_path_required} =
-             Sigma.Agent.start_link(execution_engine: :backplane)
+             Sigma.Agent.start_link([])
 
     assert {:error, :invalid_backplane_store} =
              start_blocking_agent(dir, backplane_store: :invalid)
@@ -617,7 +607,6 @@ defmodule Sigma.Agent.BackplaneEngineTest do
 
   defp start_todo_agent(dir, arguments) do
     Sigma.Agent.start_link(
-      execution_engine: :backplane,
       backplane_runtime_path: Path.join(dir, "runtime"),
       model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
       provider: ToolProvider,
@@ -645,7 +634,6 @@ defmodule Sigma.Agent.BackplaneEngineTest do
     Sigma.Agent.start_link(
       Keyword.merge(
         [
-          execution_engine: :backplane,
           backplane_runtime_path: Path.join(dir, "runtime"),
           model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
           provider: BlockingProvider,

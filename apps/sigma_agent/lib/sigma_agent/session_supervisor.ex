@@ -95,6 +95,7 @@ defmodule Sigma.Agent.SessionSupervisor do
           },
           %{
             id: :subagents,
+            shutdown: 10_000,
             start:
               {Sigma.Agent.Subagents, :start_link,
                [
@@ -104,12 +105,6 @@ defmodule Sigma.Agent.SessionSupervisor do
                    session_id: session_id,
                    writer: writer_name,
                    transcript_path: transcript_path,
-                   enabled:
-                     Keyword.get(
-                       opts,
-                       :execution_engine,
-                       Application.get_env(:sigma_agent, :execution_engine, :backplane)
-                     ) == :backplane,
                    max_concurrent_threads_per_session:
                      Keyword.get(opts, :max_concurrent_threads_per_session, 4)
                  ]

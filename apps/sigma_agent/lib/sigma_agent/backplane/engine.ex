@@ -184,7 +184,9 @@ defmodule Sigma.Agent.Backplane.Engine do
               else
                 Sigma.Agent.__backplane_emit__(acc, {:message_start, message})
                 Sigma.Agent.__backplane_emit__(acc, {:message_end, message})
+
                 %{acc | messages: acc.messages ++ [message]}
+                |> Sigma.Agent.__backplane_messages_changed__()
               end
             end
           )
@@ -229,7 +231,8 @@ defmodule Sigma.Agent.Backplane.Engine do
         Sigma.Agent.__backplane_emit__(state, {:message_end, message})
 
         loop(
-          %{state | messages: state.messages ++ [message]},
+          %{state | messages: state.messages ++ [message]}
+          |> Sigma.Agent.__backplane_messages_changed__(),
           conversation,
           turn_id,
           users,
@@ -324,7 +327,10 @@ defmodule Sigma.Agent.Backplane.Engine do
       Sigma.Agent.__backplane_emit__(state, {:turn_end, message, []})
     end
 
-    state = %{state | messages: state.messages ++ [message], backplane_tool_results: []}
+    state =
+      %{state | messages: state.messages ++ [message], backplane_tool_results: []}
+      |> Sigma.Agent.__backplane_messages_changed__()
+
     {state, users, message, nil}
   end
 
@@ -356,7 +362,10 @@ defmodule Sigma.Agent.Backplane.Engine do
       Sigma.Agent.__backplane_emit__(state, {:turn_end, assistant, results})
     end
 
-    state = %{state | messages: state.messages ++ [tool], backplane_tool_results: results}
+    state =
+      %{state | messages: state.messages ++ [tool], backplane_tool_results: results}
+      |> Sigma.Agent.__backplane_messages_changed__()
+
     {state, users, assistant, nil}
   end
 
@@ -383,7 +392,21 @@ defmodule Sigma.Agent.Backplane.Engine do
        %{message_id: canonical.id, turn_id: state.turn_state.turn_id}}
     )
 
-    {%{state | messages: state.messages ++ [canonical]}, users, assistant, nil}
+    state =
+      %{state | messages: state.messages ++ [canonical]}
+      |> Sigma.Agent.__backplane_messages_changed__()
+
+    {state, users, assistant, nil}
+  end
+
+  defp reduce_event(
+         state,
+         %{type: :turn_failed, error: %Error{class: :budget_exceeded} = error},
+         users,
+         assistant
+       ) do
+    Sigma.Agent.__backplane_emit__(state, {:turn_error, normalize_error(error)})
+    {state, users, assistant, nil}
   end
 
   defp reduce_event(state, %{type: :turn_failed}, users, assistant),

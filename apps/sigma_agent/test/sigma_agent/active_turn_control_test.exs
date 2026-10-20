@@ -1,6 +1,13 @@
 defmodule Sigma.Agent.ActiveTurnControlTest do
   use ExUnit.Case, async: false
 
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp_dir} do
+    Process.put(:agent_test_runtime_root, tmp_dir)
+    :ok
+  end
+
   alias Sigma.Agent.Message
 
   defmodule BlockingProvider do
@@ -148,7 +155,7 @@ defmodule Sigma.Agent.ActiveTurnControlTest do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: BlockingProvider,
         options: [test_pid: self()]
@@ -233,7 +240,7 @@ defmodule Sigma.Agent.ActiveTurnControlTest do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: ToolProvider,
         tools: [BlockingTool],
@@ -243,8 +250,10 @@ defmodule Sigma.Agent.ActiveTurnControlTest do
     Sigma.Agent.subscribe(agent)
     assert {:accepted, _} = Sigma.Agent.prompt(agent, "run tool")
     assert_receive {:tool_waiting, tool_pid}, 1_000
+    tool_ref = Process.monitor(tool_pid)
     assert {:cancelling, _turn_id} = Sigma.Agent.cancel(agent)
     assert_receive {:turn_cancelled}, 1_000
+    assert_receive {:DOWN, ^tool_ref, :process, ^tool_pid, _}, 5_000
     refute Process.alive?(tool_pid)
     assert Process.alive?(agent)
   end
@@ -253,7 +262,7 @@ defmodule Sigma.Agent.ActiveTurnControlTest do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: SteeringToolProvider,
         tools: [BlockingTool],
@@ -281,7 +290,7 @@ defmodule Sigma.Agent.ActiveTurnControlTest do
     :ok = Sigma.Coding.PermissionPolicy.ask_tool(policy, "blocking")
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: ToolProvider,
         tools: [BlockingTool],
@@ -364,7 +373,7 @@ defmodule Sigma.Agent.ActiveTurnControlTest do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
 
     {:ok, agent} =
-      Sigma.Agent.start_link(
+      start_agent(
         model: model,
         provider: NonCooperativeProvider,
         options: [test_pid: self()]
@@ -381,5 +390,15 @@ defmodule Sigma.Agent.ActiveTurnControlTest do
     assert %{follow_up_queue_count: 0} = Sigma.Agent.status(agent)
     send(follow_up_provider, :release_noncooperative)
     assert_receive {:agent_end, _messages}, 5_000
+  end
+
+  defp start_agent(opts) do
+    path =
+      Path.join(
+        Process.get(:agent_test_runtime_root),
+        "runtime-#{System.unique_integer([:positive])}"
+      )
+
+    Sigma.Agent.start_link(Keyword.put(opts, :backplane_runtime_path, path))
   end
 end

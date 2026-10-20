@@ -31,41 +31,38 @@ defmodule Sigma.Agent.SubscriberLifecycleTest do
     end
   end
 
-  for engine <- [:sigma, :backplane] do
-    test "#{engine} notifies subscribers who join during an active turn", %{tmp_dir: tmp_dir} do
-      agent = start_agent(unquote(engine), tmp_dir)
-      assert {:accepted, _} = Sigma.Agent.prompt(agent, "Hi")
-      assert_receive {:provider_paused, provider}, 1_000
+  test "notifies subscribers who join during an active turn", %{tmp_dir: tmp_dir} do
+    agent = start_agent(tmp_dir)
+    assert {:accepted, _} = Sigma.Agent.prompt(agent, "Hi")
+    assert_receive {:provider_paused, provider}, 1_000
 
-      :ok = Sigma.Agent.subscribe(agent)
-      send(provider, :resume)
+    :ok = Sigma.Agent.subscribe(agent)
+    send(provider, :resume)
 
-      assert_receive {:message_end, %{role: :assistant, content: [%{text: "completed"}]}}, 1_000
-      assert_receive {:agent_end, _}, 1_000
-    end
-
-    test "#{engine} stops notifying subscribers who leave during an active turn", %{
-      tmp_dir: tmp_dir
-    } do
-      agent = start_agent(unquote(engine), tmp_dir)
-      :ok = Sigma.Agent.subscribe(agent)
-      assert {:accepted, _} = Sigma.Agent.prompt(agent, "Hi")
-      assert_receive {:provider_paused, provider}, 1_000
-
-      :ok = Sigma.Agent.unsubscribe(agent)
-      send(provider, :resume)
-
-      assert_receive {:persisted, {:agent_end, _}}, 1_000
-      refute_receive {:message_end, %{role: :assistant}}
-    end
+    assert_receive {:message_end, %{role: :assistant, content: [%{text: "completed"}]}}, 1_000
+    assert_receive {:agent_end, _}, 1_000
   end
 
-  defp start_agent(engine, tmp_dir) do
+  test "stops notifying subscribers who leave during an active turn", %{
+    tmp_dir: tmp_dir
+  } do
+    agent = start_agent(tmp_dir)
+    :ok = Sigma.Agent.subscribe(agent)
+    assert {:accepted, _} = Sigma.Agent.prompt(agent, "Hi")
+    assert_receive {:provider_paused, provider}, 1_000
+
+    :ok = Sigma.Agent.unsubscribe(agent)
+    send(provider, :resume)
+
+    assert_receive {:persisted, {:agent_end, _}}, 1_000
+    refute_receive {:message_end, %{role: :assistant}}
+  end
+
+  defp start_agent(tmp_dir) do
     test_pid = self()
 
     start_supervised!(
       {Sigma.Agent,
-       execution_engine: engine,
        backplane_runtime_path: Path.join(tmp_dir, "runtime"),
        model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
        provider: PausedProvider,

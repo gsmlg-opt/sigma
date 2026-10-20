@@ -58,7 +58,6 @@ defmodule Sigma.Web.SubagentStatusTest do
         cwd: repo,
         transcript_path: path,
         provider: Provider,
-        execution_engine: :backplane,
         model: %{id: "fixture", provider: "fixture", api: "fixture"},
         tools: [Sigma.Tools.Bash],
         hook_specs: [],

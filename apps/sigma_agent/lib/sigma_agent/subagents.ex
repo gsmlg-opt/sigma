@@ -2,6 +2,8 @@ defmodule Sigma.Agent.Subagents do
   @moduledoc "Session-owned bridge to Backplane's nested collaboration runtime."
   use GenServer
 
+  require Logger
+
   alias Backplane.AgentRuntime.{Error, Codex.MultiAgent, Codex.Session}
   alias Sigma.Agent.Backplane.{ChildIO, Store}
   alias Sigma.Session.{Subagents, Writer}
@@ -9,6 +11,10 @@ defmodule Sigma.Agent.Subagents do
   @collaboration ~w(spawn_agent send_message followup_task interrupt_agent list_agents wait_agent)
   @configuration ~w(model provider provider_options system_prompt session_context context_limit cwd tools mcp_servers hook_specs dispatcher_opts policy task_supervisor)a
   @terminal [:completed, :errored, :interrupted, :shutdown]
+
+  def child_spec(opts) do
+    %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, shutdown: 10_000}
+  end
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
   def prepare_root(host, context), do: GenServer.call(host, {:prepare_root, context}, :infinity)
@@ -433,6 +439,51 @@ defmodule Sigma.Agent.Subagents do
     do: {:noreply, mark_unknown(%{state | error: :runtime_down}, "runtime_down")}
 
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(_reason, state) do
+    if is_pid(state.session) and Process.alive?(state.session) do
+      task = Task.async(fn -> runtime_call(fn -> Session.close(state.session) end) end)
+      result = Task.yield(task, 6_000) || Task.shutdown(task, :brutal_kill)
+
+      unless match?({:ok, {:ok, %{status: :confirmed}}}, result) do
+        Logger.error(
+          "[Sigma.Agent.Subagents] Shutdown cleanup is unconfirmed: #{inspect(result)}"
+        )
+      end
+    end
+
+    owners =
+      [state.session, state.manager] ++ Enum.map(state.children, fn {_id, child} -> child.io end)
+
+    deadline = System.monotonic_time(:millisecond) + 2_500
+
+    Enum.reduce_while(owners, :ok, fn pid, :ok ->
+      remaining = deadline - System.monotonic_time(:millisecond)
+
+      cond do
+        not is_pid(pid) or not Process.alive?(pid) ->
+          {:cont, :ok}
+
+        remaining <= 0 ->
+          Logger.error("[Sigma.Agent.Subagents] Shutdown owner stop failed: deadline exceeded")
+          {:halt, :ok}
+
+        true ->
+          case runtime_call(fn -> GenServer.stop(pid, :shutdown, remaining) end) do
+            :ok ->
+              :ok
+
+            error ->
+              Logger.error(
+                "[Sigma.Agent.Subagents] Shutdown owner stop failed: #{inspect(error)}"
+              )
+          end
+
+          {:cont, :ok}
+      end
+    end)
+  end
 
   defp job(state, from, kind, fun) do
     task = Task.async(fun)

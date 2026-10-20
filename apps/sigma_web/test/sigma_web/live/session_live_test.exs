@@ -1859,10 +1859,6 @@ defmodule Sigma.Web.SessionLiveTest do
   for terminal_event <- [{:turn_failed, "failed-turn"}, {:turn_cancelled}] do
     @terminal_event terminal_event
     test "continues the current history after #{inspect(terminal_event)}", %{conn: conn} do
-      previous_engine = Application.fetch_env!(:sigma_agent, :execution_engine)
-      Application.put_env(:sigma_agent, :execution_engine, :backplane)
-      on_exit(fn -> Application.put_env(:sigma_agent, :execution_engine, previous_engine) end)
-
       session_id = unique_session_id("continue")
       storage_path = session_storage_path(session_id)
       File.mkdir_p!(Path.dirname(storage_path))
