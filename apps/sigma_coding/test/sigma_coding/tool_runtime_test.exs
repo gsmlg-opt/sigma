@@ -152,6 +152,7 @@ defmodule Sigma.Coding.ToolRuntimeTest do
       call("real", "write_probe", %{"path" => real_path}),
       call("link", "write_probe", %{"path" => link_path})
     ]
+
     test_pid = self()
 
     batch =
@@ -181,6 +182,7 @@ defmodule Sigma.Coding.ToolRuntimeTest do
       call("first", "write_probe", %{"path" => first_path}),
       call("second", "write_probe", %{"path" => second_path})
     ]
+
     test_pid = self()
 
     batch =
@@ -263,12 +265,15 @@ defmodule Sigma.Coding.ToolRuntimeTest do
     signal = make_ref()
     test_pid = self()
     handler_id = {__MODULE__, self(), :cancellation_trace}
+    session_id = "bash-cancel-#{System.unique_integer([:positive])}"
 
     :telemetry.attach(
       handler_id,
       [:sigma, :tool, :call, :start],
-      fn _event, _measurements, _metadata, _config ->
-        send(test_pid, {:tool_task_started, self()})
+      fn _event, _measurements, metadata, _config ->
+        if metadata.session_id == session_id and metadata.tool_name == "bash" do
+          send(test_pid, {:tool_task_started, self()})
+        end
       end,
       nil
     )
@@ -282,6 +287,7 @@ defmodule Sigma.Coding.ToolRuntimeTest do
           [Sigma.Coding.Tools.Bash],
           task_supervisor: ts,
           cwd: tmp_dir,
+          session_id: session_id,
           signal: signal
         )
       end)
@@ -292,6 +298,150 @@ defmodule Sigma.Coding.ToolRuntimeTest do
     assert [{_call, {:error, %ToolError{kind: :cancelled}}}] = Task.await(batch)
     Process.sleep(1_100)
     refute File.exists?(target)
+  end
+
+  test "a monitored PID signal cancels work when the signal owner exits", %{task_supervisor: ts} do
+    signal =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    on_exit(fn -> if Process.alive?(signal), do: Process.exit(signal, :kill) end)
+    test_pid = self()
+
+    batch =
+      Task.async(fn ->
+        Process.monitor(signal)
+
+        Dispatcher.dispatch_batch(
+          [call("pid-signal", "shared_probe", %{})],
+          [SharedProbe],
+          task_supervisor: ts,
+          test_pid: test_pid,
+          signal: signal,
+          deadline_ms: :infinity,
+          shutdown_budget_ms: 10
+        )
+      end)
+
+    assert_receive {:started, "pid-signal", tool_pid, nil}
+    tool_ref = Process.monitor(tool_pid)
+    send(signal, :stop)
+    assert [{_call, {:error, %ToolError{kind: :cancelled}}}] = Task.await(batch, 1_000)
+    assert_receive {:DOWN, ^tool_ref, :process, ^tool_pid, _}, 1_000
+    refute Process.alive?(tool_pid)
+  end
+
+  test "owner death terminates interruptible work and its scheduler", %{task_supervisor: ts} do
+    test_pid = self()
+
+    {owner, owner_ref} =
+      spawn_monitor(fn ->
+        Dispatcher.dispatch_batch(
+          [call("orphan", "shared_probe", %{})],
+          [SharedProbe],
+          task_supervisor: ts,
+          test_pid: test_pid,
+          deadline_ms: :infinity,
+          shutdown_budget_ms: 10
+        )
+      end)
+
+    on_exit(fn -> if Process.alive?(owner), do: Process.exit(owner, :kill) end)
+    assert_receive {:started, "orphan", tool_pid, nil}
+    tool_ref = Process.monitor(tool_pid)
+
+    schedulers =
+      for pid <- Task.Supervisor.children(ts), pid != tool_pid, do: {pid, Process.monitor(pid)}
+
+    Process.exit(owner, :kill)
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :killed}
+    assert_receive {:DOWN, ^tool_ref, :process, ^tool_pid, _}, 1_000
+
+    for {pid, ref} <- schedulers do
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000
+    end
+
+    refute Process.alive?(tool_pid)
+    assert Task.Supervisor.children(ts) == []
+  end
+
+  @tag :tmp_dir
+  test "owner death retains non-interruptible work and fences conflicts until completion", %{
+    task_supervisor: ts,
+    tmp_dir: tmp_dir
+  } do
+    path = Path.join(tmp_dir, "owner-death-resource")
+    test_pid = self()
+    handler_id = {__MODULE__, self(), :owner_death_pending}
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:sigma, :tool, :cleanup, :pending],
+        fn _event, _measurements, metadata, _config ->
+          send(test_pid, {:cleanup_pending, metadata.tool_name})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    {owner, owner_ref} =
+      spawn_monitor(fn ->
+        Dispatcher.dispatch_batch(
+          [call("retained", "write_probe", %{"path" => path})],
+          [WriteProbe],
+          task_supervisor: ts,
+          test_pid: test_pid,
+          cwd: tmp_dir,
+          deadline_ms: :infinity,
+          shutdown_budget_ms: 10
+        )
+      end)
+
+    on_exit(fn -> if Process.alive?(owner), do: Process.exit(owner, :kill) end)
+    assert_receive {:started, "retained", tool_pid, ^path}
+    tool_ref = Process.monitor(tool_pid)
+
+    schedulers =
+      for pid <- Task.Supervisor.children(ts), pid != tool_pid, do: {pid, Process.monitor(pid)}
+
+    Process.exit(owner, :kill)
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :killed}
+    assert_receive {:cleanup_pending, "write_probe"}, 1_000
+
+    for {pid, ref} <- schedulers do
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000
+    end
+
+    assert Process.alive?(tool_pid)
+
+    metadata =
+      Tool.metadata(WriteProbe, call("conflict", "write_probe", %{"path" => path}), cwd: tmp_dir)
+
+    refute Sigma.Coding.PendingToolRegistry.compatible?(metadata)
+
+    conflict =
+      Task.async(fn ->
+        Dispatcher.dispatch_batch(
+          [call("conflict", "write_probe", %{"path" => path})],
+          [WriteProbe],
+          task_supervisor: ts,
+          test_pid: test_pid,
+          cwd: tmp_dir
+        )
+      end)
+
+    refute_receive {:started, "conflict", _pid, ^path}, 50
+    send(tool_pid, {:release, "retained"})
+    assert_receive {:DOWN, ^tool_ref, :process, ^tool_pid, _}, 1_000
+    assert_receive {:started, "conflict", conflict_pid, ^path}, 1_000
+    send(conflict_pid, {:release, "conflict"})
+    assert [{_call, {:ok, _result}}] = Task.await(conflict)
+    assert Sigma.Coding.PendingToolRegistry.compatible?(metadata)
   end
 
   @tag :capture_log

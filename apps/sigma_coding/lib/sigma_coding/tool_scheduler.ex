@@ -6,10 +6,45 @@ defmodule Sigma.Coding.ToolScheduler do
   alias Sigma.Coding.{ToolError, ToolResult}
 
   def run(executions, opts) do
+    owner = self()
+    supervisor = Keyword.get(opts, :task_supervisor, Sigma.Coding.Dispatcher.TaskSupervisor)
+
+    task =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        run_owned(executions, opts, owner)
+      end)
+
+    await_scheduler(task, Keyword.get(opts, :signal))
+  end
+
+  defp await_scheduler(task, signal) do
+    receive do
+      {ref, results} when ref == task.ref ->
+        Process.demonitor(ref, [:flush])
+        results
+
+      {:DOWN, ref, :process, _pid, reason} when ref == task.ref ->
+        exit({reason, {__MODULE__, :run, []}})
+
+      {:abort, received_signal} when received_signal == signal and not is_nil(signal) ->
+        send(task.pid, {:abort, signal})
+        await_scheduler(task, signal)
+
+      {:DOWN, _ref, :process, signal_pid, _reason} = down
+      when is_pid(signal) and signal_pid == signal ->
+        send(task.pid, down)
+        await_scheduler(task, signal)
+    end
+  end
+
+  defp run_owned(executions, opts, owner) do
+    owner_monitor = Process.monitor(owner)
     max_parallel = max(Keyword.get(opts, :max_parallel, 4), 1)
 
     state = %{
       queue: executions,
+      owner: owner,
+      owner_monitor: owner_monitor,
       running: %{},
       results: %{},
       max_parallel: max_parallel,
@@ -19,10 +54,14 @@ defmodule Sigma.Coding.ToolScheduler do
       shutdown_budget_ms: Keyword.get(opts, :shutdown_budget_ms, 250)
     }
 
-    state
-    |> schedule_ready()
-    |> await()
-    |> Map.fetch!(:results)
+    try do
+      state
+      |> schedule_ready()
+      |> await()
+      |> Map.fetch!(:results)
+    after
+      Process.demonitor(owner_monitor, [:flush])
+    end
   end
 
   defp await(%{queue: [], running: running} = state) when map_size(running) == 0, do: state
@@ -44,6 +83,9 @@ defmodule Sigma.Coding.ToolScheduler do
         |> schedule_ready()
         |> await()
 
+      {:DOWN, ref, :process, _pid, _reason} when ref == state.owner_monitor ->
+        cancel_all(state)
+
       {:abort, signal} when signal == state.signal and not is_nil(signal) ->
         cancel_all(state)
 
@@ -59,26 +101,34 @@ defmodule Sigma.Coding.ToolScheduler do
     end
   end
 
-  defp schedule_ready(state) when map_size(state.running) >= state.max_parallel, do: state
-  defp schedule_ready(%{queue: []} = state), do: state
-
   defp schedule_ready(state) do
+    if Process.alive?(state.owner), do: schedule_owned(state), else: cancel_all(state)
+  end
+
+  defp schedule_owned(state) when map_size(state.running) >= state.max_parallel, do: state
+  defp schedule_owned(%{queue: []} = state), do: state
+
+  defp schedule_owned(state) do
     case next_runnable_index(state.queue, state.running) do
       nil ->
         state
 
       index ->
-        {execution, queue} = List.pop_at(state.queue, index)
-        task = Task.Supervisor.async_nolink(state.task_supervisor, execution.run)
+        if Process.alive?(state.owner) do
+          {execution, queue} = List.pop_at(state.queue, index)
+          task = Task.Supervisor.async_nolink(state.task_supervisor, execution.run)
 
-        running_item = %{
-          task: task,
-          execution: execution,
-          deadline_at: deadline_at(execution.deadline_ms)
-        }
+          running_item = %{
+            task: task,
+            execution: execution,
+            deadline_at: deadline_at(execution.deadline_ms)
+          }
 
-        state = %{state | queue: queue, running: Map.put(state.running, task.ref, running_item)}
-        schedule_ready(state)
+          state = %{state | queue: queue, running: Map.put(state.running, task.ref, running_item)}
+          schedule_ready(state)
+        else
+          cancel_all(state)
+        end
     end
   end
 
