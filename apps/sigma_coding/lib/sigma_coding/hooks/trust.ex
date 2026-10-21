@@ -13,7 +13,7 @@ defmodule Sigma.Coding.Hooks.Trust do
   """
 
   alias Sigma.Coding.Hooks.Spec
-  alias Sigma.Coding.Hooks.Spec.{Command, Http}
+  alias Sigma.Coding.Hooks.Spec.{Command, Http, McpTool}
 
   @trust_file "hook_trust.json"
 
@@ -82,6 +82,7 @@ defmodule Sigma.Coding.Hooks.Trust do
       handler_type: handler_type_key(spec.handler),
       handler_cmd: handler_cmd(spec.handler),
       handler_timeout: handler_timeout(spec.handler),
+      handler_options: handler_options(spec.handler),
       source_path: to_string(source_path)
     }
 
@@ -102,16 +103,25 @@ defmodule Sigma.Coding.Hooks.Trust do
 
   defp handler_type_key(%Command{}), do: "command"
   defp handler_type_key(%Http{}), do: "http"
+  defp handler_type_key(%McpTool{}), do: "mcp_tool"
   defp handler_type_key({:unsupported, type}), do: "unsupported:#{type}"
   defp handler_type_key(nil), do: "none"
 
   defp handler_cmd(%Command{cmd: cmd}), do: cmd
   defp handler_cmd(%Http{url: url}), do: url
+  defp handler_cmd(%McpTool{server: server, tool: tool}), do: {server, tool}
   defp handler_cmd(_), do: ""
 
   defp handler_timeout(%Command{timeout_ms: t}), do: t
   defp handler_timeout(%Http{timeout_ms: t}), do: t
+  defp handler_timeout(%McpTool{timeout_ms: t}), do: t
   defp handler_timeout(_), do: 0
+
+  defp handler_options(%Command{} = handler),
+    do: {handler.async, handler.additional_context_limit, handler.status_message}
+
+  defp handler_options(%McpTool{} = handler), do: {handler.input, handler.status_message}
+  defp handler_options(_), do: nil
 
   defp trust_store_path do
     Path.join(agent_dir(), @trust_file)

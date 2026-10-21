@@ -1,115 +1,102 @@
 defmodule Sigma.Coding.Hooks.Payload do
-  @moduledoc """
-  Builds the stdin JSON payload sent to hook commands.
+  @moduledoc "Builds command stdin according to the pinned Codex hook input schemas."
 
-  All functions are pure and return JSON-encodable maps. The caller is
-  responsible for encoding via `Jason.encode!/1`.
+  alias Sigma.Coding.Hooks.{Catalog, Matcher}
 
-  Common fields (FR-P1):
-    session_id, transcript_path, cwd, hook_event_name, permission_mode
+  @names Map.new(Catalog.events(), &{&1.event, &1.name})
+  @no_permission [
+    :session_end,
+    :pre_compact,
+    :post_compact,
+    :pre_model_request,
+    :post_model_request
+  ]
 
-  Event-specific fields (FR-P2) are merged on top.
-  """
-
-  alias Sigma.Coding.Hooks.Matcher
-
-  @doc """
-  Build the JSON payload map for a hook event.
-
-  `ctx` is the session/turn context with at minimum:
-    - `:session_id`
-    - `:cwd`
-    - `:transcript_path`
-    - `:permission_mode` (default "default")
-    - `:model` (required on SessionStart; optional elsewhere)
-    - `:turn_id` (optional)
-
-  `event_data` carries event-specific fields.
-  """
-  @spec build(atom(), map(), map()) :: map()
-  def build(event, ctx, event_data \\ %{}) do
+  def build(event, ctx, data \\ %{}) do
     base = %{
       "session_id" => ctx[:session_id] || "",
-      "transcript_path" => ctx[:transcript_path] || "",
+      "transcript_path" => ctx[:transcript_path],
       "cwd" => ctx[:cwd] || "",
-      "hook_event_name" => event_name(event),
-      "permission_mode" => ctx[:permission_mode] || "default"
+      "hook_event_name" => Map.fetch!(@names, event)
     }
+
+    base = if event == :session_end, do: base, else: Map.put(base, "model", ctx[:model] || "")
+
+    base =
+      if event in @no_permission,
+        do: base,
+        else: Map.put(base, "permission_mode", ctx[:permission_mode] || "default")
+
+    base =
+      if event in [:session_start, :session_end],
+        do: base,
+        else: Map.put(base, "turn_id", ctx[:turn_id] || "")
 
     base
-    |> maybe_put("turn_id", ctx[:turn_id])
-    |> Map.merge(event_specific(event, ctx, event_data))
+    |> subagent_fields(event, ctx, data)
+    |> Map.merge(event_fields(event, data))
   end
 
-  # ---------------------------------------------------------------------------
-  # Event-specific fields
-  # ---------------------------------------------------------------------------
+  defp subagent_fields(base, event, ctx, data) do
+    cond do
+      event in [:subagent_start, :subagent_stop] ->
+        base
+        |> Map.put("agent_id", data[:agent_id] || ctx[:agent_id] || "")
+        |> Map.put("agent_type", data[:agent_type] || ctx[:agent_type] || "")
 
-  defp event_specific(:session_start, ctx, data) do
-    %{
-      "source" => to_string(Map.get(data, :source, "startup")),
-      "model" => ctx[:model] || ""
+      event in [:session_start, :session_end, :stop, :interrupt] ->
+        base
+
+      true ->
+        base |> maybe_put("agent_id", ctx[:agent_id]) |> maybe_put("agent_type", ctx[:agent_type])
+    end
+  end
+
+  defp event_fields(:session_start, data),
+    do: %{"source" => to_string(data[:source] || "startup")}
+
+  defp event_fields(:session_end, _data), do: %{"reason" => "other"}
+  defp event_fields(:user_prompt_submit, data), do: %{"prompt" => data[:prompt] || ""}
+
+  defp event_fields(event, data)
+       when event in [:pre_tool_use, :permission_request, :post_tool_use] do
+    fields = %{
+      "tool_name" => Matcher.to_external_name(data[:tool_name] || ""),
+      "tool_input" => data[:tool_input] || %{}
     }
+
+    fields =
+      if event == :permission_request,
+        do: fields,
+        else: Map.put(fields, "tool_use_id", data[:tool_use_id] || "")
+
+    if event == :post_tool_use,
+      do: Map.put(fields, "tool_response", Map.get(data, :tool_response)),
+      else: fields
   end
 
-  defp event_specific(:user_prompt_submit, _ctx, data) do
-    %{"prompt" => Map.get(data, :prompt, "")}
-  end
-
-  defp event_specific(event, _ctx, data)
-       when event in [:pre_tool_use, :permission_request] do
-    %{
-      "tool_name" => Matcher.to_external_name(Map.get(data, :tool_name, "")),
-      "tool_use_id" => Map.get(data, :tool_use_id, ""),
-      "tool_input" => Map.get(data, :tool_input, %{})
-    }
-  end
-
-  defp event_specific(:post_tool_use, _ctx, data) do
-    %{
-      "tool_name" => Matcher.to_external_name(Map.get(data, :tool_name, "")),
-      "tool_use_id" => Map.get(data, :tool_use_id, ""),
-      "tool_input" => Map.get(data, :tool_input, %{}),
-      "tool_response" => Map.get(data, :tool_response, "")
-    }
-  end
-
-  defp event_specific(:stop, _ctx, data) do
-    %{
+  defp event_fields(event, data) when event in [:stop, :subagent_stop] do
+    fields = %{
       "stop_hook_active" => Map.get(data, :stop_hook_active, false),
-      "last_assistant_message" => Map.get(data, :last_assistant_message, "")
+      "last_assistant_message" => data[:last_assistant_message]
     }
+
+    if event == :subagent_stop,
+      do: Map.put(fields, "agent_transcript_path", data[:agent_transcript_path]),
+      else: fields
   end
 
-  defp event_specific(:session_end, _ctx, data) do
-    %{
-      "reason" => to_string(Map.get(data, :reason, "user_close")),
-      "last_activity_at" => Map.get(data, :last_activity_at, "")
+  defp event_fields(event, data) when event in [:pre_compact, :post_compact],
+    do: %{"trigger" => to_string(data[:trigger] || "auto")}
+
+  defp event_fields(:post_model_request, data),
+    do: %{
+      "status" => to_string(data[:status] || "completed"),
+      "error" => data[:error],
+      "token_usage" => data[:token_usage]
     }
-  end
 
-  defp event_specific(:pre_compact, _ctx, data) do
-    %{
-      "trigger" => to_string(Map.get(data, :trigger, "auto")),
-      "summary" => Map.get(data, :summary, "")
-    }
-  end
-
-  defp event_specific(_, _, _), do: %{}
-
-  # ---------------------------------------------------------------------------
-  # Helpers
-  # ---------------------------------------------------------------------------
-
-  defp event_name(:pre_tool_use), do: "PreToolUse"
-  defp event_name(:permission_request), do: "PermissionRequest"
-  defp event_name(:post_tool_use), do: "PostToolUse"
-  defp event_name(:user_prompt_submit), do: "UserPromptSubmit"
-  defp event_name(:stop), do: "Stop"
-  defp event_name(:session_start), do: "SessionStart"
-  defp event_name(:session_end), do: "SessionEnd"
-  defp event_name(:pre_compact), do: "PreCompact"
-  defp event_name(event), do: to_string(event)
+  defp event_fields(_event, _data), do: %{}
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)

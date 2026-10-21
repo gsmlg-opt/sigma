@@ -83,7 +83,11 @@ defmodule Sigma.AgentTest do
   test "hook context is leading text while preserving rich content" do
     model = %{id: "mock-model", api: "mock-api", provider: "mock-provider"}
     image = %{type: :image, data: "iVBORw0KGgo=", mime_type: "image/png"}
-    spec = hook_spec("echo '{\"hookSpecificOutput\":{\"additionalContext\":\"extra\"}}'")
+
+    spec =
+      hook_spec(
+        "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"extra\"}}'"
+      )
 
     {:ok, agent} =
       start_agent(

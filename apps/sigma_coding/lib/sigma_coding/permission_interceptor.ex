@@ -4,14 +4,16 @@ defmodule Sigma.Coding.PermissionInterceptor do
   """
 
   alias Sigma.Coding.PermissionPolicy
+  alias Sigma.Coding.Hooks.Outcome
 
   @doc """
   Checks if a tool call is allowed based on the provided options.
 
-  Returns `:allow`, `{:allow, patched_args}`, or `{:deny, reason}`.
+  Returns `:allow`, `{:allow, patched_args}`, `{:allow, patched_args, context}`,
+  or `{:deny, reason}`.
 
   When hook specs are present in `opts` (`:hook_specs`), PreToolUse hooks run
-  after the policy grants `:allow`, and PermissionRequest hooks intercept the
+  before permission evaluation, and PermissionRequest hooks intercept the
   `:ask` branch before showing the approval UI.
   """
   def check(tool_call, opts) do
@@ -41,13 +43,63 @@ defmodule Sigma.Coding.PermissionInterceptor do
   end
 
   defp do_check(tool_call, opts) do
+    case run_pre_tool_use_hooks(tool_call, opts) do
+      {:deny, _} = denied ->
+        denied
+
+      :allow ->
+        check_policy(tool_call, opts)
+
+      {:allow, {:replace_input, input}} ->
+        check_replaced_policy(tool_call, input, nil, opts)
+
+      {:allow, {:replace_input, input}, context} ->
+        check_replaced_policy(tool_call, input, context, opts)
+
+      {:allow, patch} ->
+        check_patched_policy(tool_call, patch, nil, opts)
+
+      {:allow, patch, context} ->
+        check_patched_policy(tool_call, patch, context, opts)
+    end
+  end
+
+  defp check_replaced_policy(tool_call, input, context, opts) do
+    case check_policy(%{tool_call | arguments: input}, opts) do
+      :allow ->
+        with_context({:allow, {:replace_input, input}}, context)
+
+      {:allow, approval_patch} ->
+        with_context({:allow, {:replace_input, Map.merge(input, approval_patch)}}, context)
+
+      denied ->
+        denied
+    end
+  end
+
+  defp check_patched_policy(tool_call, patch, context, opts) do
+    tool_call = %{tool_call | arguments: Map.merge(tool_call.arguments, patch)}
+
+    case check_policy(tool_call, opts) do
+      :allow ->
+        with_context({:allow, patch}, context)
+
+      {:allow, approval_patch} ->
+        with_context({:allow, Map.merge(patch, approval_patch)}, context)
+
+      denied ->
+        denied
+    end
+  end
+
+  defp check_policy(tool_call, opts) do
     policy = Keyword.get(opts, :permission_policy)
 
     cond do
       policy && (is_pid(policy) || (is_atom(policy) && Process.whereis(policy))) ->
         case PermissionPolicy.check(policy, tool_call.name) do
           :allow ->
-            run_pre_tool_use_hooks(tool_call, opts)
+            :allow
 
           :deny ->
             {:deny, "Permission denied by policy for tool: #{tool_call.name}"}
@@ -60,18 +112,18 @@ defmodule Sigma.Coding.PermissionInterceptor do
         allowed = Keyword.get(opts, :allow_tool)
 
         if tool_call.name == allowed or (is_list(allowed) and tool_call.name in allowed) do
-          run_pre_tool_use_hooks(tool_call, opts)
+          :allow
         else
           {:deny, "Permission denied for tool: #{tool_call.name}"}
         end
 
       true ->
-        run_pre_tool_use_hooks(tool_call, opts)
+        :allow
     end
   end
 
   # ---------------------------------------------------------------------------
-  # PreToolUse hooks (after policy :allow)
+  # PreToolUse hooks (before permission evaluation)
   # ---------------------------------------------------------------------------
 
   defp run_pre_tool_use_hooks(tool_call, opts) do
@@ -91,7 +143,10 @@ defmodule Sigma.Coding.PermissionInterceptor do
 
       Enum.each(warnings, &surface_warning/1)
 
-      collapse_pre_tool_use(outcome, tool_call, opts)
+      outcome
+      |> Outcome.control()
+      |> collapse_pre_tool_use(tool_call, opts)
+      |> with_context(Outcome.context(outcome))
     else
       :allow
     end
@@ -102,6 +157,9 @@ defmodule Sigma.Coding.PermissionInterceptor do
   defp collapse_pre_tool_use({:modify, patch}, _tool_call, _opts) when is_map(patch) do
     {:allow, patch}
   end
+
+  defp collapse_pre_tool_use({:replace_input, input}, _tool_call, _opts) when is_map(input),
+    do: {:allow, {:replace_input, input}}
 
   defp collapse_pre_tool_use({:block, reason}, _tool_call, _opts) do
     {:deny, reason}
@@ -144,6 +202,7 @@ defmodule Sigma.Coding.PermissionInterceptor do
       Enum.each(warnings, &surface_warning/1)
 
       case outcome do
+        :allow -> :allow
         :proceed -> :proceed
         {:modify, patch} -> {:allow, patch}
         {:block, reason} -> {:deny, reason}
@@ -176,32 +235,25 @@ defmodule Sigma.Coding.PermissionInterceptor do
         other -> other
       end
 
-    run_pre_tool_use_after_approval(resolution, tool_call, opts)
-  end
-
-  defp run_pre_tool_use_after_approval(:allow, tool_call, opts) do
-    run_pre_tool_use_hooks(tool_call, opts)
-  end
-
-  defp run_pre_tool_use_after_approval({:allow, approval_patch}, tool_call, opts)
-       when is_map(approval_patch) do
-    patched_call = %{tool_call | arguments: Map.merge(tool_call.arguments, approval_patch)}
-
-    case run_pre_tool_use_hooks(patched_call, opts) do
-      :allow -> {:allow, approval_patch}
-      {:allow, hook_patch} -> {:allow, Map.merge(approval_patch, hook_patch)}
-      {:deny, _reason} = denied -> denied
+    case resolution do
+      :allow -> :allow
+      {:allow, patch} when is_map(patch) -> resolution
+      {:deny, _} -> resolution
+      _ -> {:deny, {:invalid_approval_response, tool_call.name}}
     end
   end
 
-  defp run_pre_tool_use_after_approval({:deny, _reason} = denied, _tool_call, _opts),
-    do: denied
+  defp with_context(:allow, text) when is_binary(text) and text != "",
+    do: {:allow, %{}, text}
 
-  defp run_pre_tool_use_after_approval(_other, tool_call, _opts),
-    do: {:deny, {:invalid_approval_response, tool_call.name}}
+  defp with_context({:allow, patch}, text) when is_binary(text) and text != "",
+    do: {:allow, patch, text}
+
+  defp with_context(result, _context), do: result
 
   defp result_class(:allow), do: :allow
   defp result_class({:allow, _patch}), do: :allow
+  defp result_class({:allow, _patch, _context}), do: :allow
   defp result_class({:deny, {:approval_required, _tool_name}}), do: :approval_required
   defp result_class({:deny, _reason}), do: :deny
 
@@ -211,7 +263,15 @@ defmodule Sigma.Coding.PermissionInterceptor do
       cwd: Keyword.get(opts, :cwd),
       transcript_path: Keyword.get(opts, :transcript_path, ""),
       permission_mode: Keyword.get(opts, :permission_mode, "default"),
-      turn_id: Keyword.get(opts, :turn_id)
+      turn_id: Keyword.get(opts, :turn_id),
+      model: Keyword.get(opts, :model, ""),
+      agent_id: Keyword.get(opts, :agent_id),
+      agent_type: Keyword.get(opts, :agent_type),
+      hook_task_supervisor:
+        Keyword.get(opts, :hook_task_supervisor, Sigma.Coding.Dispatcher.TaskSupervisor),
+      mcp_hook_executor: Keyword.get(opts, :mcp_hook_executor),
+      hook_async_callback: Keyword.get(opts, :hook_async_callback),
+      hook_async_runtime: Keyword.get(opts, :hook_async_runtime)
     }
   end
 

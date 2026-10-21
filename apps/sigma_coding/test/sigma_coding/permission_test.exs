@@ -46,6 +46,7 @@ defmodule Sigma.Coding.PermissionTest do
     test "denies tool when :allow_tool does not match", %{dispatcher: _d} do
       tool_call = %{id: "1", name: "mock_tool", arguments: %{}}
       opts = [allow_tool: "other_tool"]
+
       assert {:error, %Sigma.Coding.ToolError{kind: :permission_denied, message: reason}} =
                Dispatcher.dispatch(tool_call, [MockTool], opts)
 
@@ -138,7 +139,7 @@ defmodule Sigma.Coding.PermissionTest do
     end
 
     @tag :tmp_dir
-    test "explicit ask runs PermissionRequest, approval, then PreToolUse", %{tmp_dir: tmp_dir} do
+    test "PreToolUse runs before PermissionRequest and approval", %{tmp_dir: tmp_dir} do
       {:ok, policy} = PermissionPolicy.start_link(name: nil, default: :allow)
       PermissionPolicy.ask_tool(policy, "mock_tool")
       order_path = Path.join(tmp_dir, "order")
@@ -182,7 +183,7 @@ defmodule Sigma.Coding.PermissionTest do
                  cwd: tmp_dir
                )
 
-      assert File.read!(order_path) == "permission\napproval\npre_tool\n"
+      assert File.read!(order_path) == "pre_tool\npermission\napproval\n"
     end
   end
 end

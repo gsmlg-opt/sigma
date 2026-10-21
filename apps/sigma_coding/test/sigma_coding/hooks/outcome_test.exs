@@ -62,8 +62,9 @@ defmodule Sigma.Coding.Hooks.OutcomeTest do
     for o <- @outcomes do
       @o o
       test ":halt absorbs #{inspect(@o)}" do
-        assert {:halt, _} = Outcome.join({:halt, nil}, @o)
-        assert {:halt, _} = Outcome.join(@o, {:halt, nil})
+        assert {:halt, _} = Outcome.control(Outcome.join({:halt, nil}, @o))
+        assert {:halt, _} = Outcome.control(Outcome.join(@o, {:halt, nil}))
+        assert Outcome.context(Outcome.join({:halt, nil}, @o)) == Outcome.context(@o)
       end
     end
   end
@@ -90,7 +91,9 @@ defmodule Sigma.Coding.Hooks.OutcomeTest do
     end
 
     test "ask wins over context" do
-      assert {:ask, _} = Outcome.join({:ask, "r"}, {:context, "t"})
+      outcome = Outcome.join({:ask, "r"}, {:context, "t"})
+      assert Outcome.control(outcome) == {:ask, "r"}
+      assert Outcome.context(outcome) == "t"
     end
   end
 
@@ -162,8 +165,8 @@ defmodule Sigma.Coding.Hooks.OutcomeTest do
       assert Outcome.decode(:pre_tool_use, %{exit: 0, stdout: "", stderr: ""}, :codex) == :proceed
     end
 
-    test "plain stdout → {:context, text}" do
-      assert {:context, "hello"} =
+    test "PreToolUse plain stdout does not become model context" do
+      assert :proceed =
                Outcome.decode(:pre_tool_use, %{exit: 0, stdout: "hello", stderr: ""}, :codex)
     end
   end
@@ -296,10 +299,10 @@ defmodule Sigma.Coding.Hooks.OutcomeTest do
                Outcome.decode(:post_tool_use, %{exit: 0, stdout: json, stderr: ""}, :claude)
     end
 
-    test "updatedToolOutput → substitute regardless of dialect" do
+    test "Codex rejects unsupported updatedToolOutput while Claude compatibility remains" do
       json = Jason.encode!(%{"hookSpecificOutput" => %{"updatedToolOutput" => "replaced"}})
 
-      assert {:modify, %{"tool_output" => "replaced"}} =
+      assert :proceed =
                Outcome.decode(:post_tool_use, %{exit: 0, stdout: json, stderr: ""}, :codex)
 
       assert {:modify, %{"tool_output" => "replaced"}} =

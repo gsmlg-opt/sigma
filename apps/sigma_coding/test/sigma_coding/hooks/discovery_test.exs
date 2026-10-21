@@ -96,14 +96,14 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
       assert spec.handler.timeout_ms == 600_000
     end
 
-    test "UserPromptSubmit default timeout is 30_000ms" do
+    test "UserPromptSubmit default timeout matches Codex at 600_000ms" do
       json =
         Jason.encode!([
           %{"event" => "UserPromptSubmit", "hooks" => [%{"hooks" => [%{"command" => "x"}]}]}
         ])
 
       {:ok, [spec]} = Discovery.parse(json, :codex)
-      assert spec.handler.timeout_ms == 30_000
+      assert spec.handler.timeout_ms == 600_000
     end
 
     test "explicit timeout in seconds is converted to ms" do

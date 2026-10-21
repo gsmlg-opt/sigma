@@ -1,23 +1,23 @@
 defmodule Sigma.Coding.Hooks.Outcome do
   @moduledoc """
-  Decodes hook subprocess results and folds N outcomes into one decision.
+  Decodes hook subprocess results and folds outcomes in completion order.
 
   ## Outcome lattice (most restrictive wins)
 
-    halt > block > defer > ask > modify/context > proceed
+    halt > block > defer > ask > input changes > allow > proceed
 
   `:halt` is the absorbing element — once present it wins regardless of order.
   `:proceed` is the identity element.
 
-  `join/2` is commutative and associative, so concurrent hook execution can
-  fold results in any order.
+  Additional context is retained independently of the control decision.
+  Codex input replacements use the latest completed replacement, so `join/2`
+  is order-sensitive. Legacy Claude input patches retain their merge behavior.
 
   ## Dialect divergences
 
-  PostToolUse "block" semantics differ between Codex and Claude:
-  - Codex `decision:"block"` → substitute result content with feedback
-  - Claude `decision:"block"` → append feedback alongside original
-  - `updatedToolOutput` (either dialect) → substitute
+  `:codex` and `:pi` use the Codex decoder. PostToolUse blocking adds feedback
+  alongside the tool result; Codex does not support `updatedToolOutput`.
+  The `:claude` decoder retains the legacy output schema and patch semantics.
 
   PreToolUse `defer` is Claude-only (headless -p mode). If not headless,
   degrades to `ask`.
@@ -25,9 +25,10 @@ defmodule Sigma.Coding.Hooks.Outcome do
   ## Exit-code semantics
 
   - exit 0, empty stdout → :proceed
-  - exit 2 → blocking (event-specific handling); stderr is the reason
+  - Codex exit 2 → blocking only for steering events with nonempty stderr
   - other non-zero → non-blocking error (surface to user, not model)
-  - JSON stdout overrides exit-code decisions
+  - Codex nonzero exits take precedence over JSON stdout
+  - the legacy Claude decoder attempts JSON stdout before exit-code handling
   """
 
   @type raw_result :: %{
@@ -51,6 +52,11 @@ defmodule Sigma.Coding.Hooks.Outcome do
   `dialect` is `:codex | :claude | :pi`.
   """
   @spec decode(atom(), raw_result(), atom()) :: outcome()
+  def decode(event, raw, dialect) when dialect in [:codex, :pi] do
+    {outcome, _warnings} = Sigma.Coding.Hooks.CodexOutput.evaluate(event, raw)
+    outcome
+  end
+
   def decode(event, %{exit: exit_code, stdout: stdout, stderr: stderr}, dialect) do
     stdout = String.slice(stdout, 0, @max_context_chars)
 
@@ -64,27 +70,63 @@ defmodule Sigma.Coding.Hooks.Outcome do
     end
   end
 
+  def evaluate(event, raw, dialect) when dialect in [:codex, :pi],
+    do: Sigma.Coding.Hooks.CodexOutput.evaluate(event, raw)
+
+  def evaluate(event, raw, dialect), do: {decode(event, raw, dialect), []}
+
+  def evaluate_async(event, raw, dialect) when dialect in [:codex, :pi],
+    do: Sigma.Coding.Hooks.CodexOutput.evaluate_async(event, raw)
+
+  def evaluate_async(event, raw, dialect) do
+    {outcome, warnings} = evaluate(event, raw, dialect)
+    context = context(outcome)
+    {if(is_binary(context), do: {:context, context}, else: :proceed), warnings}
+  end
+
   # ---------------------------------------------------------------------------
   # Join (lattice operation)
   # ---------------------------------------------------------------------------
 
-  @doc """
-  Fold two outcomes into one, with the more restrictive winning.
+  def control({:with_context, control, _text}), do: control
+  def control({:context, _text}), do: :proceed
+  def control(outcome), do: outcome
 
-  `:halt` is the absorbing element; `:proceed` is the identity.
+  def context({:with_context, _control, text}), do: text
+  def context({:context, text}), do: text
+  def context(_outcome), do: nil
+
+  @doc """
+  Fold outcomes in completion order, retaining context and the stricter control.
+
+  `:halt` absorbs other controls; the rightmost input replacement wins.
   """
   @spec join(outcome(), outcome()) :: outcome()
-  def join({:halt, _} = h, _), do: h
-  def join(_, {:halt, _} = h), do: h
-  def join({:block, _} = b, _), do: b
-  def join(_, {:block, _} = b), do: b
-  def join({:defer, _} = d, _), do: d
-  def join(_, {:defer, _} = d), do: d
-  def join({:ask, _} = a, _), do: a
-  def join(_, {:ask, _} = a), do: a
+  def join(left, right) do
+    control = join_control(control(left), control(right))
+    text = [context(left), context(right)] |> Enum.reject(&is_nil/1) |> Enum.join("\n")
+    text = String.slice(text, 0, @max_context_chars)
+
+    cond do
+      text == "" -> control
+      control == :proceed -> {:context, text}
+      true -> {:with_context, control, text}
+    end
+  end
+
+  defp join_control({:halt, _} = h, _), do: h
+  defp join_control(_, {:halt, _} = h), do: h
+  defp join_control({:block, _} = b, _), do: b
+  defp join_control(_, {:block, _} = b), do: b
+  defp join_control({:defer, _} = d, _), do: d
+  defp join_control(_, {:defer, _} = d), do: d
+  defp join_control({:ask, _} = a, _), do: a
+  defp join_control(_, {:ask, _} = a), do: a
+  defp join_control(_left, {:replace_input, _} = replacement), do: replacement
+  defp join_control({:replace_input, _} = replacement, _right), do: replacement
 
   # Both modify: merge patches; conflicting key → escalate to :ask
-  def join({:modify, p1}, {:modify, p2}) do
+  defp join_control({:modify, p1}, {:modify, p2}) do
     conflicts =
       Enum.any?(p1, fn {k, v} ->
         Map.has_key?(p2, k) and Map.get(p2, k) != v
@@ -97,21 +139,16 @@ defmodule Sigma.Coding.Hooks.Outcome do
     end
   end
 
-  # Both context: concatenate (capped)
-  def join({:context, t1}, {:context, t2}) do
-    combined = t1 <> "\n" <> t2
-    {:context, String.slice(combined, 0, @max_context_chars)}
-  end
+  defp join_control(:allow, :proceed), do: :allow
+  defp join_control(:proceed, :allow), do: :allow
+  defp join_control(:allow, other), do: other
+  defp join_control(other, :allow), do: other
 
-  # context + modify: keep both intents — modify takes structural priority
-  def join({:modify, _} = m, {:context, _}), do: m
-  def join({:context, _}, {:modify, _} = m), do: m
-
-  def join(:proceed, other), do: other
-  def join(other, :proceed), do: other
+  defp join_control(:proceed, other), do: other
+  defp join_control(other, :proceed), do: other
 
   # Fallback: left wins (should not normally be reached with well-formed outcomes)
-  def join(left, _right), do: left
+  defp join_control(left, _right), do: left
 
   @doc "Fold a list of outcomes into a single outcome."
   @spec fold([outcome()]) :: outcome()
@@ -133,7 +170,8 @@ defmodule Sigma.Coding.Hooks.Outcome do
   end
 
   # New schema: hookSpecificOutput
-  defp decode_json(event, %{"hookSpecificOutput" => hso} = json, _exit_code, _stderr, dialect) do
+  defp decode_json(event, %{"hookSpecificOutput" => hso} = json, _exit_code, _stderr, dialect)
+       when is_map(hso) do
     decision = Map.get(hso, "permissionDecision") || Map.get(hso, "decision")
     reason = Map.get(hso, "permissionDecisionReason") || Map.get(hso, "reason", "")
     additional_context = Map.get(hso, "additionalContext") || Map.get(json, "additionalContext")

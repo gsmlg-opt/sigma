@@ -11,11 +11,11 @@ defmodule Sigma.Coding.Hooks.Discovery do
   """
 
   alias Sigma.Coding.Hooks.Spec
-  alias Sigma.Coding.Hooks.Spec.{Command, Http}
+  alias Sigma.Coding.Hooks.Catalog
+  alias Sigma.Coding.Hooks.Spec.{Command, McpTool}
 
   # Default timeouts per the wire contract
   @default_timeout_ms 600_000
-  @user_prompt_submit_timeout_ms 30_000
 
   # ---------------------------------------------------------------------------
   # Pure parse API
@@ -157,7 +157,7 @@ defmodule Sigma.Coding.Hooks.Discovery do
         []
 
       event ->
-        Enum.flat_map(matcher_groups, fn group ->
+        Enum.flat_map(List.wrap(matcher_groups), fn group ->
           parse_matcher_group(group, event, dialect)
         end)
     end
@@ -171,14 +171,16 @@ defmodule Sigma.Coding.Hooks.Discovery do
     raw_matcher = Map.get(group, "matcher")
     handlers_raw = Map.get(group, "hooks", [group])
 
-    matcher = parse_matcher(raw_matcher)
+    case parse_matcher(raw_matcher, event) do
+      {:ok, matcher} ->
+        handlers_raw
+        |> List.wrap()
+        |> Enum.map(fn handler_raw -> parse_handler(handler_raw, event, matcher, dialect) end)
+        |> Enum.reject(&is_nil/1)
 
-    handlers_raw
-    |> List.wrap()
-    |> Enum.map(fn handler_raw ->
-      parse_handler(handler_raw, event, matcher, dialect)
-    end)
-    |> Enum.reject(&is_nil/1)
+      :error ->
+        []
+    end
   end
 
   defp parse_matcher_group(_, _, _), do: []
@@ -189,25 +191,54 @@ defmodule Sigma.Coding.Hooks.Discovery do
     handler =
       case handler_type do
         :command ->
-          cmd = Map.get(raw, "command") || Map.get(raw, "cmd") || ""
+          cmd =
+            if match?({:win32, _}, :os.type()),
+              do: raw["commandWindows"] || raw["command_windows"] || raw["command"] || raw["cmd"],
+              else: raw["command"] || raw["cmd"]
+
           timeout_ms = parse_timeout(raw, event)
           status_message = Map.get(raw, "statusMessage") || Map.get(raw, "status_message")
-          %Command{cmd: cmd, timeout_ms: timeout_ms, status_message: status_message}
 
-        :http ->
-          url = Map.get(raw, "url") || ""
+          if is_binary(cmd) and String.trim(cmd) != "" and is_integer(timeout_ms) and
+               Map.get(raw, "async", false) in [true, false] do
+            %Command{
+              cmd: cmd,
+              timeout_ms: timeout_ms,
+              status_message: status_message,
+              async: raw["async"] == true and event != :session_end,
+              additional_context_limit: raw["additionalContextLimit"]
+            }
+          else
+            {:unsupported, :invalid_command}
+          end
+
+        :mcp_tool ->
           timeout_ms = parse_timeout(raw, event)
-          headers = Map.get(raw, "headers", %{})
-          %Http{url: url, timeout_ms: timeout_ms, headers: headers}
+          server = raw["server"]
+          tool = raw["tool"]
+          input = Map.get(raw, "input", %{})
 
-        unsupported when is_atom(unsupported) ->
+          if event != :session_end and is_binary(server) and String.trim(server) != "" and
+               is_binary(tool) and String.trim(tool) != "" and is_map(input) and
+               is_integer(timeout_ms) do
+            %McpTool{
+              server: server,
+              tool: tool,
+              input: input,
+              timeout_ms: timeout_ms,
+              status_message: raw["statusMessage"]
+            }
+          else
+            {:unsupported, :invalid_mcp_tool}
+          end
+
+        unsupported ->
           {:unsupported, unsupported}
       end
 
     unsupported_reason =
       case handler do
         {:unsupported, type} -> "Handler type '#{type}' is not supported in v1"
-        %Http{} -> "HTTP handlers are not supported in v1"
         _ -> nil
       end
 
@@ -225,14 +256,27 @@ defmodule Sigma.Coding.Hooks.Discovery do
   defp parse_handler(_, _, _, _), do: nil
 
   defp detect_handler_type(raw) do
-    cond do
-      Map.has_key?(raw, "command") or Map.has_key?(raw, "cmd") -> :command
-      Map.has_key?(raw, "url") -> :http
-      Map.get(raw, "type") in ["mcp_tool", "mcpTool"] -> :mcp_tool
-      Map.get(raw, "type") in ["prompt"] -> :prompt
-      Map.get(raw, "type") in ["agent"] -> :agent
-      Map.get(raw, "async") == true -> :async
-      true -> :command
+    case Map.get(raw, "type") do
+      "command" ->
+        :command
+
+      "mcp_tool" ->
+        :mcp_tool
+
+      "prompt" ->
+        :prompt
+
+      "agent" ->
+        :agent
+
+      nil ->
+        if is_binary(raw["command"] || raw["cmd"]), do: :command, else: :unknown
+
+      value when is_binary(value) ->
+        value
+
+      _ ->
+        :unknown
     end
   end
 
@@ -240,54 +284,56 @@ defmodule Sigma.Coding.Hooks.Discovery do
   # nil/"*"/"" → :any
   # only letters/digits/_/| → exact or |-list (stored as plain string)
   # any other char → compiled regex
-  defp parse_matcher(nil), do: :any
-  defp parse_matcher(""), do: :any
-  defp parse_matcher("*"), do: :any
+  defp parse_matcher(_matcher, event)
+       when event in [
+              :pre_model_request,
+              :post_model_request,
+              :user_prompt_submit,
+              :stop,
+              :interrupt
+            ],
+       do: {:ok, :any}
 
-  defp parse_matcher(s) when is_binary(s) do
-    if Regex.match?(~r/^[A-Za-z0-9_|]+$/, s) do
-      s
+  defp parse_matcher(value, _event) when value in [nil, "", "*"], do: {:ok, :any}
+
+  defp parse_matcher(value, _event) when is_binary(value) do
+    if Regex.match?(~r/^[A-Za-z0-9_|]+$/, value) do
+      {:ok, value}
     else
-      case Regex.compile(s) do
-        {:ok, re} -> re
-        {:error, _} -> :any
+      case Regex.compile(value) do
+        {:ok, regex} -> {:ok, regex}
+        {:error, _} -> :error
       end
     end
   end
 
+  defp parse_matcher(_, _), do: :error
+
   # Timeout: `timeout` (seconds), `timeoutSec` alias, default 600s
-  # Exception: UserPromptSubmit command default is 30s
+  # SessionEnd and Interrupt default to 1s and cap explicit timeouts at 3s.
   defp parse_timeout(raw, event) do
     secs =
       Map.get(raw, "timeout") ||
         Map.get(raw, "timeoutSec") ||
         Map.get(raw, "timeout_sec")
 
-    cond do
-      is_number(secs) -> round(secs * 1000)
-      event == :user_prompt_submit -> @user_prompt_submit_timeout_ms
-      true -> @default_timeout_ms
-    end
+    default = if event in [:session_end, :interrupt], do: 1_000, else: @default_timeout_ms
+
+    timeout =
+      if is_nil(secs),
+        do: default,
+        else: if(is_integer(secs) and secs >= 0, do: max(secs, 1) * 1000)
+
+    if is_integer(timeout) and event in [:session_end, :interrupt],
+      do: min(timeout, 3_000),
+      else: timeout
   end
 
-  @event_map %{
-    "PreToolUse" => :pre_tool_use,
-    "pre_tool_use" => :pre_tool_use,
-    "PermissionRequest" => :permission_request,
-    "permission_request" => :permission_request,
-    "PostToolUse" => :post_tool_use,
-    "post_tool_use" => :post_tool_use,
-    "UserPromptSubmit" => :user_prompt_submit,
-    "user_prompt_submit" => :user_prompt_submit,
-    "Stop" => :stop,
-    "stop" => :stop,
-    "SessionStart" => :session_start,
-    "session_start" => :session_start,
-    "SessionEnd" => :session_end,
-    "session_end" => :session_end,
-    "PreCompact" => :pre_compact,
-    "pre_compact" => :pre_compact
-  }
+  @event_map Map.new(
+               Enum.flat_map(Catalog.events(), fn event ->
+                 [{event.name, event.event}, {Atom.to_string(event.event), event.event}]
+               end)
+             )
 
   defp normalize_event(name) when is_binary(name), do: Map.get(@event_map, name)
   defp normalize_event(_), do: nil

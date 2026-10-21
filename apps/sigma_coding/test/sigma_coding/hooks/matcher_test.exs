@@ -21,14 +21,14 @@ defmodule Sigma.Coding.Hooks.MatcherTest do
   describe "to_external_name/1" do
     for {internal, external} <- [
           {"bash", "Bash"},
-          {"read", "Read"},
-          {"write", "Write"},
-          {"edit", "Edit"},
-          {"grep", "Grep"},
-          {"glob", "Glob"},
-          {"ls", "LS"},
-          {"url_fetch", "WebFetch"},
-          {"ask_user_question", "AskUserQuestion"}
+          {"read", "read"},
+          {"write", "write"},
+          {"edit", "edit"},
+          {"grep", "grep"},
+          {"glob", "glob"},
+          {"ls", "ls"},
+          {"url_fetch", "url_fetch"},
+          {"ask_user_question", "ask_user_question"}
         ] do
       @internal internal
       @external external
@@ -65,8 +65,8 @@ defmodule Sigma.Coding.Hooks.MatcherTest do
       end
 
       test "#{event}: pipe-list matcher" do
-        assert Matcher.match?(spec(@event, "Edit|Write"), %{tool_name: "edit"})
-        assert Matcher.match?(spec(@event, "Edit|Write"), %{tool_name: "write"})
+        assert Matcher.match?(spec(@event, "Edit|Write"), %{tool_name: "apply_patch"})
+        assert Matcher.match?(spec(@event, "apply_patch"), %{tool_name: "apply_patch"})
         refute Matcher.match?(spec(@event, "Edit|Write"), %{tool_name: "bash"})
       end
 
@@ -76,8 +76,8 @@ defmodule Sigma.Coding.Hooks.MatcherTest do
         refute Matcher.match?(spec(@event, re), %{tool_name: "bash"})
       end
 
-      test "#{event}: UrlFetch alias accepted" do
-        assert Matcher.match?(spec(@event, "UrlFetch"), %{tool_name: "url_fetch"})
+      test "#{event}: unrelated ecosystem aliases do not rename canonical tools" do
+        refute Matcher.match?(spec(@event, "UrlFetch"), %{tool_name: "url_fetch"})
       end
     end
   end
@@ -143,10 +143,10 @@ defmodule Sigma.Coding.Hooks.MatcherTest do
     assert Matcher.match?(s, %{tool_name: "bash"})
   end
 
-  test "AC-1: Edit|Write matcher hits internal edit and write" do
+  test "Codex apply_patch accepts Edit and Write as matcher-only aliases" do
     s = spec(:pre_tool_use, "Edit|Write")
-    assert Matcher.match?(s, %{tool_name: "edit"})
-    assert Matcher.match?(s, %{tool_name: "write"})
+    assert Matcher.match?(s, %{tool_name: "apply_patch"})
+    assert Matcher.match?(s, %{tool_name: "apply_patch"})
     refute Matcher.match?(s, %{tool_name: "bash"})
   end
 end

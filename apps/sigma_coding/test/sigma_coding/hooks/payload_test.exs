@@ -40,11 +40,11 @@ defmodule Sigma.Coding.Hooks.PayloadTest do
       assert payload["turn_id"] == "turn_42"
     end
 
-    test "turn_id is omitted when nil" do
+    test "turn_id remains present when the host has not supplied one" do
       payload =
         Payload.build(:stop, @base_ctx, %{stop_hook_active: false, last_assistant_message: ""})
 
-      refute Map.has_key?(payload, "turn_id")
+      assert payload["turn_id"] == ""
     end
   end
 
@@ -87,7 +87,7 @@ defmodule Sigma.Coding.Hooks.PayloadTest do
       assert payload["tool_input"] == %{"command" => "ls"}
     end
 
-    test "url_fetch maps to WebFetch" do
+    test "function tool names retain their canonical identity" do
       payload =
         Payload.build(:pre_tool_use, @base_ctx, %{
           tool_name: "url_fetch",
@@ -95,7 +95,7 @@ defmodule Sigma.Coding.Hooks.PayloadTest do
           tool_input: %{"url" => "https://example.com"}
         })
 
-      assert payload["tool_name"] == "WebFetch"
+      assert payload["tool_name"] == "url_fetch"
     end
 
     test "MCP tool name is unchanged" do
@@ -120,7 +120,7 @@ defmodule Sigma.Coding.Hooks.PayloadTest do
         })
 
       assert payload["hook_event_name"] == "PermissionRequest"
-      assert payload["tool_name"] == "Edit"
+      assert payload["tool_name"] == "edit"
       assert payload["tool_input"] == %{"file_path" => "/etc/hosts"}
     end
   end
@@ -136,7 +136,7 @@ defmodule Sigma.Coding.Hooks.PayloadTest do
         })
 
       assert payload["hook_event_name"] == "PostToolUse"
-      assert payload["tool_name"] == "Write"
+      assert payload["tool_name"] == "write"
       assert payload["tool_response"] == "Wrote 2 bytes"
     end
   end
@@ -156,12 +156,12 @@ defmodule Sigma.Coding.Hooks.PayloadTest do
   end
 
   describe "PreCompact (FR-P2)" do
-    test "includes trigger and summary" do
+    test "includes trigger without the non-Codex summary field" do
       payload = Payload.build(:pre_compact, @base_ctx, %{trigger: :auto, summary: "summary text"})
 
       assert payload["hook_event_name"] == "PreCompact"
       assert payload["trigger"] == "auto"
-      assert payload["summary"] == "summary text"
+      refute Map.has_key?(payload, "summary")
     end
   end
 

@@ -6,6 +6,7 @@ defmodule Sigma.Coding.Dispatcher do
   use Supervisor
 
   alias Sigma.Coding.{Tool, ToolError, ToolExecution, ToolResult, ToolScheduler}
+  alias Sigma.Coding.Hooks.Outcome
 
   def start_link(opts \\ []) do
     name = Keyword.get(opts, :name, __MODULE__)
@@ -81,6 +82,21 @@ defmodule Sigma.Coding.Dispatcher do
         patched_call = %{tool_call | arguments: Map.merge(tool_call.arguments, patched_args)}
         prepare_authorized(patched_call, tools, opts, index)
 
+      {:allow, {:replace_input, arguments}} when is_map(arguments) ->
+        prepare_authorized(%{tool_call | arguments: arguments}, tools, opts, index)
+
+      {:allow, {:replace_input, arguments}, context} when is_map(arguments) ->
+        prepare_authorized(
+          %{tool_call | arguments: arguments},
+          tools,
+          Keyword.put(opts, :hook_context, context),
+          index
+        )
+
+      {:allow, patched_args, context} when is_map(patched_args) ->
+        patched_call = %{tool_call | arguments: Map.merge(tool_call.arguments, patched_args)}
+        prepare_authorized(patched_call, tools, Keyword.put(opts, :hook_context, context), index)
+
       {:deny, {:approval_required, tool_name}} ->
         {:permission_rejected,
          ToolError.new(:approval_required, "Approval required for tool: #{tool_name}",
@@ -146,6 +162,7 @@ defmodule Sigma.Coding.Dispatcher do
     )
 
     result = apply_post_tool_use_hooks(normalized, tool_call, hook_specs, hook_ctx)
+    result = append_hook_context(result, Keyword.get(opts, :hook_context))
     emit_tool_fact(opts, tool_call, result, started_at)
     result
   end
@@ -219,7 +236,11 @@ defmodule Sigma.Coding.Dispatcher do
         Sigma.Coding.Hooks.dispatch(:post_tool_use, hook_specs, hook_ctx, event_data)
 
       Enum.each(warnings, &surface_warning/1)
-      apply_post_outcome(outcome, result)
+
+      outcome
+      |> Outcome.control()
+      |> apply_post_outcome(result)
+      |> append_hook_context(Outcome.context(outcome))
     else
       result
     end
@@ -242,6 +263,11 @@ defmodule Sigma.Coding.Dispatcher do
 
   defp apply_post_outcome({:halt, _reason}, result), do: result
   defp apply_post_outcome(_outcome, result), do: result
+
+  defp append_hook_context(result, text) when is_binary(text) and text != "",
+    do: apply_post_outcome({:context, text}, result)
+
+  defp append_hook_context(result, _text), do: result
 
   defp result_to_response_string({:ok, %ToolResult{content: content}}) do
     Enum.map_join(content, "\n", fn
@@ -270,7 +296,15 @@ defmodule Sigma.Coding.Dispatcher do
       cwd: Keyword.get(opts, :cwd),
       transcript_path: Keyword.get(opts, :transcript_path, ""),
       permission_mode: Keyword.get(opts, :permission_mode, "default"),
-      turn_id: Keyword.get(opts, :turn_id)
+      turn_id: Keyword.get(opts, :turn_id),
+      model: Keyword.get(opts, :model, ""),
+      agent_id: Keyword.get(opts, :agent_id),
+      agent_type: Keyword.get(opts, :agent_type),
+      hook_task_supervisor:
+        Keyword.get(opts, :hook_task_supervisor, Sigma.Coding.Dispatcher.TaskSupervisor),
+      mcp_hook_executor: Keyword.get(opts, :mcp_hook_executor),
+      hook_async_callback: Keyword.get(opts, :hook_async_callback),
+      hook_async_runtime: Keyword.get(opts, :hook_async_runtime)
     }
   end
 

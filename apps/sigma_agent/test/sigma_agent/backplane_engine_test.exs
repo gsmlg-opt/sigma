@@ -491,14 +491,16 @@ defmodule Sigma.Agent.BackplaneEngineTest do
   end
 
   @tag :tmp_dir
-  test "stop hook continuation is canonical and cannot block recursively", %{tmp_dir: dir} do
+  test "stop hook can use its active flag to finish a canonical continuation", %{tmp_dir: dir} do
     {:ok, agent} = start_blocking_agent(dir)
     Sigma.Agent.subscribe(agent)
 
     spec =
       hook_spec(
         :stop,
-        "sh -c 'dd bs=65536 count=1 of=/dev/null 2>/dev/null; printf continue >&2; exit 2'"
+        ~S"""
+        sh -c 'input=$(cat); case "$input" in *\"stop_hook_active\":true*) exit 0 ;; *) printf continue >&2; exit 2 ;; esac'
+        """
       )
 
     :sys.replace_state(agent, &%{&1 | hook_specs: [spec]})

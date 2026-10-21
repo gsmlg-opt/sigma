@@ -10,13 +10,14 @@ defmodule Sigma.Agent.Backplane.ChildIO do
   use GenServer
 
   alias Backplane.AgentRuntime.Error
-  alias Sigma.Agent.{ContextBuilder, Message, SessionContext}
+  alias Sigma.Agent.{ContextBuilder, Hooks, Message, SessionContext}
+  alias Sigma.Coding.Hooks.Outcome
   alias Sigma.Agent.Backplane.{ChildStore, Provider, Store, ToolCatalog}
   alias Sigma.Ai.{ProviderRequest, ProviderUsage}
   alias Sigma.Coding.{Dispatcher, Tool}
   alias Sigma.Session.{Log, Writer}
 
-  @config_keys ~w(model provider provider_options system_prompt session_context context_limit cwd tools mcp_servers hook_specs dispatcher_opts policy task_supervisor)a
+  @config_keys ~w(model provider provider_options system_prompt session_context context_limit cwd tools mcp_servers hook_specs dispatcher_opts policy task_supervisor mcp_hook_executor)a
 
   defmodule QuestionTool do
     @moduledoc false
@@ -57,6 +58,7 @@ defmodule Sigma.Agent.Backplane.ChildIO do
 
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
     config = opts |> Keyword.fetch!(:config) |> Map.take(@config_keys)
     identity = Keyword.fetch!(opts, :identity)
     path = Keyword.fetch!(opts, :transcript_path)
@@ -74,7 +76,8 @@ defmodule Sigma.Agent.Backplane.ChildIO do
                session_id: identity.child_session_id,
                cwd: config.cwd
              ]
-           ]) do
+           ]),
+         {:ok, hook_async_runtime} <- Sigma.Coding.Hooks.AsyncRuntime.start(self()) do
       {:ok,
        %{
          config: config,
@@ -99,6 +102,10 @@ defmodule Sigma.Agent.Backplane.ChildIO do
          request: nil,
          current_request_id: nil,
          finished_requests: MapSet.new(),
+         start_hook_pending: true,
+         hook_context: nil,
+         hook_async_contexts: Hooks.async_contexts(),
+         hook_async_runtime: hook_async_runtime,
          persistence_error: nil
        }}
     else
@@ -198,6 +205,28 @@ defmodule Sigma.Agent.Backplane.ChildIO do
 
   def handle_call({:project, _key, _messages}, _from, state), do: {:reply, stale(), state}
 
+  def handle_call({:start_hook, key}, _from, %{key: key} = state) do
+    if state.start_hook_pending do
+      outcome =
+        Hooks.dispatch(
+          :subagent_start,
+          Map.get(state.config, :hook_specs, []),
+          hook_context(state)
+        )
+
+      {:reply, :ok, %{state | start_hook_pending: false, hook_context: Outcome.context(outcome)}}
+    else
+      {:reply, :ok, state}
+    end
+  end
+
+  def handle_call({:start_hook, _key}, _from, state), do: {:reply, stale(), state}
+
+  def handle_call({:hook_context, key}, _from, %{key: key} = state),
+    do: {:reply, state.hook_context, state}
+
+  def handle_call({:hook_context, _key}, _from, state), do: {:reply, nil, state}
+
   def handle_call({:tool_context, key}, _from, %{key: key} = state) do
     notify(state, :running_tools)
     {:reply, {:ok, state.active_tools, dispatcher_options(state)}, state}
@@ -233,8 +262,13 @@ defmodule Sigma.Agent.Backplane.ChildIO do
 
   def handle_info({:child_io, _key, _event}, state), do: {:noreply, state}
 
+  def handle_info({:EXIT, _pid, :normal}, state), do: {:noreply, state}
+  def handle_info({:EXIT, _pid, reason}, state), do: {:stop, reason, state}
+
   @impl true
   def terminate(_reason, state) do
+    Sigma.Coding.Hooks.AsyncRuntime.shutdown(state.hook_async_runtime)
+
     Enum.each([state.writer, state.store], fn pid ->
       if Process.alive?(pid), do: GenServer.stop(pid, :normal)
     end)
@@ -242,6 +276,9 @@ defmodule Sigma.Agent.Backplane.ChildIO do
 
   defp conversation_options(state, catalog) do
     config = state.config
+    io = self()
+    key = state.key
+    hook_context = hook_context(state)
 
     host = %{
       model: config.model,
@@ -250,9 +287,21 @@ defmodule Sigma.Agent.Backplane.ChildIO do
       session_id: state.identity.child_session_id,
       log_session_id: state.identity.child_session_id,
       turn_id: public_run_id(state.identity),
+      hook_specs: Map.get(config, :hook_specs, []),
+      hook_context: hook_context,
+      stop_hook_context:
+        Map.put(hook_context, :transcript_path, Map.get(state.identity, :parent_transcript_path)),
+      stop_hook_data: %{agent_transcript_path: state.transcript_path},
+      stop_hook_active: :atomics.new(1, signed: false),
+      start_hook: fn -> GenServer.call(io, {:start_hook, key}, :infinity) end,
       build_context: fn messages ->
+        additional_context = GenServer.call(io, {:hook_context, key}, :infinity)
+
         ContextBuilder.build(
-          messages: messages,
+          messages:
+            messages
+            |> Hooks.prepend_context(additional_context)
+            |> Hooks.async_messages(state.hook_async_contexts),
           session_context: Map.get(config, :session_context) || SessionContext.new(),
           system_prompt: Map.get(config, :system_prompt),
           tools: catalog.tools,
@@ -280,6 +329,7 @@ defmodule Sigma.Agent.Backplane.ChildIO do
       context: %{store: state.store, io: self(), key: state.key},
       provider: Provider,
       provider_context: %{host: host, owner: {self(), state.key}},
+      hooks: Sigma.Agent.Backplane.ChildHooks,
       registry: catalog.registry,
       tools: catalog.tools,
       authority: catalog.authority,
@@ -342,6 +392,12 @@ defmodule Sigma.Agent.Backplane.ChildIO do
         transcript_path: state.transcript_path,
         tool_state: state.tool_state,
         hook_specs: Map.get(config, :hook_specs, []),
+        model: hook_context(state).model,
+        agent_id: state.identity.agent_id,
+        agent_type: Map.get(state.identity, :agent_type, "default"),
+        mcp_hook_executor: Map.get(config, :mcp_hook_executor),
+        hook_async_runtime: state.hook_async_runtime,
+        hook_async_callback: Hooks.async_callback(state.hook_async_contexts),
         on_tool_fact: fn fact -> GenServer.call(io, {:tool_fact, key, fact}, :infinity) end
       )
 
@@ -366,6 +422,19 @@ defmodule Sigma.Agent.Backplane.ChildIO do
     else
       opts
     end
+  end
+
+  defp hook_context(state) do
+    Hooks.context(state.config, %{
+      session_id: state.identity.child_session_id,
+      turn_id: public_run_id(state.identity),
+      transcript_path: state.transcript_path,
+      agent_id: state.identity.agent_id,
+      agent_type: Map.get(state.identity, :agent_type, "default"),
+      mcp_hook_executor: Map.get(state.config, :mcp_hook_executor),
+      hook_async_runtime: state.hook_async_runtime,
+      hook_async_callback: Hooks.async_callback(state.hook_async_contexts)
+    })
   end
 
   defp provider_event({:backplane_request_started, worker, ref, request, _context}, state) do

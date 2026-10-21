@@ -660,6 +660,8 @@ defmodule Sigma.Agent.Subagents do
 
     identity = %{
       agent_id: agent_id,
+      agent_type: request.options["agent_type"] || "default",
+      parent_transcript_path: parent_transcript_path(state, parent.name),
       agent_path: child.name,
       child_session_id: child_session,
       root_session_id: state.root_session_id,
@@ -714,6 +716,17 @@ defmodule Sigma.Agent.Subagents do
         {failure(:execution_failure, "subagent intent could not be persisted"),
          %{state | error: :storage_failed}}
     end
+  end
+
+  defp parent_transcript_path(state, "/root"), do: state.transcript_path
+
+  defp parent_transcript_path(state, name) do
+    Enum.find_value(state.children, fn {_id, child} ->
+      if child.identity.agent_path == name do
+        {:ok, metadata} = ChildIO.metadata(child.io)
+        metadata.transcript_path
+      end
+    end)
   end
 
   defp prepare_child_io(state, identity, existing, messages, authority) do
@@ -1266,7 +1279,16 @@ defmodule Sigma.Agent.Subagents do
   end
 
   def collaboration_tools, do: @collaboration
-  def configuration(state), do: Map.take(state, @configuration)
+
+  def configuration(state) do
+    state
+    |> Map.take(@configuration)
+    |> Map.put(
+      :mcp_hook_executor,
+      Sigma.Coding.MCP.hook_executor(Map.get(state, :mcp_session, %{}))
+    )
+  end
+
   defp model_id(model) when is_map(model), do: model[:id] || model["id"]
   defp model_id(model), do: to_string(model)
   defp qualify(state, id), do: state.generation <> ":" <> id

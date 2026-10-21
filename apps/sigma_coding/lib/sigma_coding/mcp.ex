@@ -164,6 +164,43 @@ defmodule Sigma.Coding.MCP do
     end
   end
 
+  @doc "Builds a hook executor using this session's already configured MCP clients."
+  def hook_executor(%{clients: clients}) do
+    fn server, tool, input, timeout_ms ->
+      case Map.fetch(clients, server) do
+        {:ok, client} -> call_hook_tool(client, tool, input, timeout_ms)
+        :error -> {:error, "MCP hook server #{server} is not connected"}
+      end
+    end
+  end
+
+  defp call_hook_tool(client, tool, input, timeout_ms) do
+    case Client.call_tool(client, tool, input, timeout: timeout_ms) do
+      {:ok, %Response{} = response} ->
+        result = Response.get_result(response) || %{}
+
+        if Response.error?(response) or result["isError"] == true do
+          {:error, "MCP hook tool #{tool} failed"}
+        else
+          text =
+            result
+            |> Map.get("content", [])
+            |> Enum.flat_map(fn
+              %{"type" => "text", "text" => text} when is_binary(text) -> [text]
+              _ -> []
+            end)
+            |> Enum.join("\n")
+
+          {:ok, %{exit: 0, stdout: text, stderr: ""}}
+        end
+
+      {:error, error} ->
+        {:error, format_error(error)}
+    end
+  catch
+    :exit, reason -> {:error, "MCP hook tool call failed: #{inspect(reason)}"}
+  end
+
   defp empty_session do
     %{handles: [], subscriptions: [], clients: %{}}
   end

@@ -12,6 +12,10 @@ defmodule Sigma.Coding do
       Sigma.Coding.Dispatcher,
       Sigma.Coding.PendingToolRegistry,
       Sigma.Coding.ExtensionRegistry,
+      Supervisor.child_spec(
+        {DynamicSupervisor, strategy: :one_for_one, name: Sigma.Coding.Hooks.AsyncSupervisor},
+        id: Sigma.Coding.Hooks.AsyncSupervisor
+      ),
       {Registry, keys: :unique, name: Sigma.Coding.MCP.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: Sigma.Coding.MCP.ClientSupervisor}
     ]

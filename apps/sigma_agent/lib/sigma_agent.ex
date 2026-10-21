@@ -15,6 +15,8 @@ defmodule Sigma.Agent do
   alias Sigma.Ai.{Provider, ProviderError, ProviderEvent, ProviderRequest, ProviderUsage}
   alias Sigma.Ai.Providers.Anthropic
   alias Sigma.Coding.ToolError
+  alias Sigma.Coding.Hooks.Outcome
+  alias Sigma.Agent.Hooks
 
   defstruct [
     :session_id,
@@ -48,6 +50,9 @@ defmodule Sigma.Agent do
     :backplane_store_owned,
     :backplane_request,
     :subagents,
+    :start_hook_pending,
+    :hook_async_contexts,
+    :hook_async_runtime,
     messages: [],
     subscribers: [],
     current_turn_resources: [],
@@ -232,6 +237,8 @@ defmodule Sigma.Agent do
 
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
+
     case init_backplane_store(opts) do
       {:ok, store, owned?} -> init_agent(opts, store, owned?)
       {:error, reason} -> {:stop, reason}
@@ -280,6 +287,8 @@ defmodule Sigma.Agent do
         stale: true
       )
 
+    {:ok, hook_async_runtime} = Sigma.Coding.Hooks.AsyncRuntime.start(self())
+
     state = %__MODULE__{
       task_supervisor: task_supervisor,
       policy: policy,
@@ -312,9 +321,17 @@ defmodule Sigma.Agent do
       context_policy:
         context_policy(context_snapshot, opts[:model], opts[:options] || [], opts[:context_limit]),
       hook_specs: hook_specs,
+      start_hook_pending: :atomics.new(1, signed: false),
+      hook_async_contexts: Hooks.async_contexts(),
+      hook_async_runtime: hook_async_runtime,
       prompt_queue: PromptQueue.new(),
       turn_state: TurnState.idle(),
-      resume_source: Keyword.get(opts, :resume_source, :startup),
+      resume_source:
+        Keyword.get(
+          opts,
+          :resume_source,
+          if((opts[:messages] || []) == [], do: :startup, else: :resume)
+        ),
       backplane_store: backplane_store,
       backplane_store_owned: backplane_store_owned,
       subagents: opts[:subagents]
@@ -325,24 +342,16 @@ defmodule Sigma.Agent do
 
   @impl true
   def handle_continue(:session_start, state) do
-    {:noreply, state |> start_mcp_clients() |> run_session_start_hook()}
+    {:noreply, start_mcp_clients(state)}
   end
 
   @impl true
   def terminate(reason, state) do
     release_all_resources(state)
+    Sigma.Coding.Hooks.AsyncRuntime.shutdown(state.hook_async_runtime)
 
-    if Sigma.Coding.Hooks.any_for_event?(state.hook_specs, :session_end) do
-      task = Task.async(fn -> run_session_end_hook(state, reason) end)
-
-      case Task.yield(task, 2_000) do
-        nil ->
-          Task.shutdown(task, :brutal_kill)
-          Logger.warning("[Sigma.Agent] SessionEnd hooks exceeded 2s budget, killed")
-
-        _ ->
-          :ok
-      end
+    if reason in [:normal, :shutdown] or match?({:shutdown, _}, reason) do
+      run_session_end_hook(state)
     end
 
     Sigma.Coding.MCP.stop(state.mcp_session)
@@ -965,6 +974,8 @@ defmodule Sigma.Agent do
     end
   end
 
+  def handle_info({:EXIT, _pid, :normal}, state), do: {:noreply, state}
+  def handle_info({:EXIT, _pid, reason}, state), do: {:stop, reason, state}
   def handle_info(_msg, state), do: {:noreply, state}
 
   defp status_snapshot(state) do
@@ -1166,6 +1177,7 @@ defmodule Sigma.Agent do
         state
 
       :cancelled ->
+        Hooks.dispatch(:interrupt, state.hook_specs, hook_ctx(state, turn_id))
         emit(state, {:turn_cancelled})
         %{state | last_cancelled_turn_id: turn_id}
     end
@@ -1316,7 +1328,16 @@ defmodule Sigma.Agent do
         skill_preparations: prepared_resource_metadata(item.prepared_resources)
       })
 
-    case run_user_prompt_submit_hook(state, user_msg) do
+    {admission, state} =
+      case run_session_start_hook(state) do
+        {:ok, started_state} ->
+          {run_user_prompt_submit_hook(started_state, user_msg), started_state}
+
+        {:block, _reason} = blocked ->
+          {blocked, state}
+      end
+
+    case admission do
       {:block, reason} ->
         notify_retry_admission(item, {:error, reason})
         emit(state, {:turn_blocked, reason})
@@ -1336,7 +1357,9 @@ defmodule Sigma.Agent do
         acknowledge_canonical(state)
 
         {state, outcome} = run_turn_loop(state, item.turn_id)
-        state = if outcome == :completed, do: maybe_compact(state), else: state
+
+        {state, outcome} =
+          if outcome == :completed, do: maybe_compact(state), else: {state, outcome}
 
         %{
           messages: state.messages,
@@ -1481,10 +1504,16 @@ defmodule Sigma.Agent do
       end)
 
     if input_tokens >= state.context_policy.threshold do
-      {state, _result} = run_compact(state, trigger: :auto)
-      state
+      case run_compact(state, trigger: :auto) do
+        {state, {:error, {:hook_stopped, reason}}} ->
+          emit(state, {:turn_blocked, reason})
+          {state, :failed}
+
+        {state, _result} ->
+          {state, :completed}
+      end
     else
-      state
+      {state, :completed}
     end
   end
 
@@ -1517,7 +1546,16 @@ defmodule Sigma.Agent do
            }}
         )
 
-        case generate_summary(state, to_summarize) do
+        pre_outcome =
+          Hooks.dispatch(:pre_compact, state.hook_specs, hook_ctx(state), %{trigger: trigger})
+
+        summary_result =
+          case Outcome.control(pre_outcome) do
+            {:halt, reason} -> {:error, {:hook_stopped, reason}, nil}
+            _ -> generate_summary(state, to_summarize)
+          end
+
+        case summary_result do
           {:ok, summary_text, request_id}
           when is_binary(summary_text) and byte_size(summary_text) > 0 ->
             first_kept_id =
@@ -1570,13 +1608,26 @@ defmodule Sigma.Agent do
 
             new_state = refresh_context_from_assembly(new_state, context, :compaction)
 
-            {new_state,
-             {:ok,
-              %{
-                compaction_id: compaction_id,
-                summary_id: summary_msg.id,
-                source_leaf_id: source_leaf_id
-              }}}
+            post_outcome =
+              Hooks.dispatch(:post_compact, new_state.hook_specs, hook_ctx(new_state), %{
+                trigger: trigger
+              })
+
+            result =
+              case Outcome.control(post_outcome) do
+                {:halt, reason} ->
+                  {:error, {:hook_stopped, reason}}
+
+                _ ->
+                  {:ok,
+                   %{
+                     compaction_id: compaction_id,
+                     summary_id: summary_msg.id,
+                     source_leaf_id: source_leaf_id
+                   }}
+              end
+
+            {new_state, result}
 
           {:ok, _empty, request_id} ->
             emit_compaction_failure(
@@ -1875,14 +1926,14 @@ defmodule Sigma.Agent do
   # Hook helpers
   # ---------------------------------------------------------------------------
 
-  defp hook_ctx(state) do
-    %{
-      session_id: state.session_id,
-      cwd: state.cwd,
+  defp hook_ctx(state, turn_id \\ nil) do
+    Hooks.context(Map.from_struct(state), %{
+      turn_id: turn_id || state.turn_state.turn_id,
       transcript_path: transcript_path(state),
-      permission_mode: "default",
-      model: state.model && Map.get(state.model, "id", "")
-    }
+      mcp_hook_executor: Sigma.Coding.MCP.hook_executor(state.mcp_session),
+      hook_async_runtime: state.hook_async_runtime,
+      hook_async_callback: Hooks.async_callback(state.hook_async_contexts)
+    })
   end
 
   defp start_mcp_clients(%{mcp_servers: servers} = state) when map_size(servers) == 0 do
@@ -2168,70 +2219,65 @@ defmodule Sigma.Agent do
   end
 
   defp run_session_start_hook(state) do
-    if Sigma.Coding.Hooks.any_for_event?(state.hook_specs, :session_start) do
-      ctx = hook_ctx(state)
-      event_data = %{source: state.resume_source}
+    if :atomics.compare_exchange(state.start_hook_pending, 1, 0, 1) == :ok do
+      outcome =
+        Hooks.dispatch(:session_start, state.hook_specs, hook_ctx(state), %{
+          source: state.resume_source
+        })
 
-      {outcome, _warnings} =
-        Sigma.Coding.Hooks.dispatch(:session_start, state.hook_specs, ctx, event_data)
-
-      case outcome do
-        {:context, text} ->
-          dev_msg =
-            Message.user(
-              "hook_ctx_#{System.unique_integer([:positive])}",
-              "[Developer context from hook]\n#{text}"
-            )
-
-          %{state | messages: [dev_msg | state.messages]}
+      case Outcome.control(outcome) do
+        {:halt, reason} ->
+          {:block, reason || "SessionStart hook stopped the turn"}
 
         _ ->
-          state
+          {:ok,
+           %{state | messages: Hooks.prepend_context(state.messages, Outcome.context(outcome))}}
       end
     else
-      state
+      {:ok, state}
     end
   end
 
-  defp run_session_end_hook(state, otp_reason) do
-    ctx = hook_ctx(state)
-
-    reason =
-      case otp_reason do
-        :normal -> "user_close"
-        :shutdown -> "user_close"
-        {:shutdown, _} -> "user_close"
-        _ -> "crash"
+  defp run_session_end_hook(state) do
+    if state.writer do
+      try do
+        apply(Sigma.Session.Writer, :flush, [state.writer])
+      catch
+        :exit, reason ->
+          Logger.warning(
+            "[Sigma.Agent] Could not flush SessionEnd transcript: #{inspect(reason)}"
+          )
       end
-
-    event_data = %{reason: reason, last_activity_at: ""}
-
-    try do
-      Sigma.Coding.Hooks.dispatch(:session_end, state.hook_specs, ctx, event_data)
-    rescue
-      e -> Logger.warning("[Sigma.Agent] SessionEnd hook crashed: #{Exception.message(e)}")
     end
+
+    Hooks.dispatch(:session_end, state.hook_specs, hook_ctx(state), %{reason: "other"})
+  rescue
+    e -> Logger.warning("[Sigma.Agent] SessionEnd hook crashed: #{Exception.message(e)}")
+  catch
+    :exit, reason ->
+      Logger.warning("[Sigma.Agent] SessionEnd hook unavailable: #{inspect(reason)}")
   end
 
   defp run_user_prompt_submit_hook(state, user_msg) do
     if Sigma.Coding.Hooks.any_for_event?(state.hook_specs, :user_prompt_submit) do
-      ctx = Map.put(hook_ctx(state), :turn_id, user_msg.id)
+      ctx = hook_ctx(state, Map.get(user_msg.metadata, :turn_id))
       prompt_text = message_text(user_msg)
       event_data = %{prompt: prompt_text}
 
-      {outcome, _warnings} =
-        Sigma.Coding.Hooks.dispatch(:user_prompt_submit, state.hook_specs, ctx, event_data)
+      outcome = Hooks.dispatch(:user_prompt_submit, state.hook_specs, ctx, event_data)
 
-      case outcome do
-        {:block, reason} ->
-          {:block, reason}
-
-        {:context, extra} ->
-          updated_msg = append_text_to_message(user_msg, extra)
-          {:ok, updated_msg, state}
+      case Outcome.control(outcome) do
+        {control, reason} when control in [:block, :halt] ->
+          {:block, reason || "UserPromptSubmit hook stopped the turn"}
 
         _ ->
-          {:ok, user_msg, state}
+          updated_msg =
+            case Outcome.context(outcome) do
+              nil -> user_msg
+              extra -> append_text_to_message(user_msg, extra)
+            end
+
+          {:ok, updated_msg, state}
       end
     else
       {:ok, user_msg, state}
@@ -2452,7 +2498,7 @@ defmodule Sigma.Agent do
   @doc false
   def __backplane_build_context__(state, messages, tools \\ nil) do
     ContextBuilder.build(
-      messages: messages,
+      messages: Hooks.async_messages(messages, state.hook_async_contexts),
       session_context: state.session_context,
       system_prompt: state.system_prompt,
       tools: tools || Enum.map(state.tools, &Sigma.Coding.Tool.ai_definition/1),
@@ -2465,31 +2511,14 @@ defmodule Sigma.Agent do
   def __backplane_context_error__(state, context), do: context_budget_error(state, context)
 
   @doc false
+  def __backplane_hook_context__(state, turn_id), do: hook_ctx(state, turn_id)
+
+  @doc false
   def __backplane_prompt_hook__(state, message), do: run_user_prompt_submit_hook(state, message)
 
   @doc false
-  def __backplane_stop_hook__(state, _turn_id, messages, stop_hook_active) do
-    if Sigma.Coding.Hooks.any_for_event?(state.hook_specs, :stop) do
-      assistant = Enum.find(Enum.reverse(messages), &match?(%{role: :assistant}, &1))
-      ctx = hook_ctx(state)
-
-      event_data = %{
-        stop_hook_active: stop_hook_active,
-        last_assistant_message: message_text(assistant)
-      }
-
-      {outcome, _warnings} = Sigma.Coding.Hooks.dispatch(:stop, state.hook_specs, ctx, event_data)
-
-      case outcome do
-        {:block, reason} when not stop_hook_active ->
-          {:continue, Message.user("hook_stop_#{System.unique_integer([:positive])}", reason)}
-
-        _outcome ->
-          :stop
-      end
-    else
-      :stop
-    end
+  def __backplane_stop_hook__(state, turn_id, messages, stop_hook_active) do
+    Hooks.stop(:stop, state.hook_specs, hook_ctx(state, turn_id), messages, stop_hook_active)
   end
 
   @doc false
@@ -2542,6 +2571,10 @@ defmodule Sigma.Agent do
       )
       |> Keyword.put(:transcript_path, transcript_path(state))
       |> Keyword.put(:hook_specs, state.hook_specs)
+      |> Keyword.put(:model, hook_ctx(state).model)
+      |> Keyword.put(:mcp_hook_executor, Sigma.Coding.MCP.hook_executor(state.mcp_session))
+      |> Keyword.put(:hook_async_runtime, state.hook_async_runtime)
+      |> Keyword.put(:hook_async_callback, Hooks.async_callback(state.hook_async_contexts))
       |> Keyword.put(:tool_state, state.tool_state)
       |> Keyword.put(:on_tool_fact, fn fact -> emit(state, {:metrics, :tool_finished, fact}) end)
       |> Keyword.put(:on_tool_update, fn update ->

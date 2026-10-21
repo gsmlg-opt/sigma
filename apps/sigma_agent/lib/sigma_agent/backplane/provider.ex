@@ -5,6 +5,7 @@ defmodule Sigma.Agent.Backplane.Provider do
 
   alias Sigma.Ai.{Provider, ProviderEvent, ProviderRequest, ProviderUsage}
   alias Sigma.Agent.Message
+  alias Sigma.Agent.Hooks.ModelRequest
 
   @impl true
   def stream(request, %{host: host, owner: owner}) do
@@ -42,6 +43,23 @@ defmodule Sigma.Agent.Backplane.Provider do
 
     acknowledge_request_start(owner, request, context)
 
+    observer =
+      ModelRequest.start(
+        Map.get(host, :hook_specs, []),
+        Map.get(host, :hook_context, %{}),
+        request
+      )
+
+    stream_request(host, owner, request, observer)
+  rescue
+    exception ->
+      [%{type: :response_failed, error: Sigma.Ai.ProviderError.from_exception(exception)}]
+  catch
+    kind, reason ->
+      [%{type: :response_failed, error: Sigma.Ai.ProviderError.from_exception({kind, reason})}]
+  end
+
+  defp stream_request(host, owner, request, observer) do
     host.provider
     |> Provider.stream(request)
     |> Stream.transform(
@@ -49,8 +67,10 @@ defmodule Sigma.Agent.Backplane.Provider do
       fn event, request ->
         {mapped, request} = map_event(event, request)
         send_owner(owner, {:backplane_request_progress, request})
+        ModelRequest.progress(observer, request)
 
         if event.type in [:response_completed, :response_failed] do
+          ModelRequest.finish(observer, request, Map.get(event, :error))
           ref = make_ref()
           send_owner(owner, {:backplane_provider_boundary, self(), ref, finish_request(request)})
 
@@ -62,16 +82,19 @@ defmodule Sigma.Agent.Backplane.Provider do
         {List.wrap(mapped), request}
       end,
       fn request ->
+        ModelRequest.finish(observer, request)
         send_owner(owner, {:backplane_request_finished, finish_request(request)})
       end
     )
   rescue
     exception ->
       error = Sigma.Ai.ProviderError.from_exception(exception)
+      ModelRequest.finish(observer, %{request | status: :failed}, error)
       [%{type: :response_failed, error: error}]
   catch
     kind, reason ->
       error = Sigma.Ai.ProviderError.from_exception({kind, reason})
+      ModelRequest.finish(observer, %{request | status: :failed}, error)
       [%{type: :response_failed, error: error}]
   end
 

@@ -81,6 +81,8 @@ defmodule Sigma.Agent.Backplane.Engine do
       log_session_id: state.log_session_id,
       initial_prompt: initial_prompt,
       stop_hook_active: stop_hook_active,
+      hook_specs: state.hook_specs,
+      hook_context: Sigma.Agent.__backplane_hook_context__(state, turn_id),
       initial_message: initial_message,
       build_context: &Sigma.Agent.__backplane_build_context__(state, &1, catalog.tools),
       context_error: &Sigma.Agent.__backplane_context_error__(state, &1),

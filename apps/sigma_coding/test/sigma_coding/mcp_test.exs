@@ -68,6 +68,14 @@ defmodule Sigma.Coding.MCPTest do
                timeout: 5_000
              )
 
+    hook_executor = Sigma.Coding.MCP.hook_executor(session)
+
+    assert {:ok, %{exit: 0, stdout: "hook result", stderr: ""}} =
+             hook_executor.("fixture", "echo", %{"text" => "hook result"}, 5_000)
+
+    assert {:error, "MCP hook server missing is not connected"} =
+             hook_executor.("missing", "echo", %{}, 5_000)
+
     assert :ok = Sigma.Coding.MCP.stop(session)
   end
 
