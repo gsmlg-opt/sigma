@@ -63,12 +63,73 @@ defmodule Sigma.Web.ProjectHooksLiveTest do
 
       assert html =~ "Project Hooks"
       assert html =~ ConfigManager.project_hooks_file(workdir)
+      assert length(Floki.find(Floki.parse_document!(html), "[data-hook-event]")) == 14
+      assert length(Floki.find(Floki.parse_document!(html), "[data-hook-help]")) == 14
+      view |> element("#project-hooks-event-PermissionRequest > summary") |> render_click()
+      view |> element("#project-hooks-help-PermissionRequest > summary") |> render_click()
+
+      assert has_element?(
+               view,
+               "#project-hooks-help-PermissionRequest[open] [data-hook-input-example]"
+             )
+
+      assert has_element?(
+               view,
+               "#project-hooks-help-PermissionRequest [data-hook-output-example]"
+             )
+
+      refute File.exists?(ConfigManager.project_hooks_file(workdir))
 
       hooks_json = ~s({"hooks":{"SessionStart":[]}})
-      render_submit(view, "save_hooks", %{"hooks_json" => hooks_json})
+      view |> form("#project-hooks-form", hooks_json: hooks_json) |> render_submit()
 
       assert File.read!(ConfigManager.project_hooks_file(workdir)) == hooks_json
       refute File.exists?(ConfigManager.project_hooks_file(unregistered_workdir))
+    end)
+  end
+
+  @tag :tmp_dir
+  test "guided project command editing is isolated from global and other project hooks", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    with_agent_dir(tmp_dir, fn ->
+      workdir = Path.join(tmp_dir, "registered")
+      other_workdir = Path.join(tmp_dir, "other")
+      File.mkdir_p!(workdir)
+      {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")
+      global_json = ~s({"hooks":{"Stop":[]},"global":true})
+      :ok = ConfigManager.save_hooks_json(ConfigManager.hooks_file(), global_json)
+      encoded_repository = Base.url_encode64(workdir, padding: false)
+      route = "/repository/#{encoded_repository}/hooks"
+      path = ConfigManager.project_hooks_file(workdir)
+      {:ok, view, _html} = live(conn, route)
+
+      view |> element("#project-hooks-add-PreToolUse") |> render_click()
+
+      view
+      |> form("#project-hooks-command-form",
+        command: %{
+          command: "echo project",
+          matcher: "Bash",
+          timeout: "25"
+        }
+      )
+      |> render_submit()
+
+      assert Jason.decode!(File.read!(path))["hooks"]["PreToolUse"] == [
+               %{
+                 "matcher" => "Bash",
+                 "hooks" => [%{"type" => "command", "command" => "echo project", "timeout" => 25}]
+               }
+             ]
+
+      {:ok, reloaded, html} = live(conn, route)
+      assert html =~ "echo project"
+      reloaded |> element("#project-hooks-PreToolUse-0-0-remove") |> render_click()
+      assert Jason.decode!(File.read!(path))["hooks"]["PreToolUse"] == []
+      assert File.read!(ConfigManager.hooks_file()) == global_json
+      refute File.exists?(ConfigManager.project_hooks_file(other_workdir))
     end)
   end
 
