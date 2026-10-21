@@ -443,22 +443,29 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   @tag :tmp_dir
-  test "loads session while agent startup is still busy", %{conn: conn, tmp_dir: tmp_dir} do
+  test "renders while runtime session startup is busy", %{conn: conn, tmp_dir: tmp_dir} do
     with_agent_config(tmp_dir, fn ->
       write_provider_configs("openai", "smart", %{"openai" => ["smart"]})
-      trust_workdir!(@workdir)
-      write_session_start_hook!(@workdir, "sleep 2", timeout: 3)
+      {:ok, %{repository: repository}} = Sigma.Agent.Runtime.ensure_repository(@workdir)
+      :ok = :sys.suspend(repository)
 
-      {:ok, view, _html} = live(conn, session_path(unique_session_id("slow-start")))
-      html = render(view)
+      view =
+        try do
+          {:ok, view, _html} = live(conn, session_path(unique_session_id("slow-start")))
+          html = render(view)
 
-      assert html =~ ~s(phx-hook="SigmaReactChat")
-      refute html =~ "Could not load session"
-      refute html =~ "pending_user_questions"
+          assert html =~ ~s(phx-hook="SigmaReactChat")
+          refute html =~ "Could not load session"
+          refute html =~ "pending_user_questions"
+          view
+        after
+          :sys.resume(repository)
+        end
 
       loaded_html = render_async(view, 4_000)
       assert loaded_html =~ ~s(phx-hook="SigmaReactChat")
       refute loaded_html =~ "Could not load session"
+      assert chat_snapshot(view).admission.canSubmit
     end)
   end
 
@@ -1895,17 +1902,28 @@ defmodule Sigma.Web.SessionLiveTest do
   test "rejects send while the session is still loading", %{conn: conn, tmp_dir: tmp_dir} do
     with_agent_config(tmp_dir, fn ->
       write_provider_configs("openai", "smart", %{"openai" => ["smart"]})
-      trust_workdir!(@workdir)
-      write_session_start_hook!(@workdir, "sleep 2", timeout: 3)
-      {:ok, view, _html} = live(conn, session_path(unique_session_id("hook-not-ready")))
+      {:ok, %{repository: repository}} = Sigma.Agent.Runtime.ensure_repository(@workdir)
+      :ok = :sys.suspend(repository)
 
-      assert render_click(view, "continue_session", %{"msg-id" => "stale-answer"}) =~
-               "Session is still loading"
+      view =
+        try do
+          {:ok, view, _html} = live(conn, session_path(unique_session_id("not-ready")))
 
-      html = render_hook(view, "send_prompt", %{"value" => "hello", "images" => []})
-      assert_reply(view, %{status: "rejected"})
-      assert html =~ "Session is still loading"
-      refute_receive {:agent_start, _}, 200
+          assert render_click(view, "continue_session", %{"msg-id" => "stale-answer"}) =~
+                   "Session is still loading"
+
+          html = render_hook(view, "send_prompt", %{"value" => "hello", "images" => []})
+          assert_reply(view, %{status: "rejected"})
+          assert html =~ "Session is still loading"
+          refute_receive {:agent_start, _}, 200
+          view
+        after
+          :sys.resume(repository)
+        end
+
+      loaded_html = render_async(view, 4_000)
+      refute loaded_html =~ "Could not load session"
+      assert chat_snapshot(view).admission.canSubmit
     end)
   end
 
@@ -3087,37 +3105,6 @@ defmodule Sigma.Web.SessionLiveTest do
   defp register_repo!(workdir, name) do
     File.mkdir_p!(workdir)
     {:ok, _repo} = RepoManager.add_repo(workdir, name: name)
-  end
-
-  defp trust_workdir!(workdir) do
-    agent_dir = Sigma.Session.ConfigManager.agent_dir()
-    File.mkdir_p!(agent_dir)
-
-    File.write!(
-      Path.join(agent_dir, "repos.jsonl"),
-      Jason.encode!(%{"path" => Path.expand(workdir), "trusted" => true}) <> "\n"
-    )
-  end
-
-  defp write_session_start_hook!(workdir, command, opts) do
-    hooks_dir = Path.join(workdir, ".pi")
-    File.mkdir_p!(hooks_dir)
-
-    File.write!(
-      Path.join(hooks_dir, "hooks.json"),
-      Jason.encode!([
-        %{
-          "event" => "SessionStart",
-          "hooks" => [
-            %{
-              "hooks" => [
-                %{"command" => command, "timeout" => Keyword.fetch!(opts, :timeout)}
-              ]
-            }
-          ]
-        }
-      ])
-    )
   end
 
   defp session_path(session_id) do
