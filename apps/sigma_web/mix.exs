@@ -29,15 +29,15 @@ defmodule Sigma.Web.MixProject do
 
   defp deps do
     [
-      {:phoenix, "~> 1.8.15"},
-      {:phoenix_live_view, "~> 1.1"},
+      {:phoenix, "~> 1.8.16"},
+      {:phoenix_live_view, "~> 1.2.13"},
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_reload, "~> 1.5", only: :dev},
       {:jason, "~> 1.4"},
       {:plug_cowboy, "~> 2.7"},
       {:gettext, "~> 1.0"},
-      {:duskmoon_bundler, "~> 9.16.16"},
-      {:phoenix_duskmoon, "~> 9.16.16"},
+      {:duskmoon_bundler, "~> 10.0.2"},
+      {:phoenix_duskmoon, "~> 10.0.10"},
       {:sigma_agent, in_umbrella: true},
       {:sigma_session, in_umbrella: true},
       {:sigma_logs, in_umbrella: true},

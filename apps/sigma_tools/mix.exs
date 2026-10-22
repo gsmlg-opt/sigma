@@ -26,7 +26,7 @@ defmodule Sigma.Tools.MixProject do
       {:sigma_coding, in_umbrella: true},
       {:sigma_session, in_umbrella: true},
       {:jason, "~> 1.4"},
-      {:backplane_agent_runtime, "~> 1.10.16"}
+      {:backplane_agent_runtime, "~> 1.10.28"}
     ]
   end
 end
