@@ -324,7 +324,7 @@ defmodule Sigma.Web.ProjectSkillsLive do
             </td>
             <td data-label="Invocation" role="cell" class="min-w-36">
               <span class="inline-flex rounded-full bg-surface-container-high px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-on-surface-variant">
-                {if skill.disable_model_invocation?, do: "Manual", else: "Model"}
+                Manual
               </span>
             </td>
             <td data-label="Description" role="cell" class="settings-skills-description-cell">

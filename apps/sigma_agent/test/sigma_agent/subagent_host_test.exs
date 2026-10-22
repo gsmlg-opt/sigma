@@ -2,6 +2,7 @@ defmodule Sigma.Agent.SubagentHostTest do
   use ExUnit.Case, async: false
 
   alias Sigma.Agent.{PublicRuntime, Runtime, Subagents}
+  alias Sigma.Agent.TestTools.{FileWrite, HostInput}
 
   defmodule Provider do
     @behaviour Sigma.Ai.Provider
@@ -92,7 +93,7 @@ defmodule Sigma.Agent.SubagentHostTest do
 
   @moduletag :tmp_dir
 
-  test "writerless Runtime sessions run with only their available tools", ctx do
+  test "writerless Runtime sessions complete chat with an empty tool catalog", ctx do
     session_id = "writerless"
 
     {:ok, handle} =
@@ -101,7 +102,7 @@ defmodule Sigma.Agent.SubagentHostTest do
         backplane_runtime_path: Path.join(ctx.repo, "writerless-runtime"),
         provider: Provider,
         model: %{id: "test", provider: "test", api: "test"},
-        tools: [Sigma.Tools.Read],
+        tools: [],
         hook_specs: [],
         options: [test_pid: self()]
       )
@@ -112,7 +113,7 @@ defmodule Sigma.Agent.SubagentHostTest do
     :ok = Sigma.Agent.subscribe(handle.agent)
     assert {:accepted, _} = Sigma.Agent.prompt(handle.agent, "ordinary writerless turn")
     root = provider(session_id)
-    assert Enum.map(root.params.context.tools, & &1.name) == ["read"]
+    assert Enum.map(root.params.context.tools, & &1.name) == []
     finish(root.pid)
 
     assert_receive {:agent_end, messages}, 5_000
@@ -225,7 +226,7 @@ defmodule Sigma.Agent.SubagentHostTest do
     assert eventually(fn -> roster(ctx.host).counts.stopped == 1 end)
   end
 
-  @tag tools: [Sigma.Tools.Write]
+  @tag tools: [FileWrite]
   @tag permission_config: %{default: :allow, rules: %{}}
   test "concurrent children write separate files and retain only their own tool history", ctx do
     Sigma.Agent.prompt(ctx.agent, "delegate file creation")
@@ -244,18 +245,21 @@ defmodule Sigma.Agent.SubagentHostTest do
       end)
 
     for {name, child} <- children do
-      call(child.pid, "write", %{"path" => "#{name}.txt", "content" => "written by #{name}"})
+      call(child.pid, "test_fixture_file_write", %{
+        "path" => "#{name}.txt",
+        "content" => "written by #{name}"
+      })
     end
 
     for {name, child} <- children do
       continued = provider(child.params.session_id)
       assert File.read!(Path.join(ctx.repo, "#{name}.txt")) == "written by #{name}"
       results = Enum.filter(continued.params.context.messages, &(&1.role == :tool_result))
-      assert [%{tool_name: "write", is_error: false} = result] = results
+      assert [%{tool_name: "test_fixture_file_write", is_error: false} = result] = results
 
       calls =
         for %{role: :assistant, content: blocks} <- continued.params.context.messages,
-            %{type: :tool_call, name: "write"} = block <- blocks,
+            %{type: :tool_call, name: "test_fixture_file_write"} = block <- blocks,
             do: block
 
       assert [write_call] = calls
@@ -269,7 +273,7 @@ defmodule Sigma.Agent.SubagentHostTest do
     assert eventually(fn -> roster(ctx.host).counts.stopped == 2 end)
     assert eventually(fn -> Sigma.Agent.status(ctx.agent).phase == :completed end)
     {:ok, persisted} = Sigma.Session.Log.snapshot(ctx.path)
-    refute Enum.any?(persisted.messages, &(Map.get(&1, :tool_name) == "write"))
+    refute Enum.any?(persisted.messages, &(Map.get(&1, :tool_name) == "test_fixture_file_write"))
 
     for row <- roster(ctx.host).agents do
       name = Path.basename(row.agent_path)
@@ -278,13 +282,13 @@ defmodule Sigma.Agent.SubagentHostTest do
 
       calls =
         for %{role: :assistant, content: blocks} <- child_log.messages,
-            %{type: :tool_call, name: "write"} = block <- blocks,
+            %{type: :tool_call, name: "test_fixture_file_write"} = block <- blocks,
             do: block
 
       assert [write_call] = calls
       assert write_call.arguments == %{"path" => "#{name}.txt", "content" => "written by #{name}"}
 
-      assert [%{role: :tool_result, tool_name: "write"} = result] =
+      assert [%{role: :tool_result, tool_name: "test_fixture_file_write"} = result] =
                Enum.filter(child_log.messages, &(&1.role == :tool_result))
 
       assert result.tool_call_id == write_call.id
@@ -783,7 +787,7 @@ defmodule Sigma.Agent.SubagentHostTest do
     finish(root.pid)
   end
 
-  @tag tools: [Sigma.Coding.Tools.AskUserQuestion]
+  @tag tools: [HostInput]
   @tag permission_config: %{default: :ask, rules: %{}}
   test "explicit headless resolvers receive exact child source and handle real questions", ctx do
     test = self()
@@ -815,7 +819,7 @@ defmodule Sigma.Agent.SubagentHostTest do
     child = child_provider()
     root = provider("root")
     arguments = %{"question" => "Continue?", "options" => ["yes", "no"]}
-    call(child.pid, "AskUserQuestion", arguments)
+    call(child.pid, "test_fixture_host_input", arguments)
 
     assert_receive {:headless_permission, permission}, 5_000
     assert permission.source.agent_path == "/root/a"
@@ -880,7 +884,7 @@ defmodule Sigma.Agent.SubagentHostTest do
     assert {:error, :subagent_resources_active} = Subagents.can_stop(ctx.host)
   end
 
-  @tag tools: [Sigma.Coding.Tools.AskUserQuestion]
+  @tag tools: [HostInput]
   @tag permission_config: %{default: :ask, rules: %{}}
   test "headless child without a resolver returns approval required without waiting", ctx do
     Sigma.Agent.prompt(ctx.agent, "delegate")
@@ -894,11 +898,11 @@ defmodule Sigma.Agent.SubagentHostTest do
 
     child = child_provider()
     root = provider("root")
-    call(child.pid, "AskUserQuestion", %{"question" => "Continue?"})
+    call(child.pid, "test_fixture_host_input", %{"question" => "Continue?"})
     child = provider(child.params.session_id)
     result = List.last(child.params.context.messages)
     assert result.is_error
-    assert inspect(result.content) =~ "Approval required for tool: AskUserQuestion"
+    assert inspect(result.content) =~ "Approval required for tool: test_fixture_host_input"
     assert Subagents.pending(ctx.host) == []
     finish(child.pid)
     finish(root.pid)

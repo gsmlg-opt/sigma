@@ -113,6 +113,15 @@ defmodule Sigma.Web.ProjectSkillsLiveTest do
       assert html =~ "Project Skills"
       assert html =~ "repo-only"
       assert html =~ "Repository scoped skill"
+
+      assert html
+             |> Floki.parse_document!()
+             |> Floki.find("td[data-label='Invocation']")
+             |> Enum.map(&(Floki.text(&1) |> String.trim())) == ["Manual"]
+
+      [skill] = Sigma.Session.Skills.list_repository(workdir).skills
+      refute skill.disable_model_invocation?
+
       assert html =~ ~s(id="remote-skill-sources")
       assert html =~ "Remote One"
       assert html =~ "configured"

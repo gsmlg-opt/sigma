@@ -1,5 +1,10 @@
 # S9 Phase 1 — Extension / Feature Expansion 执行计划
 
+> 2026-10-23：本文保留 S9 原交付记录。旧 `sigma_tools` 工具与
+> `ExtensionRegistry` 已按[退役设计](../superpowers/specs/2026-10-23-legacy-tools-retirement-design.md)
+> 移除，下面对应的工具实现和扩展注册建议不再适用；当前可用性见
+> [tools.md](../features/tools.md)。
+
 - Status: **Complete**（S0–S8 已完成；Phase 1 WO-1–WO-5 已交付）
 - Date: 2026-09-04
 - Depends on: [contract-stabilization-v2-execution-report.md](contract-stabilization-v2-execution-report.md)（Complete）

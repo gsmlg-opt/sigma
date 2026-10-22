@@ -306,6 +306,17 @@ defmodule Sigma.Web.SettingsLiveTest do
       assert html =~ "global-skill"
       assert html =~ "Global skill description"
       assert html =~ "other-skill"
+
+      assert html
+             |> Floki.parse_document!()
+             |> Floki.find("td[data-label='Invocation']")
+             |> Enum.map(&(Floki.text(&1) |> String.trim())) == ["Manual", "Manual"]
+
+      assert Enum.all?(
+               Sigma.Session.Skills.list_global().skills,
+               &(!&1.disable_model_invocation?)
+             )
+
       assert html =~ ~s(id="settings-remote-skill-sources")
       assert html =~ "Remote One"
       assert html =~ "Configured"

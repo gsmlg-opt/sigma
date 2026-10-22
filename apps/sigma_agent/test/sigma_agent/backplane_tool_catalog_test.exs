@@ -127,14 +127,15 @@ defmodule Sigma.Agent.BackplaneToolCatalogTest do
              {:ok, %{"id" => 1}}
   end
 
-  test "the current application tool set passes strict admission without changing its names" do
-    tools = Sigma.Tools.default_tools()
-    names = Enum.map(tools, &Sigma.Coding.Tool.name/1)
-    authority = %{caller: "root", run_id: "turn-1", grants: names, tool_revision: 1}
+  test "an empty built-in catalog admits no tools or executable grants" do
+    authority = %{caller: "root", run_id: "turn-1", grants: [], tool_revision: 1}
 
-    assert {:ok, bundle} = ToolCatalog.admit(tools, authority, fn _ -> :unused end)
-    assert MapSet.new(Enum.map(bundle.tools, & &1.name)) == MapSet.new(names)
-    assert bundle.authority.grants == names
+    assert {:ok, bundle} =
+             ToolCatalog.admit([], authority, fn _ -> flunk("no tool can execute") end)
+
+    assert bundle.tools == []
+    assert bundle.registry.tools == %{}
+    assert bundle.authority.grants == []
     assert bundle.rejected == []
   end
 

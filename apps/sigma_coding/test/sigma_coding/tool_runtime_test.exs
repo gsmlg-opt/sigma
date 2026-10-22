@@ -90,18 +90,52 @@ defmodule Sigma.Coding.ToolRuntimeTest do
     end
   end
 
+  defmodule CancellationProbe do
+    @behaviour Sigma.Coding.Tool
+
+    @impl true
+    def name, do: "cancellation_probe"
+    @impl true
+    def description, do: "Delays a test side effect"
+    @impl true
+    def schema, do: %{}
+    @impl true
+    def metadata, do: %{effect: :process, concurrency: :exclusive, interruptible: true}
+
+    @impl true
+    def execute(id, %{"path" => path}, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:started, id, self(), path})
+      Process.sleep(1_000)
+      File.write!(path, "late")
+      {:ok, %{content: [%{type: :text, text: "done"}], details: %{}}}
+    end
+  end
+
+  defmodule UnannotatedReadProbe do
+    @behaviour Sigma.Coding.Tool
+
+    @impl true
+    def name, do: "read"
+    @impl true
+    def description, do: "Tests conservative metadata for a historical name"
+    @impl true
+    def schema, do: %{}
+    @impl true
+    def execute(_id, _params, _opts), do: raise("metadata-only probe")
+  end
+
   setup do
     task_supervisor = start_supervised!({Task.Supervisor, name: unique_name()})
     {:ok, task_supervisor: task_supervisor}
   end
 
-  test "derives explicit built-in metadata and conservative MCP defaults" do
+  test "derives explicit tool metadata and conservative MCP defaults" do
     assert %ToolMetadata{
              effect: :write,
              concurrency: :sequential,
              interruptible: false,
              discoverable: true
-           } = Tool.metadata(Sigma.Coding.Tools.Write, %{arguments: %{"path" => "file"}}, cwd: File.cwd!())
+           } = Tool.metadata(WriteProbe, %{arguments: %{"path" => "file"}}, cwd: File.cwd!())
 
     mcp_tool = %Sigma.Coding.MCP.Tool{name: "mcp__server__unknown", schema: %{}}
 
@@ -113,7 +147,19 @@ defmodule Sigma.Coding.ToolRuntimeTest do
            } = Tool.metadata(mcp_tool, %{arguments: %{}}, cwd: File.cwd!())
   end
 
-  test "parallel shared work respects max_parallel and stable result order", %{task_supervisor: ts} do
+  test "historical tool names do not receive implicit privileges" do
+    assert %ToolMetadata{
+             effect: :process,
+             concurrency: :sequential,
+             interruptible: true,
+             approval_tier: :guarded,
+             render_hint: :structured
+           } = Tool.metadata(UnannotatedReadProbe, %{arguments: %{}}, cwd: File.cwd!())
+  end
+
+  test "parallel shared work respects max_parallel and stable result order", %{
+    task_supervisor: ts
+  } do
     calls = for id <- ~w(one two three), do: call(id, "shared_probe", %{"path" => id})
     test_pid = self()
 
@@ -174,7 +220,10 @@ defmodule Sigma.Coding.ToolRuntimeTest do
   end
 
   @tag :tmp_dir
-  test "sequential writes do not overlap even with independent resources", %{task_supervisor: ts, tmp_dir: tmp_dir} do
+  test "sequential writes do not overlap even with independent resources", %{
+    task_supervisor: ts,
+    tmp_dir: tmp_dir
+  } do
     first_path = Path.join(tmp_dir, "first")
     second_path = Path.join(tmp_dir, "second")
 
@@ -257,45 +306,32 @@ defmodule Sigma.Coding.ToolRuntimeTest do
   end
 
   @tag :tmp_dir
-  test "batch cancellation terminates Bash and returns one cancelled result", %{
+  test "batch cancellation terminates interruptible work and prevents delayed side effects", %{
     task_supervisor: ts,
     tmp_dir: tmp_dir
   } do
     target = Path.join(tmp_dir, "late")
     signal = make_ref()
     test_pid = self()
-    handler_id = {__MODULE__, self(), :cancellation_trace}
-    session_id = "bash-cancel-#{System.unique_integer([:positive])}"
-
-    :telemetry.attach(
-      handler_id,
-      [:sigma, :tool, :call, :start],
-      fn _event, _measurements, metadata, _config ->
-        if metadata.session_id == session_id and metadata.tool_name == "bash" do
-          send(test_pid, {:tool_task_started, self()})
-        end
-      end,
-      nil
-    )
-
-    on_exit(fn -> :telemetry.detach(handler_id) end)
 
     batch =
       Task.async(fn ->
         Dispatcher.dispatch_batch(
-          [call("bash", "bash", %{"command" => "sleep 1; touch #{target}"})],
-          [Sigma.Coding.Tools.Bash],
+          [call("cancel", "cancellation_probe", %{"path" => target})],
+          [CancellationProbe],
           task_supervisor: ts,
           cwd: tmp_dir,
-          session_id: session_id,
+          test_pid: test_pid,
           signal: signal
         )
       end)
 
-    assert_receive {:tool_task_started, _tool_task}
+    assert_receive {:started, "cancel", tool_pid, ^target}
+    tool_ref = Process.monitor(tool_pid)
     send(batch.pid, {:abort, signal})
 
     assert [{_call, {:error, %ToolError{kind: :cancelled}}}] = Task.await(batch)
+    assert_receive {:DOWN, ^tool_ref, :process, ^tool_pid, _}, 1_000
     Process.sleep(1_100)
     refute File.exists?(target)
   end
@@ -445,7 +481,9 @@ defmodule Sigma.Coding.ToolRuntimeTest do
   end
 
   @tag :capture_log
-  test "crashes and malformed results fail closed without crashing the caller", %{task_supervisor: ts} do
+  test "crashes and malformed results fail closed without crashing the caller", %{
+    task_supervisor: ts
+  } do
     calls = [
       call("crash", "shared_probe", %{"action" => "crash"}),
       call("malformed", "shared_probe", %{"action" => "malformed"})

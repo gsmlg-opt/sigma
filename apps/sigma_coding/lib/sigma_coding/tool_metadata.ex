@@ -34,7 +34,7 @@ defmodule Sigma.Coding.ToolMetadata do
 
   def resolve(tool, tool_call, opts) do
     explicit = explicit_metadata(tool)
-    defaults = defaults(tool, Sigma.Coding.Tool.name(tool))
+    defaults = defaults(tool)
     metadata = Map.merge(defaults, explicit)
     resource_keys = resource_keys(metadata, tool_call.arguments, opts)
 
@@ -47,7 +47,7 @@ defmodule Sigma.Coding.ToolMetadata do
 
   defp explicit_metadata(_tool), do: %{}
 
-  defp defaults(%MCPTool{}, _name) do
+  defp defaults(%MCPTool{}) do
     %{
       effect: :network,
       concurrency: :sequential,
@@ -59,79 +59,7 @@ defmodule Sigma.Coding.ToolMetadata do
     }
   end
 
-  defp defaults(_tool, name) when name in ["read", "search", "find", "grep", "glob", "ls"] do
-    %{
-      effect: :read,
-      concurrency: :shared,
-      interruptible: true,
-      default_deadline_ms: 30_000,
-      approval_tier: :standard,
-      discoverable: true,
-      render_hint: :text
-    }
-  end
-
-  defp defaults(_tool, name) when name in ["write", "edit"] do
-    %{
-      effect: :write,
-      concurrency: :sequential,
-      interruptible: false,
-      default_deadline_ms: 30_000,
-      approval_tier: :guarded,
-      discoverable: true,
-      render_hint: :diff
-    }
-  end
-
-  defp defaults(_tool, "bash") do
-    %{
-      effect: :process,
-      concurrency: :exclusive,
-      interruptible: true,
-      default_deadline_ms: 120_000,
-      approval_tier: :guarded,
-      discoverable: true,
-      render_hint: :terminal
-    }
-  end
-
-  defp defaults(_tool, name) when name in ["ask", "AskUserQuestion"] do
-    %{
-      effect: :process,
-      concurrency: :sequential,
-      interruptible: true,
-      default_deadline_ms: 300_000,
-      approval_tier: :standard,
-      discoverable: true,
-      render_hint: :question
-    }
-  end
-
-  defp defaults(_tool, "todo") do
-    %{
-      effect: :write,
-      concurrency: :sequential,
-      interruptible: true,
-      default_deadline_ms: 5_000,
-      approval_tier: :standard,
-      discoverable: true,
-      render_hint: :structured
-    }
-  end
-
-  defp defaults(_tool, "url_fetch") do
-    %{
-      effect: :network,
-      concurrency: :shared,
-      interruptible: true,
-      default_deadline_ms: 30_000,
-      approval_tier: :guarded,
-      discoverable: true,
-      render_hint: :text
-    }
-  end
-
-  defp defaults(_tool, _name) do
+  defp defaults(_tool) do
     %{
       effect: :process,
       concurrency: :sequential,

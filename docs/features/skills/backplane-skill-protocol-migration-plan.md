@@ -1,5 +1,10 @@
 # Backplane Skill Protocol Migration Plan
 
+> 2026-10-23：下面记录迁移时的实现与验证。旧模型激活工具及
+> `apps/sigma_tools/test` 已随[旧内置工具退役](../../superpowers/specs/2026-10-23-legacy-tools-retirement-design.md)
+> 移除；手动调用、技能协议服务和资源授权继续保留。当前验收使用
+> Agent skill-invocation、Session skills/slash-command、PathUtils 和 skills API 测试。
+
 | Item | Value |
 | --- | --- |
 | Status | Implementation complete; E2E deferred and baseline unused-lock check still fails |

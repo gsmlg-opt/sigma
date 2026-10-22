@@ -15,6 +15,8 @@ defmodule Sigma.Web.SkillsControllerTest do
       response = Jason.decode!(conn.resp_body)
       assert conn.status == 200
       assert response["skills"]["localCatalog"]
+      assert response["skills"]["manualInvocation"]
+      assert response["skills"]["modelActivation"] == false
       assert response["skills"]["remoteRead"] == false
       assert response["skills"]["remoteSources"] == []
       assert response["skills"]["conditionalPublication"] == false

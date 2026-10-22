@@ -157,7 +157,6 @@ defmodule Sigma.Web.SessionLive do
         "# Worktree Context\nYou are working in a git worktree for branch `#{session_branch}` at `#{effective_cwd}`. The project root is at `#{workdir}`."
       end
 
-    builtin_tools = Sigma.Tools.default_tools()
     mcp_servers = ConfigManager.mcp_servers_for(mcp_server_ids)
     context_discovery = Sigma.Session.ContextFiles.discover(nil, effective_cwd)
 
@@ -192,7 +191,7 @@ defmodule Sigma.Web.SessionLive do
                  session_context: session_context,
                  on_event: session_event_handler(repo_key, session_id),
                  permission_config: ConfigManager.get_permissions(),
-                 tools: builtin_tools,
+                 tools: [],
                  mcp_servers: mcp_servers,
                  messages: initial_messages,
                  cwd: effective_cwd,

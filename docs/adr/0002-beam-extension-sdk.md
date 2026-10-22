@@ -1,9 +1,15 @@
 # ADR 0002: BEAM-native Extension SDK boundary
 
-- Status: Accepted
+- Status: Superseded for legacy tool registration (2026-10-23)
 - Date: 2026-09-04
 - Scope: extension registration boundary across `sigma_coding` / `sigma_tools` / future OTP apps
 - Related: [S9 Phase 1 plan](../contracts/s9-phase1-plan.md) WO-3, [tools.md](../features/tools.md), [hooks design](../features/hooks/01-hooks-design.md), [protocol-v1.md](../contracts/protocol-v1.md), Tool Runtime V2 (`Sigma.Coding.Tool` / Dispatcher / metadata)
+
+The legacy first-party tool app and `ExtensionRegistry` described below have been
+retired. This ADR is retained as historical rationale, not an active registration
+API. Shared MCP dispatch, permissions and hooks remain in use. See the
+[retirement design](../superpowers/specs/2026-10-23-legacy-tools-retirement-design.md)
+and [current tool availability](../features/tools.md).
 
 ## Context
 

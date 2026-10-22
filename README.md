@@ -1,6 +1,6 @@
 # sigma
 
-`sigma` is an Elixir umbrella implementation of a `pi`-style AI coding agent. It combines a Phoenix LiveView chat UI, per-repository BEAM processes, streaming LLM providers, pi-compatible JSONL persistence, MCP and hook support, and an oh-my-pi-style coding-tool runtime.
+`sigma` is an Elixir umbrella implementation of a `pi`-style AI coding agent. It combines a Phoenix LiveView chat UI, per-repository BEAM processes, streaming LLM providers, pi-compatible JSONL persistence, MCP and hook support, and Backplane agent execution.
 
 The original TypeScript `pi` project is [earendil-works/pi](https://github.com/earendil-works/pi). A local checkout at `./source` is optional and gitignored; it is a porting reference, not part of the published tree.
 
@@ -12,8 +12,7 @@ The original TypeScript `pi` project is [earendil-works/pi](https://github.com/e
 | `sigma_protocol` | `Sigma.Protocol`, `Sigma.Agent.Message` | Versioned command/event envelopes, bounded JSON codec, and shared message types |
 | `sigma_agent` | `Sigma.Agent` | Repository/session supervisors, turn loop, context building, compaction, and tool-call orchestration |
 | `sigma_session` | `Sigma.Session` | pi-compatible config, repository list, context files, skills, slash commands, and JSONL replay/persistence |
-| `sigma_coding` | `Sigma.Coding` | Tool behaviour, dispatcher, permissions, MCP, and hooks |
-| `sigma_tools` | `Sigma.Tools` | First-party tools (`ask`, `read`, `write`, `bash`, `edit`, `search`, `find`) and apply_patch editing |
+| `sigma_coding` | `Sigma.Coding` | MCP tool hosting, shared dispatch, permissions, hooks, and terminal primitives |
 | `sigma_logs` | `Sigma.Logs` | Per-session in-memory debug log buffers for LLM, tool, and permission events |
 | `sigma_web` | `Sigma.Web` | Phoenix LiveView UI, routes, settings, and repository/session lifecycle |
 
@@ -25,7 +24,7 @@ The original TypeScript `pi` project is [earendil-works/pi](https://github.com/e
 - Append-only JSONL session journals with deterministic branch replay, compaction, serialized switch/fork operations, stable dump/export, and explicit relocation.
 - New sessions can run in the project directory, an existing git worktree, or a newly created worktree.
 - Context-file assembly from `AGENTS.md`/`CLAUDE.md`, ordered from filesystem root to the active workdir. `AGENTS.md` wins when both files exist in the same directory. Bounded imports, path scopes, sticky rules, provenance, diagnostics, preview traces, and explicit idle-only reload are supported by [Context Rules V2](docs/contracts/context-rules-v2.md).
-- Built-in tools: `ask`, `read`, `write`, `bash`, `search`, `find`, and `edit` using the `apply_patch` format.
+- Native Backplane V2 subagents and configured MCP tools. Legacy built-in coding tools have been retired; their Codex-aligned replacements are a separate development phase. See [tool availability](docs/features/tools.md).
 - Global and project MCP server selection, plus hook discovery for Pi, Codex, and Claude-style hook files.
 - Skills from `~/.agents/skills` and `<repo>/.agents/skills`.
 - DuskMoon UI components via `phoenix_duskmoon` and the DuskMoon web component packages.
@@ -79,7 +78,7 @@ legacy settings resolve to:
 }
 ```
 
-This YOLO-style mode runs built-in and newly discovered MCP tools without an
+This YOLO-style mode runs newly discovered MCP tools without an
 approval prompt. Guarded mode is opt-in through per-tool `ask` or `deny` rules:
 
 ```json

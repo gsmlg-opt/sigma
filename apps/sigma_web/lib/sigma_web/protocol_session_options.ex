@@ -85,7 +85,7 @@ defmodule Sigma.Web.ProtocolSessionOptions do
         system_prompt: nil,
         session_context: session_context,
         permission_config: ConfigManager.get_permissions(),
-        tools: Sigma.Tools.default_tools(),
+        tools: [],
         mcp_servers: ConfigManager.mcp_servers_for(mcp_ids),
         cwd: effective_cwd
       ]

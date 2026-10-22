@@ -38,7 +38,7 @@
 | --- | --- |
 | [hooks/](features/hooks/) | Hook 系统设计、PRD、实现与生命周期计划 |
 | [session-ui/](features/session-ui/) | Session UI Observability V2：PRD、契约、实施计划与报告 |
-| [tools.md](features/tools.md) | `sigma_tools` / oh-my-pi 风格工具面 PRD |
+| [tools.md](features/tools.md) | 当前工具可用性、旧内置工具退役边界与后续 Codex 接入 |
 | [providers.md](features/providers.md) | Provider 扩展 playbook：OpenAI-compat 配置、`stream_normalized`、错误/取消/fixture 清单 |
 
 ## Agent 协作（agents/）

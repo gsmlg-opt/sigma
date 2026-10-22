@@ -1,5 +1,12 @@
 # Sigma Codex Tools Replacement Implementation Plan
 
+> Historical full-replacement plan and 2026-10-07 dependency snapshot. The user
+> split retirement from redevelopment on 2026-10-23; use the
+> [retirement design](../specs/2026-10-23-legacy-tools-retirement-design.md) and
+> [retirement plan](2026-10-23-legacy-tools-retirement.md) for the current phase.
+> The upstream blocker table below records its original date, not current issue
+> or package status. Recheck published APIs before the later Codex integration.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 完整移除 Sigma 现有工具实现和旧工具执行路径，以 `backplane_agent_runtime` 的 Codex contracts、profiles 和执行内核提供工具；通过工具契约、实际行为、跨轮生命周期和端到端验证证明兼容性。

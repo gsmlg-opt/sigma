@@ -3,6 +3,7 @@ defmodule Sigma.Agent.BackplanePublicRuntimeTest do
 
   alias Sigma.Agent.{PublicRuntime, Runtime}
   alias Sigma.Protocol.{Codec, Envelope}
+  alias Sigma.Agent.TestTools.FileWrite
 
   @moduletag :tmp_dir
 
@@ -26,7 +27,7 @@ defmodule Sigma.Agent.BackplanePublicRuntimeTest do
               %{
                 type: :tool_call,
                 id: "write-call",
-                name: "write",
+                name: "test_fixture_file_write",
                 arguments: %{"path" => "result.txt", "content" => "written by Sigma"}
               }
             ],
@@ -50,6 +51,26 @@ defmodule Sigma.Agent.BackplanePublicRuntimeTest do
     end
   end
 
+  defmodule ChatProvider do
+    @behaviour Sigma.Ai.Provider
+
+    def stream(params) do
+      send(params.options[:test_pid], {:chat_catalog, params.context.tools})
+
+      message = %{
+        role: :assistant,
+        content: [%{type: :text, text: "Chat remains available."}],
+        model: "scripted",
+        provider: "test",
+        usage: %{input: 1, output: 1, total_tokens: 2},
+        stop_reason: :stop,
+        timestamp: System.system_time(:millisecond)
+      }
+
+      [{:start, %{message | content: []}}, {:done, :stop, message}]
+    end
+  end
+
   setup %{tmp_dir: root} do
     repo = Path.join(root, "repo")
     sessions = Path.join(root, "sessions")
@@ -68,6 +89,30 @@ defmodule Sigma.Agent.BackplanePublicRuntimeTest do
     end)
 
     %{repo: repo, sessions: sessions}
+  end
+
+  test "public runtime without configured tools chats with only native collaboration", ctx do
+    ctx =
+      Map.put(ctx, :engine_opts, provider: ChatProvider, tools: [], options: [test_pid: self()])
+
+    {context, subscription} = create_session(ctx, "no-builtins")
+
+    assert {:ok, _} =
+             command(context, "prompt.submit", "no-builtins", %{"content" => "Hello"})
+
+    collect_until(subscription, "turn.completed")
+    assert_receive {:chat_catalog, tools}
+
+    assert Enum.sort(Enum.map(tools, & &1.name)) ==
+             Enum.sort(Sigma.Agent.Subagents.collaboration_tools())
+
+    assert {:ok, snapshot} =
+             Sigma.Session.Log.snapshot(Path.join(ctx.sessions, "no-builtins.jsonl"))
+
+    assert [
+             %{role: :user, content: "Hello"},
+             %{role: :assistant, content: [%{type: :text, text: "Chat remains available."}]}
+           ] = snapshot.messages
   end
 
   test "public commands default to Backplane through a real write and durable history", ctx do
@@ -213,8 +258,8 @@ defmodule Sigma.Agent.BackplanePublicRuntimeTest do
           [
             provider: FileProvider,
             model: %{id: "scripted", provider: "test"},
-            tools: [Sigma.Coding.Tools.Write],
-            permission_config: %{default: :allow, rules: %{"write" => permission}}
+            tools: [FileWrite],
+            permission_config: %{default: :allow, rules: %{FileWrite.name() => permission}}
           ],
           Map.get(ctx, :engine_opts, [])
         )

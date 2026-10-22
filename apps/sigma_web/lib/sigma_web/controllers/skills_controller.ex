@@ -12,7 +12,7 @@ defmodule Sigma.Web.SkillsController do
       "skills" => %{
         "localCatalog" => true,
         "manualInvocation" => true,
-        "modelActivation" => true,
+        "modelActivation" => false,
         "remoteRead" =>
           Enum.any?(remote_sources, &(&1.enabled? and &1.status in ["configured", "offline"])),
         "remoteSources" => Enum.map(remote_sources, &json_remote_source/1),

@@ -12,7 +12,7 @@
 | `sigma_ai` | `Sigma.Ai` | Provider behaviour, Anthropic/OpenAI SSE streaming, event reducers |
 | `sigma_agent` | `Sigma.Agent` | Per-session GenServer turn loop, message transforms, tool execution flow |
 | `sigma_session` | `Sigma.Session` | JSONL replay/persistence, config, repo list, context files |
-| `sigma_coding` | `Sigma.Coding` | Tool behaviour, dispatcher, permissions, read/write/edit/bash/search tools |
+| `sigma_coding` | `Sigma.Coding` | MCP tool hosting, shared dispatch, permissions, hooks, terminal primitives |
 | `sigma_web` | `Sigma.Web` | Phoenix LiveView UI, routing, session process lifecycle |
 
 ## Commands
@@ -41,7 +41,8 @@ mix compile --warnings-as-errors
 
 - User prompts enter through `Sigma.Web.SessionLive`, call `Sigma.Agent.prompt/2`, stream through a `Sigma.Ai.Provider`, then persist/broadcast `Sigma.Agent` events.
 - Providers implement `Sigma.Ai.Provider.stream/1` and return lazy streams of tagged events such as `{:start, msg}`, `{:text_delta, idx, text, msg}`, `{:toolcall_*, ...}`, and `{:done, reason, msg}`.
-- Tool calls are dispatched by `Sigma.Coding.Dispatcher`; batch execution uses `Task.Supervisor` when one is supplied.
+- Configured MCP tools use `Sigma.Coding.Dispatcher`; native collaboration uses Backplane contracts. Shared dispatch and its task supervision remain host infrastructure.
+- Legacy built-in tools and their extension registry have been retired. Web and protocol sessions start with no built-in coding tools; do not restore the old tool app or implementations. Codex-aligned tools will use Backplane contracts in a separate phase.
 - Permission checks go through `Sigma.Coding.PermissionInterceptor` and `Sigma.Coding.PermissionPolicy`; LiveView approval waits must stay aligned with the interceptor timeout.
 - Session JSONL files are stored per repository/workdir. In dev, sessions live under `apps/sigma_web/priv/sessions/<base64-url-workdir>/`.
 - Known repositories are stored in dev at `apps/sigma_session/priv/repos.jsonl`.

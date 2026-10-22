@@ -108,9 +108,9 @@ defmodule Sigma.Web.SessionLiveTest do
           [
             %{
               type: :tool_call,
-              id: "permission_bash_call",
-              name: "bash",
-              arguments: %{"command" => "printf permitted > #{target}"}
+              id: "permission_probe_call",
+              name: "permission_probe",
+              arguments: %{"path" => target}
             }
           ]
         end
@@ -201,6 +201,37 @@ defmodule Sigma.Web.SessionLiveTest do
     {:ok, _repo} = RepoManager.add_repo(@workdir, name: "Repo")
 
     :ok
+  end
+
+  @tag :tmp_dir
+  test "new Web sessions advertise only native collaboration and complete chat", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    with_agent_config(tmp_dir, fn ->
+      with_mock_provider(CaptureProvider, fn ->
+        with_capture_provider_pid(self(), fn ->
+          write_selectable_provider_configs()
+          session_id = unique_session_id("retired-tools")
+          {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+          render_submit(view, "send_prompt", %{"value" => "hello", "images" => []})
+
+          assert_receive {:provider_params, params}, 3_000
+
+          assert Enum.sort(Enum.map(params.context.tools, & &1.name)) ==
+                   Enum.sort(
+                     ~w(spawn_agent send_message followup_task interrupt_agent list_agents wait_agent)
+                   )
+
+          assert_eventually(fn ->
+            snapshot = chat_snapshot(view)
+
+            not snapshot.runtime.active and
+              Enum.any?(snapshot.messages, &(&1.content == "I am a mock response."))
+          end)
+        end)
+      end)
+    end)
   end
 
   test "context limit defaults, synchronizes between views and survives runtime restart", %{
@@ -2951,7 +2982,7 @@ defmodule Sigma.Web.SessionLiveTest do
     assert {:ok, _permissions} =
              ConfigManager.update_permissions(%{
                "default" => "allow",
-               "rules" => %{"bash" => "ask"}
+               "rules" => %{"permission_probe" => "ask"}
              })
 
     with_mock_provider(PermissionToolProvider, fn ->
@@ -2960,6 +2991,7 @@ defmodule Sigma.Web.SessionLiveTest do
       on_exit(fn -> Application.delete_env(:sigma_web, :permission_test_path) end)
 
       allow_session_id = unique_session_id("permission-allow")
+      start_permission_session(allow_session_id)
       {:ok, allow_view, _html} = live_loaded(conn, session_path(allow_session_id))
       render_submit(allow_view, "send_prompt", %{"value" => "run", "images" => []})
 
@@ -2972,11 +3004,12 @@ defmodule Sigma.Web.SessionLiveTest do
       |> render_submit()
 
       assert_eventually(fn -> File.read(allow_target) == {:ok, "permitted"} end)
-      refute render(allow_view) =~ "Allow bash for this tool call?"
+      refute render(allow_view) =~ "Allow permission_probe for this tool call?"
 
       deny_target = Path.join(tmp_dir, "denied")
       Application.put_env(:sigma_web, :permission_test_path, deny_target)
       deny_session_id = unique_session_id("permission-deny")
+      start_permission_session(deny_session_id)
       {:ok, deny_view, _html} = live_loaded(conn, session_path(deny_session_id))
       render_submit(deny_view, "send_prompt", %{"value" => "run", "images" => []})
 
@@ -2990,7 +3023,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
       Process.sleep(50)
       refute File.exists?(deny_target)
-      refute render(deny_view) =~ "Allow bash for this tool call?"
+      refute render(deny_view) =~ "Allow permission_probe for this tool call?"
     end)
   end
 
@@ -3297,11 +3330,23 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   defp assert_permission_question(view) do
-    assert_eventually(fn -> render(view) =~ "Allow bash for this tool call?" end)
+    assert_eventually(fn -> render(view) =~ "Allow permission_probe for this tool call?" end)
     html = render(view)
     assert html =~ "Allow once"
     assert html =~ "Deny once"
     assert [_one_form] = html |> Floki.parse_document!() |> Floki.find("#ask-user-questions form")
+  end
+
+  defp start_permission_session(session_id) do
+    {:ok, _} =
+      Sigma.Agent.Runtime.get_session(@workdir, session_id,
+        model: %{id: "smart", provider: "openai", api: "openai"},
+        provider: PermissionToolProvider,
+        tools: [Sigma.Web.PermissionProbe],
+        permission_config: ConfigManager.get_permissions(),
+        transcript_path: session_storage_path(session_id),
+        cwd: @workdir
+      )
   end
 
   defp assert_eventually(fun),

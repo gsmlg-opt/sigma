@@ -225,14 +225,10 @@ requests do not reach the provider.
   one-pass `$ARGUMENTS` expansion. The existing LiveView admission path passes
   the effective workdir, and the existing composer menu lists enabled local
   catalog skills.
-- S2 model activation slice: `Sigma.Tools.ActivateSkill` is registered in the
-  existing dispatcher, resolves the same local catalog, rejects manual-only
-  skills for model-origin calls, and returns a prepared snapshot/instruction
-  result without starting a nested Agent turn. Successful activation is
-  deduplicated per Agent turn through the existing tool-state ETS. Durable
-  activation records are still pending; the existing read tools now receive
-  turn-scoped activated roots and PathUtils authorizes package resources under
-  those roots.
+- Historical S2 model activation slice: the old `activate_skill` tool was retired
+  on 2026-10-23 with the other built-in tools. Model-origin activation is no
+  longer advertised. Explicit invocation, prepared resources, skill grants and
+  path authorization remain available; Codex skill tools require a later phase.
 - Remote distribution, archive consumption, offline binding, and publication
   are deferred to a separate job and intentionally absent here.
 - S2 Protocol slice: `Sigma.Agent.SkillInvocation` freezes request validation,
@@ -248,9 +244,9 @@ requests do not reach the provider.
   `GET /api/v1/skills/:id` through a thin controller using registered
   repository IDs and the shared catalog revision. Invocation/publication write
   routes and trusted remote caller delegation remain pending.
-- S5-B capability slice: `GET /api/v1/capabilities` reports local catalog,
-  manual/model activation, and local-only operation. Remote distribution and
-  publication are not advertised in this job.
+- S5-B capability slice: `GET /api/v1/capabilities` reports local catalog and
+  manual invocation, with `modelActivation: false` after retirement. Configured
+  remote-read capabilities are reported independently; publication is not advertised.
 - S5-B local invocation slice: `POST /api/v1/sessions/:sessionId/skill-invocations`
   requires `Idempotency-Key`, persists the validated request in the
   session-scoped invocation store, and admits it through the existing Agent

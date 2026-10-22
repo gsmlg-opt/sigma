@@ -148,6 +148,33 @@ defmodule Sigma.Agent.BackplaneEngineTest do
     end
   end
 
+  defmodule EnumStateTool do
+    @moduledoc false
+    @behaviour Sigma.Coding.Tool
+
+    def name, do: "test_fixture_enum_state"
+    def description, do: "Record validated arguments in test session state"
+
+    def schema do
+      %{
+        "type" => "object",
+        "properties" => %{
+          "content" => %{"type" => "string"},
+          "status" => %{"type" => "string", "enum" => ["pending", "in_progress", "completed"]}
+        },
+        "required" => ["content", "status"]
+      }
+    end
+
+    def metadata,
+      do: %{effect: :write, concurrency: :sequential, default_deadline_ms: 5_000}
+
+    def execute(_id, arguments, opts) do
+      :ets.insert(Keyword.fetch!(opts, :tool_state), {:enum_fixture, arguments})
+      {:ok, %{content: [%{type: :text, text: "Recorded fixture state"}], details: arguments}}
+    end
+  end
+
   defmodule BlockingProvider do
     @behaviour Sigma.Ai.Provider
 
@@ -557,10 +584,39 @@ defmodule Sigma.Agent.BackplaneEngineTest do
   end
 
   @tag :tmp_dir
-  test "Todo enum schema reaches the real dispatcher and updates session state", %{tmp_dir: dir} do
+  test "a retired tool call is rejected by the empty runtime catalog", %{tmp_dir: dir} do
+    output_path = Path.join(dir, "must-not-exist.txt")
+
     {:ok, agent} =
-      start_todo_agent(dir, %{
-        "action" => "add",
+      start_supervised(
+        {Sigma.Agent,
+         backplane_runtime_path: Path.join(dir, "runtime"),
+         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+         provider: ToolProvider,
+         tools: [],
+         options: [
+           test_pid: self(),
+           tool_call: %{
+             type: :tool_call,
+             id: "retired-write",
+             name: "write",
+             arguments: %{"path" => output_path, "content" => "must not execute"}
+           }
+         ]}
+      )
+
+    :ok = Sigma.Agent.subscribe(agent)
+    assert {:accepted, _} = Sigma.Agent.prompt(agent, "Chat without built-in tools")
+    assert_receive {:agent_end, [_, _, %Message{role: :tool_result, is_error: true}, _]}, 5_000
+    assert Sigma.Agent.status(agent).phase == :completed
+    refute File.exists?(output_path)
+    refute_receive {:metrics, :tool_finished, _}
+  end
+
+  @tag :tmp_dir
+  test "enum schema reaches the real dispatcher and updates session state", %{tmp_dir: dir} do
+    {:ok, agent} =
+      start_enum_agent(dir, %{
         "content" => "Ship runtime update",
         "status" => "in_progress"
       })
@@ -571,19 +627,17 @@ defmodule Sigma.Agent.BackplaneEngineTest do
     assert_receive {:metrics, :tool_finished, _}
     assert Sigma.Agent.status(agent).phase == :completed
 
-    assert Sigma.Tools.Store.get_todo_state(:sys.get_state(agent).tool_state) == %{
-             items: [%{id: "1", content: "Ship runtime update", status: "in_progress"}],
-             next_id: 2
-           }
+    assert :ets.lookup(:sys.get_state(agent).tool_state, :enum_fixture) == [
+             {:enum_fixture, %{"content" => "Ship runtime update", "status" => "in_progress"}}
+           ]
   end
 
   @tag :tmp_dir
-  test "invalid Todo enum is rejected before the dispatcher can mutate session state", %{
+  test "invalid enum is rejected before the dispatcher can mutate session state", %{
     tmp_dir: dir
   } do
     {:ok, agent} =
-      start_todo_agent(dir, %{
-        "action" => "add",
+      start_enum_agent(dir, %{
         "content" => "Must not be added",
         "status" => "blocked"
       })
@@ -601,21 +655,23 @@ defmodule Sigma.Agent.BackplaneEngineTest do
     refute_receive {:metrics, :tool_finished, _}
     assert Sigma.Agent.status(agent).phase == :completed
 
-    assert Sigma.Tools.Store.get_todo_state(:sys.get_state(agent).tool_state) == %{
-             items: [],
-             next_id: 1
-           }
+    assert :ets.lookup(:sys.get_state(agent).tool_state, :enum_fixture) == []
   end
 
-  defp start_todo_agent(dir, arguments) do
+  defp start_enum_agent(dir, arguments) do
     Sigma.Agent.start_link(
       backplane_runtime_path: Path.join(dir, "runtime"),
       model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
       provider: ToolProvider,
-      tools: [Sigma.Tools.Todo],
+      tools: [EnumStateTool],
       options: [
         test_pid: self(),
-        tool_call: %{type: :tool_call, id: "todo-1", name: "todo", arguments: arguments}
+        tool_call: %{
+          type: :tool_call,
+          id: "enum-1",
+          name: "test_fixture_enum_state",
+          arguments: arguments
+        }
       ]
     )
   end

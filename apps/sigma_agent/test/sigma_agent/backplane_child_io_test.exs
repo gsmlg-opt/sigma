@@ -4,6 +4,7 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
   alias Backplane.AgentRuntime.{Conversation, Error}
   alias Sigma.Agent.Backplane.{ChildIO, ChildStore, Provider, Store}
   alias Sigma.Agent.Message
+  alias Sigma.Agent.TestTools.HostInput
   alias Sigma.Session.{Log, Storage.JsonlFile}
 
   test "native collaboration results retain complete structured values in model history" do
@@ -350,7 +351,7 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
        ctx do
     parent = self()
     policy = start_supervised!({Sigma.Coding.PermissionPolicy, default: :ask})
-    tool = Sigma.Coding.Tools.AskUserQuestion
+    tool = HostInput
     arguments = %{"question" => "Original question?", "allow_freeform" => false}
     patch = %{"question" => "  Approved question?  ", "options" => ["Proceed", "Wait"]}
     effective_arguments = Map.merge(arguments, patch)
@@ -513,7 +514,7 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
 
   test "fresh child runs refresh supplied config and clear explicit nil resolvers", ctx do
     parent = self()
-    tool = Sigma.Coding.Tools.AskUserQuestion
+    tool = HostInput
     policy = start_supervised!({Sigma.Coding.PermissionPolicy, default: :ask})
     config = %{ctx.config | tools: [tool], policy: policy}
 

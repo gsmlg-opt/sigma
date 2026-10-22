@@ -12,29 +12,17 @@ try do
   {:ok, skill} = Sigma.Session.Skills.Catalog.resolve(catalog, "smoke")
   {:ok, snapshot} = Sigma.Session.Skills.Snapshot.prepare(skill)
   {:ok, expanded} = Sigma.Session.SlashCommands.expand("/skill smoke verify", cwd: tmp)
-  owner = self()
-
-  {:ok, result} =
-    Sigma.Tools.ActivateSkill.execute("smoke", %{"reference" => "smoke", "arguments" => "verify"},
-      cwd: tmp,
-      register_skill_resource: fn resource ->
-        send(owner, {:prepared_resource, resource})
-        :ok
-      end
-    )
 
   true = String.starts_with?(snapshot.digest, "sha256:")
   true = expanded.content == "Use verify."
   true = expanded.skill.digest == hd(expanded.prepared_resources).digest
-  [%{text: "Use verify."}] = result.content
-  true = result.details.digest =~ ~r/^sha256:[0-9a-f]{64}$/
+  [resource] = expanded.prepared_resources
+  true = File.regular?(Path.join(resource.root, "SKILL.md"))
+  true = resource.digest =~ ~r/^sha256:[0-9a-f]{64}$/
 
   :ok = Sigma.Session.Skills.Snapshot.release(snapshot)
   Enum.each(expanded.prepared_resources, & &1.release.())
-
-  receive do
-    {:prepared_resource, resource} -> resource.release.()
-  end
+  false = File.exists?(resource.root)
 
   record = %{
     "invocationId" => "smoke-invocation",

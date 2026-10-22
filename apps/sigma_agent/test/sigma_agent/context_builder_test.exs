@@ -171,7 +171,10 @@ defmodule Sigma.Agent.ContextBuilderTest do
       assert skills_reminder =~
                "The following skills provide specialized instructions for specific tasks"
 
-      assert skills_reminder =~ "Use the read tool to load a skill's file"
+      assert skills_reminder =~
+               "Skill instructions are supplied when the user explicitly invokes a skill."
+
+      refute skills_reminder =~ "Use the read tool"
       refute skills_reminder =~ "Skill tool"
       assert agents_reminder =~ "# agentsContext"
       assert agents_reminder =~ "global rules"

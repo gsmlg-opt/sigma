@@ -116,7 +116,11 @@ defmodule Sigma.Agent.SessionContextTest do
       assert skills_reminder =~
                "<system-reminder>\nThe following skills provide specialized instructions for specific tasks."
 
-      assert skills_reminder =~ "Use the read tool to load a skill's file"
+      assert skills_reminder =~
+               "Skill instructions are supplied when the user explicitly invokes a skill."
+
+      refute skills_reminder =~ "Use the read tool"
+      refute skills_reminder =~ "activate_skill"
       assert skills_reminder =~ "<name>repo-skill</name>"
       assert skills_reminder =~ "<location>/repo/.agents/skills/repo-skill/SKILL.md</location>"
       refute skills_reminder =~ "Skill tool"

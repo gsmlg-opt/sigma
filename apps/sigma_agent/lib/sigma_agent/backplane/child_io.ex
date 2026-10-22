@@ -19,33 +19,6 @@ defmodule Sigma.Agent.Backplane.ChildIO do
 
   @config_keys ~w(model provider provider_options system_prompt session_context context_limit cwd tools mcp_servers hook_specs dispatcher_opts policy task_supervisor mcp_hook_executor)a
 
-  defmodule QuestionTool do
-    @moduledoc false
-    @behaviour Sigma.Coding.Tool
-
-    alias Sigma.Coding.Tools.AskUserQuestion
-
-    defdelegate name(), to: AskUserQuestion
-    defdelegate description(), to: AskUserQuestion
-    defdelegate schema(), to: AskUserQuestion
-
-    def execute(tool_call_id, arguments, opts) do
-      opts =
-        case Keyword.get(opts, :ask_user_question_fn) do
-          ask when is_function(ask, 2) ->
-            Keyword.put(opts, :ask_user_question_fn, fn request, tool_opts ->
-              request = Map.merge(request, %{tool_call_id: tool_call_id, arguments: arguments})
-              ask.(request, tool_opts)
-            end)
-
-          _ ->
-            opts
-        end
-
-      AskUserQuestion.execute(tool_call_id, arguments, opts)
-    end
-  end
-
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   def prepare(io, identity, parent_authority, contracts, opts \\ []),
@@ -343,12 +316,6 @@ defmodule Sigma.Agent.Backplane.ChildIO do
 
   defp execute(io, key, operation) do
     with {:ok, tools, opts} <- GenServer.call(io, {:tool_context, key}, :infinity) do
-      tools =
-        Enum.map(tools, fn
-          Sigma.Coding.Tools.AskUserQuestion -> QuestionTool
-          tool -> tool
-        end)
-
       call = %{
         id: operation.tool_call_id,
         name: operation.tool_name,

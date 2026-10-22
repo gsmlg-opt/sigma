@@ -59,10 +59,10 @@ defmodule Sigma.Web.SubagentStatusTest do
         transcript_path: path,
         provider: Provider,
         model: %{id: "fixture", provider: "fixture", api: "fixture"},
-        tools: [Sigma.Tools.Bash],
+        tools: [Sigma.Web.PermissionProbe],
         hook_specs: [],
         options: [test_pid: self()],
-        permission_config: %{default: :allow, rules: %{"bash" => :ask}}
+        permission_config: %{default: :allow, rules: %{"permission_probe" => :ask}}
       )
 
     Sigma.Agent.subscribe(handle.agent)
@@ -252,8 +252,8 @@ defmodule Sigma.Web.SubagentStatusTest do
     root_last = provider(c.session_id)
     finish(root_last.pid)
     assert_eventually(fn -> Sigma.Agent.status(c.agent).phase == :completed end)
-    call(a.pid, "bash", %{"command" => "printf approved-a"})
-    call(b.pid, "bash", %{"command" => "printf approved-b"})
+    call(a.pid, "permission_probe", %{"path" => "approved-a"})
+    call(b.pid, "permission_probe", %{"path" => "approved-b"})
 
     assert_eventually(fn ->
       length(Runtime.pending_subagent_questions(c.repo, c.session_id)) == 2

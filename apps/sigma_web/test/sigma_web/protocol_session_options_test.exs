@@ -4,6 +4,24 @@ defmodule Sigma.Web.ProtocolSessionOptionsTest do
   alias Sigma.Web.ProtocolSessionOptions
 
   @tag :tmp_dir
+  test "protocol sessions start without legacy built-in tools", %{tmp_dir: tmp} do
+    with_config(tmp, fn ->
+      snapshot = %{
+        cwd: tmp,
+        mcp_server_ids: [],
+        provider_id: "p",
+        model_id: "kept",
+        model_source: :journal
+      }
+
+      opts = ProtocolSessionOptions.resolve(snapshot, tmp, tmp, "retired-tools")
+      assert opts[:provider] == Sigma.Ai.Providers.OpenAIResponses
+      assert opts[:tools] == []
+      assert opts[:mcp_servers] == %{}
+    end)
+  end
+
+  @tag :tmp_dir
   test "new protocol sessions validate model membership and freeze the resolved default budget",
        %{tmp_dir: tmp} do
     with_config(tmp, fn ->

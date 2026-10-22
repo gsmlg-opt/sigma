@@ -99,8 +99,8 @@ The `:skills` bucket is special. It does not use the generic context preamble. I
 ```text
 <system-reminder>
 The following skills provide specialized instructions for specific tasks.
-Use the read tool to load a skill's file when the task matches its description.
-When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.
+Skill instructions are supplied when the user explicitly invokes a skill.
+Resolve relative resource paths against the skill directory (parent of SKILL.md / dirname of the path).
 
 <available_skills>
   <skill>
@@ -117,7 +117,7 @@ When a skill file references a relative path, resolve it against the skill direc
 </system-reminder>
 ```
 
-The skills block is only a discovery summary. The full skill content should be loaded with the `read` tool when a skill is invoked. `read` keeps the normal workspace fence for ordinary files, but allows `SKILL.md` files to be loaded by absolute path.
+The skills block is only a discovery summary. Explicit invocation prepares the skill package and supplies its instructions through the existing invocation service. Built-in model activation and file-reading tools are retired; manual invocation and scoped resource grants remain available.
 
 Blank sources are dropped. A source can be passed as:
 
