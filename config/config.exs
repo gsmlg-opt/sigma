@@ -25,7 +25,10 @@ config :sigma_web, :build_info, %{
 }
 
 config :sigma_web, Sigma.Web.Endpoint,
+  adapter: Gaoxy.PhoenixAdapter,
   url: [host: "localhost"],
+  # Gaoxy caps WebSocket frames at one quarter of the shared service byte budget.
+  http: [ip: {0, 0, 0, 0}, limits: %{max_bytes: 128 * 1024 * 1024}],
   secret_key_base: "uR8T8QyHkZfTjG+lS0fWf6eQ+V8S8QyHkZfTjG+lS0fWf6eQ+V8S8QyHkZfTjG+l",
   render_errors: [
     formats: [html: Sigma.Web.ErrorHTML, json: Sigma.Web.ErrorJSON],

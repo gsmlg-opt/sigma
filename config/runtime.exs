@@ -12,7 +12,7 @@ if System.get_env("RELEASE_NAME") do
     server: System.get_env("PHX_SERVER", "true") in ["1", "true", "TRUE"],
     http: [
       port: String.to_integer(System.get_env("PORT") || "4580"),
-      transport_options: [socket_opts: [:inet6]]
+      ip: {0, 0, 0, 0, 0, 0, 0, 0}
     ]
 end
 
@@ -28,7 +28,7 @@ if config_env() == :prod do
     server: System.get_env("PHX_SERVER", "true") in ["1", "true", "TRUE"],
     http: [
       port: String.to_integer(System.get_env("PORT") || "4580"),
-      transport_options: [socket_opts: [:inet6]]
+      ip: {0, 0, 0, 0, 0, 0, 0, 0}
     ],
     secret_key_base: secret_key_base
 end
