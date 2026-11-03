@@ -1196,17 +1196,12 @@ defmodule Sigma.Web.SessionLive do
       if message.role == :assistant, do: assistant_content_blocks(message.content), else: []
 
     tools =
-      for %{type: :tool_call, id: id} = block <- blocks do
-        result = socket.assigns.tool_results[id]
+      for %{type: :tool_call} = block <- blocks, do: tool_view(socket, block)
 
-        %{
-          id: id,
-          name: block.name,
-          input: format_tool_call_args(block),
-          result: if(result, do: elem(result, 0)),
-          status: tool_call_status(socket.assigns.tool_results, id)
-        }
-      end
+    # Ordered projection of an assistant message: text and tool calls keep the
+    # exact order of the content blocks. Tool results only fill their own block.
+    ordered_blocks =
+      if message.role == :assistant, do: ordered_blocks(socket, message, blocks), else: []
 
     actions =
       case message.role do
@@ -1234,13 +1229,9 @@ defmodule Sigma.Web.SessionLive do
     %{
       id: message.id,
       role: message.role,
-      author:
-        case message.role do
-          :user -> "You"
-          :assistant -> "∑"
-          _ -> "Context compaction"
-        end,
+      author: message_author(message.role),
       content: user_content(message.content),
+      blocks: ordered_blocks,
       status:
         if(message.id == socket.assigns.streaming_message_id, do: "streaming", else: "complete"),
       tools: tools,
@@ -1254,6 +1245,46 @@ defmodule Sigma.Web.SessionLive do
       }
     }
   end
+
+  defp tool_view(socket, %{type: :tool_call, id: id} = block) do
+    result = socket.assigns.tool_results[id]
+
+    %{
+      id: id,
+      name: block.name,
+      input: format_tool_call_args(block),
+      result: if(result, do: elem(result, 0)),
+      status: tool_call_status(socket.assigns.tool_results, id)
+    }
+  end
+
+  defp ordered_blocks(socket, message, blocks) do
+    blocks
+    |> Enum.with_index()
+    |> Enum.flat_map(fn
+      {%{type: :text, text: text}, index} when is_binary(text) and text != "" ->
+        [%{type: "text", id: "#{message.id}:text:#{index}", text: text}]
+
+      {%{type: :tool_call} = block, _index} ->
+        [socket |> tool_view(block) |> Map.put(:type, "tool")]
+
+      _other ->
+        []
+    end)
+  end
+
+  # Only the explicit `:compaction_summary` role is a context compaction.
+  defp message_author(:user), do: "You"
+  defp message_author(:assistant), do: "∑"
+  defp message_author(:compaction_summary), do: "Context compaction"
+  defp message_author(:tool_result), do: "Tool result"
+  defp message_author(:system), do: "System"
+  defp message_author(:branch_summary), do: "Branch summary"
+
+  defp message_author(role) when is_atom(role) and not is_nil(role),
+    do: role |> Atom.to_string() |> String.replace("_", " ") |> String.capitalize()
+
+  defp message_author(_role), do: "Message"
 
   defp queue_chat_message(socket, message) do
     order = socket.assigns.chat_order
@@ -1419,7 +1450,8 @@ defmodule Sigma.Web.SessionLive do
   defp render_tool_result_content(content) when is_binary(content), do: content
   defp render_tool_result_content(_), do: ""
 
-  defp split_messages(messages) do
+  @doc false
+  def split_messages(messages) do
     Enum.reduce(messages, {[], %{}, %{}}, fn msg, {stream_msgs, tool_results, tc_map} ->
       case msg.role do
         :tool_result ->
@@ -1454,6 +1486,9 @@ defmodule Sigma.Web.SessionLive do
       {Map.put(by_id, message.id, message), last_by_turn}
     end)
   end
+
+  defp stream_display_message(socket, %{role: :tool_result} = message),
+    do: record_tool_result(socket, message, false)
 
   defp stream_display_message(socket, message) do
     previous_id = Map.get(socket.assigns.turn_last_message_ids, message_turn_id(message))
@@ -1493,6 +1528,38 @@ defmodule Sigma.Web.SessionLive do
       end
     else
       socket
+    end
+  end
+
+  # A tool result is a projection onto its owning tool call, keyed by the real
+  # `tool_call_id`. It never creates a top-level chat card. Results that arrive
+  # before their parent stay in `tool_results` and are rendered as soon as the
+  # parent message is projected. Start/update snapshots cannot overwrite a final
+  # result, so replays and late events never move a settled tool backwards.
+  defp record_tool_result(socket, %{tool_call_id: call_id} = message, final?)
+       when is_binary(call_id) do
+    existing = Map.get(socket.assigns.tool_results, call_id)
+
+    if final? or is_nil(existing) do
+      content = render_tool_result_content(message.content)
+
+      socket
+      |> update(:tool_results, &Map.put(&1, call_id, {content, message.is_error}))
+      |> queue_tool_parent(call_id)
+    else
+      socket
+    end
+  end
+
+  defp record_tool_result(socket, _message, _final?), do: socket
+
+  defp queue_tool_parent(socket, call_id) do
+    case Map.get(socket.assigns.tool_call_to_msg, call_id) do
+      nil ->
+        socket
+
+      %{id: parent_id} = parent ->
+        queue_chat_message(socket, Map.get(socket.assigns.display_messages, parent_id, parent))
     end
   end
 
@@ -3041,20 +3108,8 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
-  def handle_info({:message_end, %{role: :tool_result} = message}, socket) do
-    content_str = render_tool_result_content(message.content)
-    parent_msg = Map.get(socket.assigns.tool_call_to_msg, message.tool_call_id)
-
-    socket =
-      update(
-        socket,
-        :tool_results,
-        &Map.put(&1, message.tool_call_id, {content_str, message.is_error})
-      )
-
-    socket = if parent_msg, do: queue_chat_message(socket, parent_msg), else: socket
-    {:noreply, socket}
-  end
+  def handle_info({:message_end, %{role: :tool_result} = message}, socket),
+    do: {:noreply, record_tool_result(socket, message, true)}
 
   @impl true
   def handle_info({:message_end, %{role: :assistant, content: content} = message}, socket)
