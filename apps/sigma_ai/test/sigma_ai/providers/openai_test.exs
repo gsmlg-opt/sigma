@@ -261,6 +261,81 @@ defmodule Sigma.Ai.Providers.OpenAITest do
     end)
   end
 
+  test "Responses API preserves streamed arguments when output_item.done has empty arguments and repairs invalid escapes" do
+    raw_arguments = ~s({"command":"grep -i \\"beam\\|mix\\"","note":"col1\tcol2"})
+
+    sse = [
+      sse_json(%{"type" => "response.created", "response" => %{"id" => "resp_repair"}}),
+      sse_json(%{
+        "type" => "response.output_item.added",
+        "item" => %{
+          "type" => "function_call",
+          "id" => "item_repair",
+          "call_id" => "call_repair",
+          "name" => "bash",
+          "arguments" => ""
+        }
+      }),
+      sse_json(%{
+        "type" => "response.function_call_arguments.delta",
+        "delta" => raw_arguments
+      }),
+      sse_json(%{
+        "type" => "response.output_item.done",
+        "item" => %{
+          "type" => "function_call",
+          "id" => "item_repair",
+          "call_id" => "call_repair",
+          "name" => "bash",
+          "arguments" => ""
+        }
+      }),
+      sse_json(%{
+        "type" => "response.output_item.added",
+        "item" => %{
+          "type" => "function_call",
+          "id" => "item_empty",
+          "call_id" => "call_empty",
+          "name" => "ping",
+          "arguments" => ""
+        }
+      }),
+      sse_json(%{
+        "type" => "response.output_item.done",
+        "item" => %{
+          "type" => "function_call",
+          "id" => "item_empty",
+          "call_id" => "call_empty",
+          "name" => "ping",
+          "arguments" => ""
+        }
+      }),
+      sse_json(%{"type" => "response.completed", "response" => %{"status" => "completed"}}),
+      "data: [DONE]\n\n"
+    ]
+
+    with_sse_server(sse, fn base_url ->
+      events =
+        OpenAIResponses.stream(%{
+          model: %{id: "gpt-5", api: "openai", provider: "openai"},
+          context: %{messages: [], system_prompt: nil, tools: []},
+          options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+        })
+        |> Enum.to_list()
+
+      assert {:toolcall_end, 0,
+              %{
+                id: "call_repair",
+                name: "bash",
+                arguments: %{"command" => "grep -i \"beam\\|mix\"", "note" => "col1\tcol2"}
+              }, _} =
+               Enum.find(events, &match?({:toolcall_end, 0, _, _}, &1))
+
+      assert {:toolcall_end, 1, %{id: "call_empty", name: "ping", arguments: %{}}, _} =
+               Enum.find(events, &match?({:toolcall_end, 1, _, _}, &1))
+    end)
+  end
+
   test "captures prompt tokens from stream usage chunk" do
     sse = [
       ~s(data: {"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}\n\n),

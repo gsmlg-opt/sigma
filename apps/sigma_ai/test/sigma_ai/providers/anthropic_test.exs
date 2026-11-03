@@ -99,6 +99,34 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
     refute Enum.any?(processed, &match?({:toolcall_end, _, _, _}, &1))
   end
 
+  test "repairs invalid escape sequences and control characters in streamed tool arguments" do
+    events = [
+      %{
+        "type" => "content_block_start",
+        "index" => 0,
+        "content_block" => %{"type" => "tool_use", "id" => "call-repair", "name" => "edit"}
+      },
+      %{
+        "type" => "content_block_delta",
+        "index" => 0,
+        "delta" => %{
+          "type" => "input_json_delta",
+          "partial_json" => "{\"path\":\"A\\H\",\"text\":\"col1\tcol2\"}"
+        }
+      },
+      %{"type" => "content_block_stop", "index" => 0}
+    ]
+
+    {processed, _message} = Anthropic.process_events(events, initial_message())
+
+    assert {:toolcall_end, 0,
+            %{
+              id: "call-repair",
+              name: "edit",
+              arguments: %{"path" => "A\\H", "text" => "col1\tcol2"}
+            }, _} = Enum.find(processed, &match?({:toolcall_end, _, _, _}, &1))
+  end
+
   test "uses model maxTokens as the default Anthropic output cap" do
     sse = [
       ~s(data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1,"output_tokens":0}}}\n\n),

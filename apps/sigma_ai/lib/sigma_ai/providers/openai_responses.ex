@@ -2,7 +2,13 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   @behaviour Sigma.Ai.Provider
 
   alias Backplane.AiProtocol.{Request, Serialization, SSE}
-  alias Sigma.Ai.{ProviderAuth, ProviderCapabilities, ProviderError, ProviderRequest}
+  alias Sigma.Ai.{
+    ProviderAuth,
+    ProviderCapabilities,
+    ProviderError,
+    ProviderRequest,
+    ToolCallJson
+  }
 
   @impl true
   def stream_normalized(%ProviderRequest{} = request),
@@ -567,23 +573,22 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
         %{
           "type" => "response.function_call_arguments.delta",
-          "item_id" => item_id,
           "delta" => delta
-        } ->
-          process_response_tool_delta(acc, item_id, delta)
+        } = event
+        when is_binary(delta) ->
+          process_response_tool_delta(acc, event["item_id"], event["call_id"], delta)
 
         %{
           "type" => "response.function_call_arguments.done",
-          "item_id" => item_id,
           "arguments" => arguments
-        } ->
-          update_response_tool_arguments(acc, item_id, arguments)
+        } = event ->
+          update_response_tool_arguments(acc, event, arguments)
 
         %{"type" => "response.output_item.done", "item" => %{"type" => "function_call"} = item} ->
           finalize_response_tool(acc, item)
 
         %{"type" => "response.completed", "response" => response} ->
-          {tool_events, acc} = finalize_response_tools(acc)
+          {tool_events, acc} = finalize_response_tools(acc, response)
 
           acc = %{
             acc
@@ -624,8 +629,10 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   end
 
   defp start_response_tool(acc, item) do
-    item_id = item["id"]
-    call_id = item["call_id"]
+    item_id = present_string(item["id"])
+    call_id = present_string(item["call_id"])
+    name = present_string(item["name"])
+    initial_args = if is_binary(item["arguments"]), do: item["arguments"], else: ""
 
     case response_tool_index(acc.content, item_id, call_id) do
       nil ->
@@ -635,26 +642,36 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
           type: :tool_call,
           item_id: item_id,
           id: call_id,
-          name: item["name"],
-          partial_json: item["arguments"] || ""
+          name: name,
+          partial_json: initial_args
         }
 
         new_acc = %{acc | content: acc.content ++ [block]}
         {[{:toolcall_start, index, new_acc}], new_acc}
 
-      _index ->
-        {[], acc}
+      index ->
+        content =
+          update_content(acc.content, index, fn block ->
+            block
+            |> Map.put(:item_id, present_string(block[:item_id]) || item_id)
+            |> Map.put(:id, present_string(block[:id]) || call_id)
+            |> Map.put(:name, present_string(block[:name]) || name)
+          end)
+
+        {[], %{acc | content: content}}
     end
   end
 
-  defp process_response_tool_delta(acc, item_id, delta) do
-    index = response_tool_index(acc.content, item_id, nil) || length(acc.content)
+  defp process_response_tool_delta(acc, item_id, call_id, delta) do
+    item_id = present_string(item_id)
+    call_id = present_string(call_id)
+    index = response_tool_index(acc.content, item_id, call_id) || length(acc.content)
 
     content =
       if index == length(acc.content),
         do:
           acc.content ++
-            [%{type: :tool_call, item_id: item_id, id: nil, name: nil, partial_json: ""}],
+            [%{type: :tool_call, item_id: item_id, id: call_id, name: nil, partial_json: ""}],
         else: acc.content
 
     content =
@@ -666,58 +683,126 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     {[{:toolcall_delta, index, delta, msg}], msg}
   end
 
-  defp update_response_tool_arguments(acc, item_id, arguments) do
-    index = response_tool_index(acc.content, item_id, nil) || length(acc.content)
+  defp update_response_tool_arguments(acc, event, arguments) do
+    item_id = present_string(event["item_id"])
+    call_id = present_string(event["call_id"])
+    name = present_string(event["name"])
+    index = response_tool_index(acc.content, item_id, call_id) || length(acc.content)
 
     content =
       if index == length(acc.content),
         do:
           acc.content ++
-            [%{type: :tool_call, item_id: item_id, id: nil, name: nil, partial_json: ""}],
+            [%{type: :tool_call, item_id: item_id, id: call_id, name: name, partial_json: ""}],
         else: acc.content
 
-    content =
-      List.replace_at(content, index, Map.put(Enum.at(content, index), :arguments, arguments))
+    block = Enum.at(content, index)
+
+    updated =
+      block
+      |> Map.put(:item_id, present_string(block[:item_id]) || item_id)
+      |> Map.put(:id, present_string(block[:id]) || call_id)
+      |> Map.put(:name, present_string(block[:name]) || name)
+      |> maybe_put_arguments(arguments)
+
+    content = List.replace_at(content, index, updated)
 
     {[], %{acc | content: content}}
   end
 
-  defp finalize_response_tool(acc, item) do
-    item_id = item["id"]
-    call_id = item["call_id"]
-    index = response_tool_index(acc.content, item_id, call_id) || length(acc.content)
-    block = Enum.at(acc.content, index) || %{}
-    arguments = item["arguments"] || block[:arguments] || block[:partial_json]
-    name = item["name"] || block[:name]
-    call_id = call_id || block[:id] || item_id
+  defp maybe_put_arguments(block, arguments) when is_map(arguments),
+    do: Map.put(block, :arguments, arguments)
 
-    with {:ok, arguments} <- decode_arguments(arguments),
-         true <- is_binary(call_id) and call_id != "",
-         true <- is_binary(name) and name != "" do
-      call = %{type: :tool_call, id: call_id, name: name, arguments: arguments}
-
-      content =
-        if index == length(acc.content),
-          do: acc.content ++ [call],
-          else: List.replace_at(acc.content, index, call)
-
-      msg = %{acc | content: content}
-      {[{:toolcall_end, index, call, msg}], msg}
-    else
-      _ -> {[{:provider_error, ProviderError.malformed(:invalid_tool_call_arguments)}], acc}
+  defp maybe_put_arguments(block, arguments) when is_binary(arguments) do
+    case present_string(arguments) do
+      nil -> block
+      present -> Map.put(block, :arguments, present)
     end
   end
 
-  defp finalize_response_tools(acc) do
+  defp maybe_put_arguments(block, _arguments), do: block
+
+  defp finalize_response_tool(acc, item) do
+    item_id = present_string(item["id"])
+    call_id = present_string(item["call_id"])
+    index = response_tool_index(acc.content, item_id, call_id) || length(acc.content)
+    block = Enum.at(acc.content, index) || %{}
+
+    if block[:type] == :tool_call and not Map.has_key?(block, :partial_json) and
+         is_map(block[:arguments]) do
+      {[], acc}
+    else
+      arguments =
+        present_arguments(item["arguments"]) ||
+          present_arguments(block[:arguments]) ||
+          present_arguments(block[:partial_json]) ||
+          "{}"
+
+      name = present_string(item["name"]) || present_string(block[:name])
+
+      call_id =
+        call_id || present_string(block[:id]) || item_id || present_string(block[:item_id])
+
+      with {:ok, arguments} <- decode_arguments(arguments),
+           true <- is_binary(call_id) and call_id != "",
+           true <- is_binary(name) and name != "" do
+        call = %{type: :tool_call, id: call_id, name: name, arguments: arguments}
+
+        content =
+          if index == length(acc.content),
+            do: acc.content ++ [call],
+            else: List.replace_at(acc.content, index, call)
+
+        msg = %{acc | content: content}
+        {[{:toolcall_end, index, call, msg}], msg}
+      else
+        _ -> {[{:provider_error, ProviderError.malformed(:invalid_tool_call_arguments)}], acc}
+      end
+    end
+  end
+
+  defp finalize_response_tools(acc, response) do
+    output_items =
+      case response do
+        %{"output" => items} when is_list(items) ->
+          Enum.filter(items, &match?(%{"type" => "function_call"}, &1))
+
+        _ ->
+          []
+      end
+
+    {output_events, acc} =
+      Enum.reduce(output_items, {[], acc}, fn item, {events, current_acc} ->
+        item_id = present_string(item["id"])
+        call_id = present_string(item["call_id"])
+
+        case response_tool_index(current_acc.content, item_id, call_id) do
+          nil ->
+            {new_events, new_acc} = finalize_response_tool(current_acc, item)
+            {events ++ new_events, new_acc}
+
+          index ->
+            block = Enum.at(current_acc.content, index)
+
+            if Map.has_key?(block, :partial_json) do
+              {new_events, new_acc} = finalize_response_tool(current_acc, item)
+              {events ++ new_events, new_acc}
+            else
+              {events, current_acc}
+            end
+        end
+      end)
+
     acc.content
-    |> Enum.reduce({[], acc}, fn block, {events, current_acc} ->
+    |> Enum.reduce({output_events, acc}, fn block, {events, current_acc} ->
       if block[:type] == :tool_call and Map.has_key?(block, :partial_json) do
         {new_events, new_acc} =
           finalize_response_tool(current_acc, %{
             "id" => block[:item_id],
             "call_id" => block[:id],
             "name" => block[:name],
-            "arguments" => block[:arguments] || block[:partial_json]
+            "arguments" =>
+              present_arguments(block[:arguments]) || present_arguments(block[:partial_json])
           })
 
         {events ++ new_events, new_acc}
@@ -728,23 +813,39 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   end
 
   defp response_tool_index(content, item_id, call_id) do
-    Enum.find_index(content, fn block ->
-      block[:type] == :tool_call and
-        ((is_binary(item_id) and block[:item_id] == item_id) or
-           (is_binary(call_id) and block[:id] == call_id))
-    end)
-  end
+    present_item_id = present_string(item_id)
+    present_call_id = present_string(call_id)
 
-  defp decode_arguments(arguments) when is_map(arguments), do: {:ok, arguments}
+    cond do
+      present_item_id != nil or present_call_id != nil ->
+        Enum.find_index(content, fn block ->
+          block[:type] == :tool_call and
+            ((present_item_id != nil and
+                (block[:item_id] == present_item_id or block[:id] == present_item_id)) or
+               (present_call_id != nil and block[:id] == present_call_id))
+        end)
 
-  defp decode_arguments(arguments) when is_binary(arguments) do
-    case Jason.decode(arguments) do
-      {:ok, value} when is_map(value) -> {:ok, value}
-      _ -> :error
+      true ->
+        content
+        |> Enum.with_index()
+        |> Enum.reverse()
+        |> Enum.find_value(fn {block, idx} ->
+          if block[:type] == :tool_call and Map.has_key?(block, :partial_json), do: idx
+        end)
     end
   end
 
-  defp decode_arguments(_), do: :error
+  defp present_arguments(value) when is_map(value), do: value
+  defp present_arguments(value) when is_binary(value), do: present_string(value)
+  defp present_arguments(_value), do: nil
+
+  defp present_string(value) when is_binary(value) do
+    if String.trim(value) == "", do: nil, else: value
+  end
+
+  defp present_string(_value), do: nil
+
+  defp decode_arguments(arguments), do: ToolCallJson.decode_arguments(arguments)
 
   defp response_usage(nil), do: acc_usage_empty()
 

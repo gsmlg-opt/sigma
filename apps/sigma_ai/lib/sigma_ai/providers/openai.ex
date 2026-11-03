@@ -1,7 +1,14 @@
 defmodule Sigma.Ai.Providers.OpenAI do
   @behaviour Sigma.Ai.Provider
 
-  alias Sigma.Ai.{ProviderAuth, ProviderCapabilities, ProviderError, ProviderRequest, Stream}
+  alias Sigma.Ai.{
+    ProviderAuth,
+    ProviderCapabilities,
+    ProviderError,
+    ProviderRequest,
+    Stream,
+    ToolCallJson
+  }
 
   @impl true
   def stream_normalized(%ProviderRequest{} = request),
@@ -583,7 +590,7 @@ defmodule Sigma.Ai.Providers.OpenAI do
          %{type: :tool_call, partial_json: partial_json} = block,
          index
        ) do
-    case Jason.decode(partial_json || "") do
+    case ToolCallJson.decode_arguments(partial_json || "") do
       {:ok, args} when is_map(args) ->
         tool_call = %{
           type: :tool_call,

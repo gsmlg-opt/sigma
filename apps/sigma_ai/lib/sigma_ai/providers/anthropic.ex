@@ -1,7 +1,14 @@
 defmodule Sigma.Ai.Providers.Anthropic do
   @behaviour Sigma.Ai.Provider
 
-  alias Sigma.Ai.{ProviderAuth, ProviderCapabilities, ProviderError, ProviderRequest, Stream}
+  alias Sigma.Ai.{
+    ProviderAuth,
+    ProviderCapabilities,
+    ProviderError,
+    ProviderRequest,
+    Stream,
+    ToolCallJson
+  }
 
   @impl true
   def stream_normalized(%ProviderRequest{} = request),
@@ -566,7 +573,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
                 {{:thinking_end, idx, block.thinking, new_acc}, new_acc}
 
               :tool_call ->
-                case Jason.decode(block.partial_json) do
+                case ToolCallJson.decode_arguments(block.partial_json) do
                   {:ok, args} when is_map(args) ->
                     tool_call = %{
                       type: :tool_call,
