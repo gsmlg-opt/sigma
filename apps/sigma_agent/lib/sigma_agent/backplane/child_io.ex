@@ -164,7 +164,10 @@ defmodule Sigma.Agent.Backplane.ChildIO do
           |> Map.put(:caller, identity.child_session_id)
           |> Map.put(:grants, names)
 
-        case ToolCatalog.admit(tools, authority, &execute(io, key, &1), contracts: contracts) do
+        case ToolCatalog.admit(tools, authority, &execute(io, key, &1),
+               contracts: contracts,
+               mode: :quarantine
+             ) do
           {:ok, catalog} ->
             if state.tool_state, do: :ets.delete(state.tool_state)
             tool_state = :ets.new(__MODULE__, [:set, :public, read_concurrency: true])
@@ -172,12 +175,15 @@ defmodule Sigma.Agent.Backplane.ChildIO do
             messages =
               if state.messages == [], do: Keyword.get(opts, :messages, []), else: state.messages
 
+            admitted_tools =
+              Enum.filter(tools, &Map.has_key?(catalog.registry.tools, Tool.name(&1)))
+
             state = %{
               state
               | identity: identity,
                 key: key,
                 tool_state: tool_state,
-                active_tools: tools,
+                active_tools: admitted_tools,
                 request: nil,
                 current_request_id: nil,
                 finished_requests: MapSet.new(),

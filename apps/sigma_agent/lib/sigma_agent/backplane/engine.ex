@@ -155,7 +155,8 @@ defmodule Sigma.Agent.Backplane.Engine do
           {:backplane_tool_continue, ^ref} -> result
         end
       end,
-      contracts: contracts
+      contracts: contracts,
+      mode: :quarantine
     )
   end
 

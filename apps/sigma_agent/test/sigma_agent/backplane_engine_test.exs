@@ -363,18 +363,64 @@ defmodule Sigma.Agent.BackplaneEngineTest do
     def description, do: "Unsupported schema fixture"
 
     def schema,
-      do: %{"type" => "object", "$schema" => "https://example.test/unsupported-dialect"}
+      do: %{"type" => "object", "$schema" => "http://json-schema.org/draft-07/schema#"}
 
     def execute(_, _, _), do: raise("unsupported tool must never run")
   end
 
+  defmodule InvalidSchemaTool do
+    def name, do: "invalid_schema"
+    def description, do: "Invalid schema fixture"
+
+    def schema,
+      do: %{"type" => "object", "properties" => %{"mode" => %{"$ref" => "#/$defs/missing"}}}
+
+    def execute(_, _, _), do: raise("invalid schema tool must never run")
+  end
+
   @tag :tmp_dir
-  test "unsupported schemas fail before starting the provider", %{tmp_dir: dir} do
-    {:ok, agent} = start_blocking_agent(dir, tools: [UnsupportedTool])
+  test "unsupported schema dialects are quarantined while valid tools still execute", %{
+    tmp_dir: dir
+  } do
+    output_path = Path.join(dir, "quarantine-schema.txt")
+
+    {:ok, agent} =
+      Sigma.Agent.start_link(
+        backplane_runtime_path: Path.join(dir, "runtime"),
+        model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+        provider: ToolProvider,
+        tools: [UnsupportedTool, DefaultSchemaTool],
+        options: [
+          test_pid: self(),
+          path: output_path,
+          tool_call: %{
+            type: :tool_call,
+            id: "quarantine-1",
+            name: DefaultSchemaTool.name(),
+            arguments: %{"path" => output_path}
+          }
+        ]
+      )
+
+    Sigma.Agent.subscribe(agent)
+    assert {:accepted, _} = Sigma.Agent.prompt(agent, "write it")
+    assert_receive {:backplane_provider, _}, 5_000
+
+    assert_receive {:tool_execution_end, "quarantine-1", "backplane_default_schema", _, false},
+                   5_000
+
+    assert_receive {:agent_end, _}, 5_000
+    assert File.read!(output_path) == "default schema"
+    assert Sigma.Agent.status(agent).phase == :completed
+  end
+
+  @tag :tmp_dir
+  test "invalid schemas fail before starting the provider", %{tmp_dir: dir} do
+    {:ok, agent} = start_blocking_agent(dir, tools: [InvalidSchemaTool])
     Sigma.Agent.subscribe(agent)
     assert {:accepted, _} = Sigma.Agent.prompt(agent, "initial")
     assert_receive {:turn_error, error}, 5_000
-    assert inspect(error) =~ "unsupported"
+    assert inspect(error) =~ "missing"
     assert_receive {:agent_end, _}, 5_000
     refute_receive {:backplane_provider_waiting, _, _}
     assert Sigma.Agent.status(agent).phase == :failed
