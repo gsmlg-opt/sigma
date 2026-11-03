@@ -3002,7 +3002,13 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def handle_info({:turn_error, reason}, socket) do
-    msg = if is_binary(reason), do: reason, else: inspect(reason)
+    msg =
+      case reason do
+        %Sigma.Ai.ProviderError{message: message} when is_binary(message) -> message
+        %{message: message} when is_binary(message) -> message
+        binary when is_binary(binary) -> binary
+        other -> inspect(other)
+      end
 
     {:noreply,
      socket
