@@ -1078,6 +1078,34 @@ defmodule Sigma.Ai.Providers.OpenAITest do
     end)
   end
 
+  test "automatically retries transient HTTP 408 error and recovers stream" do
+    sse = [
+      sse_json(%{"type" => "response.created", "response" => %{"id" => "resp_retry"}}),
+      sse_json(%{"type" => "response.output_text.delta", "delta" => "recovered"}),
+      sse_json(%{"type" => "response.completed", "response" => %{"status" => "completed"}}),
+      "data: [DONE]\n\n"
+    ]
+
+    with_retry_server(408, "Request Timeout", sse, fn base_url ->
+      events =
+        OpenAIResponses.stream(%{
+          model: %{id: "MiniMax-M3", api: "openai-responses", provider: "openai"},
+          context: %{messages: [%{role: :user, content: "hi"}], system_prompt: nil, tools: []},
+          options: [
+            api_key: "test-key",
+            base_url: base_url,
+            receive_timeout: 1_000,
+            retry_delay: fn _ -> 10 end
+          ]
+        })
+        |> Enum.to_list()
+
+      assert {:done, :stop, message} = Enum.find(events, &match?({:done, _, _}, &1))
+      assert message.response_id == "resp_retry"
+      assert [%{type: :text, text: "recovered"}] = message.content
+    end)
+  end
+
   defp with_sse_server(chunks, fun) do
     {:ok, listen_socket} =
       :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
@@ -1134,6 +1162,56 @@ defmodule Sigma.Ai.Providers.OpenAITest do
 
         :ok = :gen_tcp.send(socket, response)
         :gen_tcp.close(socket)
+        :gen_tcp.close(listen_socket)
+      end)
+
+    try do
+      fun.("http://127.0.0.1:#{port}")
+    after
+      Task.shutdown(task, 1_000)
+      :gen_tcp.close(listen_socket)
+    end
+  end
+
+  defp with_retry_server(first_status, first_body, second_chunks, fun) do
+    {:ok, listen_socket} =
+      :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
+
+    {:ok, port} = :inet.port(listen_socket)
+
+    task =
+      Task.async(fn ->
+        {:ok, socket1} = :gen_tcp.accept(listen_socket)
+        _request1 = recv_request(socket1, "")
+
+        response1 = [
+          "HTTP/1.1 #{first_status} Request Timeout\r\n",
+          "content-type: text/plain\r\n",
+          "content-length: #{byte_size(first_body)}\r\n",
+          "connection: close\r\n",
+          "\r\n",
+          first_body
+        ]
+
+        :ok = :gen_tcp.send(socket1, response1)
+        :gen_tcp.close(socket1)
+
+        {:ok, socket2} = :gen_tcp.accept(listen_socket)
+        _request2 = recv_request(socket2, "")
+
+        body2 = IO.iodata_to_binary(second_chunks)
+
+        response2 = [
+          "HTTP/1.1 200 OK\r\n",
+          "content-type: text/event-stream\r\n",
+          "content-length: #{byte_size(body2)}\r\n",
+          "connection: close\r\n",
+          "\r\n",
+          body2
+        ]
+
+        :ok = :gen_tcp.send(socket2, response2)
+        :gen_tcp.close(socket2)
         :gen_tcp.close(listen_socket)
       end)
 
