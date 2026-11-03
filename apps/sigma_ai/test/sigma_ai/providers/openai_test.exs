@@ -336,6 +336,66 @@ defmodule Sigma.Ai.Providers.OpenAITest do
     end)
   end
 
+  test "Responses API completes cleanly on response.incomplete and [DONE] or EOF after completed items" do
+    incomplete_sse = [
+      sse_json(%{"type" => "response.created", "response" => %{"id" => "resp_inc"}}),
+      sse_json(%{"type" => "response.output_text.delta", "delta" => "partial output"}),
+      sse_json(%{
+        "type" => "response.incomplete",
+        "response" => %{
+          "id" => "resp_inc",
+          "status" => "incomplete",
+          "usage" => %{"input_tokens" => 20, "output_tokens" => 5}
+        }
+      }),
+      "data: [DONE]\n\n"
+    ]
+
+    with_sse_server(incomplete_sse, fn base_url ->
+      events =
+        OpenAIResponses.stream(%{
+          model: %{id: "gpt-5", api: "openai", provider: "openai"},
+          context: %{messages: [], system_prompt: nil, tools: []},
+          options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+        })
+        |> Enum.to_list()
+
+      assert {:done, :length, %{response_id: "resp_inc", usage: %{input: 20, output: 5}}} =
+               Enum.find(events, &match?({:done, _, _}, &1))
+
+      refute Enum.any?(events, &match?({:provider_error, _}, &1))
+    end)
+
+    eof_after_item_done_sse = [
+      sse_json(%{"type" => "response.created", "response" => %{"id" => "resp_eof"}}),
+      sse_json(%{
+        "type" => "response.output_item.done",
+        "item" => %{
+          "type" => "function_call",
+          "id" => "item_eof",
+          "call_id" => "call_eof",
+          "name" => "read",
+          "arguments" => "{\"path\":\"README.md\"}"
+        }
+      })
+    ]
+
+    with_sse_server(eof_after_item_done_sse, fn base_url ->
+      events =
+        OpenAIResponses.stream(%{
+          model: %{id: "gpt-5", api: "openai", provider: "openai"},
+          context: %{messages: [], system_prompt: nil, tools: []},
+          options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+        })
+        |> Enum.to_list()
+
+      assert {:done, :tool_use, %{content: [%{id: "call_eof", name: "read"}]}} =
+               Enum.find(events, &match?({:done, _, _}, &1))
+
+      refute Enum.any?(events, &match?({:provider_error, _}, &1))
+    end)
+  end
+
   test "captures prompt tokens from stream usage chunk" do
     sse = [
       ~s(data: {"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}\n\n),

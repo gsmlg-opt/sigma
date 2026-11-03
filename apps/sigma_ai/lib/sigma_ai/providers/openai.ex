@@ -202,7 +202,8 @@ defmodule Sigma.Ai.Providers.OpenAI do
         {processed_events, new_message} = process_events(events, acc_message)
 
         status =
-          if Enum.any?(processed_events, &match?({:done, _, _}, &1)),
+          if Enum.any?(processed_events, &match?({:done, _, _}, &1)) or
+               Enum.any?(processed_events, &match?({:provider_error, _}, &1)),
             do: :done,
             else: :streaming
 
@@ -212,8 +213,28 @@ defmodule Sigma.Ai.Providers.OpenAI do
         {acc_events, acc_message, acc_buffer, :done}
 
       :done, {acc_events, acc_message, acc_buffer, _status} ->
-        error = ProviderError.malformed(:truncated_stream)
-        {acc_events ++ [{:provider_error, error}], acc_message, acc_buffer, :done}
+        {flushed_events, new_message, new_buffer} =
+          if String.trim(acc_buffer) == "" do
+            {[], acc_message, acc_buffer}
+          else
+            {events, rest} = Stream.decode(acc_buffer, "\n\n")
+            {processed, msg} = process_events(events, acc_message)
+            {processed, msg, rest}
+          end
+
+        cond do
+          Enum.any?(flushed_events, &match?({:done, _, _}, &1)) or
+              Enum.any?(flushed_events, &match?({:provider_error, _}, &1)) ->
+            {acc_events ++ flushed_events, new_message, new_buffer, :done}
+
+          not is_nil(new_message.stop_reason) ->
+            {done_events, done_message} = process_events([:done], new_message)
+            {acc_events ++ flushed_events ++ done_events, done_message, new_buffer, :done}
+
+          true ->
+            error = ProviderError.malformed(:truncated_stream)
+            {acc_events ++ flushed_events ++ [{:provider_error, error}], new_message, new_buffer, :done}
+        end
 
       _chunk, acc ->
         acc

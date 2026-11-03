@@ -143,7 +143,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
         {_initial_assistant_message(model),
          %{
-           framer: SSE.new(),
+           framer: SSE.new(max_frame_bytes: 16 * 1024 * 1024, max_buffer_bytes: 32 * 1024 * 1024),
            observer: Backplane.AiProtocol.OpenAIResponsesObserver.new(),
            error_body: ""
          }, :streaming, resp}
@@ -224,7 +224,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
             {processed_events, new_message} = process_events(events, acc_message)
 
             status =
-              if Enum.any?(processed_events, &match?({:done, _, _}, &1)),
+              if Enum.any?(processed_events, &match?({:done, _, _}, &1)) or
+                   Enum.any?(processed_events, &match?({:provider_error, _}, &1)),
                 do: :done,
                 else: :streaming
 
@@ -247,37 +248,45 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
         {acc_events, acc_message, acc_state, :done}
 
       :done, {acc_events, acc_message, acc_state, _status} ->
+        observer = Backplane.AiProtocol.OpenAIResponsesObserver.finish(acc_state.observer, :eof)
+
         case SSE.finish(acc_state.framer) do
           {:ok, framer, frames} ->
             events = decode_frames(frames)
             {processed_events, new_message} = process_events(events, acc_message)
 
-            if Enum.any?(processed_events, &match?({:done, _, _}, &1)) do
-              {acc_events ++ processed_events, new_message,
-               %{
-                 framer: framer,
-                 observer:
-                   Backplane.AiProtocol.OpenAIResponsesObserver.finish(acc_state.observer, :eof),
-                 error_body: acc_state.error_body
-               }, :done}
-            else
-              error = ProviderError.malformed(:truncated_stream)
+            cond do
+              Enum.any?(processed_events, &match?({:done, _, _}, &1)) or
+                  Enum.any?(processed_events, &match?({:provider_error, _}, &1)) ->
+                {acc_events ++ processed_events, new_message,
+                 %{framer: framer, observer: observer, error_body: acc_state.error_body}, :done}
 
-              {acc_events ++ processed_events ++ [{:provider_error, error}], new_message,
-               %{
-                 framer: framer,
-                 observer:
-                   Backplane.AiProtocol.OpenAIResponsesObserver.finish(acc_state.observer, :eof),
-                 error_body: acc_state.error_body
-               }, :done}
+              can_recover_eof?(new_message) ->
+                {recovery_events, recovered_message} = complete_response(new_message, %{})
+
+                {acc_events ++ processed_events ++ recovery_events, recovered_message,
+                 %{framer: framer, observer: observer, error_body: acc_state.error_body}, :done}
+
+              true ->
+                error = ProviderError.malformed(:truncated_stream)
+
+                {acc_events ++ processed_events ++ [{:provider_error, error}], new_message,
+                 %{framer: framer, observer: observer, error_body: acc_state.error_body}, :done}
             end
 
           {:error, _error, framer} ->
-            error = ProviderError.malformed(:truncated_stream)
+            if can_recover_eof?(acc_message) do
+              {recovery_events, recovered_message} = complete_response(acc_message, %{})
 
-            {acc_events ++ [{:provider_error, error}], acc_message,
-             %{framer: framer, observer: acc_state.observer, error_body: acc_state.error_body},
-             :done}
+              {acc_events ++ recovery_events, recovered_message,
+               %{framer: framer, observer: observer, error_body: acc_state.error_body}, :done}
+            else
+              error = ProviderError.malformed(:truncated_stream)
+
+              {acc_events ++ [{:provider_error, error}], acc_message,
+               %{framer: framer, observer: acc_state.observer, error_body: acc_state.error_body},
+               :done}
+            end
         end
 
       _chunk, acc ->
@@ -305,7 +314,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
         [:done]
 
       %{data: data} ->
-        case Serialization.from_json(data) do
+        case Serialization.from_json(data, max_encoded_bytes: 16 * 1024 * 1024) do
           {:ok, event} when is_map(event) -> [event]
           _ -> [{:provider_error, ProviderError.malformed(:invalid_event_json)}]
         end
@@ -556,11 +565,18 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   defp process_events(events, message) do
     Enum.map_reduce(events, message, fn event, acc ->
       case event do
-        %{"type" => "response.created", "response" => response} ->
-          {[], %{acc | response_id: response["id"]}}
+        %{"type" => type, "response" => response}
+        when type in ["response.created", "response.in_progress"] ->
+          {[], %{acc | response_id: acc.response_id || response["id"]}}
 
         %{"type" => "response.output_text.delta", "delta" => text} ->
           process_text_delta(acc, text)
+
+        %{"type" => "response.output_text.done", "text" => text}
+        when is_binary(text) and text != "" ->
+          if is_nil(text_content_index(acc.content)),
+            do: process_text_delta(acc, text),
+            else: {[], acc}
 
         %{"type" => "response.reasoning_text.delta", "delta" => text} ->
           process_thinking_delta(acc, text)
@@ -587,16 +603,23 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
         %{"type" => "response.output_item.done", "item" => %{"type" => "function_call"} = item} ->
           finalize_response_tool(acc, item)
 
-        %{"type" => "response.completed", "response" => response} ->
-          {tool_events, acc} = finalize_response_tools(acc, response)
+        %{"type" => "response.output_item.done", "item" => %{"type" => "message"} = item} ->
+          maybe_process_message_item_done(acc, item)
 
-          acc = %{
-            acc
-            | usage: response_usage(response["usage"]),
-              stop_reason: response_stop_reason(response, acc)
-          }
+        %{"type" => type, "response" => response}
+        when type in ["response.completed", "response.incomplete", "response.done"] ->
+          if is_nil(acc.stop_reason) do
+            complete_response(acc, response)
+          else
+            {[], acc}
+          end
 
-          {tool_events ++ [{:done, acc.stop_reason, acc}], acc}
+        :done ->
+          if is_nil(acc.stop_reason) and (acc.content != [] or not is_nil(acc.response_id)) do
+            complete_response(acc, %{})
+          else
+            {[], acc}
+          end
 
         %{"type" => "response.failed", "response" => response} ->
           raise provider_error_message(response["error"] || response)
@@ -610,6 +633,87 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     end)
     |> then(fn {events, acc} -> {List.flatten(events), acc} end)
   end
+
+  defp complete_response(acc, response) do
+    {text_events, acc} = maybe_extract_response_output_text(acc, response)
+    {tool_events, acc} = finalize_response_tools(acc, response)
+
+    usage =
+      case response do
+        %{"usage" => usage_map} when is_map(usage_map) -> response_usage(usage_map)
+        _ -> acc.usage
+      end
+
+    acc = %{
+      acc
+      | response_id: acc.response_id || response["id"],
+        usage: usage,
+        stop_reason: response_stop_reason(response, acc)
+    }
+
+    if Enum.any?(tool_events, &match?({:provider_error, _}, &1)) do
+      {text_events ++ tool_events, acc}
+    else
+      {text_events ++ tool_events ++ [{:done, acc.stop_reason, acc}], acc}
+    end
+  end
+
+  defp maybe_process_message_item_done(acc, %{"content" => content}) when is_list(content) do
+    if is_nil(text_content_index(acc.content)) do
+      text =
+        content
+        |> Enum.map(fn
+          %{"type" => type, "text" => part}
+          when type in ["output_text", "text"] and is_binary(part) ->
+            part
+
+          _ ->
+            ""
+        end)
+        |> Enum.join("")
+
+      if text != "", do: process_text_delta(acc, text), else: {[], acc}
+    else
+      {[], acc}
+    end
+  end
+
+  defp maybe_process_message_item_done(acc, _item), do: {[], acc}
+
+  defp maybe_extract_response_output_text(acc, %{"output" => items}) when is_list(items) do
+    if is_nil(text_content_index(acc.content)) do
+      Enum.reduce(items, {[], acc}, fn
+        %{"type" => "message"} = item, {events, current_acc} ->
+          {new_events, new_acc} = maybe_process_message_item_done(current_acc, item)
+          {events ++ new_events, new_acc}
+
+        _, state ->
+          state
+      end)
+    else
+      {[], acc}
+    end
+  end
+
+  defp maybe_extract_response_output_text(acc, _response), do: {[], acc}
+
+  defp can_recover_eof?(%{content: content}) when is_list(content) and content != [] do
+    Enum.all?(content, fn
+      %{type: :tool_call} = block ->
+        not Map.has_key?(block, :partial_json) or Map.has_key?(block, :arguments)
+
+      %{type: :text, text: text} ->
+        is_binary(text) and text != ""
+
+      %{type: :thinking, thinking: thinking} ->
+        is_binary(thinking) and thinking != ""
+
+      _ ->
+        true
+    end)
+  end
+
+  defp can_recover_eof?(_message), do: false
 
   defp process_thinking_delta(acc, text) do
     index = Enum.find_index(acc.content, &(&1[:type] == :thinking)) || length(acc.content)
