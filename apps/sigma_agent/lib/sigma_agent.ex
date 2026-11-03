@@ -986,7 +986,7 @@ defmodule Sigma.Agent do
       turn_id: state.turn_state.turn_id,
       current_request_id: state.current_request_id,
       context_snapshot: state.context_snapshot,
-      context_policy: state.context_policy,
+      context_policy: current_context_policy(state),
       steering_queue_count: counts.steering,
       follow_up_queue_count: counts.follow_up
     }
@@ -1503,7 +1503,9 @@ defmodule Sigma.Agent do
         end
       end)
 
-    if input_tokens >= state.context_policy.threshold do
+    policy = current_context_policy(state)
+
+    if input_tokens >= policy.threshold do
       case run_compact(state, trigger: :auto) do
         {state, {:error, {:hook_stopped, reason}}} ->
           emit(state, {:turn_blocked, reason})
@@ -2436,6 +2438,13 @@ defmodule Sigma.Agent do
           context_policy(snapshot, state.model, state.provider_options, state.context_limit)
     }
   end
+
+  defp current_context_policy(%__MODULE__{context_snapshot: %ContextPolicy{} = snapshot} = state) do
+    context_policy(snapshot, state.model, state.provider_options, state.context_limit)
+  end
+
+  defp current_context_policy(%{context_policy: policy}) when is_map(policy), do: policy
+  defp current_context_policy(_state), do: %{}
 
   defp context_policy(snapshot, model, options, limit) do
     ContextPolicy.policy(snapshot,

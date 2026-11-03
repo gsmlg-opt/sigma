@@ -254,7 +254,7 @@ defmodule Sigma.Web.SessionLiveTest do
     assert has_element?(reopened, "#context-limit-select option[value='768000'][selected]")
     {:ok, {restarted, _}} = Sigma.Web.SessionManager.get_agent(session_id, repo_path: @workdir)
     assert Sigma.Agent.status(restarted).context_policy.context_limit == 768_000
-    assert Sigma.Agent.status(restarted).context_policy.threshold == 614_400
+    assert Sigma.Agent.status(restarted).context_policy.threshold == 691_200
   end
 
   for active? <- [false, true] do
@@ -3206,13 +3206,8 @@ defmodule Sigma.Web.SessionLiveTest do
     end
 
     assert has_element?(view, "#session-context-details", "Context window: 256K tokens")
-    policy = Sigma.Agent.status(agent).context_policy
-
-    if policy.estimate_stale do
-      refute has_element?(view, "#session-context-details progress")
-    else
-      assert has_element?(view, "#session-context-details progress")
-    end
+    assert has_element?(view, "#session-context-details progress")
+    assert has_element?(view, "#session-context-details [data-compaction-marker]")
 
     estimate
   end

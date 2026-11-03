@@ -625,7 +625,7 @@ defmodule Sigma.AgentTest do
     assert_receive {:context_limit_changed, 384_000}
     assert :ok = Sigma.Agent.ensure_context_limit(agent, 256_000)
     assert Sigma.Agent.status(agent).context_policy.context_window == 384_000
-    assert Sigma.Agent.status(agent).context_policy.threshold == 307_200
+    assert Sigma.Agent.status(agent).context_policy.threshold == 345_600
     Sigma.Agent.set_model(agent, %{context_window: 100_000})
     assert Sigma.Agent.status(agent).context_policy.context_limit == 384_000
     assert Sigma.Agent.status(agent).context_policy.context_window == 100_000

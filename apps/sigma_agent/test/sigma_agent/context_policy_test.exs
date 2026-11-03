@@ -29,7 +29,7 @@ defmodule Sigma.Agent.ContextPolicyTest do
     policy = ContextPolicy.policy(snapshot, context_limit: 256_000, output_reserve: 8_000)
     assert policy.context_limit == 256_000
     assert policy.context_window == 256_000
-    assert policy.threshold == 204_800
+    assert policy.threshold == 230_400
     assert policy.window_source == :session
     assert policy.threshold_source == :session_ratio
     assert policy.overflow == :hard_overflow
@@ -38,7 +38,7 @@ defmodule Sigma.Agent.ContextPolicyTest do
       ContextPolicy.policy(snapshot, context_limit: 256_000, model: %{context_window: 100_000})
 
     assert smaller.context_window == 100_000
-    assert smaller.threshold == 80_000
+    assert smaller.threshold == 90_000
     assert smaller.window_source == :model
     assert smaller.threshold_source == :model_ratio
 
@@ -46,7 +46,7 @@ defmodule Sigma.Agent.ContextPolicyTest do
       ContextPolicy.policy(snapshot, context_limit: 384_000, model: %{context_window: 1_000_000})
 
     assert larger.context_window == 384_000
-    assert larger.threshold == 307_200
+    assert larger.threshold == 345_600
   end
 
   test "keeps provider measurement separate from next request estimate" do

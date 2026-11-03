@@ -104,8 +104,8 @@ defmodule Sigma.Web.SessionObservabilityTest do
           last_measured: 20_176,
           context_window: 512_000,
           estimate_source: :last_request_measurement,
-          tokens_remaining: 389_802,
-          threshold: 409_600,
+          tokens_remaining: 441_002,
+          threshold: 460_800,
           output_reserve: 8_000,
           hard_tokens_remaining: 484_202,
           overflow: :within_budget
@@ -128,10 +128,14 @@ defmodule Sigma.Web.SessionObservabilityTest do
     assert text =~ "Next request estimate: 19.8K tokens"
     assert text =~ "20.18K tokens"
     assert text =~ "Context window: 512K tokens"
-    assert text =~ "Auto-compaction threshold: 409.6K tokens"
-    assert text =~ "Until compaction threshold: 389.8K tokens"
+    assert text =~ "19.8K / 512K tokens"
+    assert text =~ "3.9%"
+    assert text =~ "Compaction 90% (460.8K)"
+    assert text =~ "Auto-compaction threshold: 460.8K tokens"
+    assert text =~ "Until compaction threshold: 441K tokens"
     assert text =~ "484.2K tokens"
     assert html =~ ~s(max="512000")
+    assert html =~ ~s(data-compaction-marker)
     assert text =~ "100K -> 25K"
     assert html =~ "summary"
     assert html =~ "last_request_measurement"
@@ -154,7 +158,10 @@ defmodule Sigma.Web.SessionObservabilityTest do
     assert stale =~ ~r/Hard budget remaining<\/dt>\s*<dd>unknown \(estimate stale\)/
     assert stale =~ "Hard request budget: unknown (estimate stale)"
     assert stale =~ "Previous check exceeded the model hard budget; current budget unknown"
-    refute stale =~ ~s(<progress)
+    assert stale =~ ~s(<progress)
+    assert stale =~ "90K / 100K tokens"
+    assert stale =~ "Compaction 90% (90K)"
+    assert stale =~ ~s(data-compaction-marker)
 
     unknown = render_component(&SessionObservability.context_budget_card/1, %{policy: %{}})
     assert unknown =~ "Context window: unknown"
