@@ -14,7 +14,7 @@ concurrency:
 jobs:
   elixir:
     name: Elixir format and compile
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Check out repository
@@ -43,7 +43,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             native/sigma_terminal_helper/target
-          key: ci-elixir-${{ runner.os }}-${{ runner.arch }}-otp-28.5-elixir-1.18.4-${{ hashFiles('mix.lock', '**/mix.exs', '**/Cargo.lock') }}
+          key: ci-elixir-ubuntu-26.04-${{ runner.arch }}-otp-28.5-elixir-1.18.4-${{ hashFiles('mix.lock', '**/mix.exs', '**/Cargo.lock') }}
 
       - name: Install dependencies
         run: mix deps.get
@@ -56,7 +56,7 @@ jobs:
 
   rust:
     name: Rust format, Clippy, and tests
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Check out repository
@@ -74,7 +74,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             native/sigma_terminal_helper/target
-          key: ci-rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/sigma_terminal_helper/Cargo.lock', 'native/sigma_terminal_helper/Cargo.toml') }}
+          key: ci-rust-ubuntu-26.04-${{ runner.arch }}-${{ hashFiles('native/sigma_terminal_helper/Cargo.lock', 'native/sigma_terminal_helper/Cargo.toml') }}
 
       - name: Run Rust tests
         run: |
@@ -88,7 +88,7 @@ jobs:
 
   assets:
     name: Web asset setup and build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Check out repository
@@ -115,7 +115,7 @@ jobs:
             ~/.hex
             ~/.mix
             ~/.cache/rebar3
-          key: ci-assets-${{ runner.os }}-${{ runner.arch }}-otp-28.5-elixir-1.18.4-bun-1.3.13-${{ hashFiles('mix.lock', 'package-lock.json', '**/package.json') }}
+          key: ci-assets-ubuntu-26.04-${{ runner.arch }}-otp-28.5-elixir-1.18.4-bun-1.3.13-${{ hashFiles('mix.lock', 'package-lock.json', '**/package.json') }}
 
       - name: Install dependencies
         run: mix deps.get
@@ -131,7 +131,7 @@ jobs:
 
   release_smoke:
     name: Installed release agent smoke
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     env:
       MIX_ENV: prod
 
@@ -168,7 +168,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             native/sigma_terminal_helper/target
-          key: ci-release-${{ runner.os }}-${{ runner.arch }}-otp-28.5-elixir-1.18.4-bun-1.3.13-${{ hashFiles('mix.lock', 'package-lock.json', '**/package.json', '**/Cargo.lock') }}
+          key: ci-release-ubuntu-26.04-${{ runner.arch }}-otp-28.5-elixir-1.18.4-bun-1.3.13-${{ hashFiles('mix.lock', 'package-lock.json', '**/package.json', '**/Cargo.lock') }}
 
       - name: Install production dependencies
         run: |

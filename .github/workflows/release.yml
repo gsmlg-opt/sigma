@@ -23,7 +23,7 @@ concurrency:
 jobs:
   resolve:
     name: Resolve release source
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       branch: ${{ steps.source.outputs.branch }}
       base_sha: ${{ steps.source.outputs.base_sha }}
@@ -94,7 +94,7 @@ jobs:
   verify:
     name: Verify release source
     needs: resolve
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Check out resolved release source
@@ -140,7 +140,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             native/sigma_terminal_helper/target
-          key: release-verify-${{ runner.os }}-${{ runner.arch }}-otp-28.5-elixir-1.18.4-bun-1.3.13-${{ hashFiles('mix.lock', 'package-lock.json', '**/package.json', '**/Cargo.lock') }}
+          key: release-verify-ubuntu-26.04-${{ runner.arch }}-otp-28.5-elixir-1.18.4-bun-1.3.13-${{ hashFiles('mix.lock', 'package-lock.json', '**/package.json', '**/Cargo.lock') }}
 
       - name: Build debug native helpers before Mix commands
         run: scripts/build-terminal-helper.sh debug
@@ -191,16 +191,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
+          - runner: ubuntu-26.04
             os: linux
             arch: amd64
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             os: linux
             arch: arm64
-          - runner: macos-15-intel
+          - runner: macos-26-intel
             os: macos
             arch: amd64
-          - runner: macos-15
+          - runner: macos-26
             os: macos
             arch: arm64
 
@@ -239,7 +239,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             native/sigma_terminal_helper/target
-          key: release-${{ matrix.os }}-${{ matrix.arch }}-otp-28.5-elixir-1.18.4-${{ hashFiles('mix.lock', 'package-lock.json', '**/Cargo.lock', '**/package.json') }}
+          key: release-${{ matrix.runner }}-${{ matrix.arch }}-otp-28.5-elixir-1.18.4-${{ hashFiles('mix.lock', 'package-lock.json', '**/Cargo.lock', '**/package.json') }}
 
       - name: Prepare native helpers before Mix commands
         run: scripts/build-terminal-helper.sh release
@@ -359,7 +359,7 @@ jobs:
     needs:
       - resolve
       - build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     env:
       BRANCH: ${{ needs.resolve.outputs.branch }}
       BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
