@@ -668,6 +668,11 @@ defmodule Sigma.Agent.Subagents do
     end
   end
 
+  def handle_info({:upstream_cancel_result, scope, result}, state) do
+    notify(state, {:upstream_cancel_status, scope, result})
+    {:noreply, state}
+  end
+
   def handle_info({:subagent_activity, identity, activity}, state) do
     activity =
       case activity do
@@ -1799,7 +1804,9 @@ defmodule Sigma.Agent.Subagents do
     })
   end
 
-  defp observe(state, %{agent: agent}) do
+  defp observe(state, %{agent: agent} = event) do
+    Sigma.Ai.ManagedCancellation.observe(event, self(), fn run_id -> qualify(state, run_id) end)
+
     id = qualify(state, agent.agent_id)
     row = Enum.find(state.roster.agents, &(&1.agent_id == id))
     original = get_in(agent.host_metadata, ["sigma_identity", "public_run_id"])

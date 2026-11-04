@@ -208,8 +208,20 @@ defmodule Sigma.Agent.ProtocolEventMapper do
   def map({:turn_failed, event_turn_id}, session_id, _turn_id),
     do: event("turn.failed", session_id, %{}, event_turn_id)
 
+  def map({:upstream_cancel_status, scope, result}, session_id, turn_id) do
+    {envelope, _} =
+      event(
+        "provider.cancellation",
+        session_id,
+        Sigma.Ai.CancellationFeedback.payload(scope, result),
+        scope[:turn_id]
+      )
+
+    {envelope, turn_id}
+  end
+
   def map({:turn_cancelled}, session_id, turn_id),
-    do: event("turn.cancelled", session_id, %{}, turn_id)
+    do: event("turn.cancelled", session_id, %{"scope" => "local"}, turn_id)
 
   def map({:prompt_consumed, :follow_up, %{turn_id: turn_id}}, _session_id, _active_turn_id),
     do: {nil, turn_id}

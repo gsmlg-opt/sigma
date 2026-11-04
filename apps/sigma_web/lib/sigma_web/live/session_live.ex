@@ -3228,6 +3228,11 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
+  def handle_info({:upstream_cancel_status, scope, result}, socket) do
+    {:noreply, put_flash(socket, :info, Sigma.Ai.CancellationFeedback.message(scope, result))}
+  end
+
+  @impl true
   def handle_info({:turn_cancelled}, socket) do
     {:noreply,
      socket

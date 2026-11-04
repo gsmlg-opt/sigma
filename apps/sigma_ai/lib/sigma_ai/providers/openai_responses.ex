@@ -13,6 +13,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
   alias Sigma.Ai.Providers.OpenAIResponses.Hosted
 
+  alias Sigma.Ai.{ResponsesRecovery, ResponsesCancellation}
+
   @impl true
   def stream_normalized(%ProviderRequest{} = request),
     do: stream(ProviderRequest.to_legacy(request))
@@ -25,7 +27,13 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
       image_input: true,
       context_window: model[:context_window] || model["contextWindow"],
       max_output_tokens: model[:max_tokens] || model["maxTokens"],
-      supported_options: [:max_tokens, :reasoning_effort]
+      supported_options: [
+        :max_tokens,
+        :reasoning_effort,
+        :background,
+        :responses_recovery,
+        :responses_cancel
+      ]
     }
   end
 
@@ -34,6 +42,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     model = params.model
     context = params.context
     options = params.options
+    _ = ResponsesRecovery.new(options)
+    ResponsesCancellation.validate!(options)
     session_id = Map.get(params, :session_id)
     log_session_id = Map.get(params, :log_session_id, session_id)
 
@@ -74,6 +84,11 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
         nil -> body
         limit -> Map.put(body, :max_output_tokens, limit)
       end
+
+    body =
+      if Keyword.has_key?(options, :background),
+        do: Map.put(body, :background, options[:background]),
+        else: body
 
     # Add tools if present
     body =
@@ -173,6 +188,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
           }
         )
 
+        cancellation = ResponsesCancellation.register(options, base_url, headers)
+
         resp =
           try do
             {:ok, encoded_body} = Serialization.to_json(body)
@@ -182,7 +199,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
                 body: encoded_body,
                 headers: headers,
                 receive_timeout: options[:receive_timeout] || 120_000,
-                retry: Keyword.get(options, :retry, :transient),
+                retry: Sigma.Ai.CreationRequest.retry_policy(options),
+                redirect: false,
                 max_retries: Keyword.get(options, :max_retries, 3),
                 into: :self
               ]
@@ -191,8 +209,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
             Req.post!(base_url <> "/responses", req_opts)
           rescue
-            e in [Req.TransportError, Finch.TransportError] ->
-              reraise transport_error_message(e), __STACKTRACE__
+            e in [Req.TransportError, Finch.TransportError, Req.HTTPError] ->
+              reraise Sigma.Ai.CreationRequest.submission_error(e), __STACKTRACE__
           end
 
         {_initial_assistant_message(model),
@@ -208,20 +226,26 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
              {if(native_transport?, do: Codec.stream_new(:openai_responses), else: :ordinary),
               Hosted.new(hosted)},
            observer: Backplane.AiProtocol.OpenAIResponsesObserver.new(),
-           error_body: ""
+           error_body: "",
+           cancellation: cancellation,
+           recovery: ResponsesRecovery.new(options)
          }, :streaming, resp}
       end,
       fn
-        {message, _state, :done, resp} ->
-          {:halt, {message, %{}, :done, resp}}
+        {message, state, :done, resp} ->
+          {:halt, {message, state, :done, resp}}
+
+        {message, state, :interrupted, resp} ->
+          reconnect(message, state, resp, base_url, headers, options)
 
         {message, state, :streaming, resp} ->
           cancellation_ref = options[:cancellation_ref]
 
           receive do
             {:cancel, ^cancellation_ref} when not is_nil(cancellation_ref) ->
+              ResponsesCancellation.request(state.cancellation)
               Req.cancel_async_response(resp)
-              error = ProviderError.from_reason(:cancelled)
+              error = ResponsesCancellation.local_error(state.cancellation, state.recovery)
               {[{:provider_error, error}], {message, state, :done, resp}}
 
             req_message ->
@@ -232,28 +256,20 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
           after
             options[:receive_timeout] || 120_000 ->
               Req.cancel_async_response(resp)
-              raise transport_error_message(%{reason: :timeout})
+
+              if state.recovery do
+                {[], {message, state, :interrupted, resp}}
+              else
+                raise Sigma.Ai.CreationRequest.interrupted(:timeout, message[:response_id])
+              end
           end
       end,
       fn
-        {_message, _state, :streaming, resp} -> Req.cancel_async_response(resp)
-        _ -> :ok
+        {_message, state, _status, resp} ->
+          ResponsesCancellation.release(state.cancellation)
+          Req.cancel_async_response(resp)
       end
     )
-  end
-
-  # A network timeout or connection failure to the AI provider is an
-  # expected failure — convert it into a RuntimeError with a readable
-  # message so the agent surfaces it as a clean {:turn_error, ...} flash
-  # instead of crashing the turn task.
-  defp transport_error_message(%{reason: :timeout}) do
-    "The AI provider did not respond in time (request timed out). " <>
-      "Check your network connection and API key, then try again."
-  end
-
-  defp transport_error_message(%{reason: reason}) do
-    "Network error contacting the AI provider: #{inspect(reason)}. " <>
-      "Check your connection and try again."
   end
 
   defp maybe_put_opt(opts, options, key) do
@@ -266,14 +282,18 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   defp handle_async_message(resp, req_message, message, state) do
     case Req.parse_message(resp, req_message) do
       {:ok, chunks} ->
-        if resp.status >= 400 do
+        if resp.status >= 300 do
           handle_error_chunks(resp, chunks, message, state)
         else
           handle_stream_chunks(chunks, message, state)
         end
 
       {:error, %{reason: reason}} ->
-        raise transport_error_message(%{reason: reason})
+        if state.recovery && resp.status < 300 do
+          {[], message, state, :interrupted}
+        else
+          raise Sigma.Ai.CreationRequest.interrupted(reason, message[:response_id])
+        end
 
       :unknown ->
         {[], message, state, :streaming}
@@ -290,8 +310,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
         case SSE.feed(acc_state.framer, chunk) do
           {:ok, framer, frames} ->
-            {processed_events, new_message, tool_codec} =
-              process_events(decode_frames(frames), acc_message, acc_state.tool_codec)
+            {processed_events, new_message, next_state} =
+              process_frames(frames, acc_message, acc_state)
 
             status = if terminal_events?(processed_events), do: :done, else: :streaming
 
@@ -301,10 +321,10 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
                 else: observer
 
             {acc_events ++ processed_events, new_message,
-             %{acc_state | framer: framer, observer: observer, tool_codec: tool_codec}, status}
+             %{next_state | framer: framer, observer: observer}, status}
 
           {:error, _error, framer} ->
-            error = ProviderError.malformed(:invalid_sse)
+            error = stream_error(:invalid_sse, acc_message)
 
             {acc_events ++ [{:provider_error, error}], acc_message,
              %{acc_state | framer: framer, observer: observer}, :done}
@@ -313,43 +333,44 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
       :done, {acc_events, acc_message, acc_state, :done} ->
         {acc_events, acc_message, acc_state, :done}
 
+      :done,
+      {acc_events, acc_message, %{recovery: recovery, framer: %{buffer: buffer}} = acc_state,
+       _status}
+      when not is_nil(recovery) and buffer != "" ->
+        # An unterminated frame is not an applied event. Replay it from the last
+        # complete checkpoint rather than parsing a possibly cut JSON payload.
+        {acc_events, acc_message, acc_state, :interrupted}
+
       :done, {acc_events, acc_message, acc_state, _status} ->
         observer = Backplane.AiProtocol.OpenAIResponsesObserver.finish(acc_state.observer, :eof)
 
         case SSE.finish(acc_state.framer) do
           {:ok, framer, frames} ->
-            {processed_events, new_message, tool_codec} =
-              process_events(decode_frames(frames), acc_message, acc_state.tool_codec)
+            {processed_events, new_message, next_state} =
+              process_frames(frames, acc_message, acc_state)
 
-            state = %{acc_state | framer: framer, observer: observer, tool_codec: tool_codec}
+            state = %{next_state | framer: framer, observer: observer}
 
             cond do
               terminal_events?(processed_events) ->
                 {acc_events ++ processed_events, new_message, state, :done}
 
-              can_recover_eof?(new_message, tool_codec) ->
-                {recovery_events, recovered_message, tool_codec} =
-                  complete_response(new_message, %{}, tool_codec)
-
-                {acc_events ++ processed_events ++ recovery_events, recovered_message,
-                 %{state | tool_codec: tool_codec}, :done}
+              not is_nil(state.recovery) ->
+                {acc_events ++ processed_events, new_message, state, :interrupted}
 
               true ->
-                error = ProviderError.malformed(:truncated_stream)
+                error = stream_error(:truncated_stream, new_message)
 
                 {acc_events ++ processed_events ++ [{:provider_error, error}], new_message, state,
                  :done}
             end
 
           {:error, _error, framer} ->
-            if can_recover_eof?(acc_message, acc_state.tool_codec) do
-              {recovery_events, recovered_message, tool_codec} =
-                complete_response(acc_message, %{}, acc_state.tool_codec)
-
-              {acc_events ++ recovery_events, recovered_message,
-               %{acc_state | framer: framer, observer: observer, tool_codec: tool_codec}, :done}
+            if acc_state.recovery do
+              {acc_events, acc_message, %{acc_state | framer: framer, observer: observer},
+               :interrupted}
             else
-              error = ProviderError.malformed(:truncated_stream)
+              error = stream_error(:invalid_sse, acc_message)
 
               {acc_events ++ [{:provider_error, error}], acc_message,
                %{acc_state | framer: framer, observer: observer}, :done}
@@ -359,6 +380,95 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
       _chunk, acc ->
         acc
     end)
+  end
+
+  defp process_frames(frames, message, state) do
+    Enum.reduce_while(decode_frames(frames), {[], message, state}, fn event,
+                                                                      {all, message, state} ->
+      case ResponsesRecovery.accept(state.recovery, event) do
+        {:skip, _} ->
+          {:cont, {all, message, state}}
+
+        {:error, error} ->
+          {:halt, {all ++ [{:provider_error, error}], message, state}}
+
+        {:apply, checkpoint} ->
+          ResponsesCancellation.observe(state.cancellation, event)
+          {events, message, codec} = process_events([event], message, state.tool_codec)
+          state = %{state | tool_codec: codec}
+
+          state =
+            if Enum.any?(events, &match?({:provider_error, _}, &1)),
+              do: state,
+              else: %{state | recovery: checkpoint}
+
+          result = {all ++ events, message, state}
+          if terminal_events?(events), do: {:halt, result}, else: {:cont, result}
+      end
+    end)
+  end
+
+  defp reconnect(message, state, resp, base_url, headers, options) do
+    Req.cancel_async_response(resp)
+
+    case ResponsesRecovery.next_attempt(state.recovery) do
+      {:error, error} ->
+        {[{:provider_error, error}], {message, state, :done, resp}}
+
+      {:ok, recovery} ->
+        ref = options[:cancellation_ref]
+
+        receive do
+          {:cancel, ^ref} when not is_nil(ref) ->
+            ResponsesCancellation.request(state.cancellation)
+
+            {[
+               {:provider_error,
+                ResponsesCancellation.local_error(state.cancellation, state.recovery)}
+             ], {message, state, :done, resp}}
+        after
+          ResponsesRecovery.delay(recovery) ->
+            state = %{state | recovery: recovery}
+
+            if System.monotonic_time(:millisecond) >= recovery.deadline do
+              error = ResponsesRecovery.error(recovery, :recovery_expired)
+              {[{:provider_error, error}], {message, state, :done, resp}}
+            else
+              url =
+                String.trim_trailing(base_url, "/") <>
+                  "/responses/" <> URI.encode(recovery.id, &URI.char_unreserved?/1)
+
+              timeout =
+                min(
+                  options[:receive_timeout] || 120_000,
+                  max(1, recovery.deadline - System.monotonic_time(:millisecond))
+                )
+
+              case Req.get(url,
+                     headers: headers,
+                     params: [stream: true, starting_after: recovery.cursor],
+                     retry: false,
+                     redirect: false,
+                     receive_timeout: timeout,
+                     into: :self
+                   ) do
+                {:ok, resumed} ->
+                  # Only transport framing is reset. Reducer, Codec, Hosted and output
+                  # state are retained; replayed event numbers are filtered before them.
+                  state = %{
+                    state
+                    | framer: %{state.framer | buffer: "", closed?: false},
+                      error_body: ""
+                  }
+
+                  {[], {message, state, :streaming, resumed}}
+
+                {:error, _error} ->
+                  {[], {message, state, :interrupted, resp}}
+              end
+            end
+        end
+    end
   end
 
   defp terminal_events?(events),
@@ -371,7 +481,23 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
          :streaming}
 
       :done, {_acc_events, _acc_message, acc_state, _status} ->
-        raise http_provider_error(resp.status, acc_state.error_body, resp.headers)
+        error = http_provider_error(resp.status, acc_state.error_body, resp.headers)
+
+        error =
+          if acc_state.recovery do
+            %{
+              error
+              | raw: %{
+                  provider_error: error.raw,
+                  response_id: acc_state.recovery.id,
+                  starting_after: acc_state.recovery.cursor
+                }
+            }
+          else
+            error
+          end
+
+        raise error
 
       _chunk, acc ->
         acc
@@ -774,19 +900,46 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
   defp positive_integer(_value), do: nil
 
+  defp response_error(error) do
+    %ProviderError{kind: :server_error, message: provider_error_message(error), retryable: false}
+  end
+
+  defp normalize_terminal_event!(%{"type" => type, "response" => response} = event)
+       when type in ["response.completed", "response.incomplete", "response.done"] do
+    case {type, response["status"]} do
+      {_, "failed"} ->
+        Map.put(event, "type", "response.failed")
+
+      {_, "cancelled"} ->
+        Map.put(event, "type", "response.cancelled")
+
+      {_, status} when status not in [nil, "completed", "incomplete"] ->
+        raise ProviderError.malformed(:invalid_terminal_response_status)
+
+      {"response.done", nil} ->
+        raise ProviderError.malformed(:invalid_terminal_response_status)
+
+      {"response.incomplete", _} ->
+        Map.put(event, "response", Map.put(response, "status", "incomplete"))
+
+      {"response.done", "incomplete"} ->
+        Map.put(event, "type", "response.incomplete")
+
+      {"response.done", "completed"} ->
+        Map.put(event, "type", "response.completed")
+
+      _ ->
+        event
+    end
+  end
+
+  defp normalize_terminal_event!(event), do: event
+
   defp process_events(events, message, {codec, hosted}) do
     Enum.reduce_while(events, {[], message, {codec, hosted}}, fn event,
                                                                  {all, acc, {codec, hosted}} ->
-      event =
-        case event do
-          %{"type" => "response.done"} -> Map.put(event, "type", "response.completed")
-          other -> other
-        end
-
-      {emitted, next, codec} =
-        if event == :done and hosted.prepared.enabled,
-          do: {[], acc, codec},
-          else: process_event(event, acc, codec)
+      event = normalize_terminal_event!(event)
+      {emitted, next, codec} = process_event(event, acc, codec)
 
       {observed, next, hosted} = Hosted.observe(hosted, event, next)
 
@@ -806,13 +959,29 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     error in ProviderError -> {[{:provider_error, error}], message, {codec, hosted}}
   end
 
+  # Common failure handling must precede both ordinary and native codec paths.
+  defp process_event(:done, acc, codec),
+    do: {[{:provider_error, stream_error(:truncated_stream, acc)}], acc, codec}
+
+  defp process_event({:provider_error, error}, acc, codec),
+    do: {[{:provider_error, %{error | raw: %{response_id: acc.response_id}}}], acc, codec}
+
+  defp process_event(%{"type" => "response.cancelled"}, acc, codec),
+    do: {[{:provider_error, ProviderError.from_reason(:cancelled)}], acc, codec}
+
+  defp process_event(%{"type" => "response.failed", "response" => response}, acc, codec),
+    do: {[{:provider_error, response_error(response["error"] || response)}], acc, codec}
+
+  defp process_event(%{"type" => "error"} = error, acc, codec),
+    do: {[{:provider_error, response_error(error)}], acc, codec}
+
   defp process_event(event, acc, :ordinary) do
     {events, acc} = process_ordinary_events([event], acc)
     {events, acc, :ordinary}
   end
 
   defp process_event(%{"type" => type, "response" => response}, acc, codec)
-       when type in ["response.created", "response.in_progress"],
+       when type in ["response.created", "response.queued", "response.in_progress"],
        do: {[], %{acc | response_id: acc.response_id || response["id"]}, codec}
 
   defp process_event(%{"type" => "response.output_text.done", "text" => text}, acc, codec)
@@ -884,21 +1053,6 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     response = if incomplete?, do: Map.put(response, "status", "incomplete"), else: response
     complete_response(acc, response, codec)
   end
-
-  defp process_event(:done, acc, codec) do
-    if is_nil(acc.stop_reason) and (acc.content != [] or not is_nil(acc.response_id)),
-      do: complete_response(acc, %{}, codec),
-      else: {[], acc, codec}
-  end
-
-  defp process_event(%{"type" => "response.failed", "response" => response}, _acc, _codec),
-    do: raise(provider_error_message(response["error"] || response))
-
-  defp process_event(%{"type" => "error"} = error, _acc, _codec),
-    do: raise(provider_error_message(error))
-
-  defp process_event({:provider_error, error}, acc, codec),
-    do: {[{:provider_error, error}], acc, codec}
 
   defp process_event(_event, acc, codec), do: {[], acc, codec}
 
@@ -1110,29 +1264,15 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
   defp maybe_extract_response_output_text(acc, _response), do: {[], acc}
 
-  # Hosted replay requires the actual terminal output; EOF cannot invent it.
-  defp can_recover_eof?(message, {_codec, %{prepared: %{enabled: false}}}),
-    do: can_recover_eof?(message)
-
-  defp can_recover_eof?(_message, _tool_codec), do: false
-
-  defp can_recover_eof?(%{content: content}) when is_list(content) and content != [] do
-    Enum.all?(content, fn
-      %{type: :tool_call} = block ->
-        not Map.has_key?(block, :partial_json) or Map.has_key?(block, :arguments)
-
-      %{type: :text, text: text} ->
-        is_binary(text) and text != ""
-
-      %{type: :thinking, thinking: thinking} ->
-        is_binary(thinking) and thinking != ""
-
-      _ ->
-        true
-    end)
+  defp stream_error(reason, message) do
+    %{
+      ProviderError.malformed(reason)
+      | message:
+          "Provider stream ended without a valid terminal response (#{reason}). " <>
+            "Automatic recovery is unavailable; a new request may duplicate work.",
+        raw: %{reason: reason, response_id: message.response_id}
+    }
   end
-
-  defp can_recover_eof?(_message), do: false
 
   defp process_thinking_delta(acc, text) do
     index = Enum.find_index(acc.content, &(&1[:type] == :thinking)) || length(acc.content)
@@ -1155,7 +1295,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     Enum.map_reduce(events, message, fn event, acc ->
       case event do
         %{"type" => type, "response" => response}
-        when type in ["response.created", "response.in_progress"] ->
+        when type in ["response.created", "response.queued", "response.in_progress"] ->
           {[], %{acc | response_id: acc.response_id || response["id"]}}
 
         %{"type" => "response.output_text.delta", "delta" => text} ->
@@ -1202,19 +1342,6 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
           else
             {[], acc}
           end
-
-        :done ->
-          if is_nil(acc.stop_reason) and (acc.content != [] or not is_nil(acc.response_id)) do
-            ordinary_complete_response(acc, %{})
-          else
-            {[], acc}
-          end
-
-        %{"type" => "response.failed", "response" => response} ->
-          raise provider_error_message(response["error"] || response)
-
-        %{"type" => "error"} = error ->
-          raise provider_error_message(error)
 
         _ ->
           {[], acc}
@@ -1542,7 +1669,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
         {:error, _reason} -> %{"message" => http_error_message(status, body)}
       end
 
-    ProviderError.from_http(status, error, retry_after: retry_after(headers))
+    Sigma.Ai.CreationRequest.http_error(status, error, retry_after(headers))
   end
 
   defp retry_after(headers) when is_map(headers),

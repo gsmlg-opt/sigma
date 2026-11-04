@@ -106,7 +106,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesHostedTest do
     end)
   end
 
-  test "hosted framing preserves the native aggregate limit and ordinary transport bound" do
+  test "hosted framing preserves its aggregate limit and ordinary large terminal output" do
     reasoning = %{
       "type" => "reasoning",
       "id" => "too-large",
@@ -131,12 +131,10 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesHostedTest do
 
     with_server([terminal(ordinary)], fn base_url, _capture ->
       events = stream(base_url, tools: [], options: [])
-      refute Enum.any?(events, &(&1.type == :response_completed))
-
-      assert Enum.any?(
-               events,
-               &(&1.type == :response_failed and &1.error.message == "invalid_sse")
-             )
+      # Ordinary transport explicitly allows 16 MiB frames, not SSE.new/0's
+      # portable 256 KiB default. Hosted output retains its separate 1 MiB cap.
+      assert Enum.any?(events, &(&1.type == :response_completed))
+      refute Enum.any?(events, &(&1.type == :response_failed))
     end)
   end
 

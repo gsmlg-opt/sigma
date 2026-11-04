@@ -723,7 +723,16 @@ defmodule Sigma.Agent.Backplane.ChildIO do
     host = %{
       model: config.model,
       provider: config.provider,
-      provider_options: Map.get(config, :provider_options, []),
+      provider_options:
+        Keyword.put(
+          Map.get(config, :provider_options, []),
+          :cancellation_ref,
+          Sigma.Ai.ManagedCancellation.key(
+            state.identity.child_session_id,
+            state.identity.run_id,
+            state.identity.incarnation
+          )
+        ),
       session_id: state.identity.child_session_id,
       log_session_id: state.identity.child_session_id,
       turn_id: public_run_id(state.identity),

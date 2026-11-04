@@ -61,6 +61,7 @@ defmodule Sigma.Protocol.Envelope do
     async_interaction.chunk
     async_interaction.uploaded
     provider.hosted
+    provider.cancellation
     provider_hosted.changed
     provider_hosted.page
     provider_hosted.chunk

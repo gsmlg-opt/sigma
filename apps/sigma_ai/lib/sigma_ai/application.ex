@@ -5,7 +5,7 @@ defmodule Sigma.Ai.Application do
   @impl true
   def start(_type, _args) do
     Supervisor.start_link(
-      [{Task.Supervisor, name: Sigma.Ai.ProviderTaskSupervisor}],
+      [{Task.Supervisor, name: Sigma.Ai.ProviderTaskSupervisor}, Sigma.Ai.ResponsesCancellation],
       strategy: :one_for_one,
       name: Sigma.Ai.Supervisor
     )

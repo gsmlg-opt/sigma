@@ -32,6 +32,7 @@ defmodule Sigma.Ai.Providers.OpenAI do
     context = params.context
     Sigma.Ai.Providers.ToolTransport.require_json_functions!(context, "OpenAI Chat Completions")
     options = params.options
+    Sigma.Ai.CreationRequest.reject_responses_recovery!(options)
     session_id = Map.get(params, :session_id)
     log_session_id = Map.get(params, :log_session_id, session_id)
 
@@ -123,7 +124,8 @@ defmodule Sigma.Ai.Providers.OpenAI do
                 json: body,
                 headers: headers,
                 receive_timeout: options[:receive_timeout] || 120_000,
-                retry: Keyword.get(options, :retry, :transient),
+                retry: Sigma.Ai.CreationRequest.retry_policy(options),
+                redirect: false,
                 max_retries: Keyword.get(options, :max_retries, 3),
                 into: :self
               ]
@@ -132,8 +134,8 @@ defmodule Sigma.Ai.Providers.OpenAI do
 
             Req.post!(base_url <> "/chat/completions", req_opts)
           rescue
-            e in [Req.TransportError, Finch.TransportError] ->
-              reraise transport_error_message(e), __STACKTRACE__
+            e in [Req.TransportError, Finch.TransportError, Req.HTTPError] ->
+              reraise Sigma.Ai.CreationRequest.submission_error(e), __STACKTRACE__
           end
 
         {_initial_assistant_message(model), "", :streaming, resp}
@@ -159,7 +161,7 @@ defmodule Sigma.Ai.Providers.OpenAI do
           after
             options[:receive_timeout] || 120_000 ->
               Req.cancel_async_response(resp)
-              raise transport_error_message(%{reason: :timeout})
+              raise Sigma.Ai.CreationRequest.interrupted(:timeout, message[:response_id])
           end
       end,
       fn
@@ -167,20 +169,6 @@ defmodule Sigma.Ai.Providers.OpenAI do
         _ -> :ok
       end
     )
-  end
-
-  # A network timeout or connection failure to the AI provider is an
-  # expected failure — convert it into a RuntimeError with a readable
-  # message so the agent surfaces it as a clean {:turn_error, ...} flash
-  # instead of crashing the turn task.
-  defp transport_error_message(%{reason: :timeout}) do
-    "The AI provider did not respond in time (request timed out). " <>
-      "Check your network connection and API key, then try again."
-  end
-
-  defp transport_error_message(%{reason: reason}) do
-    "Network error contacting the AI provider: #{inspect(reason)}. " <>
-      "Check your connection and try again."
   end
 
   defp maybe_put_opt(opts, options, key) do
@@ -193,14 +181,14 @@ defmodule Sigma.Ai.Providers.OpenAI do
   defp handle_async_message(resp, req_message, message, buffer) do
     case Req.parse_message(resp, req_message) do
       {:ok, chunks} ->
-        if resp.status >= 400 do
+        if resp.status >= 300 do
           handle_error_chunks(resp, chunks, message, buffer)
         else
           handle_stream_chunks(chunks, message, buffer)
         end
 
       {:error, %{reason: reason}} ->
-        raise transport_error_message(%{reason: reason})
+        raise Sigma.Ai.CreationRequest.interrupted(reason, message[:response_id])
 
       :unknown ->
         {[], message, buffer, :streaming}
@@ -685,7 +673,7 @@ defmodule Sigma.Ai.Providers.OpenAI do
         {:error, _reason} -> %{"message" => http_error_message(status, body)}
       end
 
-    ProviderError.from_http(status, error, retry_after: retry_after(headers))
+    Sigma.Ai.CreationRequest.http_error(status, error, retry_after(headers))
   end
 
   defp retry_after(headers) when is_map(headers),

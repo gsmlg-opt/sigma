@@ -1049,6 +1049,12 @@ defmodule Sigma.Agent do
         task = state.current_turn_task
         turn_id = state.turn_state.turn_id
         cancellation_ref = state.turn_state.cancellation_ref
+
+        Sigma.Ai.ResponsesCancellation.request(
+          cancellation_ref,
+          {self(), %{turn_id: turn_id, target: "Cancelled turn"}}
+        )
+
         send(task.pid, {:cancel, cancellation_ref})
         send(task.pid, {:abort, cancellation_ref})
         state = cancel_pending_interactions(state)
@@ -1079,6 +1085,12 @@ defmodule Sigma.Agent do
         state = fence_goal_admission(state, :cancelled)
         task = state.current_turn_task
         cancellation_ref = state.turn_state.cancellation_ref
+
+        Sigma.Ai.ResponsesCancellation.request(
+          cancellation_ref,
+          {self(), %{turn_id: turn_id, target: "Cancelled turn"}}
+        )
+
         send(task.pid, {:cancel, cancellation_ref})
         send(task.pid, {:abort, cancellation_ref})
         state = cancel_pending_interactions(state)
@@ -1711,6 +1723,11 @@ defmodule Sigma.Agent do
       _task ->
         {:noreply, state}
     end
+  end
+
+  def handle_info({:upstream_cancel_result, scope, result}, state) do
+    notify_subscribers(state, {:upstream_cancel_status, scope, result})
+    {:noreply, state}
   end
 
   def handle_info({:EXIT, _pid, :normal}, state), do: {:noreply, state}
