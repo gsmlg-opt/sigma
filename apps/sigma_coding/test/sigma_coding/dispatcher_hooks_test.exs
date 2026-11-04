@@ -1,7 +1,7 @@
 defmodule Sigma.Coding.DispatcherHooksTest do
   use ExUnit.Case, async: true
 
-  alias Sigma.Coding.{Dispatcher, PermissionPolicy, ToolResult}
+  alias Sigma.Coding.{Dispatcher, PermissionPolicy, ToolError, ToolResult}
   alias Sigma.Coding.Hooks.Discovery
 
   @moduletag :tmp_dir
@@ -14,7 +14,10 @@ defmodule Sigma.Coding.DispatcherHooksTest do
 
     def execute(_id, arguments, opts) do
       send(opts[:test_pid], {:executed, arguments})
-      {:ok, %ToolResult{content: [%{type: :text, text: "original result"}]}}
+
+      if arguments["fail"],
+        do: {:error, ToolError.new(:execution, "original error")},
+        else: {:ok, %ToolResult{content: [%{type: :text, text: "original result"}]}}
     end
   end
 
@@ -85,6 +88,21 @@ defmodule Sigma.Coding.DispatcherHooksTest do
              )
 
     assert_received {:executed, %{}}
+  end
+
+  test "tool errors keep the original error without running success hooks", %{tmp_dir: cwd} do
+    specs = hooks("PostToolUse", "printf 'success hook ran' >&2; exit 2", "echo_tool")
+
+    assert {:error, %ToolError{message: "original error"}} =
+             Dispatcher.dispatch(
+               %{id: "failed-post", name: "echo_tool", arguments: %{"fail" => true}},
+               [EchoTool],
+               hook_specs: specs,
+               cwd: cwd,
+               test_pid: self()
+             )
+
+    assert_received {:executed, %{"fail" => true}}
   end
 
   defp hooks(event, command, matcher) do

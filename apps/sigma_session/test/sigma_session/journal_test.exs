@@ -878,6 +878,12 @@ defmodule Sigma.Session.JournalTest do
     projection = Sigma.Session.Metrics.snapshot(metrics)
     assert projection.coverage == %{known: 0, total: 1, ratio: 0.0}
     assert projection.turns["turn-1"].status == :interrupted
+
+    assert {:ok, %Snapshot{metrics: live_metrics}} =
+             Journal.replay(entries, finalize_metrics: false)
+
+    assert live_metrics.requests["request-1"].status == :running
+    assert Sigma.Session.Metrics.snapshot(live_metrics).turns["turn-1"].status == :running
   end
 
   test "replays 10,000 heterogeneous durable metric records incrementally without changing the active branch" do

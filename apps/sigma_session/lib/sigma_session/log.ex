@@ -158,7 +158,7 @@ defmodule Sigma.Session.Log do
   @doc """
   Returns bounded, display-safe summaries for every persisted conversation leaf.
 
-  Metrics entries are operational siblings and never become branch alternatives.
+  Operational entries, including async inbox facts, never become branch alternatives.
   The result contains no raw entries, attachments, thinking, or tool arguments.
   """
   def branch_summaries(storage_id, opts \\ [], storage_mod \\ JsonlFile) do
@@ -181,8 +181,14 @@ defmodule Sigma.Session.Log do
   end
 
   defp conversation_node?(%{entry: %{"type" => type}})
-       when type in ["metrics", "subagent", "subagent_admission"],
-    do: false
+       when type in [
+              "metrics",
+              "subagent",
+              "subagent_admission",
+              "async_interaction",
+              "hook_feedback"
+            ],
+       do: false
 
   defp conversation_node?(_node), do: true
 
@@ -329,6 +335,8 @@ defmodule Sigma.Session.Log do
          source_entry_id: node.entry["id"],
          checkpoint_entry_id: node.parent_id,
          context_messages: context_snapshot.messages,
+         provider_context_messages: context_snapshot.context_messages,
+         context_window: context_snapshot.context_window,
          provider_id: context_snapshot.provider_id,
          model_id: context_snapshot.model_id,
          current_provider_id: source_snapshot.provider_id,
@@ -364,7 +372,9 @@ defmodule Sigma.Session.Log do
          %{type: :text, text: text} when is_binary(text) -> String.trim(text) != ""
          %{type: :image} -> true
          _ -> false
-       end), do: :ok, else: {:error, :invalid_retry_boundary}
+       end),
+       do: :ok,
+       else: {:error, :invalid_retry_boundary}
   end
 
   defp validate_retry_message(%{role: :user}), do: {:error, :invalid_retry_boundary}

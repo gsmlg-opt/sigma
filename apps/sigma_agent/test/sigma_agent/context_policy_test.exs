@@ -91,6 +91,54 @@ defmodule Sigma.Agent.ContextPolicyTest do
     assert long.next_request_estimated_input_tokens > short.next_request_estimated_input_tokens
   end
 
+  test "hosted replay actions and citations contribute to the next request estimate" do
+    short = hosted_message("answer", "query", "source")
+
+    long =
+      hosted_message(
+        "answer",
+        String.duplicate("query ", 2_000),
+        String.duplicate("source ", 2_000)
+      )
+
+    assert short.content == long.content
+    short_snapshot = ContextPolicy.snapshot(messages: [short])
+    long_snapshot = ContextPolicy.snapshot(messages: [long])
+
+    assert long_snapshot.next_request_estimated_input_tokens >
+             short_snapshot.next_request_estimated_input_tokens + 6_000
+
+    assert long_snapshot.estimate_coverage == :complete
+  end
+
+  test "hosted native text is counted once alongside canonical assistant text" do
+    short = hosted_message("abcd", "query", "source")
+    long = hosted_message(String.duplicate("abcd", 1_001), "query", "source")
+
+    estimate = fn message ->
+      ContextPolicy.snapshot(messages: [message]).next_request_estimated_input_tokens
+    end
+
+    legacy = fn message -> %{message | metadata: %{}} end
+
+    assert estimate.(long) - estimate.(short) == 1_000
+
+    assert estimate.(long) - estimate.(short) ==
+             estimate.(legacy.(long)) - estimate.(legacy.(short))
+
+    assert estimate.(short) > estimate.(legacy.(short))
+  end
+
+  test "hosted projection keeps legacy estimates and explicit message token overrides" do
+    legacy = ContextPolicy.snapshot(messages: [%{role: :user, content: "short"}])
+    assert legacy.estimate_components.messages == 8
+
+    hosted = hosted_message("answer", String.duplicate("query", 1_000), "source")
+    explicit = ContextPolicy.snapshot(messages: [hosted], message_tokens: 42)
+    assert explicit.estimate_components.messages == 42
+    assert explicit.next_request_estimated_input_tokens == 42
+  end
+
   test "reports runtime threshold and model window provenance" do
     snapshot = ContextPolicy.snapshot(next_request_estimated_input_tokens: 75_000)
 
@@ -156,5 +204,59 @@ defmodule Sigma.Agent.ContextPolicyTest do
            } = invalidated
 
     assert {:ok, _generated_at, 0} = DateTime.from_iso8601(invalidated.generated_at)
+  end
+
+  defp hosted_message(text, query, title) do
+    %{
+      role: :assistant,
+      content: [%{type: :text, text: text}],
+      metadata: %{
+        "openai_responses_hosted" => %{
+          "version" => 1,
+          "origin" => %{
+            "protocol" => "openai-responses",
+            "provider" => "openai",
+            "model" => "model",
+            "endpoint_sha256" => String.duplicate("a", 64)
+          },
+          "response_id" => "response-1",
+          "items" => [
+            %{
+              "output_index" => 0,
+              "item" => %{
+                "type" => "web_search_call",
+                "id" => "search-1",
+                "status" => "completed",
+                "action" => %{"type" => "search", "query" => query}
+              }
+            },
+            %{
+              "output_index" => 1,
+              "item" => %{
+                "type" => "message",
+                "id" => "message-1",
+                "role" => "assistant",
+                "status" => "completed",
+                "content" => [
+                  %{
+                    "type" => "output_text",
+                    "text" => text,
+                    "annotations" => [
+                      %{
+                        "type" => "url_citation",
+                        "start_index" => 0,
+                        "end_index" => 4,
+                        "url" => "https://example.com/source",
+                        "title" => title
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
   end
 end

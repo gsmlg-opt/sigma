@@ -64,6 +64,10 @@ defmodule Sigma.Coding.PermissionInterceptor do
     end
   end
 
+  defp check_replaced_policy(%{arguments: raw} = tool_call, _input, _context, _opts)
+       when is_binary(raw),
+       do: deny_input_edit(tool_call)
+
   defp check_replaced_policy(tool_call, input, context, opts) do
     case check_policy(%{tool_call | arguments: input}, opts) do
       :allow ->
@@ -74,6 +78,19 @@ defmodule Sigma.Coding.PermissionInterceptor do
 
       denied ->
         denied
+    end
+  end
+
+  defp check_patched_policy(%{arguments: raw} = tool_call, patch, context, opts)
+       when is_binary(raw) do
+    if patch == %{} do
+      case check_policy(tool_call, opts) do
+        :allow -> with_context(:allow, context)
+        {:allow, approval_patch} -> with_context({:allow, approval_patch}, context)
+        denied -> denied
+      end
+    else
+      deny_input_edit(tool_call)
     end
   end
 
@@ -236,12 +253,25 @@ defmodule Sigma.Coding.PermissionInterceptor do
       end
 
     case resolution do
-      :allow -> :allow
-      {:allow, patch} when is_map(patch) -> resolution
-      {:deny, _} -> resolution
-      _ -> {:deny, {:invalid_approval_response, tool_call.name}}
+      :allow ->
+        :allow
+
+      {:allow, patch}
+      when is_map(patch) and map_size(patch) > 0 and is_binary(tool_call.arguments) ->
+        deny_input_edit(tool_call)
+
+      {:allow, patch} when is_map(patch) ->
+        resolution
+
+      {:deny, _} ->
+        resolution
+
+      _ ->
+        {:deny, {:invalid_approval_response, tool_call.name}}
     end
   end
+
+  defp deny_input_edit(tool_call), do: {:deny, {:unsupported_input_edit, tool_call.name}}
 
   defp with_context(:allow, text) when is_binary(text) and text != "",
     do: {:allow, %{}, text}

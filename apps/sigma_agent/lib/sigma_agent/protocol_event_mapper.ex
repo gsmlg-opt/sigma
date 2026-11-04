@@ -1,13 +1,72 @@
 defmodule Sigma.Agent.ProtocolEventMapper do
   @moduledoc "Pure mapping from Agent domain events to bounded Protocol V1 events."
 
-  alias Sigma.Protocol.{Codec, Envelope, Error, Metrics, Subagents}
+  alias Sigma.Protocol.{
+    AsyncInteractionPages,
+    AsyncInteractions,
+    Codec,
+    Envelope,
+    Error,
+    HostedResultPages,
+    Metrics,
+    Questions,
+    Subagents
+  }
+
+  alias Sigma.Ai.Providers.OpenAIResponses.Hosted
 
   @max_text_bytes 16_384
   @max_parts 100
   @max_metric_summaries 10
   @max_metric_summary_parts 32
   @max_metric_summary_text_bytes 128
+
+  def map({kind, message}, session_id, turn_id, capabilities)
+      when kind in [:message_start, :message_end] do
+    projected = public_message(message, capabilities)
+
+    if Map.has_key?(projected, "providerHostedError") do
+      {session_error(session_id, turn_id, :provider_hosted_payload_rejected), turn_id}
+    else
+      type = if kind == :message_start, do: "message.started", else: "message.completed"
+      event(type, session_id, %{"message" => projected}, turn_id)
+    end
+  end
+
+  def map({:provider_hosted_event, "web_search", frame}, session_id, turn_id, capabilities) do
+    if "provider_hosted.v1" in capabilities do
+      case Hosted.project_event(frame) do
+        {:ok, projected} ->
+          event(
+            "provider.hosted",
+            session_id,
+            %{"capability" => "web_search", "event" => projected},
+            turn_id
+          )
+
+        {:error, reason} ->
+          {session_error(session_id, turn_id, reason), turn_id}
+      end
+    else
+      {nil, turn_id}
+    end
+  end
+
+  def map({:async_interactions_updated, snapshot} = raw_event, session_id, turn_id, capabilities) do
+    if "async_interactions.pages.v1" in capabilities do
+      case AsyncInteractionPages.descriptor(snapshot, session_id) do
+        {:ok, inbox} ->
+          event("async_interactions.changed", session_id, %{"inbox" => inbox}, turn_id)
+
+        {:error, reason} ->
+          {session_error(session_id, turn_id, reason), turn_id}
+      end
+    else
+      map(raw_event, session_id, turn_id)
+    end
+  end
+
+  def map(raw_event, session_id, turn_id, _capabilities), do: map(raw_event, session_id, turn_id)
 
   def map({:prompt_admitted, status, info}, session_id, active_turn_id) do
     event_turn_id = info.turn_id
@@ -48,6 +107,13 @@ defmodule Sigma.Agent.ProtocolEventMapper do
     case Subagents.event(attrs) do
       {:ok, fact} -> event("subagents.changed", session_id, Subagents.to_map(fact), turn_id)
       {:error, _} -> {nil, turn_id}
+    end
+  end
+
+  def map({:async_interactions_updated, snapshot}, session_id, turn_id) do
+    case async_interaction_payload(snapshot, session_id) do
+      {:ok, payload} -> event("async_interactions.updated", session_id, payload, turn_id)
+      {:error, reason} -> {session_error(session_id, turn_id, reason), turn_id}
     end
   end
 
@@ -126,6 +192,16 @@ defmodule Sigma.Agent.ProtocolEventMapper do
     )
   end
 
+  def map({:ask_user_question, request_id, request}, session_id, turn_id) do
+    case Questions.request(request_id, request) do
+      {:ok, payload} -> event("question.required", session_id, payload, turn_id)
+      {:error, _} -> {session_error(session_id, turn_id, :invalid_question_request), turn_id}
+    end
+  end
+
+  def map({:ask_user_question_resolved, request_id}, session_id, turn_id),
+    do: event("question.resolved", session_id, %{"requestId" => request_id}, turn_id)
+
   def map({:turn_completed, event_turn_id}, session_id, _turn_id),
     do: event("turn.completed", session_id, %{}, event_turn_id)
 
@@ -172,8 +248,8 @@ defmodule Sigma.Agent.ProtocolEventMapper do
   defp public_error_details({_reason, details}) when is_map(details), do: public_value(details)
   defp public_error_details(_reason), do: %{}
 
-  def public_message(message) do
-    %{
+  def public_message(message, capabilities \\ []) do
+    projected = %{
       "id" => message.id,
       "role" => to_string(message.role),
       "content" => public_value(message.content),
@@ -185,11 +261,28 @@ defmodule Sigma.Agent.ProtocolEventMapper do
       "toolName" => message.tool_name,
       "isError" => message.is_error
     }
+
+    if Enum.any?(~w(provider_hosted.v1 provider_hosted.pages.v1), &(&1 in capabilities)) do
+      case Hosted.project_metadata(message) do
+        {:ok, metadata} ->
+          if "provider_hosted.pages.v1" in capabilities,
+            do: Map.put(projected, "providerHosted", true),
+            else: Map.put(projected, "metadata", %{"openai_responses_hosted" => metadata})
+
+        :none ->
+          projected
+
+        {:error, _} ->
+          Map.put(projected, "providerHostedError", true)
+      end
+    else
+      projected
+    end
   end
 
   def snapshot_payload(snapshot, session_id \\ nil, capabilities \\ []) do
     message_count = length(snapshot.messages)
-    messages = snapshot.messages |> Enum.take(-5) |> Enum.map(&snapshot_message/1)
+    messages = snapshot.messages |> Enum.take(-5) |> Enum.map(&snapshot_message(&1, capabilities))
 
     payload = %{
       "sessionId" => snapshot_value(snapshot.session_id),
@@ -214,7 +307,101 @@ defmodule Sigma.Agent.ProtocolEventMapper do
 
     payload
     |> maybe_subagents_snapshot(snapshot, capabilities)
+    |> maybe_questions_snapshot(snapshot, capabilities)
+    |> maybe_async_snapshot(snapshot, session_id || snapshot.session_id, capabilities)
+    |> maybe_hosted_results(snapshot, session_id || snapshot.session_id, capabilities)
     |> fit_snapshot_payload(snapshot.session_id)
+  end
+
+  @doc false
+  def encode_hosted_event(%Envelope{payload: payload} = event) do
+    messages = [payload["message"] | payload["messages"] || []]
+
+    cond do
+      Map.has_key?(payload, "providerHostedError") or
+          Enum.any?(messages, &(is_map(&1) and Map.has_key?(&1, "providerHostedError"))) ->
+        {:error, :provider_hosted_payload_rejected}
+
+      true ->
+        case Codec.encode(event) do
+          {:error, reason} = error ->
+            if hosted_payload?(payload) do
+              if reason == :payload_too_large,
+                do: {:error, :provider_hosted_payload_too_large},
+                else: {:error, :provider_hosted_payload_rejected}
+            else
+              error
+            end
+
+          result ->
+            result
+        end
+    end
+  end
+
+  defp hosted_payload?(payload) do
+    (payload["capability"] == "web_search" and Map.has_key?(payload, "event")) or
+      Enum.any?([payload["message"] | payload["messages"] || []], fn
+        %{"metadata" => %{"openai_responses_hosted" => _}} -> true
+        %{"providerHostedError" => _} -> true
+        _ -> false
+      end)
+  end
+
+  defp maybe_hosted_results(payload, snapshot, session_id, capabilities) do
+    if "provider_hosted.pages.v1" in capabilities do
+      case HostedResultPages.descriptor(Map.get(snapshot, :provider_hosted_view), session_id) do
+        {:ok, descriptor} -> Map.put(payload, "providerHostedResults", descriptor)
+        {:error, _} -> Map.put(payload, "providerHostedError", true)
+      end
+    else
+      payload
+    end
+  end
+
+  @doc "Validates complete async cards without truncating their questions, replies or identities."
+  def async_interaction_payload(snapshot, session_id),
+    do: AsyncInteractions.project(snapshot, session_id)
+
+  defp maybe_async_snapshot(payload, snapshot, session_id, capabilities) do
+    if Enum.any?(~w(async_interactions.v1 async_interactions.pages.v1), &(&1 in capabilities)) do
+      async =
+        Map.get(snapshot, :async_interaction_snapshot) ||
+          %{
+            items:
+              snapshot
+              |> Map.get(:async_interactions, AsyncInteractions.new())
+              |> AsyncInteractions.snapshot(snapshot.branch_entry_ids)
+              |> Enum.map(&Map.put(&1, "can_reply", false)),
+            leaf_id: snapshot.active_leaf_id
+          }
+
+      projection =
+        if "async_interactions.pages.v1" in capabilities,
+          do: AsyncInteractionPages.descriptor(async, session_id),
+          else: async_interaction_payload(async, session_id)
+
+      case projection do
+        {:ok, descriptor} when is_map_key(descriptor, "revision") ->
+          Map.put(payload, "asyncInteractionInbox", descriptor)
+
+        {:ok, projected} ->
+          payload
+          |> Map.put("asyncInteractions", projected["items"])
+          |> Map.put("asyncInteractionLeafId", projected["leafId"])
+
+        {:error, _} ->
+          Map.put(payload, "asyncInteractionError", "async_payload_rejected")
+      end
+    else
+      payload
+    end
+  end
+
+  defp maybe_questions_snapshot(payload, snapshot, capabilities) do
+    if "questions.v1" in capabilities,
+      do: Map.put(payload, "pendingQuestions", Map.get(snapshot, :pending_questions, [])),
+      else: payload
   end
 
   defp maybe_subagents_snapshot(payload, snapshot, capabilities) do
@@ -234,6 +421,14 @@ defmodule Sigma.Agent.ProtocolEventMapper do
   end
 
   defp fit_snapshot_payload(payload, session_id) do
+    if hosted_payload?(payload) do
+      payload
+    else
+      fit_legacy_snapshot_payload(payload, session_id)
+    end
+  end
+
+  defp fit_legacy_snapshot_payload(payload, session_id) do
     with {:ok, event} <- Envelope.event("session.snapshot", session_id || "unknown", payload),
          {:ok, _encoded} <- Codec.encode(event) do
       payload
@@ -249,9 +444,9 @@ defmodule Sigma.Agent.ProtocolEventMapper do
     end
   end
 
-  defp snapshot_message(message) do
+  defp snapshot_message(message, capabilities) do
     message
-    |> public_message()
+    |> public_message(capabilities)
     |> Map.update!("content", &snapshot_value/1)
   end
 

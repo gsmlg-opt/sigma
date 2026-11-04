@@ -128,6 +128,39 @@ defmodule Sigma.Coding.Hooks.AsyncRuntimeTest do
     assert {:error, :closed} = AsyncRuntime.track(runtime, self())
   end
 
+  test "owner death joins command cleanup independently of occupied async slots", %{
+    options: options
+  } do
+    owner = spawn(fn -> receive do: (:stop -> :ok) end)
+    {:ok, runtime} = AsyncRuntime.start(owner, options)
+    runtime_ref = Process.monitor(runtime)
+    hold_eight(runtime)
+    test_pid = self()
+
+    worker =
+      spawn(fn ->
+        Process.flag(:trap_exit, true)
+        send(test_pid, :command_worker_ready)
+
+        receive do
+          {:EXIT, ^runtime, :shutdown} ->
+            send(test_pid, :command_cleanup_waiting)
+            receive do: (:cleanup_complete -> :ok)
+        end
+      end)
+
+    worker_ref = Process.monitor(worker)
+    assert_receive :command_worker_ready
+    assert :ok = AsyncRuntime.track_command(runtime, worker)
+    Process.exit(owner, :kill)
+    assert_receive :command_cleanup_waiting
+    refute_receive {:DOWN, ^runtime_ref, :process, ^runtime, _}, 50
+    send(worker, :cleanup_complete)
+    assert_receive {:DOWN, ^worker_ref, :process, ^worker, :normal}
+    assert_receive {:DOWN, ^runtime_ref, :process, ^runtime, :normal}
+    assert {:error, :closed} = AsyncRuntime.track_command(runtime, self())
+  end
+
   @tag capture_log: true
   test "a crashed hook releases its concurrency slot", %{options: options} do
     {:ok, runtime} = AsyncRuntime.start(self(), options)

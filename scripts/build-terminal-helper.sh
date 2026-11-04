@@ -8,11 +8,11 @@ manifest="native/sigma_terminal_helper/Cargo.toml"
 case "$profile" in
   debug)
     cargo build --locked --manifest-path "$manifest"
-    source_binary="native/sigma_terminal_helper/target/debug/sigma-terminal-helper"
+    source_directory="native/sigma_terminal_helper/target/debug"
     ;;
   release)
     cargo build --locked --release --manifest-path "$manifest"
-    source_binary="native/sigma_terminal_helper/target/release/sigma-terminal-helper"
+    source_directory="native/sigma_terminal_helper/target/release"
     ;;
   *)
     echo "usage: $0 [debug|release]" >&2
@@ -22,4 +22,6 @@ esac
 
 destination="${SIGMA_TERMINAL_HELPER_DESTINATION:-apps/sigma_agent/priv/native}"
 install -d "$destination"
-install -m 0755 "$source_binary" "$destination/sigma-terminal-helper"
+for binary in sigma-terminal-helper sigma-sandbox-launcher; do
+  install -m 0755 "$source_directory/$binary" "$destination/$binary"
+done

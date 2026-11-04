@@ -4,18 +4,63 @@ defmodule Sigma.Agent.Backplane.Provider do
   @behaviour Backplane.AgentRuntime.ConversationAdapter
 
   alias Sigma.Ai.{Provider, ProviderEvent, ProviderRequest, ProviderUsage}
+  alias Sigma.Agent.Backplane.GoalUsage
   alias Sigma.Agent.Message
   alias Sigma.Agent.Hooks.ModelRequest
 
   @impl true
-  def stream(request, %{host: host, owner: owner}) do
-    collaboration = Enum.filter(request.messages, &Map.has_key?(&1, :collaboration))
+  def stream(request, %{host: host, owner: owner} = context) do
+    case observe_worker(context[:provider_lifecycle_store], request) do
+      :ok -> stream_observed(request, host, owner)
+      {:error, error} -> [%{type: :response_failed, error: error}]
+    end
+  end
 
-    if collaboration != [],
-      do: send_owner(owner, {:backplane_collaboration_messages, collaboration})
+  defp observe_worker(nil, _request), do: :ok
+
+  defp observe_worker(store, request) do
+    Sigma.Agent.Backplane.Store.observe_provider(
+      store,
+      Sigma.Agent.Backplane.ProviderLifecycle.identity(request)
+    )
+  catch
+    :exit, reason ->
+      {:error,
+       Backplane.AgentRuntime.Error.new(
+         :unknown_outcome,
+         "provider lifecycle observer is unavailable",
+         cause: reason
+       )}
+  end
+
+  defp stream_observed(request, host, owner) do
+    canonical =
+      Enum.filter(request.messages, fn message ->
+        Map.has_key?(message, :collaboration) or Map.has_key?(message, :host_feedback)
+      end)
+
+    if canonical != [],
+      do: send_owner(owner, {:backplane_collaboration_messages, canonical})
+
+    window = if is_function(host[:context_window], 0), do: host.context_window.()
+
+    if (is_function(host.build_context, 2) or is_function(host.build_context, 3)) and
+         is_nil(window) do
+      raise Sigma.Ai.ProviderError.from_exception(:context_window_unavailable)
+    end
 
     context =
-      host.build_context.(normalize_messages(request.messages))
+      cond do
+        is_function(host.build_context, 3) ->
+          host.build_context.(normalize_messages(request.messages), window, request.tools)
+
+        is_function(host.build_context, 2) ->
+          host.build_context.(normalize_messages(request.messages), window)
+
+        true ->
+          host.build_context.(normalize_messages(request.messages))
+      end
+      |> Map.put(:runtime_context_window, window)
       |> Map.put(:tools, request.tools)
       |> Map.put(:catalog_revision, request.catalog_revision)
 
@@ -126,7 +171,7 @@ defmodule Sigma.Agent.Backplane.Provider do
   defp map_event(%ProviderEvent{type: :response_completed, message: message} = event, request) do
     usage = event.usage || ProviderUsage.from_map(message[:usage])
     request = request |> put_usage(usage) |> Map.put(:status, :completed)
-    {event_map(event, request.message_id), request}
+    {event_map(%{event | usage: usage}, request.message_id), request}
   end
 
   defp map_event(%ProviderEvent{type: :response_failed, error: error} = event, request) do
@@ -142,6 +187,8 @@ defmodule Sigma.Agent.Backplane.Provider do
   defp event_map(%ProviderEvent{message: message} = event, message_id) when is_map(message) do
     event
     |> Map.from_struct()
+    |> runtime_usage()
+    |> runtime_stop_reason()
     |> Map.put(:message, with_id(message, message_id))
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
@@ -150,9 +197,25 @@ defmodule Sigma.Agent.Backplane.Provider do
   defp event_map(event, _message_id) do
     event
     |> Map.from_struct()
+    |> runtime_usage()
+    |> runtime_stop_reason()
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
   end
+
+  defp runtime_usage(%{type: type} = event)
+       when type in [:usage_updated, :response_completed] do
+    Map.put(event, :usage, GoalUsage.normalize(event[:usage]))
+  end
+
+  defp runtime_usage(event), do: event
+
+  # The public lifecycle consumes an atom. Keep Sigma's richer value within
+  # its Provider boundary; the original message still retains the raw reason.
+  defp runtime_stop_reason(%{stop_reason: %Sigma.Ai.ProviderStopReason{reason: reason}} = event),
+    do: Map.put(event, :stop_reason, reason)
+
+  defp runtime_stop_reason(event), do: event
 
   defp with_id(message, nil), do: message
   defp with_id(message, id), do: Map.put(message, :id, id)
@@ -212,7 +275,7 @@ defmodule Sigma.Agent.Backplane.Provider do
 
   defp normalize_message(%{role: :tool} = message) do
     result = Map.get(message, :result, %{})
-    {content, metadata, is_error} = tool_result(result)
+    {content, metadata, is_error} = tool_result(message.name, result)
 
     %Sigma.Agent.Message{
       id: "msg_tool_res_#{message.tool_call_id}",
@@ -231,6 +294,20 @@ defmodule Sigma.Agent.Backplane.Provider do
     Sigma.Agent.Message.assistant(id, Map.delete(message, :id))
   end
 
+  defp normalize_message(
+         %{role: :user, content: content, host_feedback: %{"id" => id} = metadata} = message
+       ) do
+    normalized =
+      Message.user(
+        "msg_host_feedback_" <> id,
+        content,
+        Map.get(message, :timestamp, System.system_time(:millisecond))
+      )
+
+    original = Map.get(message, :metadata, %{}) |> Map.delete("host_feedback")
+    %{normalized | metadata: Map.put(original, :host_feedback, metadata)}
+  end
+
   defp normalize_message(%{role: :user, id: id, content: content} = message) do
     normalized =
       Message.user(id, content, Map.get(message, :timestamp, System.system_time(:millisecond)))
@@ -247,29 +324,86 @@ defmodule Sigma.Agent.Backplane.Provider do
 
   defp normalize_message(message), do: message
 
-  defp tool_result(%{content: content} = result) when is_list(content),
-    do: {content, %{}, Map.get(result, :is_error, false)}
+  defp tool_result("view_image", %{data: data, mime_type: mime} = result)
+       when is_binary(data) and is_binary(mime) do
+    image = %{
+      type: :image,
+      data: Base.encode64(data),
+      mime_type: mime,
+      detail: Map.get(result, :detail, "high")
+    }
 
-  defp tool_result(%{content: content} = result) when is_binary(content),
-    do: {[%{type: :text, text: content}], %{}, Map.get(result, :is_error, false)}
+    # The data URL preserves the original bytes in the canonical result; raw
+    # image bytes are not UTF-8 JSON and must not be written to the journal.
+    canonical = Map.delete(result, :data)
 
-  defp tool_result(%{error: error}),
-    do: {[%{type: :text, text: "Error: #{inspect(error)}"}], %{}, true}
-
-  # Native collaboration contracts return structured maps rather than Sigma
-  # content blocks. Keep the complete JSON for the model and canonical history.
-  defp tool_result(result) when is_map(result) do
-    case Jason.encode(result) do
-      {:ok, json} ->
-        {[%{type: :text, text: json}], %{structured_result: Jason.decode!(json)},
-         Map.get(result, :is_error, false)}
-
-      {:error, _} ->
-        malformed_result()
+    if canonical[:image_url] == "data:#{mime};base64,#{image.data}" do
+      project_result(canonical, [image])
+    else
+      malformed_result()
     end
   end
 
-  defp tool_result(_result), do: malformed_result()
+  defp tool_result(_name, %{error: %Backplane.AgentRuntime.Error{} = error} = result) do
+    result
+    |> Map.put(:error, Backplane.AgentRuntime.Error.to_map(error))
+    |> Map.put(:is_error, true)
+    |> project_result(nil)
+  end
+
+  defp tool_result(_name, %{error: _error} = result) do
+    project_result(Map.put(result, :is_error, true), nil)
+  end
+
+  # Memory's content is one field of a JSON response, not a display-block
+  # envelope. Keep path, line position and truncation visible to the model.
+  defp tool_result("memories::read", %{content: content} = result) when is_binary(content),
+    do: project_result(result, nil)
+
+  defp tool_result("history::read_item", %{content: text, images: images} = result)
+       when is_binary(text) and is_list(images) do
+    case Jason.encode(Map.delete(result, :images)) do
+      {:ok, json} -> project_result(result, [%{type: :text, text: json} | images])
+      {:error, _} -> malformed_result()
+    end
+  end
+
+  defp tool_result(_name, %{content: content})
+       when not is_list(content) and not is_binary(content),
+       do: malformed_result()
+
+  defp tool_result(_name, result) when is_map(result) do
+    content =
+      case result[:content] do
+        content when is_list(content) -> content
+        content when is_binary(content) -> [%{type: :text, text: content}]
+        _ -> nil
+      end
+
+    project_result(result, content)
+  end
+
+  defp tool_result(_name, _result), do: malformed_result()
+
+  # Keep the full JSON-safe result independently of its model/UI projection.
+  # Validate every sibling field so handles cannot hide beside valid content.
+  defp project_result(result, content) do
+    with true <- is_boolean(Map.get(result, :is_error, false)),
+         true <- is_nil(content) or Enum.all?(content, &valid_result_block?/1),
+         {:ok, json} <- Jason.encode(result) do
+      {content || [%{type: :text, text: json}], %{structured_result: Jason.decode!(json)},
+       Map.get(result, :is_error, false)}
+    else
+      _ -> malformed_result()
+    end
+  end
+
+  defp valid_result_block?(%{type: :text, text: text}), do: is_binary(text)
+
+  defp valid_result_block?(%{type: :image, data: data, mime_type: mime}),
+    do: is_binary(data) and is_binary(mime)
+
+  defp valid_result_block?(_block), do: false
 
   defp malformed_result,
     do: {[%{type: :text, text: "Error: malformed tool result"}], %{}, true}

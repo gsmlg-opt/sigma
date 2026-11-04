@@ -687,6 +687,11 @@ defmodule Sigma.Session.ConfigManager do
     end)
   end
 
+  @doc "Returns the optional plugin registry settings without choosing a source."
+  def get_plugin_config do
+    transaction(fn -> load_json(@settings_file, %{})["plugins"] end)
+  end
+
   def save_mcp_config(config) do
     transaction(fn ->
       servers =

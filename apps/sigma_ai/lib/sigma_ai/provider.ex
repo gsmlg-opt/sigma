@@ -14,7 +14,19 @@ defmodule Sigma.Ai.Provider do
   @callback stream_normalized(request :: ProviderRequest.t()) :: Enumerable.t()
   @callback capabilities(model :: map()) :: ProviderCapabilities.t()
 
-  @optional_callbacks stream_normalized: 1, capabilities: 1
+  @callback output_token_limit(model :: map(), options :: keyword()) :: pos_integer() | nil
+
+  @optional_callbacks stream_normalized: 1, capabilities: 1, output_token_limit: 2
+
+  @doc "The output cap used by the selected Provider for this exact request."
+  def output_token_limit(provider, model, options) do
+    if Code.ensure_loaded?(provider) and function_exported?(provider, :output_token_limit, 2) do
+      case provider.output_token_limit(model, options) do
+        limit when is_integer(limit) and limit > 0 -> limit
+        _ -> nil
+      end
+    end
+  end
 
   def stream(provider, %ProviderRequest{} = request) when is_atom(provider) do
     normalized =
@@ -30,6 +42,20 @@ defmodule Sigma.Ai.Provider do
       provider.capabilities(model)
     else
       default_capabilities(model)
+    end
+  end
+
+  def normalize_legacy_event(%ProviderEvent{type: :tool_call_completed} = event) do
+    if valid_tool_call?(event.tool_call) do
+      [event]
+    else
+      [
+        %ProviderEvent{
+          type: :response_failed,
+          error: ProviderError.malformed(:invalid_tool_call_arguments),
+          message: event.message
+        }
+      ]
     end
   end
 
@@ -74,7 +100,7 @@ defmodule Sigma.Ai.Provider do
         %ProviderEvent{
           type: :tool_call_completed,
           index: index,
-          tool_call: Map.take(tool_call, [:id, :name, :arguments]),
+          tool_call: Map.take(tool_call, [:id, :name, :arguments, :input_kind]),
           message: message
         }
       ]
@@ -274,8 +300,15 @@ defmodule Sigma.Ai.Provider do
     :ok
   end
 
-  defp valid_tool_call?(%{id: id, name: name, arguments: arguments}) do
-    is_binary(id) and id != "" and is_binary(name) and name != "" and is_map(arguments)
+  defp valid_tool_call?(%{id: id, name: name, arguments: arguments} = call) do
+    raw =
+      case Map.get(call, :input_kind, :function) do
+        :custom when is_binary(arguments) -> {:custom, arguments}
+        :function when is_map(arguments) -> {:structured, arguments}
+        _ -> :invalid
+      end
+
+    match?({:ok, _}, Backplane.AiProtocol.ToolCall.new(%{id: id, name: name, raw_arguments: raw}))
   end
 
   defp valid_tool_call?(_tool_call), do: false

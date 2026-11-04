@@ -21,10 +21,11 @@ defmodule Sigma.Ai.Message do
         }
 
   @type tool_call :: %{
+          optional(:input_kind) => :function | :custom,
           type: :tool_call,
           id: String.t(),
           name: String.t(),
-          arguments: map(),
+          arguments: map() | String.t(),
           thought_signature: String.t() | nil
         }
 
@@ -48,6 +49,7 @@ defmodule Sigma.Ai.Message do
   @type stop_reason :: :stop | :length | :tool_use | :error | :aborted
 
   @type assistant_message :: %{
+          optional(:metadata) => map(),
           role: :assistant,
           content: [content()],
           api: String.t(),

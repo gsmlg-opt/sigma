@@ -223,7 +223,12 @@ defmodule Sigma.Coding.Dispatcher do
 
   defp apply_post_tool_use_hooks(result, _tool_call, [], _hook_ctx), do: result
 
-  defp apply_post_tool_use_hooks(result, tool_call, hook_specs, hook_ctx) do
+  defp apply_post_tool_use_hooks(
+         {:ok, %ToolResult{is_error: false}} = result,
+         tool_call,
+         hook_specs,
+         hook_ctx
+       ) do
     if Sigma.Coding.Hooks.any_for_event?(hook_specs, :post_tool_use) do
       event_data = %{
         tool_name: tool_call.name,
@@ -245,6 +250,8 @@ defmodule Sigma.Coding.Dispatcher do
       result
     end
   end
+
+  defp apply_post_tool_use_hooks(result, _tool_call, _hook_specs, _hook_ctx), do: result
 
   defp apply_post_outcome(:proceed, result), do: result
 
@@ -277,8 +284,6 @@ defmodule Sigma.Coding.Dispatcher do
     end)
   end
 
-  defp result_to_response_string({:error, %ToolError{message: message}}), do: "Error: #{message}"
-
   defp result_class({:ok, _result}), do: :ok
   defp result_class({:error, %ToolError{kind: kind}}), do: kind
 
@@ -291,7 +296,7 @@ defmodule Sigma.Coding.Dispatcher do
   end
 
   defp build_hook_ctx(opts) do
-    %{
+    ctx = %{
       session_id: Keyword.get(opts, :session_id),
       cwd: Keyword.get(opts, :cwd),
       transcript_path: Keyword.get(opts, :transcript_path, ""),
@@ -306,6 +311,11 @@ defmodule Sigma.Coding.Dispatcher do
       hook_async_callback: Keyword.get(opts, :hook_async_callback),
       hook_async_runtime: Keyword.get(opts, :hook_async_runtime)
     }
+
+    case Keyword.fetch(opts, :hook_async_callback_factory) do
+      {:ok, factory} -> Map.put(ctx, :hook_async_callback_factory, factory)
+      :error -> ctx
+    end
   end
 
   defp surface_warning(message) do

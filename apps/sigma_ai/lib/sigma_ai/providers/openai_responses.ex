@@ -1,8 +1,9 @@
 defmodule Sigma.Ai.Providers.OpenAIResponses do
   @behaviour Sigma.Ai.Provider
 
-  alias Backplane.AiProtocol.{Request, Serialization, SSE}
+  alias Backplane.AiProtocol.{Codec, Request, Serialization, SSE}
   alias Sigma.Ai.{ProviderAuth, ProviderCapabilities, ProviderError, ProviderRequest}
+  alias Sigma.Ai.Providers.OpenAIResponses.Hosted
 
   @impl true
   def stream_normalized(%ProviderRequest{} = request),
@@ -35,11 +36,25 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     base_url =
       options[:base_url] || System.get_env("OPENAI_BASE_URL") || "https://api.openai.com/v1"
 
+    hosted = Hosted.prepare!(model, context, options, base_url)
+
+    image_outputs =
+      case protocol_request(model, Map.put(context, :tools, hosted.local_tools)) do
+        {:ok, request} ->
+          protocol_image_outputs!(request)
+
+        {:error, error} ->
+          raise ProviderError,
+            kind: :invalid_request,
+            message: "Invalid AI protocol request: #{error.message}",
+            retryable: false
+      end
+
     body = %{
       model: model.id,
       input:
         context.messages
-        |> transform_messages()
+        |> transform_messages(hosted, image_outputs)
         |> prepend_system_message(context[:system] || context[:system_prompt]),
       stream: true,
       store: false
@@ -53,18 +68,9 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
     # Add tools if present
     body =
-      if context[:tools], do: Map.put(body, :tools, transform_tools(context.tools)), else: body
-
-    case protocol_request(model, context) do
-      {:ok, _request} ->
-        :ok
-
-      {:error, error} ->
-        raise ProviderError,
-          kind: :invalid_request,
-          message: "Invalid AI protocol request: #{error.message}",
-          retryable: false
-    end
+      if context[:tools],
+        do: Map.put(body, :tools, transform_tools(hosted.local_tools) ++ hosted.hosted_tools),
+        else: body
 
     headers =
       [
@@ -74,7 +80,16 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
       |> List.flatten()
 
     inner =
-      build_inner_stream(model, body, headers, base_url, options, session_id, log_session_id)
+      build_inner_stream(
+        model,
+        body,
+        headers,
+        base_url,
+        options,
+        session_id,
+        log_session_id,
+        hosted
+      )
 
     Elixir.Stream.transform(
       inner,
@@ -106,7 +121,16 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     )
   end
 
-  defp build_inner_stream(model, body, headers, base_url, options, session_id, log_session_id) do
+  defp build_inner_stream(
+         model,
+         body,
+         headers,
+         base_url,
+         options,
+         session_id,
+         log_session_id,
+         hosted
+       ) do
     Elixir.Stream.resource(
       fn ->
         :telemetry.execute(
@@ -137,7 +161,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
         {_initial_assistant_message(model),
          %{
-           framer: SSE.new(),
+           framer: SSE.new(Hosted.sse_options(hosted)),
+           tool_codec: {Codec.stream_new(:openai_responses), Hosted.new(hosted)},
            observer: Backplane.AiProtocol.OpenAIResponsesObserver.new(),
            error_body: ""
          }, :streaming, resp}
@@ -215,12 +240,17 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
         case SSE.feed(acc_state.framer, chunk) do
           {:ok, framer, frames} ->
             events = decode_frames(frames)
-            {processed_events, new_message} = process_events(events, acc_message)
+
+            {processed_events, new_message, tool_codec} =
+              process_events(events, acc_message, acc_state.tool_codec)
 
             status =
-              if Enum.any?(processed_events, &match?({:done, _, _}, &1)),
-                do: :done,
-                else: :streaming
+              if Enum.any?(
+                   processed_events,
+                   &(match?({:done, _, _}, &1) or match?({:provider_error, _}, &1))
+                 ),
+                 do: :done,
+                 else: :streaming
 
             observer =
               if status == :done,
@@ -228,13 +258,20 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
                 else: observer
 
             {acc_events ++ processed_events, new_message,
-             %{framer: framer, observer: observer, error_body: acc_state.error_body}, status}
+             %{
+               acc_state
+               | framer: framer,
+                 observer: observer,
+                 tool_codec: tool_codec,
+                 error_body: acc_state.error_body
+             }, status}
 
           {:error, _error, framer} ->
             error = ProviderError.malformed(:invalid_sse)
 
             {acc_events ++ [{:provider_error, error}], acc_message,
-             %{framer: framer, observer: observer, error_body: acc_state.error_body}, :done}
+             %{acc_state | framer: framer, observer: observer, error_body: acc_state.error_body},
+             :done}
         end
 
       :done, {acc_events, acc_message, acc_state, :done} ->
@@ -244,25 +281,34 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
         case SSE.finish(acc_state.framer) do
           {:ok, framer, frames} ->
             events = decode_frames(frames)
-            {processed_events, new_message} = process_events(events, acc_message)
 
-            if Enum.any?(processed_events, &match?({:done, _, _}, &1)) do
+            {processed_events, new_message, tool_codec} =
+              process_events(events, acc_message, acc_state.tool_codec)
+
+            if Enum.any?(
+                 processed_events,
+                 &(match?({:done, _, _}, &1) or match?({:provider_error, _}, &1))
+               ) do
               {acc_events ++ processed_events, new_message,
                %{
-                 framer: framer,
-                 observer:
-                   Backplane.AiProtocol.OpenAIResponsesObserver.finish(acc_state.observer, :eof),
-                 error_body: acc_state.error_body
+                 acc_state
+                 | framer: framer,
+                   tool_codec: tool_codec,
+                   observer:
+                     Backplane.AiProtocol.OpenAIResponsesObserver.finish(acc_state.observer, :eof),
+                   error_body: acc_state.error_body
                }, :done}
             else
               error = ProviderError.malformed(:truncated_stream)
 
               {acc_events ++ processed_events ++ [{:provider_error, error}], new_message,
                %{
-                 framer: framer,
-                 observer:
-                   Backplane.AiProtocol.OpenAIResponsesObserver.finish(acc_state.observer, :eof),
-                 error_body: acc_state.error_body
+                 acc_state
+                 | framer: framer,
+                   tool_codec: tool_codec,
+                   observer:
+                     Backplane.AiProtocol.OpenAIResponsesObserver.finish(acc_state.observer, :eof),
+                   error_body: acc_state.error_body
                }, :done}
             end
 
@@ -270,8 +316,12 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
             error = ProviderError.malformed(:truncated_stream)
 
             {acc_events ++ [{:provider_error, error}], acc_message,
-             %{framer: framer, observer: acc_state.observer, error_body: acc_state.error_body},
-             :done}
+             %{
+               acc_state
+               | framer: framer,
+                 observer: acc_state.observer,
+                 error_body: acc_state.error_body
+             }, :done}
         end
 
       _chunk, acc ->
@@ -313,36 +363,51 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
       api: model.api,
       provider: model.provider,
       model: model.id,
-      usage: %{
-        input: 0,
-        output: 0,
-        cache_read: 0,
-        cache_write: 0,
-        total_tokens: 0,
-        cost: %{input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0, total: 0.0}
-      },
+      usage: Sigma.Ai.ProviderUsage.from_wire(nil, :openai_responses),
       stop_reason: nil,
       response_id: nil,
       timestamp: System.system_time(:millisecond)
     }
   end
 
-  defp transform_messages(messages) do
-    Enum.flat_map(messages, fn
-      %{role: :user, content: content} ->
-        [%{role: "user", content: transform_responses_content(content, "input_text")}]
+  defp transform_messages(messages, hosted, image_outputs) do
+    kinds =
+      for %{role: :assistant, content: blocks} <- messages,
+          is_list(blocks),
+          %{type: :tool_call, id: id} = call <- blocks,
+          into: %{},
+          do: {id, Map.get(call, :input_kind, :function)}
 
-      %{role: :assistant, content: content} ->
-        transform_assistant_responses_items(content)
+    Enum.flat_map(messages, fn
+      %{role: role, content: content} when role in [:user, :system] ->
+        [%{role: to_string(role), content: transform_responses_content(content, "input_text")}]
+
+      %{role: :assistant, content: content} = message ->
+        Hosted.replay_items!(message, hosted) || transform_assistant_responses_items(content)
 
       %{role: :tool_result, tool_call_id: id, content: content} ->
-        [
-          %{
-            type: "function_call_output",
-            call_id: id,
-            output: transform_tool_result_content(content)
-          }
-        ]
+        type =
+          case Map.fetch(kinds, id) do
+            {:ok, :custom} ->
+              "custom_tool_call_output"
+
+            {:ok, :function} ->
+              "function_call_output"
+
+            _ ->
+              raise ProviderError,
+                kind: :invalid_request,
+                message: "Responses tool result requires a preceding typed tool call",
+                retryable: false
+          end
+
+        output =
+          case Map.fetch(image_outputs, id) do
+            {:ok, output} -> output
+            :error -> transform_tool_result_content(content)
+          end
+
+        [%{type: type, call_id: id, output: output}]
     end)
   end
 
@@ -354,8 +419,9 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
       %{type: :text, text: text} ->
         %{type: text_type, text: text}
 
-      %{type: :image, data: data, mime_type: mime} ->
-        %{type: "input_image", image_url: "data:#{mime};base64,#{data}"}
+      %{type: :image, data: data, mime_type: mime} = image ->
+        uri = if String.starts_with?(data, "data:"), do: data, else: "data:#{mime};base64,#{data}"
+        maybe_put(%{type: "input_image", image_url: uri}, :detail, image[:detail])
 
       block ->
         block
@@ -369,8 +435,15 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
       %{type: :text, text: text} ->
         [%{type: "message", role: "assistant", content: [%{type: "output_text", text: text}]}]
 
-      %{type: :tool_call, id: id, name: name, arguments: arguments} ->
-        [%{type: "function_call", call_id: id, name: name, arguments: Jason.encode!(arguments)}]
+      %{type: :tool_call, id: id, name: name, arguments: arguments} = call ->
+        item = native_identity(name) |> Map.put(:call_id, id)
+
+        item =
+          if call[:input_kind] == :custom,
+            do: Map.merge(item, %{type: "custom_tool_call", input: arguments}),
+            else: Map.merge(item, %{type: "function_call", arguments: function_json!(arguments)})
+
+        [item]
 
       _ ->
         []
@@ -381,25 +454,125 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     do: [%{type: "message", role: "assistant", content: [%{type: "output_text", text: content}]}]
 
   defp transform_tool_result_content(content) when is_list(content) do
-    Enum.map_join(content, "\n", fn
-      %{type: :text, text: text} -> text
-      _ -> ""
-    end)
+    Enum.map_join(content, "\n", fn %{type: :text, text: text} -> text end)
   end
 
   defp transform_tool_result_content(content), do: content
 
-  defp transform_tools(tools) do
-    Enum.map(tools, fn tool ->
-      %{
-        type: "function",
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters,
-        strict: false
-      }
-    end)
+  # Use the public Responses image codec with each actual tool result and its
+  # preceding typed call. The rest of the host projection retains user-image
+  # input and durable hosted replay, which have separate protocol contracts.
+  defp protocol_image_outputs!(request) do
+    {_calls, outputs} =
+      Enum.reduce(request.input, {%{}, %{}}, fn
+        %{role: :assistant, content: blocks} = message, {calls, outputs} ->
+          calls =
+            Enum.reduce(blocks, calls, fn
+              %{type: :tool_call, tool_call: %{id: id}} = block, calls ->
+                Map.put(calls, id, %{message | content: [block]})
+
+              _block, calls ->
+                calls
+            end)
+
+          {calls, outputs}
+
+        %{role: :tool, tool_call_id: id, content: blocks} = message, {calls, outputs} ->
+          if Enum.any?(blocks, &(&1.type == :image)) do
+            case Map.fetch(calls, id) do
+              {:ok, call} ->
+                encoded = encode_image_output!(%{request | input: [call, message], tools: []})
+                {calls, Map.put(outputs, id, encoded)}
+
+              :error ->
+                raise ProviderError,
+                  kind: :invalid_request,
+                  message: "Responses tool result requires a preceding typed tool call",
+                  retryable: false
+            end
+          else
+            {calls, outputs}
+          end
+
+        _message, accumulator ->
+          accumulator
+      end)
+
+    outputs
   end
+
+  defp encode_image_output!(request) do
+    case Codec.encode_request(:openai_responses, request) do
+      {:ok, %{"input" => [_call, %{"output" => output}]}} ->
+        output
+
+      {:error, error} ->
+        raise ProviderError,
+          kind: :invalid_request,
+          message: "Invalid AI protocol image result: #{error.message}",
+          retryable: false
+    end
+  end
+
+  defp transform_tools(tools) do
+    declarations =
+      Enum.map(tools, fn tool ->
+        identity = native_identity(tool.name)
+        custom? = tool[:type] in ["custom", :custom] or tool[:input_kind] == :custom
+
+        declaration = %{
+          type: if(custom?, do: "custom", else: "function"),
+          name: identity.name,
+          description: tool[:description] || ""
+        }
+
+        declaration =
+          if custom?,
+            do: maybe_put(declaration, :format, tool[:format]),
+            else:
+              Map.merge(declaration, %{
+                parameters: tool[:parameters] || tool[:input_schema],
+                strict: false
+              })
+
+        {identity[:namespace], maybe_put(declaration, :output_schema, tool[:output_schema])}
+      end)
+
+    declarations
+    |> Enum.reduce({[], MapSet.new()}, fn
+      {nil, tool}, {acc, seen} ->
+        {acc ++ [tool], seen}
+
+      {namespace, _}, {acc, seen} ->
+        if MapSet.member?(seen, namespace) do
+          {acc, seen}
+        else
+          nested = for {^namespace, tool} <- declarations, do: tool
+
+          {acc ++
+             [
+               %{
+                 type: "namespace",
+                 name: namespace,
+                 description: "Tools in the #{namespace} namespace.",
+                 tools: nested
+               }
+             ], MapSet.put(seen, namespace)}
+        end
+    end)
+    |> elem(0)
+  end
+
+  defp native_identity(name) do
+    case String.split(name, "::") do
+      [name] -> %{name: name}
+      [namespace, name] -> %{namespace: namespace, name: name}
+    end
+  end
+
+  defp function_json!(arguments) when is_map(arguments), do: Jason.encode!(arguments)
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   # Validate the provider-neutral request before the provider-specific wire projection is sent.
   # The protocol package deliberately does not own HTTP transport or provider credentials.
@@ -459,15 +632,22 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   defp protocol_block(%{type: :text, text: text}),
     do: %{type: :text, text: text}
 
-  defp protocol_block(%{type: :image, data: data, mime_type: mime}),
-    do: %{type: :image, data: %{data: data, mime_type: mime}}
+  defp protocol_block(%{type: :image, data: data, mime_type: mime} = image),
+    do: %{
+      type: :image,
+      data: maybe_put(%{"data" => data, "mime_type" => mime}, "detail", image[:detail])
+    }
 
   defp protocol_block(%{type: :thinking, thinking: thinking}),
     do: %{type: :reasoning, data: %{text: thinking}}
 
-  defp protocol_block(%{type: :tool_call, id: id, name: name, arguments: arguments}) do
+  defp protocol_block(%{type: :tool_call, id: id, name: name, arguments: arguments} = call) do
     raw_arguments =
-      if is_binary(arguments), do: {:json, arguments}, else: {:structured, arguments}
+      case Map.get(call, :input_kind, :function) do
+        :custom -> {:custom, arguments}
+        :function -> {:structured, arguments}
+        _ -> :invalid
+      end
 
     %{
       type: :tool_call,
@@ -480,8 +660,19 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   defp protocol_tool(tool) do
     %{
       name: tool.name,
-      description: tool.description,
-      input_schema: tool.parameters
+      description: tool[:description],
+      input_kind:
+        if(tool[:type] in ["custom", :custom] or tool[:input_kind] == :custom,
+          do: :custom,
+          else: :function
+        ),
+      input_schema: tool[:parameters] || tool[:input_schema],
+      format: tool[:format],
+      extensions:
+        if(tool[:output_schema],
+          do: %{"openai_responses::output_schema" => tool.output_schema},
+          else: %{}
+        )
     }
   end
 
@@ -514,7 +705,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
   defp system_block_text(_), do: ""
 
-  defp output_token_limit(model, options) do
+  @impl true
+  def output_token_limit(model, options) do
     positive_integer(options[:max_tokens]) ||
       positive_integer(options[:maxTokens]) ||
       model_max_tokens(model)
@@ -547,63 +739,239 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
   defp positive_integer(_value), do: nil
 
-  defp process_events(events, message) do
-    Enum.map_reduce(events, message, fn event, acc ->
-      case event do
-        %{"type" => "response.created", "response" => response} ->
-          {[], %{acc | response_id: response["id"]}}
+  defp process_events(events, message, {codec, hosted}) do
+    Enum.reduce_while(events, {[], message, {codec, hosted}}, fn event,
+                                                                 {all, acc, {codec, hosted}} ->
+      {emitted, next, codec} = process_event(event, acc, codec)
+      {observed, next, hosted} = Hosted.observe(hosted, event, next)
 
-        %{"type" => "response.output_text.delta", "delta" => text} ->
-          process_text_delta(acc, text)
+      emitted =
+        Enum.map(emitted, fn
+          {:done, reason, _message} -> {:done, reason, next}
+          other -> other
+        end)
 
-        %{"type" => "response.reasoning_text.delta", "delta" => text} ->
-          process_thinking_delta(acc, text)
+      result = {all ++ observed ++ emitted, next, {codec, hosted}}
 
-        %{"type" => "response.reasoning_summary_text.delta", "delta" => text} ->
-          process_thinking_delta(acc, text)
-
-        %{"type" => "response.output_item.added", "item" => %{"type" => "function_call"} = item} ->
-          start_response_tool(acc, item)
-
-        %{
-          "type" => "response.function_call_arguments.delta",
-          "item_id" => item_id,
-          "delta" => delta
-        } ->
-          process_response_tool_delta(acc, item_id, delta)
-
-        %{
-          "type" => "response.function_call_arguments.done",
-          "item_id" => item_id,
-          "arguments" => arguments
-        } ->
-          update_response_tool_arguments(acc, item_id, arguments)
-
-        %{"type" => "response.output_item.done", "item" => %{"type" => "function_call"} = item} ->
-          finalize_response_tool(acc, item)
-
-        %{"type" => "response.completed", "response" => response} ->
-          {tool_events, acc} = finalize_response_tools(acc)
-
-          acc = %{
-            acc
-            | usage: response_usage(response["usage"]),
-              stop_reason: response_stop_reason(response, acc)
-          }
-
-          {tool_events ++ [{:done, acc.stop_reason, acc}], acc}
-
-        %{"type" => "response.failed", "response" => response} ->
-          raise provider_error_message(response["error"] || response)
-
-        %{"type" => "error"} = error ->
-          raise provider_error_message(error)
-
-        _ ->
-          {[], acc}
-      end
+      if Enum.any?(emitted, &(match?({:done, _, _}, &1) or match?({:provider_error, _}, &1))),
+        do: {:halt, result},
+        else: {:cont, result}
     end)
-    |> then(fn {events, acc} -> {List.flatten(events), acc} end)
+  rescue
+    error in ProviderError -> {[{:provider_error, error}], message, {codec, hosted}}
+  end
+
+  defp process_event(%{"type" => "response.created", "response" => response}, acc, codec),
+    do: {[], %{acc | response_id: response["id"]}, codec}
+
+  defp process_event(%{"type" => "response.output_text.delta", "delta" => text}, acc, codec) do
+    {events, acc} = process_text_delta(acc, text)
+    {events, acc, codec}
+  end
+
+  defp process_event(%{"type" => type, "delta" => text}, acc, codec)
+       when type in ["response.reasoning_text.delta", "response.reasoning_summary_text.delta"] do
+    {events, acc} = process_thinking_delta(acc, text)
+    {events, acc, codec}
+  end
+
+  defp process_event(%{"type" => type} = event, acc, codec)
+       when type in [
+              "response.function_call_arguments.delta",
+              "response.function_call_arguments.done",
+              "response.custom_tool_call_input.delta",
+              "response.custom_tool_call_input.done"
+            ],
+       do: process_tool_frame(event, acc, codec)
+
+  defp process_event(%{"type" => type, "item" => %{"type" => kind}} = event, acc, codec)
+       when type in ["response.output_item.added", "response.output_item.done"] and
+              kind in ["function_call", "custom_tool_call"],
+       do: process_tool_frame(event, acc, codec)
+
+  defp process_event(%{"type" => type, "response" => response}, acc, codec)
+       when type in ["response.completed", "response.incomplete"] do
+    incomplete? = type == "response.incomplete" or response["status"] == "incomplete"
+    output = response["output"]
+
+    if response["status"] not in [nil, "completed", "incomplete"] do
+      raise ProviderError.malformed(:invalid_terminal_response_status)
+    end
+
+    if (not is_nil(output) and not is_list(output)) or
+         (is_list(output) and not Enum.all?(output, &is_map/1)) do
+      raise ProviderError.malformed(:invalid_response_output)
+    end
+
+    items = Enum.filter(output || [], &(&1["type"] in ["function_call", "custom_tool_call"]))
+
+    if incomplete? and
+         (Enum.any?(acc.content, &(&1[:type] == :tool_call and Map.has_key?(&1, :partial_json))) or
+            Enum.any?(items, &(&1["status"] != "completed"))) do
+      raise ProviderError.malformed(:incomplete_tool_calls)
+    end
+
+    response = if incomplete?, do: Map.put(response, "status", "incomplete"), else: response
+    {events, acc, codec} = finalize_response_tools(acc, codec, output)
+
+    acc = %{
+      acc
+      | usage: response_usage(response["usage"]),
+        stop_reason: response_stop_reason(response, acc)
+    }
+
+    {events ++ [{:done, acc.stop_reason, acc}], acc, codec}
+  end
+
+  defp process_event(%{"type" => "response.failed", "response" => response}, _acc, _codec),
+    do: raise(provider_error_message(response["error"] || response))
+
+  defp process_event(%{"type" => "error"} = error, _acc, _codec),
+    do: raise(provider_error_message(error))
+
+  defp process_event({:provider_error, error}, acc, codec),
+    do: {[{:provider_error, error}], acc, codec}
+
+  defp process_event(_event, acc, codec), do: {[], acc, codec}
+
+  # Let the public protocol codec validate tool identity, input kind, completion
+  # status, ordering, accumulated bytes and duplicates. Text/reasoning stay host-owned.
+  defp process_tool_frame(frame, acc, codec) do
+    bytes = "data: " <> Jason.encode!(frame) <> "\n\n"
+
+    case Codec.stream_feed(:openai_responses, codec, bytes) do
+      {:ok, codec, observations} ->
+        {events, acc} = Enum.map_reduce(observations, acc, &apply_tool_observation(&1, &2, frame))
+        {List.flatten(events), acc, codec}
+
+      {:error, error, _codec} ->
+        raise ProviderError.malformed(error.message)
+    end
+  end
+
+  defp apply_tool_observation(%{type: :tool_call_start} = event, acc, frame) do
+    index = length(acc.content)
+
+    kind =
+      if event.extensions["openai_responses::input_kind"] == "custom",
+        do: :custom,
+        else: :function
+
+    item = frame["item"]
+    input = if kind == :custom, do: item["input"] || "", else: item["arguments"] || ""
+
+    block = %{
+      type: :tool_call,
+      item_id: event.native_id,
+      id: event.call_id,
+      name: event.name,
+      input_kind: kind,
+      partial_json: input
+    }
+
+    acc = %{acc | content: acc.content ++ [block]}
+    {[{:toolcall_start, index, acc}], acc}
+  end
+
+  defp apply_tool_observation(%{type: :tool_call_delta} = event, acc, _frame) do
+    index = response_tool_index(acc.content, event.native_id, event.call_id)
+
+    content =
+      update_content(acc.content, index, fn block ->
+        Map.update!(block, :partial_json, &(&1 <> event.arguments_delta))
+      end)
+
+    acc = %{acc | content: content}
+    {[{:toolcall_delta, index, event.arguments_delta, acc}], acc}
+  end
+
+  defp apply_tool_observation(
+         %{type: :tool_call_done, content: %{tool_call: call}} = event,
+         acc,
+         _frame
+       ) do
+    index = response_tool_index(acc.content, event.native_id, event.call_id)
+    {kind, input} = call.raw_arguments
+    arguments = if kind == :custom, do: input, else: Jason.decode!(input)
+
+    tool = %{
+      type: :tool_call,
+      id: call.id,
+      name: call.name,
+      arguments: arguments,
+      input_kind: if(kind == :custom, do: :custom, else: :function),
+      item_id: call.native_id
+    }
+
+    acc = %{acc | content: List.replace_at(acc.content, index, tool)}
+    {[{:toolcall_end, index, tool, acc}], acc}
+  end
+
+  defp finalize_response_tools(acc, codec, output) do
+    items =
+      if is_list(output) do
+        Enum.filter(output, &(&1["type"] in ["function_call", "custom_tool_call"]))
+      else
+        for %{type: :tool_call, partial_json: input} = call <- acc.content,
+            do: response_tool_item(call, input)
+      end
+
+    {events, acc, codec} =
+      Enum.reduce(items, {[], acc, codec}, fn item, {events, acc, codec} ->
+        {started, acc, codec} =
+          if is_nil(response_tool_index(acc.content, item["id"], item["call_id"])) do
+            key = if item["type"] == "custom_tool_call", do: "input", else: "arguments"
+
+            process_tool_frame(
+              %{"type" => "response.output_item.added", "item" => Map.put(item, key, "")},
+              acc,
+              codec
+            )
+          else
+            {[], acc, codec}
+          end
+
+        {completed, acc, codec} =
+          process_tool_frame(%{"type" => "response.output_item.done", "item" => item}, acc, codec)
+
+        {events ++ started ++ completed, acc, codec}
+      end)
+
+    calls = Enum.filter(acc.content, &(&1[:type] == :tool_call))
+
+    if Enum.any?(calls, &Map.has_key?(&1, :partial_json)) or
+         (is_list(output) and
+            (length(items) != length(calls) or
+               MapSet.new(items, & &1["call_id"]) != MapSet.new(calls, & &1.id))) do
+      raise ProviderError.malformed(:incomplete_tool_calls)
+    end
+
+    {events, acc, codec}
+  end
+
+  defp response_tool_item(call, input) do
+    identity =
+      native_identity(call.name) |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
+
+    {type, key} =
+      if call.input_kind == :custom,
+        do: {"custom_tool_call", "input"},
+        else: {"function_call", "arguments"}
+
+    Map.merge(identity, %{
+      "type" => type,
+      "id" => call.item_id,
+      "call_id" => call.id,
+      key => input
+    })
+  end
+
+  defp response_tool_index(content, item_id, call_id) do
+    Enum.find_index(content, fn block ->
+      block[:type] == :tool_call and
+        ((is_binary(item_id) and block[:item_id] == item_id) or
+           (is_binary(call_id) and block[:id] == call_id))
+    end)
   end
 
   defp process_thinking_delta(acc, text) do
@@ -623,155 +991,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     {[{:thinking_delta, index, text, msg}], msg}
   end
 
-  defp start_response_tool(acc, item) do
-    item_id = item["id"]
-    call_id = item["call_id"]
-
-    case response_tool_index(acc.content, item_id, call_id) do
-      nil ->
-        index = length(acc.content)
-
-        block = %{
-          type: :tool_call,
-          item_id: item_id,
-          id: call_id,
-          name: item["name"],
-          partial_json: item["arguments"] || ""
-        }
-
-        new_acc = %{acc | content: acc.content ++ [block]}
-        {[{:toolcall_start, index, new_acc}], new_acc}
-
-      _index ->
-        {[], acc}
-    end
-  end
-
-  defp process_response_tool_delta(acc, item_id, delta) do
-    index = response_tool_index(acc.content, item_id, nil) || length(acc.content)
-
-    content =
-      if index == length(acc.content),
-        do:
-          acc.content ++
-            [%{type: :tool_call, item_id: item_id, id: nil, name: nil, partial_json: ""}],
-        else: acc.content
-
-    content =
-      update_content(content, index, fn block ->
-        Map.update(block, :partial_json, delta, &(&1 <> delta))
-      end)
-
-    msg = %{acc | content: content}
-    {[{:toolcall_delta, index, delta, msg}], msg}
-  end
-
-  defp update_response_tool_arguments(acc, item_id, arguments) do
-    index = response_tool_index(acc.content, item_id, nil) || length(acc.content)
-
-    content =
-      if index == length(acc.content),
-        do:
-          acc.content ++
-            [%{type: :tool_call, item_id: item_id, id: nil, name: nil, partial_json: ""}],
-        else: acc.content
-
-    content =
-      List.replace_at(content, index, Map.put(Enum.at(content, index), :arguments, arguments))
-
-    {[], %{acc | content: content}}
-  end
-
-  defp finalize_response_tool(acc, item) do
-    item_id = item["id"]
-    call_id = item["call_id"]
-    index = response_tool_index(acc.content, item_id, call_id) || length(acc.content)
-    block = Enum.at(acc.content, index) || %{}
-    arguments = item["arguments"] || block[:arguments] || block[:partial_json]
-    name = item["name"] || block[:name]
-    call_id = call_id || block[:id] || item_id
-
-    with {:ok, arguments} <- decode_arguments(arguments),
-         true <- is_binary(call_id) and call_id != "",
-         true <- is_binary(name) and name != "" do
-      call = %{type: :tool_call, id: call_id, name: name, arguments: arguments}
-
-      content =
-        if index == length(acc.content),
-          do: acc.content ++ [call],
-          else: List.replace_at(acc.content, index, call)
-
-      msg = %{acc | content: content}
-      {[{:toolcall_end, index, call, msg}], msg}
-    else
-      _ -> {[{:provider_error, ProviderError.malformed(:invalid_tool_call_arguments)}], acc}
-    end
-  end
-
-  defp finalize_response_tools(acc) do
-    acc.content
-    |> Enum.reduce({[], acc}, fn block, {events, current_acc} ->
-      if block[:type] == :tool_call and Map.has_key?(block, :partial_json) do
-        {new_events, new_acc} =
-          finalize_response_tool(current_acc, %{
-            "id" => block[:item_id],
-            "call_id" => block[:id],
-            "name" => block[:name],
-            "arguments" => block[:arguments] || block[:partial_json]
-          })
-
-        {events ++ new_events, new_acc}
-      else
-        {events, current_acc}
-      end
-    end)
-  end
-
-  defp response_tool_index(content, item_id, call_id) do
-    Enum.find_index(content, fn block ->
-      block[:type] == :tool_call and
-        ((is_binary(item_id) and block[:item_id] == item_id) or
-           (is_binary(call_id) and block[:id] == call_id))
-    end)
-  end
-
-  defp decode_arguments(arguments) when is_map(arguments), do: {:ok, arguments}
-
-  defp decode_arguments(arguments) when is_binary(arguments) do
-    case Jason.decode(arguments) do
-      {:ok, value} when is_map(value) -> {:ok, value}
-      _ -> :error
-    end
-  end
-
-  defp decode_arguments(_), do: :error
-
-  defp response_usage(nil), do: acc_usage_empty()
-
-  defp response_usage(usage) do
-    input = usage["input_tokens"] || 0
-    output = usage["output_tokens"] || 0
-    cached = get_in(usage, ["input_token_details", "cached_tokens"]) || 0
-
-    %{
-      input: input - cached,
-      output: output,
-      cache_read: cached,
-      cache_write: 0,
-      total_tokens: input + output,
-      cost: %{input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0, total: 0.0}
-    }
-  end
-
-  defp acc_usage_empty,
-    do: %{
-      input: 0,
-      output: 0,
-      cache_read: 0,
-      cache_write: 0,
-      total_tokens: 0,
-      cost: %{input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0, total: 0.0}
-    }
+  defp response_usage(usage),
+    do: Sigma.Ai.ProviderUsage.from_wire(usage, :openai_responses)
 
   defp response_stop_reason(%{"status" => "incomplete"}, _), do: :length
   defp response_stop_reason(%{"status" => "failed"}, _), do: :error

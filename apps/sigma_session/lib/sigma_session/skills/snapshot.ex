@@ -6,6 +6,7 @@ defmodule Sigma.Session.Skills.Snapshot do
     BundleManifest,
     Error,
     PreparedSkill,
+    Resource,
     SkillRef,
     TemporaryStorage
   }
@@ -44,6 +45,26 @@ defmodule Sigma.Session.Skills.Snapshot do
   end
 
   def prepare(_skill, _opts), do: {:error, :invalid_skill}
+
+  @doc "Reads only verified inventory through the Skill Protocol resource boundary."
+  @spec read(map(), String.t(), keyword()) :: {:ok, binary()} | {:error, Error.t()}
+  def read(snapshot, relative, opts \\ [])
+
+  def read(%{root: root, manifest: manifest} = snapshot, relative, opts) do
+    case validate_ownership(snapshot) do
+      {:ok, _ownership} ->
+        # Preserve the existing plain-map snapshot contract. Resource only needs
+        # the verified root and inventory in this additive typed readonly view.
+        prepared = %PreparedSkill{root: root, document: nil, manifest: manifest}
+        Resource.read(prepared, relative, opts)
+
+      {:error, _} ->
+        {:error, Error.new(:invalid_request, :resource, "invalid skill snapshot")}
+    end
+  end
+
+  def read(_snapshot, _relative, _opts),
+    do: {:error, Error.new(:invalid_request, :resource, "invalid skill snapshot")}
 
   @spec release(map()) ::
           :ok | {:error, :invalid_snapshot | :unowned_snapshot | :resource_unavailable}

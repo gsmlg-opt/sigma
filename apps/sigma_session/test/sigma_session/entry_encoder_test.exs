@@ -161,4 +161,97 @@ defmodule Sigma.Session.EntryEncoderTest do
     assert error["value"] == ["storage_append_failed", "enoent"]
     assert is_binary(Jason.encode!(entry))
   end
+
+  test "preserves null and boolean metrics values while encoding atom labels" do
+    assert {:ok, entry} =
+             EntryEncoder.encode(
+               {:metrics, :turn_finished,
+                %{
+                  turn_id: "turn-1",
+                  status: :completed,
+                  reason: nil,
+                  metadata: %{
+                    allowed: true,
+                    cancelled: false,
+                    values: [nil, true, false, :unknown],
+                    result: {:ok, nil, false},
+                    error: %Protocol.UndefinedError{protocol: Jason.Encoder, value: nil}
+                  }
+                }},
+               "leaf-1",
+               true
+             )
+
+    persisted = entry |> Jason.encode!() |> Jason.decode!()
+
+    assert %{
+             "status" => "completed",
+             "reason" => nil,
+             "metadata" => %{
+               "allowed" => true,
+               "cancelled" => false,
+               "values" => [nil, true, false, "unknown"],
+               "result" => ["ok", nil, false],
+               "error" => %{"protocol" => "Elixir.Jason.Encoder", "value" => nil}
+             }
+           } = persisted["data"]
+  end
+
+  @tag :tmp_dir
+  test "JSONL metrics recovery preserves unknown values and live summaries", %{tmp_dir: tmp_dir} do
+    assert {:ok, header} = EntryEncoder.encode({:agent_start, "/repo"}, nil, false)
+
+    request = %{
+      request_id: "req-unknown",
+      session_id: header["id"],
+      turn_id: "turn-1",
+      message_id: nil,
+      revision: 0,
+      purpose: :turn,
+      status: :completed,
+      usage_status: :unknown,
+      input_tokens_total: nil,
+      output_tokens_total: nil,
+      elapsed_ms: nil,
+      retry_of: nil,
+      provenance: nil
+    }
+
+    turn = %{
+      turn_id: "turn-1",
+      session_id: header["id"],
+      revision: 0,
+      status: :completed,
+      started_at: nil,
+      finished_at: nil,
+      wall_time_ms: nil,
+      terminal_reason: nil
+    }
+
+    facts = [{:request_finished, request}, {:turn_finished, turn}]
+    live = Sigma.Session.Metrics.reduce_all(facts, header["id"])
+    path = Path.join(tmp_dir, "unknown-metrics.jsonl")
+    assert :ok = Sigma.Session.Storage.JsonlFile.append(path, header)
+
+    for fact <- facts do
+      assert {:ok, entry} = EntryEncoder.encode(fact, nil, true)
+      assert :ok = Sigma.Session.Storage.JsonlFile.append(path, entry)
+    end
+
+    assert {:ok, restored} = Sigma.Session.Log.snapshot(path)
+    assert restored.diagnostics == []
+
+    assert %{
+             usage_status: :unknown,
+             input_tokens_total: nil,
+             output_tokens_total: nil,
+             elapsed_ms: nil,
+             message_id: nil,
+             retry_of: nil,
+             provenance: nil
+           } = restored.metrics.requests["req-unknown"]
+
+    assert Sigma.Session.Metrics.snapshot(restored.metrics) ==
+             Sigma.Session.Metrics.snapshot(live)
+  end
 end

@@ -32,7 +32,7 @@ defmodule Sigma.Agent.ContextBuilder do
   # Memory
 
   ## Build rules
-  - Save durable memory only when the user explicitly asks for it or when a configured memory backend requires it.
+  - Save durable memory only when the user explicitly asks for it.
   - Do not store secrets, credentials, or transient task state as durable memory.
   - Keep memory entries factual, scoped, and useful for future sessions.
 
@@ -40,6 +40,11 @@ defmodule Sigma.Agent.ContextBuilder do
   - Use relevant memory before answering questions that depend on prior project decisions, user preferences, or repository history.
   - Treat recalled memory as possibly stale when current repo state can be checked cheaply.
   - Prefer live repository state over memory when they conflict.
+  """
+
+  @memory_tool_rules """
+  # Memory tools
+  Use memories::add_ad_hoc_note only when the user explicitly asks you to remember, forget, update, or correct durable memory. A configured backend does not authorize automatic memory writes. Preserve the requested change in a new append-only note; never overwrite generated memory files. Use memories::list and memories::read to recall relevant existing memory. Do not store secrets or transient task status.
   """
 
   @type system_block :: %{
@@ -61,11 +66,42 @@ defmodule Sigma.Agent.ContextBuilder do
         build_messages(
           Keyword.get(opts, :messages, []),
           Keyword.get(opts, :session_context, SessionContext.new())
-        ),
+        )
+        |> restore_window_context(opts),
       system: system_blocks,
       system_prompt: system_text(system_blocks),
       tools: Keyword.get(opts, :tools, [])
     }
+  end
+
+  @doc "Appends the current execution resource's real startup state to provider context."
+  def with_execution_environment(context, nil), do: context
+
+  def with_execution_environment(context, environment) when is_map(environment) do
+    block = %{
+      type: :text,
+      text: "<environment_context>\n" <> Jason.encode!(environment) <> "\n</environment_context>"
+    }
+
+    system = context.system ++ [block]
+    %{context | system: system, system_prompt: system_text(system)}
+  end
+
+  defp restore_window_context(messages, opts) do
+    context = Keyword.get(opts, :session_context, SessionContext.new())
+    window = Keyword.get(opts, :context_window, 1)
+
+    if is_integer(window) and window > 1 and not Enum.any?(messages, &(&1.role == :user)) do
+      case SessionContext.to_blocks(context) do
+        [] ->
+          messages
+
+        blocks ->
+          [%{role: :user, content: blocks, metadata: %{source: :context_window}} | messages]
+      end
+    else
+      messages
+    end
   end
 
   @doc """
@@ -88,16 +124,26 @@ defmodule Sigma.Agent.ContextBuilder do
   @spec system_blocks(nil | String.t() | [map() | String.t()], keyword()) :: [system_block()]
   def system_blocks(system, opts \\ [])
 
-  def system_blocks(nil, opts), do: default_system_blocks(opts)
-  def system_blocks("", opts), do: default_system_blocks(opts)
+  def system_blocks(nil, opts), do: memory_tool_policy(default_system_blocks(opts), opts)
+  def system_blocks("", opts), do: memory_tool_policy(default_system_blocks(opts), opts)
 
-  def system_blocks(blocks, _opts) when is_list(blocks) do
+  def system_blocks(blocks, opts) when is_list(blocks) do
     blocks
     |> Enum.map(&normalize_system_block/1)
     |> Enum.reject(&is_nil/1)
+    |> memory_tool_policy(opts)
   end
 
-  def system_blocks(text, _opts) when is_binary(text), do: [cached_text_block(text)]
+  def system_blocks(text, opts) when is_binary(text),
+    do: memory_tool_policy([cached_text_block(text)], opts)
+
+  defp memory_tool_policy(blocks, opts) do
+    if Enum.any?(Keyword.get(opts, :tools, []), fn tool ->
+         (tool[:name] || tool["name"]) == "memories::add_ad_hoc_note"
+       end),
+       do: blocks ++ [cached_text_block(@memory_tool_rules)],
+       else: blocks
+  end
 
   @doc """
   Renders system blocks as plain text for providers that still expect a string.

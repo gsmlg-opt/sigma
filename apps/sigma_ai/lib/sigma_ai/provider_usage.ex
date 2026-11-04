@@ -74,7 +74,7 @@ defmodule Sigma.Ai.ProviderUsage do
   @doc "Normalizes provider-specific counters without inventing missing values."
   def normalize(usage) when is_map(usage) do
     input =
-      first_value(usage, [:input, :input_tokens, :prompt_tokens, "input_tokens", "prompt_tokens"])
+      first_value(usage, [:input_tokens, "input_tokens", :input, :prompt_tokens, "prompt_tokens"])
 
     output =
       first_value(usage, [
@@ -87,18 +87,29 @@ defmodule Sigma.Ai.ProviderUsage do
 
     cache_read =
       first_value(usage, [:cache_read, :cache_read_tokens, "cache_read_tokens"]) ||
-        get_in(usage, ["input_token_details", "cached_tokens"])
+        detail(
+          usage,
+          ["input_tokens_details", "prompt_tokens_details", "input_token_details"],
+          "cached_tokens"
+        )
 
     cache_write = first_value(usage, [:cache_write, :cache_write_tokens, "cache_write_tokens"])
 
     reasoning =
       first_value(usage, [:reasoning, :reasoning_tokens, "reasoning_tokens"]) ||
-        get_in(usage, ["output_token_details", "reasoning_tokens"])
+        detail(
+          usage,
+          ["output_tokens_details", "completion_tokens_details", "output_token_details"],
+          "reasoning_tokens"
+        )
 
     visible =
       first_value(usage, [:visible_output, :visible_output_tokens, "visible_output_tokens"])
 
-    total = first_value(usage, [:total_tokens, "total_tokens"])
+    [input, output, cache_read, cache_write, reasoning, visible] =
+      Enum.map([input, output, cache_read, cache_write, reasoning, visible], &counter/1)
+
+    total = first_value(usage, [:total_tokens, "total_tokens"]) |> counter()
 
     total =
       if is_nil(total) and is_integer(input) and is_integer(output),
@@ -123,6 +134,57 @@ defmodule Sigma.Ai.ProviderUsage do
   end
 
   def normalize(_), do: nil
+
+  @doc "Extracts wire facts while retaining pi's legacy exclusive input display field."
+  def from_wire(usage, protocol) when protocol in [:openai_responses, :openai, :anthropic] do
+    usage = if is_map(usage), do: usage, else: %{}
+
+    {input, output, read, write, reasoning} =
+      case protocol do
+        :openai_responses ->
+          {counter(usage["input_tokens"]), counter(usage["output_tokens"]),
+           counter(
+             detail(usage, ["input_tokens_details", "input_token_details"], "cached_tokens")
+           ), nil,
+           counter(
+             detail(usage, ["output_tokens_details", "output_token_details"], "reasoning_tokens")
+           )}
+
+        :openai ->
+          {counter(usage["prompt_tokens"]), counter(usage["completion_tokens"]),
+           counter(detail(usage, ["prompt_tokens_details"], "cached_tokens")), nil,
+           counter(detail(usage, ["completion_tokens_details"], "reasoning_tokens"))}
+
+        :anthropic ->
+          {counter(usage["input_tokens"]), counter(usage["output_tokens"]),
+           counter(usage["cache_read_input_tokens"]),
+           counter(usage["cache_creation_input_tokens"]), nil}
+      end
+
+    inclusive = if protocol == :anthropic, do: sum_known([input, read, write]), else: input
+    legacy_input = if protocol == :openai_responses, do: subtract_known(input, read), else: input
+
+    %{
+      input: legacy_input,
+      input_tokens: inclusive,
+      output: output,
+      cache_read: read,
+      cache_write: write,
+      reasoning_tokens: reasoning,
+      total_tokens: counter(usage["total_tokens"]) || sum_known([inclusive, output]),
+      provenance: %{source: :provider, input_tokens: :included},
+      cost: %{input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0, total: 0.0}
+    }
+  end
+
+  defp sum_known(values) do
+    if Enum.all?(values, &is_integer/1), do: Enum.sum(values)
+  end
+
+  defp subtract_known(input, read) when is_integer(input) and is_integer(read) and input >= read,
+    do: input - read
+
+  defp subtract_known(_, _), do: nil
 
   def complete?(%__MODULE__{usage_status: :reported}), do: true
   def complete?(_), do: false
@@ -172,7 +234,25 @@ defmodule Sigma.Ai.ProviderUsage do
     end
   end
 
-  defp first_value(map, keys), do: Enum.find_value(keys, &Map.get(map, &1))
+  # An explicit canonical nil must not fall back to legacy exclusive input.
+  defp first_value(map, keys) do
+    Enum.reduce_while(keys, nil, fn key, _ ->
+      case Map.fetch(map, key) do
+        {:ok, value} -> {:halt, value}
+        :error -> {:cont, nil}
+      end
+    end)
+  end
+
+  defp counter(value) when is_integer(value) and value >= 0, do: value
+  defp counter(_), do: nil
+
+  defp detail(usage, keys, field) do
+    case first_value(usage, keys) do
+      value when is_map(value) -> Map.get(value, field)
+      _ -> nil
+    end
+  end
 
   defp provenance_value(value) when is_atom(value) do
     if value in @provenance_values, do: {:ok, value}, else: :error

@@ -59,6 +59,14 @@ defmodule Sigma.Web.SettingsLive do
 
             socket
 
+          :plugins ->
+            send_update(Sigma.Web.PluginsSettingsComponent,
+              id: "settings-plugins",
+              refresh: true
+            )
+
+            socket
+
           _ ->
             reload_current_settings_data(socket)
         end
@@ -117,6 +125,11 @@ defmodule Sigma.Web.SettingsLive do
           <.dm_link patch={~p"/settings/skills"} class={settings_nav_class(@live_action, :skills)}>
             <.dm_mdi name="auto-fix" class="w-5 h-5" />
             <span>Skills</span>
+          </.dm_link>
+
+          <.dm_link patch={~p"/settings/plugins"} class={settings_nav_class(@live_action, :plugins)}>
+            <.dm_mdi name="puzzle-outline" class="w-5 h-5" />
+            <span>Plugins</span>
           </.dm_link>
 
           <.dm_link patch={~p"/settings/mcp"} class={settings_nav_class(@live_action, :mcp)}>
@@ -187,6 +200,8 @@ defmodule Sigma.Web.SettingsLive do
                   form={@mcp_form}
                 />
               </.settings_async_result>
+            <% :plugins -> %>
+              <.live_component module={Sigma.Web.PluginsSettingsComponent} id="settings-plugins" />
             <% :hooks -> %>
               <.render_hooks
                 hooks_file={@hooks_file}

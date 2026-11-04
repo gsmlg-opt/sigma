@@ -120,7 +120,12 @@ defmodule Sigma.Agent.RepositoryProcess do
           result =
             safely_perform_operation(fn ->
               with :ok <-
-                     close_subagents_for_operation(state.repo_path, source_session_id, operation),
+                     close_subagents_for_operation(
+                       state.repo_path,
+                       source_session_id,
+                       operation,
+                       handle
+                     ),
                    :ok <- flush_session(handle),
                    :ok <- validate_operation_checkpoint(source_session_id, operation),
                    :ok <- persist_operation_started(handle, source_session_id, operation) do
@@ -142,8 +147,10 @@ defmodule Sigma.Agent.RepositoryProcess do
               end
             end)
 
-          release_after_operation(handle, operation, result)
-          result
+          case release_after_operation(handle, operation, result) do
+            :ok -> result
+            {:error, reason} -> {:error, {:session_operation_release_failed, result, reason}}
+          end
 
         {:error, _reason} = error ->
           error
@@ -248,7 +255,7 @@ defmodule Sigma.Agent.RepositoryProcess do
   defp release_operation(%{agent: agent}) when is_pid(agent) do
     Sigma.Agent.end_session_operation(agent)
   catch
-    :exit, _reason -> :ok
+    :exit, reason -> {:error, {:session_unavailable, reason}}
   end
 
   defp release_operation(_handle), do: :ok
@@ -267,7 +274,11 @@ defmodule Sigma.Agent.RepositoryProcess do
     kind, reason -> {:error, {:session_operation_failure, kind, reason}}
   end
 
-  defp close_subagents_for_operation(repo_path, session_id, operation)
+  defp close_subagents_for_operation(_repo_path, _session_id, operation, %{agent: agent} = handle)
+       when elem(operation, 0) in [:rename, :delete, :adopt] and is_pid(agent),
+       do: retire_host_owner(handle)
+
+  defp close_subagents_for_operation(repo_path, session_id, operation, _handle)
        when elem(operation, 0) in [:rename, :delete, :adopt] do
     case Sigma.Agent.Runtime.close_subagents(repo_path, session_id) do
       :ok ->
@@ -291,7 +302,7 @@ defmodule Sigma.Agent.RepositoryProcess do
        )}
   end
 
-  defp close_subagents_for_operation(_repo_path, _session_id, _operation), do: :ok
+  defp close_subagents_for_operation(_repo_path, _session_id, _operation, _handle), do: :ok
 
   defp flush_session(nil), do: :ok
   defp flush_session(%{writer: nil}), do: :ok
@@ -408,8 +419,145 @@ defmodule Sigma.Agent.RepositoryProcess do
     end
   end
 
-  defp perform_operation(source_session_id, operation, _handle),
-    do: perform_file_operation(source_session_id, operation)
+  defp perform_operation(source_session_id, operation, handle) do
+    with :ok <- retire_goal(handle, source_session_id, operation),
+         :ok <- retire_message_board(source_session_id, operation),
+         {:ok, _} = result <- perform_file_operation(source_session_id, operation) do
+      case fork_goal(handle, source_session_id, operation) do
+        :ok -> result
+        {:error, reason} -> {:error, {:goal_fork_failed, result, reason}}
+      end
+    end
+  end
+
+  # Retire both the session owner and application writer before moving their
+  # files. A failed file operation reopens the same Goal when admission unlocks.
+  defp retire_goal(handle, session_id, operation)
+       when elem(operation, 0) in [:rename, :delete, :adopt] do
+    sessions_dir =
+      case operation do
+        {:adopt, source_dir, _target_dir, _cwd, _opts} -> source_dir
+        _ -> operation_sessions_dir(operation)
+      end
+
+    with :ok <- retire_host_owner(handle),
+         :ok <- retire_goal_owner(handle),
+         :ok <- retire_runtime_store(handle),
+         {:ok, path} <-
+           apply(Sigma.Session.SessionFiles, :jsonl_path, [
+             sessions_dir,
+             session_id
+           ]) do
+      Sigma.Agent.Backplane.GoalStore.retire(goal_root(path))
+    end
+  end
+
+  defp retire_goal(_handle, _session_id, _operation), do: :ok
+
+  defp retire_goal_owner(%{agent: agent}) when is_pid(agent),
+    do: Sigma.Agent.retire_goal(agent)
+
+  defp retire_goal_owner(_handle), do: :ok
+
+  defp retire_host_owner(%{agent: agent}) when is_pid(agent) do
+    case Sigma.Agent.retire_host(agent) do
+      :ok -> :ok
+      {:ok, %{status: :confirmed}} -> :ok
+      error -> error
+    end
+  end
+
+  defp retire_host_owner(_handle), do: :ok
+
+  defp retire_runtime_store(%{agent: agent}) when is_pid(agent),
+    do: Sigma.Agent.retire_runtime_store(agent)
+
+  defp retire_runtime_store(_handle), do: :ok
+
+  defp fork_goal(handle, source_id, {:fork, target_id, sessions_dir, _message_id, _opts}) do
+    with {:ok, source} <-
+           apply(Sigma.Session.SessionFiles, :jsonl_path, [sessions_dir, source_id]),
+         {:ok, target} <-
+           apply(Sigma.Session.SessionFiles, :jsonl_path, [sessions_dir, target_id]) do
+      if File.dir?(goal_root(source)) do
+        with_goal_writer(target, target_id, fn target_writer, cwd ->
+          fork_session_goal(handle, source, source_id, target_writer, target, cwd)
+        end)
+      else
+        :ok
+      end
+    end
+  end
+
+  defp fork_goal(_handle, _source_id, _operation), do: :ok
+
+  defp fork_session_goal(%{agent: agent}, _source, _source_id, writer, target, cwd)
+       when is_pid(agent) do
+    case Sigma.Agent.fork_goal(agent, writer, cwd, target) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  defp fork_session_goal(_handle, source, source_id, writer, target, cwd) do
+    with_goal_writer(source, source_id, fn source_writer, source_cwd ->
+      case Sigma.Agent.Backplane.GoalIntegration.open(
+             writer: source_writer,
+             cwd: source_cwd,
+             root: goal_root(source),
+             transcript_path: source,
+             runtime_store_path: source <> ".runtime"
+           ) do
+        {:ok, goal} ->
+          try do
+            case Sigma.Agent.Backplane.GoalIntegration.fork(goal, writer, cwd, target) do
+              {:ok, _} -> :ok
+              {:error, _} = error -> error
+            end
+          after
+            Sigma.Agent.Backplane.GoalIntegration.close(goal)
+          end
+
+        {:error, _} = error ->
+          error
+      end
+    end)
+  end
+
+  defp with_goal_writer(path, session_id, operation) do
+    with {:ok, snapshot} <- apply(Sigma.Session.Log, :snapshot, [path]),
+         {:ok, writer} <-
+           apply(Sigma.Session.Writer, :start_link, [
+             [storage_id: path, session_id: session_id, cwd: snapshot.cwd]
+           ]) do
+      try do
+        operation.(writer, snapshot.cwd)
+      after
+        GenServer.stop(writer, :normal)
+      end
+    end
+  end
+
+  defp goal_root(path), do: Path.join(path <> ".subagents", "goal")
+
+  # Called inside the existing terminal-drained callback, after child closure
+  # and Writer flush, so the old path has no retained board writer when moved.
+  defp retire_message_board(session_id, {:rename, _target, sessions_dir, _opts}),
+    do: retire_message_board_at(sessions_dir, session_id)
+
+  defp retire_message_board(session_id, {:delete, sessions_dir, _opts}),
+    do: retire_message_board_at(sessions_dir, session_id)
+
+  defp retire_message_board(session_id, {:adopt, source_dir, _target_dir, _cwd, _opts}),
+    do: retire_message_board_at(source_dir, session_id)
+
+  defp retire_message_board(_session_id, _operation), do: :ok
+
+  defp retire_message_board_at(sessions_dir, session_id) do
+    with {:ok, path} <- apply(Sigma.Session.SessionFiles, :jsonl_path, [sessions_dir, session_id]) do
+      Sigma.Agent.Backplane.MessageBoardStore.retire(Path.expand(path))
+    end
+  end
 
   defp admit_retry(agent, writer, checkpoint, admission_ref, opts) do
     prompt_opts =
@@ -417,6 +565,8 @@ defmodule Sigma.Agent.RepositoryProcess do
       |> Keyword.get(:prompt_opts, [])
       |> Keyword.put(:attachments, checkpoint.attachments)
       |> Keyword.put(:retry_admission_notify, {self(), admission_ref})
+      |> Keyword.put(:provider_context_messages, checkpoint.provider_context_messages)
+      |> Keyword.put(:context_window, checkpoint.context_window)
 
     with :ok <-
            apply(Sigma.Session.Writer, :checkout, [
@@ -993,6 +1143,9 @@ defmodule Sigma.Agent.RepositoryProcess do
          {:error, {:operation_result_persistence_failed, performed, _reason}}
        ),
        do: performed
+
+  defp operation_effect_result({:error, {:session_operation_release_failed, result, _reason}}),
+    do: operation_effect_result(result)
 
   defp operation_effect_result(result), do: result
 

@@ -3,6 +3,14 @@ defmodule Sigma.Agent.MessageTransformerTest do
   alias Sigma.Agent.Message, as: AgentMessage
   alias Sigma.Agent.MessageTransformer
 
+  test "user reply correlation survives model context conversion" do
+    metadata = %{"async_interaction" => %{"item_id" => "item", "reply_id" => "reply"}}
+    message = %{AgentMessage.user("reply-user", "  unchanged\n") | metadata: metadata}
+
+    assert [%{role: :user, content: "  unchanged\n", metadata: ^metadata}] =
+             MessageTransformer.convert_to_llm([message])
+  end
+
   test "standard message conversion" do
     messages = [
       AgentMessage.user("1", "hello"),

@@ -4,6 +4,40 @@ defmodule Sigma.Agent.ProtocolEventMapperTest do
   alias Sigma.Agent.ProtocolEventMapper
   alias Sigma.Protocol.{Codec, Envelope}
 
+  test "native question tool calls retain complete options in message events" do
+    arguments = %{
+      "questions" => [
+        %{
+          "id" => "flow",
+          "header" => "Flow",
+          "question" => "Continue with the native patch?",
+          "options" => [
+            %{"label" => "Proceed", "description" => "Apply the file change"},
+            %{"label" => "Wait", "description" => "Keep reviewing"}
+          ]
+        }
+      ]
+    }
+
+    message =
+      Sigma.Agent.Message.assistant("native-question-message", %{
+        content: [
+          %{
+            type: :tool_call,
+            id: "native-question",
+            name: "request_user_input",
+            arguments: arguments
+          }
+        ],
+        timestamp: 1
+      })
+
+    {event, "turn"} = ProtocolEventMapper.map({:message_end, message}, "session", "turn")
+    assert {:ok, encoded} = Codec.encode(event)
+    assert {:ok, decoded} = Codec.decode(encoded)
+    assert get_in(decoded.payload, ["message", "content", Access.at(0), "arguments"]) == arguments
+  end
+
   test "queued follow-up keeps the current stream correlated to its active turn" do
     accepted =
       {:prompt_admitted, :accepted, %{message_id: "initial-message", turn_id: "turn-current"}}

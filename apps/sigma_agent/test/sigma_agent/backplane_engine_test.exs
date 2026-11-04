@@ -650,8 +650,15 @@ defmodule Sigma.Agent.BackplaneEngineTest do
                    5_000
 
     assert [%{type: :text, text: error}] = content
-    assert error =~ "class: :validation"
-    assert error =~ "rule: :enum"
+
+    assert %{
+             "error" => %{
+               "class" => "validation",
+               "details" => %{"errors" => [%{"rule" => "enum"}]}
+             }
+           } =
+             Jason.decode!(error)
+
     refute_receive {:metrics, :tool_finished, _}
     assert Sigma.Agent.status(agent).phase == :completed
 

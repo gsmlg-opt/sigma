@@ -4,7 +4,7 @@ defmodule Sigma.Agent.ProtocolSubscription do
   use GenServer
 
   alias Sigma.Agent.ProtocolEventMapper
-  alias Sigma.Protocol.{Codec, Envelope, Error, Subagents}
+  alias Sigma.Protocol.{AsyncInteractionPages, Codec, Envelope, Error, Subagents}
 
   @default_max_sink_queue 256
   @subagent_resync_retry_ms 25
@@ -27,6 +27,9 @@ defmodule Sigma.Agent.ProtocolSubscription do
         {:ok, subscription_id}
 
       {:ok, subscription_id, _cursor, _snapshot, _attachment_snapshot} ->
+        {:ok, subscription_id}
+
+      {:ok, subscription_id, _cursor, _snapshot, _attachment_snapshot, _response} ->
         {:ok, subscription_id}
 
       {:error, _reason} = error ->
@@ -53,8 +56,12 @@ defmodule Sigma.Agent.ProtocolSubscription do
          ) do
       {:ok, pid} ->
         loader = Keyword.get(opts, :snapshot_loader)
+        validator = Keyword.get(opts, :snapshot_validator)
 
-        case GenServer.call(pid, {:activate, loader}, :infinity) do
+        case GenServer.call(pid, {:activate, loader, validator}, :infinity) do
+          {:ok, cursor, turn_snapshot, attachment_snapshot, response} ->
+            {:ok, subscription_id, cursor, turn_snapshot, attachment_snapshot, response}
+
           {:ok, cursor, turn_snapshot, attachment_snapshot} ->
             if Keyword.has_key?(opts, :snapshot_loader) do
               {:ok, subscription_id, cursor, turn_snapshot, attachment_snapshot}
@@ -76,13 +83,18 @@ defmodule Sigma.Agent.ProtocolSubscription do
   end
 
   @doc "Validates a snapshot response inside the relay before advancing its roster watermark."
-  def snapshot(subscription_id, sink, snapshot_loader, validator \\ nil)
+  def snapshot(subscription_id, sink, snapshot_loader, validator \\ nil, scope \\ nil)
       when is_binary(subscription_id) and is_pid(sink) and is_function(snapshot_loader, 0) and
              (is_nil(validator) or is_function(validator, 3)) do
     case Registry.lookup(Sigma.Agent.ProtocolSubscriptionRegistry, subscription_id) do
-      [{pid, ^sink}] -> GenServer.call(pid, {:snapshot, snapshot_loader, validator}, :infinity)
-      [{_pid, _other_sink}] -> {:error, :subscription_owner_mismatch}
-      [] -> {:error, :subscription_not_found}
+      [{pid, ^sink}] ->
+        GenServer.call(pid, {:snapshot, snapshot_loader, validator, scope}, :infinity)
+
+      [{_pid, _other_sink}] ->
+        {:error, :subscription_owner_mismatch}
+
+      [] ->
+        {:error, :subscription_not_found}
     end
   end
 
@@ -101,6 +113,7 @@ defmodule Sigma.Agent.ProtocolSubscription do
 
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
     subscription_id = Keyword.fetch!(opts, :subscription_id)
     sink = Keyword.fetch!(opts, :sink)
     agent = Keyword.fetch!(opts, :agent)
@@ -137,30 +150,45 @@ defmodule Sigma.Agent.ProtocolSubscription do
        cursor: 0,
        resync_required: nil,
        metric_revisions: %{},
-       metric_events: %{}
+       metric_events: %{},
+       question_ids: MapSet.new(),
+       question_blocked?: false,
+       async_blocked?: false
      }}
   end
 
   @impl true
-  def handle_call({:activate, snapshot_loader}, _from, state) do
-    case load_attachment_snapshot(snapshot_loader) do
-      {:ok, attachment_snapshot} ->
-        state = seed_subagents(state, attachment_snapshot)
-        Enum.each(Enum.reverse(state.pending), &send(self(), &1))
+  def handle_call({:activate, snapshot_loader}, from, state),
+    do: handle_call({:activate, snapshot_loader, nil}, from, state)
 
-        {:reply, {:ok, state.cursor, state.snapshot, attachment_snapshot},
-         %{state | ready?: true, pending: [], pending_count: 0}}
+  def handle_call({:activate, snapshot_loader, validator}, _from, state) do
+    with {:ok, attachment_snapshot} <- load_attachment_snapshot(snapshot_loader),
+         {:ok, response} <- validate_attachment(validator, attachment_snapshot, state) do
+      state =
+        state |> seed_subagents(attachment_snapshot) |> seed_questions(attachment_snapshot)
 
-      {:error, _reason} = error ->
-        {:reply, error, state}
+      Enum.each(Enum.reverse(state.pending), &send(self(), &1))
+
+      reply =
+        if is_nil(validator),
+          do: {:ok, state.cursor, state.snapshot, attachment_snapshot},
+          else: {:ok, state.cursor, state.snapshot, attachment_snapshot, response}
+
+      {:reply, reply, %{state | ready?: true, pending: [], pending_count: 0}}
+    else
+      {:error, _reason} = error -> {:reply, error, state}
     end
   end
 
   def handle_call({:snapshot, snapshot_loader}, from, state),
     do: handle_call({:snapshot, snapshot_loader, nil}, from, state)
 
-  def handle_call({:snapshot, snapshot_loader, validator}, _from, state) do
-    with {:ok, cursor, turn_snapshot, attachment_snapshot} <-
+  def handle_call({:snapshot, snapshot_loader, validator}, from, state),
+    do: handle_call({:snapshot, snapshot_loader, validator, nil}, from, state)
+
+  def handle_call({:snapshot, snapshot_loader, validator, scope}, _from, state) do
+    with :ok <- validate_snapshot_scope(state, scope),
+         {:ok, cursor, turn_snapshot, attachment_snapshot} <-
            subscription_snapshot(state, snapshot_loader),
          {:ok, response} <-
            validate_snapshot(validator, cursor, turn_snapshot, attachment_snapshot) do
@@ -170,11 +198,62 @@ defmodule Sigma.Agent.ProtocolSubscription do
     end
   end
 
+  defp validate_snapshot_scope(_state, nil), do: :ok
+
+  defp validate_snapshot_scope(state, %{
+         session_id: session_id,
+         agent: agent,
+         capabilities: capabilities
+       }) do
+    cond do
+      state.session_id != session_id or state.agent != agent ->
+        {:error, :subscription_scope_mismatch}
+
+      ("async_interactions.pages.v1" in state.capabilities or
+         "async_interactions.pages.v1" in capabilities) and
+          async_mode(state.capabilities) != async_mode(capabilities) ->
+        {:error, :subscription_mode_mismatch}
+
+      ("provider_hosted.pages.v1" in state.capabilities or
+         "provider_hosted.pages.v1" in capabilities) and
+          hosted_mode(state.capabilities) != hosted_mode(capabilities) ->
+        {:error, :subscription_mode_mismatch}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_snapshot_scope(_state, _scope), do: {:error, :subscription_scope_mismatch}
+
+  defp async_mode(capabilities),
+    do: Enum.filter(~w(async_interactions.v1 async_interactions.pages.v1), &(&1 in capabilities))
+
+  defp async_capable?(capabilities), do: async_mode(capabilities) != []
+
+  defp hosted_mode(capabilities),
+    do: Enum.filter(~w(provider_hosted.v1 provider_hosted.pages.v1), &(&1 in capabilities))
+
+  defp validate_attachment(nil, _snapshot, _state), do: {:ok, nil}
+
+  defp validate_attachment(validator, snapshot, state) when is_function(validator, 4) do
+    validator.(state.subscription_id, state.cursor, state.snapshot, snapshot)
+  rescue
+    exception -> {:error, {:snapshot_validation_failed, exception.__struct__}}
+  catch
+    kind, reason -> {:error, {:snapshot_validation_failed, kind, reason}}
+  end
+
+  defp validate_attachment(_validator, _snapshot, _state),
+    do: {:error, :invalid_snapshot_validator}
+
   defp seed_snapshot_response(
          state,
-         {:ok, %Envelope{type: "session.snapshot", payload: payload}},
+         {:ok, %Envelope{type: "session.snapshot", payload: payload} = event},
          snapshot
        ) do
+    state = state |> seed_questions(snapshot) |> seed_async_snapshot(event, snapshot)
+
     case Subagents.snapshot(payload["subagents"]) do
       {:ok, _roster} -> seed_subagents(state, snapshot)
       {:error, _reason} -> state
@@ -182,9 +261,56 @@ defmodule Sigma.Agent.ProtocolSubscription do
   end
 
   defp seed_snapshot_response(state, {:ok, _cursor, _turn, _snapshot}, snapshot),
-    do: seed_subagents(state, snapshot)
+    do:
+      state
+      |> seed_subagents(snapshot)
+      |> seed_questions(snapshot)
 
   defp seed_snapshot_response(state, _response, _snapshot), do: state
+
+  defp seed_questions(state, snapshot) do
+    if "questions.v1" in state.capabilities and is_map(snapshot) and
+         Map.has_key?(snapshot, :pending_questions) do
+      ids = Enum.map(snapshot.pending_questions, & &1["requestId"])
+      %{state | question_ids: MapSet.new(ids), question_blocked?: false}
+    else
+      state
+    end
+  end
+
+  defp seed_async_snapshot(state, %Envelope{payload: payload} = event, snapshot) do
+    if "async_interactions.pages.v1" in state.capabilities do
+      with true <- event.session_id == state.session_id,
+           %{async_interaction_snapshot: async} <- snapshot,
+           {:ok, expected} <- AsyncInteractionPages.descriptor(async, state.session_id),
+           true <- payload["asyncInteractionInbox"] == expected,
+           {:ok, _} <- Codec.encode(event) do
+        %{state | async_blocked?: false}
+      else
+        _ -> state
+      end
+    else
+      seed_legacy_async_snapshot(state, event)
+    end
+  end
+
+  defp seed_legacy_async_snapshot(state, %Envelope{payload: payload} = event) do
+    with true <- "async_interactions.v1" in state.capabilities,
+         true <- event.session_id == state.session_id,
+         {:ok, _} <-
+           ProtocolEventMapper.async_interaction_payload(
+             %{
+               items: payload["asyncInteractions"],
+               leaf_id: payload["asyncInteractionLeafId"]
+             },
+             state.session_id
+           ),
+         {:ok, _} <- Codec.encode(event) do
+      %{state | async_blocked?: false}
+    else
+      _ -> state
+    end
+  end
 
   defp validate_snapshot(nil, cursor, turn_snapshot, attachment_snapshot),
     do: {:ok, {:ok, cursor, turn_snapshot, attachment_snapshot}}
@@ -197,6 +323,7 @@ defmodule Sigma.Agent.ProtocolSubscription do
   @impl true
   def terminate(_reason, state) do
     cancel_subagent_resync_timer(state)
+    Registry.unregister(Sigma.Agent.ProtocolSubscriptionRegistry, state.subscription_id)
     if Process.alive?(state.agent), do: Sigma.Agent.unsubscribe(state.agent)
     :ok
   catch
@@ -228,6 +355,43 @@ defmodule Sigma.Agent.ProtocolSubscription do
 
       true ->
         {:noreply, require_subagent_resync(state, "subscriber_overflow")}
+    end
+  end
+
+  def handle_info({:async_interactions_updated, _} = message, %{ready?: false} = state) do
+    cond do
+      not async_capable?(state.capabilities) ->
+        {:noreply, state}
+
+      state.pending_count < max(state.max_sink_queue, 1) ->
+        {:noreply,
+         %{state | pending: [message | state.pending], pending_count: state.pending_count + 1}}
+
+      true ->
+        resync = %{"reason" => "subscriber_overflow", "snapshotRequired" => true}
+
+        {:noreply,
+         %{state | async_blocked?: true, resync_required: state.resync_required || resync}}
+    end
+  end
+
+  def handle_info({:provider_hosted_event, _, _} = message, %{ready?: false} = state) do
+    cond do
+      "provider_hosted.v1" not in state.capabilities ->
+        {:noreply, state}
+
+      state.pending_count < max(state.max_sink_queue, 1) ->
+        {:noreply,
+         %{state | pending: [message | state.pending], pending_count: state.pending_count + 1}}
+
+      true ->
+        {:noreply,
+         %{
+           state
+           | resync_required:
+               state.resync_required ||
+                 %{"reason" => "subscriber_overflow", "snapshotRequired" => true}
+         }}
     end
   end
 
@@ -287,6 +451,93 @@ defmodule Sigma.Agent.ProtocolSubscription do
           {event, turn_id} = ProtocolEventMapper.map(raw_event, state.session_id, state.turn_id)
           {:noreply, deliver(event, %{state | turn_id: turn_id})}
       end
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:ask_user_question, _id, %{kind: :permission}} = raw_event, state) do
+    {event, turn_id} = ProtocolEventMapper.map(raw_event, state.session_id, state.turn_id)
+    {:noreply, deliver(event, %{state | turn_id: turn_id})}
+  end
+
+  def handle_info({:ask_user_question, id, _request} = raw_event, state) do
+    if "questions.v1" in state.capabilities do
+      {event, turn_id} = ProtocolEventMapper.map(raw_event, state.session_id, state.turn_id)
+
+      ids =
+        if event.type == "question.required",
+          do: MapSet.put(state.question_ids, id),
+          else: state.question_ids
+
+      {:noreply, deliver_question(event, %{state | turn_id: turn_id, question_ids: ids})}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:ask_user_question_resolved, id} = raw_event, state) do
+    if "questions.v1" in state.capabilities and MapSet.member?(state.question_ids, id) do
+      {event, turn_id} = ProtocolEventMapper.map(raw_event, state.session_id, state.turn_id)
+
+      {:noreply,
+       deliver_question(event, %{
+         state
+         | turn_id: turn_id,
+           question_ids: MapSet.delete(state.question_ids, id)
+       })}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:async_interactions_updated, _} = raw_event, state) do
+    cond do
+      not async_capable?(state.capabilities) ->
+        {:noreply, state}
+
+      state.async_blocked? ->
+        marker =
+          ProtocolEventMapper.session_error(state.session_id, state.turn_id, :resync_required)
+
+        {:noreply, maybe_deliver_resync(marker, state)}
+
+      true ->
+        {event, turn_id} =
+          ProtocolEventMapper.map(raw_event, state.session_id, state.turn_id, state.capabilities)
+
+        {:noreply, deliver_async(event, %{state | turn_id: turn_id})}
+    end
+  end
+
+  def handle_info({:provider_hosted_event, _, _} = raw_event, state) do
+    {event, turn_id} =
+      ProtocolEventMapper.map(raw_event, state.session_id, state.turn_id, state.capabilities)
+
+    {:noreply, deliver_hosted(event, %{state | turn_id: turn_id})}
+  end
+
+  def handle_info({kind, _message} = raw_event, state)
+      when kind in [:message_start, :message_end] do
+    {event, turn_id} =
+      ProtocolEventMapper.map(raw_event, state.session_id, state.turn_id, state.capabilities)
+
+    state = %{state | turn_id: turn_id}
+
+    state =
+      if hosted_mode(state.capabilities) != [],
+        do: deliver_hosted(event, state),
+        else: deliver(event, state)
+
+    if ((kind == :message_end and "provider_hosted.pages.v1" in state.capabilities and
+           event) && event.type == "message.completed") and
+         event.payload["message"]["providerHosted"] == true do
+      {:ok, changed} =
+        Envelope.event("provider_hosted.changed", state.session_id, %{"snapshotRequired" => true},
+          turn_id: state.turn_id
+        )
+
+      {:noreply, deliver_hosted(changed, state)}
     else
       {:noreply, state}
     end
@@ -444,6 +695,91 @@ defmodule Sigma.Agent.ProtocolSubscription do
   end
 
   defp flush_subagent_resync(state), do: state
+
+  defp deliver_question(_event, %{question_blocked?: true} = state), do: state
+
+  defp deliver_question(event, state) do
+    state = maybe_deliver_resync(event, state)
+    {wire_event, _next_state} = add_cursor(event, state)
+
+    case Codec.encode(wire_event) do
+      {:ok, _encoded} ->
+        state = deliver(event, state)
+
+        if is_map(state.resync_required) do
+          state = maybe_deliver_resync(event, state)
+          %{state | question_blocked?: true}
+        else
+          state
+        end
+
+      {:error, reason} ->
+        code =
+          if reason == :payload_too_large,
+            do: "question_payload_too_large",
+            else: "question_payload_rejected"
+
+        {:ok, error} =
+          Envelope.event(
+            "session.error",
+            state.session_id,
+            Map.take(event.payload, ["requestId"]),
+            turn_id: event.turn_id,
+            error: Error.new(code, "Question cannot be delivered; fetch a new snapshot.")
+          )
+
+        {wire_error, _next_state} = add_cursor(error, state)
+
+        case Codec.encode(wire_error) do
+          {:ok, _encoded} -> deliver(error, state)
+          {:error, _reason} -> state
+        end
+    end
+  end
+
+  defp deliver_async(event, state) do
+    state = maybe_deliver_resync(event, state)
+    {wire_event, _next_state} = add_cursor(event, state)
+
+    case Codec.encode(wire_event) do
+      {:ok, _encoded} ->
+        state = deliver(event, state)
+
+        if is_map(state.resync_required),
+          do: %{maybe_deliver_resync(event, state) | async_blocked?: true},
+          else: state
+
+      {:error, reason} ->
+        code =
+          if reason == :payload_too_large,
+            do: :async_payload_too_large,
+            else: :async_payload_rejected
+
+        error = ProtocolEventMapper.session_error(state.session_id, state.turn_id, code)
+        {wire_error, _next_state} = add_cursor(error, state)
+
+        case Codec.encode(wire_error) do
+          {:ok, _encoded} -> deliver(error, state)
+          {:error, _reason} -> state
+        end
+    end
+  end
+
+  defp deliver_hosted(nil, state), do: state
+
+  defp deliver_hosted(event, state) do
+    state = maybe_deliver_resync(event, state)
+    {wire_event, _next_state} = add_cursor(event, state)
+
+    case ProtocolEventMapper.encode_hosted_event(wire_event) do
+      {:ok, _encoded} ->
+        deliver(event, state)
+
+      {:error, reason} ->
+        error = ProtocolEventMapper.session_error(state.session_id, state.turn_id, reason)
+        deliver(error, state)
+    end
+  end
 
   defp deliver(nil, state), do: state
 

@@ -3,8 +3,17 @@ defmodule Sigma.Session.Journal do
   Pure validation and replay of one active session-journal branch.
   """
 
-  alias Sigma.Session.{EntryDecoder, Metrics, Snapshot, SubagentAdmissions, Subagents}
+  alias Sigma.Session.{
+    EntryDecoder,
+    HookFeedback,
+    Metrics,
+    Snapshot,
+    SubagentAdmissions,
+    Subagents
+  }
+
   alias Sigma.Session.Journal.Index
+  alias Sigma.Protocol.AsyncInteractions
 
   @service_tier_values ~w(auto default flex scale priority)
   @legacy_service_tiers @service_tier_values ++ ~w(openai-only claude-only)
@@ -29,8 +38,12 @@ defmodule Sigma.Session.Journal do
         message_entry_ids: message_entry_ids(nodes)
       }
 
-      snapshot = %{snapshot | metrics: metrics_snapshot(index, snapshot.session_id)}
+      snapshot = %{snapshot | metrics: metrics_snapshot(index, snapshot.session_id, opts)}
       {roster, receipts, admissions, admission_ids, subagent_diagnostics} = subagent_roster(index)
+      {async_interactions, async_ids, async_diagnostics} = async_interactions(index)
+
+      {_hooks, _hook_ids, hook_diagnostics} =
+        hook_feedback(index, Keyword.get(opts, :hook_session_id))
 
       snapshot = %{
         snapshot
@@ -38,7 +51,10 @@ defmodule Sigma.Session.Journal do
           subagents: Subagents.snapshot(roster),
           subagent_entry_ids: receipts,
           subagent_admissions: admissions,
-          subagent_admission_entry_ids: admission_ids
+          subagent_admission_entry_ids: admission_ids,
+          async_interactions: project_async_interactions(async_interactions, index, nodes),
+          async_interaction_history: async_interactions,
+          async_interaction_entry_ids: async_ids
       }
 
       {snapshot, payload_diagnostics_rev} =
@@ -46,19 +62,38 @@ defmodule Sigma.Session.Journal do
 
       payload_diagnostics = Enum.reverse(payload_diagnostics_rev)
       {messages, message_diagnostics, rendered_compaction} = render_messages(nodes)
+      context_nodes = context_nodes(nodes, snapshot)
+      {context_messages, context_diagnostics, _compaction} = render_messages(context_nodes)
+
+      messages =
+        if snapshot.context_window do
+          boundaries = snapshot.context_window_entry_ids |> Map.values() |> MapSet.new()
+          render_window_display(nodes, boundaries)
+        else
+          messages
+        end
 
       journal_diagnostics =
         index.diagnostics
         |> merge_diagnostics(payload_diagnostics)
         |> merge_diagnostics(message_diagnostics)
+        |> merge_diagnostics(context_diagnostics)
 
-      diagnostics = Enum.uniq(caller_diagnostics ++ journal_diagnostics ++ subagent_diagnostics)
+      diagnostics =
+        Enum.uniq(
+          caller_diagnostics ++
+            journal_diagnostics ++
+            subagent_diagnostics ++
+            async_diagnostics ++
+            hook_diagnostics
+        )
 
       {:ok,
        %{
          snapshot
          | compaction: rendered_compaction,
            messages: messages,
+           context_messages: context_messages,
            diagnostics: diagnostics
        }}
     end
@@ -158,6 +193,38 @@ defmodule Sigma.Session.Journal do
     {%{snapshot | compaction: entry}, diagnostics}
   end
 
+  defp reduce_entry(%{entry: %{"type" => "context_window"} = entry} = node, acc) do
+    update_snapshot(acc, node, fn snapshot ->
+      with {:ok, window} <- EntryDecoder.context_window(entry) do
+        key = {window.run_id, window.incarnation, window.window}
+
+        stale? =
+          Enum.any?(snapshot.context_window_entry_ids, fn
+            {{run, incarnation, version}, _id} ->
+              run == window.run_id and incarnation == window.incarnation and
+                version > window.window
+          end)
+
+        cond do
+          Map.has_key?(snapshot.context_window_entry_ids, key) ->
+            {:ok, snapshot}
+
+          stale? ->
+            {:error, :stale_context_window}
+
+          true ->
+            {:ok,
+             %{
+               snapshot
+               | context_window: window,
+                 context_window_entry_ids:
+                   Map.put(snapshot.context_window_entry_ids, key, entry["id"])
+             }}
+        end
+      end
+    end)
+  end
+
   defp reduce_entry(%{entry: %{"type" => "branch_summary"} = entry} = node, acc) do
     update_snapshot(acc, node, fn snapshot ->
       if is_binary(entry["fromId"]) and is_binary(entry["summary"]) do
@@ -180,16 +247,44 @@ defmodule Sigma.Session.Journal do
 
   defp reduce_entry(_node, acc), do: acc
 
-  defp metrics_snapshot(index, session_id) do
-    index.ordered
-    |> Enum.filter(&match?(%{entry: %{"type" => "metrics"}}, &1))
-    |> Enum.reduce(Metrics.new(session_id), fn %{entry: entry}, metrics ->
-      case EntryDecoder.metrics(entry) do
-        {:ok, fact} -> Metrics.reduce(metrics, fact)
-        {:error, _reason} -> metrics
-      end
-    end)
-    |> Metrics.finalize_in_flight()
+  defp context_nodes(nodes, %{context_window: nil}), do: nodes
+
+  defp context_nodes(nodes, snapshot) do
+    window = snapshot.context_window
+    id = snapshot.context_window_entry_ids[{window.run_id, window.incarnation, window.window}]
+    nodes |> Enum.drop_while(&(&1.entry["id"] != id)) |> Enum.drop(1)
+  end
+
+  defp render_window_display(nodes, boundaries) do
+    {before, boundary_and_after} =
+      Enum.split_while(nodes, fn node ->
+        not MapSet.member?(boundaries, node.entry["id"])
+      end)
+
+    {messages, _diagnostics, _compaction} = render_messages(before)
+
+    case boundary_and_after do
+      [] -> messages
+      [_boundary | after_nodes] -> messages ++ render_window_display(after_nodes, boundaries)
+    end
+  end
+
+  defp metrics_snapshot(index, session_id, opts) do
+    metrics =
+      index.ordered
+      |> Enum.filter(&match?(%{entry: %{"type" => "metrics"}}, &1))
+      |> Enum.reduce(Metrics.new(session_id), fn %{entry: entry}, metrics ->
+        case EntryDecoder.metrics(entry) do
+          {:ok, fact} -> Metrics.reduce(metrics, fact)
+          {:error, _reason} -> metrics
+        end
+      end)
+
+    # Runtime reads the durable facts before sampling the current Agent identity.
+    # Ordinary journal recovery has no live host evidence and finalizes everything.
+    if Keyword.get(opts, :finalize_metrics, true),
+      do: Metrics.finalize_in_flight(metrics),
+      else: metrics
   end
 
   defp subagent_roster(index) do
@@ -236,8 +331,182 @@ defmodule Sigma.Session.Journal do
     nodes
     |> Enum.reverse()
     |> Enum.find_value(nil, fn %{entry: %{"type" => type, "id" => id}} ->
-      if type not in ["metrics", "subagent", "subagent_admission"], do: id
+      if type not in [
+           "metrics",
+           "subagent",
+           "subagent_admission",
+           "async_interaction",
+           "hook_feedback"
+         ],
+         do: id
     end)
+  end
+
+  @doc false
+  def async_interaction_projection(projection, entries, leaf_id) do
+    index = Index.build(entries)
+
+    with {:ok, {_leaf, nodes}} <- Index.path(index, leaf_id) do
+      {:ok, project_async_interactions(projection, index, nodes)}
+    end
+  end
+
+  defp project_async_interactions(projection, index, nodes) do
+    project_auxiliary_items(projection, index, nodes, "async_interaction")
+  end
+
+  @doc false
+  def hook_feedback_projection(entries, leaf_id, session_id \\ nil) do
+    index = Index.build(entries)
+
+    with {:ok, {_leaf, nodes}} <- Index.path(index, leaf_id) do
+      case hook_feedback(index, session_id) do
+        {history, receipts, []} ->
+          selected = project_auxiliary_items(history, index, nodes, "hook_feedback")
+
+          events =
+            Map.filter(history.events, fn {_id, event} ->
+              Map.has_key?(selected.items, event["item_id"])
+            end)
+
+          {:ok,
+           %{
+             history: history,
+             projection: %{selected | events: events},
+             entry_ids: receipts
+           }}
+
+        {_history, _receipts, diagnostics} ->
+          {:error, {:invalid_journal, diagnostics}}
+      end
+    end
+  end
+
+  defp project_auxiliary_items(projection, index, nodes, type) do
+    selected = MapSet.new(nodes, & &1.entry["id"])
+
+    # Keep the global receipts for reconciliation and exactly-once admission.
+    # A card with facts on another branch must not expose that branch's answer,
+    # or become an open question that can dispatch the same logical reply again.
+    hidden =
+      Enum.reduce(index.ordered, MapSet.new(), fn
+        %{
+          entry: %{"type" => ^type, "event" => %{"item_id" => id}},
+          parent_id: parent
+        },
+        acc ->
+          if MapSet.member?(selected, parent), do: acc, else: MapSet.put(acc, id)
+
+        _, acc ->
+          acc
+      end)
+
+    items =
+      Map.reject(projection.items, fn {id, item} ->
+        MapSet.member?(hidden, id) or
+          not MapSet.member?(selected, item["origin"]["branch_entry_id"])
+      end)
+
+    %{projection | items: items}
+  end
+
+  defp hook_feedback(index, session_id) do
+    {projection, receipts, diagnostics, _parents} =
+      Enum.reduce(index.ordered, {HookFeedback.new(), %{}, [], %{}}, fn
+        %{entry: %{"type" => "hook_feedback"} = entry} = node,
+        {projection, receipts, diagnostics, item_parents} ->
+          with {:ok, event} <- EntryDecoder.hook_feedback(entry),
+               :ok <- validate_hook_session(event, session_id),
+               :ok <- validate_hook_anchor(event, projection, index, node, item_parents),
+               {:ok, updated} <- HookFeedback.apply_event(projection, event) do
+            parents =
+              Map.update(item_parents, event["item_id"], [node.parent_id], &[node.parent_id | &1])
+
+            {updated, Map.put_new(receipts, event["event_id"], entry["id"]), diagnostics, parents}
+          else
+            {:error, reason} ->
+              diagnostic = %{payload_diagnostic(node, reason) | kind: :invalid_hook_feedback}
+              {projection, receipts, diagnostics ++ [diagnostic], item_parents}
+          end
+
+        _, acc ->
+          acc
+      end)
+
+    {projection, receipts, diagnostics}
+  end
+
+  # The log header ID is independently generated and is not host session authority.
+  defp validate_hook_session(_event, nil), do: :ok
+  defp validate_hook_session(%{"session_id" => session_id}, session_id), do: :ok
+  defp validate_hook_session(_event, _session_id), do: {:error, :invalid_hook_feedback_session}
+
+  defp validate_hook_anchor(event, projection, index, node, item_parents) do
+    origin =
+      if event["fact"] == "received",
+        do: event["origin"],
+        else: get_in(projection, [:items, event["item_id"], "origin"])
+
+    with %{} <- origin,
+         %{entry_index: anchor_index, entry: %{"type" => "message"}} <-
+           index.by_id[origin["branch_entry_id"]],
+         true <- anchor_index < node.entry_index,
+         {:ok, {_leaf, parents}} <- Index.path(index, node.parent_id),
+         selected = MapSet.new(parents, & &1.entry["id"]),
+         true <- MapSet.member?(selected, origin["branch_entry_id"]),
+         true <-
+           Enum.all?(Map.get(item_parents, event["item_id"], []), &MapSet.member?(selected, &1)) do
+      :ok
+    else
+      _ -> {:error, :invalid_hook_feedback_scope}
+    end
+  end
+
+  defp async_interactions(index) do
+    Enum.reduce(index.ordered, {AsyncInteractions.new(), %{}, []}, fn
+      %{entry: %{"type" => "async_interaction"} = entry} = node,
+      {projection, receipts, diagnostics} ->
+        with {:ok, event} <- EntryDecoder.async_interaction(entry),
+             :ok <- validate_async_anchor(event, projection, index, node),
+             {:ok, updated} <- AsyncInteractions.apply_event(projection, event) do
+          {updated, Map.put_new(receipts, event["event_id"], entry["id"]), diagnostics}
+        else
+          {:error, reason} ->
+            diagnostic = %{payload_diagnostic(node, reason) | kind: :invalid_async_interaction}
+            {projection, receipts, diagnostics ++ [diagnostic]}
+        end
+
+      _, acc ->
+        acc
+    end)
+  end
+
+  defp validate_async_anchor(event, projection, index, node) do
+    origin =
+      if event["fact"] == "received",
+        do: event["origin"],
+        else: get_in(projection, [:items, event["item_id"], "origin"])
+
+    case origin && index.by_id[origin["branch_entry_id"]] do
+      %{
+        entry_index: anchor_index,
+        entry: %{
+          "type" => "message",
+          "message" => %{"role" => "user", "metadata" => %{"turn_id" => run_id}}
+        }
+      }
+      when anchor_index < node.entry_index ->
+        with true <- run_id == origin["run_id"],
+             {:ok, {_leaf, parents}} <- Index.path(index, node.parent_id),
+             true <- Enum.any?(parents, &(&1.entry["id"] == origin["branch_entry_id"])) do
+          :ok
+        else
+          _ -> {:error, :invalid_async_anchor}
+        end
+
+      _ ->
+        {:error, :invalid_async_anchor}
+    end
   end
 
   defp payload_diagnostic_from_entry(entry, reason),

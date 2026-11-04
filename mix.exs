@@ -55,6 +55,8 @@ defmodule Sigma.MixProject do
 
     case Mix.shell().cmd({helper_builder, ["release"]}, use_stdio: true) do
       0 ->
+        Mix.Task.run("backplane.mcp.stdio.build")
+
         case Mix.shell().cmd({mix, ["release", "sigma", "--overwrite", "--force"]},
                env: env,
                use_stdio: true

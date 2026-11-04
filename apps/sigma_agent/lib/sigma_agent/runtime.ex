@@ -62,9 +62,25 @@ defmodule Sigma.Agent.Runtime do
     end
   end
 
-  @doc "Loads journal state with the acknowledged live subagent projection when available."
-  def session_snapshot(repo_path, session_id, storage_path) do
-    with {:ok, snapshot} <- apply(Sigma.Session.Log, :snapshot, [storage_path]) do
+  @doc "Loads journal state with current live metrics and acknowledged subagent state when available."
+  def session_snapshot(repo_path, session_id, storage_path, opts \\ []) do
+    with {:ok, snapshot} <- load_session_snapshot(repo_path, session_id, storage_path, opts),
+         {:ok, questions} <- question_snapshot(repo_path, session_id, opts) do
+      # Journal header IDs are independently generated; metric ownership uses
+      # the runtime session ID, as do the Web and Protocol projections.
+      metrics =
+        apply(Sigma.Session.Metrics, :finalize_in_flight, [
+          Map.put(snapshot.metrics, :session_id, session_id),
+          live_metric_ids(repo_path, session_id)
+        ])
+
+      snapshot = %{snapshot | metrics: metrics}
+
+      snapshot =
+        if is_list(questions),
+          do: Map.put(snapshot, :pending_questions, questions),
+          else: snapshot
+
       case lookup(repo_path, session_id, :subagents) do
         nil ->
           {:ok, Map.put(snapshot, :subagents_available, false)}
@@ -81,6 +97,35 @@ defmodule Sigma.Agent.Runtime do
           end
       end
     end
+  end
+
+  defp load_session_snapshot(repo_path, session_id, storage_path, opts) do
+    if Keyword.get(opts, :selected_journal, false) do
+      with {:ok, %{snapshot: snapshot, view: view}} <-
+             Sigma.Agent.ProtocolHostedResults.load(repo_path, session_id, storage_path) do
+        {:ok, Map.put(snapshot, :provider_hosted_view, view)}
+      end
+    else
+      apply(Sigma.Session.Log, :snapshot, [storage_path, [finalize_metrics: false]])
+    end
+  end
+
+  defp live_metric_ids(repo_path, session_id) do
+    with agent when is_pid(agent) <- lookup(repo_path, session_id, :agent),
+         %{phase: phase} = status <- Sigma.Agent.status(agent),
+         true <- Sigma.Agent.TurnState.active?(%Sigma.Agent.TurnState{phase: phase}) do
+      [active_turn_id: status.turn_id, active_request_id: status.current_request_id]
+    else
+      _ -> []
+    end
+  catch
+    :exit, _reason -> []
+  end
+
+  defp question_snapshot(repo_path, session_id, opts) do
+    if Keyword.get(opts, :questions, false),
+      do: Sigma.Protocol.Questions.snapshot(pending_questions(repo_path, session_id)),
+      else: {:ok, nil}
   end
 
   defp current_subagent_roster?(live, durable) do
@@ -104,6 +149,17 @@ defmodule Sigma.Agent.Runtime do
       nil -> []
       host -> Sigma.Agent.Subagents.pending(host)
     end
+  end
+
+  @doc "Returns current host waiters only; no question is reconstructed from journal history."
+  def pending_questions(repo_path, session_id) do
+    root =
+      case lookup(repo_path, session_id, :agent) do
+        nil -> []
+        agent -> Sigma.Agent.pending_user_questions(agent)
+      end
+
+    root ++ pending_subagent_questions(repo_path, session_id)
   end
 
   def answer_question(repo_path, session_id, agent, request_id, reply) do

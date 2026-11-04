@@ -5,7 +5,9 @@ defmodule Sigma.Protocol.Codec do
 
   @max_encoded_bytes 65_536
   @version Envelope.version()
-  @max_depth 8
+  # Structured native calls include message/content/arguments before their own
+  # question/options containers; retain those values within a finite budget.
+  @max_depth 16
   @max_collection_size 200
   @max_string_bytes 32_768
 
@@ -29,6 +31,7 @@ defmodule Sigma.Protocol.Codec do
          :ok <- validate_required_strings(document),
          :ok <- validate_timestamp(document["timestamp"]),
          {:ok, payload} <- validate_payload(document["payload"]),
+         :ok <- validate_command_payload(type, payload),
          {:ok, error} <- decode_error(document["error"]) do
       {:ok,
        %Envelope{
@@ -54,6 +57,7 @@ defmodule Sigma.Protocol.Codec do
 
   defp envelope_document(envelope) do
     with {:ok, payload} <- sanitize(envelope.payload, 0),
+         :ok <- validate_command_payload(envelope.type, payload),
          {:ok, error} <- encode_error(envelope.error),
          :ok <- validate_envelope(envelope) do
       {:ok,
@@ -118,6 +122,62 @@ defmodule Sigma.Protocol.Codec do
   defp validate_payload(payload) when is_map(payload), do: {:ok, payload}
   defp validate_payload(_payload), do: {:error, :invalid_payload}
 
+  defp validate_command_payload(type, payload)
+       when type in ~w(plugins.requests plugins.install),
+       do: Sigma.Protocol.PluginInstallations.validate_request(type, payload)
+
+  defp validate_command_payload(type, payload)
+       when type in ~w(provider_hosted.list provider_hosted.read),
+       do: Sigma.Protocol.HostedResultPages.validate_request(type, payload)
+
+  defp validate_command_payload(type, payload)
+       when type in ~w(async_interaction.reply_chunk async_interaction.reply_commit async_interaction.reply_cancel),
+       do: Sigma.Protocol.AsyncReplyUploads.validate_request(type, payload)
+
+  defp validate_command_payload(type, payload)
+       when type in ~w(async_interactions.list async_interaction.read),
+       do: Sigma.Protocol.AsyncInteractionPages.validate_request(type, payload)
+
+  defp validate_command_payload(type, payload)
+       when type in ~w(async_interaction.reply async_interaction.dismiss) do
+    required = ~w(itemId expectedLeafId)
+    required = if type == "async_interaction.reply", do: required ++ ["reply"], else: required
+    allowed = required ++ ~w(requiredCapabilities repoPath sessionsDir)
+
+    valid? =
+      Enum.all?(required, &Map.has_key?(payload, &1)) and
+        Enum.all?(Map.keys(payload), &(&1 in allowed)) and
+        async_text?(payload["itemId"], 512) and
+        (is_nil(payload["expectedLeafId"]) or async_text?(payload["expectedLeafId"], 512)) and
+        (type == "async_interaction.dismiss" or async_reply?(payload["reply"]))
+
+    if valid?, do: :ok, else: {:error, :invalid_async_interaction_command}
+  end
+
+  defp validate_command_payload(_, _), do: :ok
+
+  defp async_reply?(%{"replyId" => id, "answers" => answers} = reply)
+       when map_size(reply) == 2 and is_list(answers) and length(answers) in 1..32 do
+    async_text?(id, 512) and
+      Enum.all?(Enum.with_index(answers), fn
+        {%{"questionIndex" => index, "answer" => answer} = row, index} when map_size(row) == 2 ->
+          async_text?(answer, 32_768)
+
+        _ ->
+          false
+      end)
+  end
+
+  defp async_reply?(%{"replyId" => id, "text" => text} = reply) when map_size(reply) == 2,
+    do: async_text?(id, 512) and async_text?(text, 32_768)
+
+  defp async_reply?(_), do: false
+
+  defp async_text?(text, limit),
+    do:
+      is_binary(text) and byte_size(text) <= limit and String.valid?(text) and
+        String.trim(text) != ""
+
   defp encode_error(nil), do: {:ok, nil}
 
   defp encode_error(%Error{} = error) do
@@ -133,7 +193,10 @@ defmodule Sigma.Protocol.Codec do
   defp decode_error(%{"code" => code, "message" => message} = error)
        when is_binary(code) and is_binary(message) do
     details = Map.get(error, "details", %{})
-    if is_map(details), do: {:ok, Error.new(code, message, details)}, else: {:error, :invalid_error}
+
+    if is_map(details),
+      do: {:ok, Error.new(code, message, details)},
+      else: {:error, :invalid_error}
   end
 
   defp decode_error(_error), do: {:error, :invalid_error}

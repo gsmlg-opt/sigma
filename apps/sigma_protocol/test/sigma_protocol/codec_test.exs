@@ -62,7 +62,13 @@ defmodule Sigma.Protocol.CodecTest do
              "skills.v1",
              "subagents.v1",
              "subscription.cursor.v1",
-             "subscription.resync.v1"
+             "subscription.resync.v1",
+             "questions.v1",
+             "async_interactions.v1",
+             "async_interactions.pages.v1",
+             "async_interactions.uploads.v1",
+             "provider_hosted.v1",
+             "provider_hosted.pages.v1"
            ]
   end
 
@@ -78,6 +84,56 @@ defmodule Sigma.Protocol.CodecTest do
              })
 
     assert {:error, :payload_too_large} = Codec.encode(event)
+  end
+
+  test "hosted result page commands round trip and reject source or range injection" do
+    revision = String.duplicate("a", 64)
+
+    for {type, payload} <- [
+          {"provider_hosted.list",
+           %{"expectedRevision" => revision, "offset" => 0, "limit" => 50}},
+          {"provider_hosted.read",
+           %{
+             "expectedRevision" => revision,
+             "entryId" => "entry",
+             "messageId" => "message",
+             "byteOffset" => 12_288
+           }}
+        ] do
+      payload = Map.put(payload, "requiredCapabilities", ["provider_hosted.pages.v1"])
+      assert {:ok, command} = Envelope.command(type, "session", payload)
+      assert {:ok, encoded} = Codec.encode(command)
+      assert {:ok, ^command} = Codec.decode(encoded)
+
+      invalid_ranges =
+        if type == "provider_hosted.list",
+          do: [Map.put(payload, "offset", -1), Map.put(payload, "limit", 51)],
+          else: [Map.put(payload, "byteOffset", 0.5), Map.put(payload, "messageId", "")]
+
+      for invalid <-
+            [
+              Map.put(payload, "filePath", "/private"),
+              Map.put(payload, "expectedRevision", "stale")
+            ] ++ invalid_ranges do
+        assert {:error, :invalid_provider_hosted_page} =
+                 Codec.encode(%{command | payload: invalid})
+
+        document = encoded |> Jason.decode!() |> Map.put("payload", invalid) |> Jason.encode!()
+        assert {:error, :invalid_provider_hosted_page} = Codec.decode(document)
+      end
+    end
+
+    for type <- ~w(provider_hosted.changed provider_hosted.page provider_hosted.chunk) do
+      assert {:ok, event} = Envelope.event(type, "session", %{})
+      assert {:ok, encoded} = Codec.encode(event)
+      assert {:ok, ^event} = Codec.decode(encoded)
+    end
+  end
+
+  test "nested native arguments remain subject to a finite depth limit" do
+    payload = Enum.reduce(1..17, "value", fn _, value -> %{"nested" => value} end)
+    assert {:ok, event} = Envelope.event("message.completed", "session", payload)
+    assert {:error, :payload_too_deep} = Codec.encode(event)
   end
 
   test "round trips the additive skills.v1 command and event" do
@@ -96,6 +152,64 @@ defmodule Sigma.Protocol.CodecTest do
 
     assert {:ok, encoded} = Codec.encode(event)
     assert {:ok, ^event} = Codec.decode(encoded)
+  end
+
+  test "async interaction commands round trip exact user answers and reject identity injection" do
+    payload = %{
+      "itemId" => "item",
+      "expectedLeafId" => "leaf",
+      "reply" => %{
+        "replyId" => "reply",
+        "answers" => [%{"questionIndex" => 0, "answer" => "  原文\n"}]
+      },
+      "requiredCapabilities" => ["async_interactions.v1"]
+    }
+
+    assert {:ok, command} = Envelope.command("async_interaction.reply", "session", payload)
+    assert {:ok, json} = Codec.encode(command)
+    assert {:ok, ^command} = Codec.decode(json)
+
+    for invalid <- [
+          Map.put(payload, "turnId", "chosen-turn"),
+          Map.delete(payload, "expectedLeafId"),
+          put_in(payload, ["reply", "message_id"], "chosen-message"),
+          put_in(payload, ["reply", "answers"], [%{"questionIndex" => 1, "answer" => "A"}]),
+          put_in(payload, ["reply", "answers"], [%{"questionIndex" => 0, "answer" => " "}])
+        ] do
+      assert {:ok, invalid_command} =
+               Envelope.command("async_interaction.reply", "session", invalid)
+
+      assert {:error, :invalid_async_interaction_command} = Codec.encode(invalid_command)
+      document = Jason.decode!(json) |> Map.put("payload", invalid)
+      assert {:error, :invalid_async_interaction_command} = Codec.decode(Jason.encode!(document))
+    end
+
+    assert {:ok, dismiss} =
+             Envelope.command(
+               "async_interaction.dismiss",
+               "session",
+               Map.drop(payload, ["reply"])
+             )
+
+    assert {:ok, json} = Codec.encode(dismiss)
+    assert {:ok, ^dismiss} = Codec.decode(json)
+
+    assert {:ok, notice_reply} =
+             Envelope.command("async_interaction.reply", "session", %{
+               payload
+               | "reply" => %{"replyId" => "optional", "text" => "Continue"}
+             })
+
+    assert {:ok, _} = Codec.encode(notice_reply)
+
+    assert {:ok, event} =
+             Envelope.event("async_interactions.updated", "session", %{
+               "items" => [],
+               "leafId" => nil
+             })
+
+    assert {:ok, json} = Codec.encode(event)
+    assert {:ok, ^event} = Codec.decode(json)
   end
 
   test "subagents v1 event round trips and snapshot DTO strips arbitrary fields" do

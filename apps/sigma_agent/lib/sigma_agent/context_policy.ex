@@ -133,8 +133,8 @@ defmodule Sigma.Agent.ContextPolicy do
     estimate = positive(Map.get(context, :next_request_estimated_input_tokens))
 
     reserve =
-      positive(get(opts, :output_reserve)) || positive(model_value(model, :max_output_tokens)) ||
-        0
+      positive(get(opts, :output_reserve)) || model_value(model, :max_output_tokens) ||
+        model_value(model, :max_tokens) || model_value(model, :output_token_limit) || 0
 
     stale = Map.get(context, :stale, false) or Map.get(context, :estimate_coverage) == :unknown
     overflow = overflow_status(estimate, window, reserve)
@@ -158,7 +158,8 @@ defmodule Sigma.Agent.ContextPolicy do
   defp estimate_components(opts) do
     %{
       system: count_part(get(opts, :system), get(opts, :system_tokens)),
-      messages: count_part(get(opts, :messages), get(opts, :message_tokens)),
+      messages:
+        count_part(message_estimate_parts(get(opts, :messages)), get(opts, :message_tokens)),
       tools: count_part(get(opts, :tools), get(opts, :tool_tokens)),
       skills: count_part(get(opts, :skills), get(opts, :skill_tokens)),
       attachments: count_part(get(opts, :attachments), get(opts, :attachment_tokens)),
@@ -171,6 +172,33 @@ defmodule Sigma.Agent.ContextPolicy do
   defp count_part(value, _explicit) when is_binary(value), do: token_estimate(value)
   defp count_part(value, _explicit) when is_list(value), do: structured_token_estimate(value)
   defp count_part(_value, _explicit), do: nil
+
+  defp message_estimate_parts(messages) when is_list(messages),
+    do: Enum.map(messages, &message_estimate_part/1)
+
+  defp message_estimate_parts(messages), do: messages
+
+  defp message_estimate_part(
+         %{
+           role: :assistant,
+           metadata:
+             %{"openai_responses_hosted" => %{"version" => 1, "items" => items}} = metadata
+         } = message
+       )
+       when is_list(items) do
+    if Enum.all?(items, &match?(%{"item" => item} when is_map(item), &1)) do
+      # Responses replays these native items instead of canonical text/tool calls.
+      # Count their actions, citations and other fields once, excluding the
+      # host-only replay envelope while preserving unrelated metadata estimates.
+      message
+      |> Map.put(:content, Enum.map(items, & &1["item"]))
+      |> Map.put(:metadata, Map.delete(metadata, "openai_responses_hosted"))
+    else
+      message
+    end
+  end
+
+  defp message_estimate_part(message), do: message
 
   defp token_estimate(value), do: max(1, div(byte_size(to_string(value)) + 3, 4))
 

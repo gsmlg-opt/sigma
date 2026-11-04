@@ -18,6 +18,16 @@ defmodule Sigma.Agent do
   alias Sigma.Coding.Hooks.Outcome
   alias Sigma.Agent.Hooks
 
+  alias Sigma.Agent.Backplane.{
+    AsyncDelivery,
+    AsyncInbox,
+    GoalIntegration,
+    HookDelivery,
+    RootRetirement
+  }
+
+  alias Sigma.Protocol.{AsyncInteractions, AsyncReplyUploads}
+
   defstruct [
     :session_id,
     :log_session_id,
@@ -41,6 +51,10 @@ defmodule Sigma.Agent do
     :context_snapshot,
     :context_policy,
     :context_limit,
+    :context_window,
+    :backplane_pending_request,
+    :backplane_catalog_tools,
+    :backplane_catalog_revision,
     :turn_started_at,
     :turn_started_monotonic,
     :control_pid,
@@ -48,11 +62,33 @@ defmodule Sigma.Agent do
     :policy,
     :backplane_store,
     :backplane_store_owned,
+    :backplane_store_path,
     :backplane_request,
     :subagents,
+    :native_memory_root,
+    :native_plugins,
     :start_hook_pending,
     :hook_async_contexts,
     :hook_async_runtime,
+    :hook_execution,
+    :host_retirement,
+    :host_retirement_task,
+    :host_retirement_stage,
+    :host_recovery_task,
+    :pending_host_prompt,
+    :goal_integration,
+    :goal_admission,
+    :goal_execution_admission,
+    :goal_executor_control,
+    :goal_executor_settlement,
+    :pending_goal_result,
+    :goal_idle_task,
+    goal_generation: 0,
+    goal_idle_generation: 0,
+    goal_resume_pending: false,
+    goal_instruction_pending: false,
+    context_excluded_message_ids: MapSet.new(),
+    context_reconciliation_required: false,
     messages: [],
     subscribers: [],
     current_turn_resources: [],
@@ -62,6 +98,13 @@ defmodule Sigma.Agent do
     turn_state: %TurnState{},
     hook_specs: [],
     backplane_tool_results: [],
+    native_tools: false,
+    async_reply_messages: %{},
+    async_interaction_signature: nil,
+    async_interaction_error: nil,
+    async_reply_uploads: %{},
+    host_retirement_facts: %{},
+    host_retirement_waiters: [],
     resume_source: :startup,
     mcp_session: %{handles: [], subscriptions: [], clients: %{}}
   ]
@@ -109,6 +152,64 @@ defmodule Sigma.Agent do
     GenServer.call(pid, {:admit_prompt, prompt_text, opts, :follow_up}, :infinity)
   end
 
+  def goal(pid) do
+    with {:ok, handle} <- GenServer.call(pid, :goal_handle), do: GoalIntegration.get(handle)
+  end
+
+  def set_goal(pid, mutation, instruction) do
+    with {:ok, handle} <- GenServer.call(pid, :goal_handle),
+         {:ok, _} = result <- GoalIntegration.set(handle, mutation, instruction) do
+      GenServer.cast(pid, :goal_changed)
+      result
+    end
+  end
+
+  def clear_goal(pid, instruction) do
+    with {:ok, handle} <- GenServer.call(pid, :goal_handle),
+         do: GoalIntegration.clear(handle, instruction)
+  end
+
+  def fork_goal(pid, target_writer, cwd, target_transcript) do
+    with {:ok, handle} <- GenServer.call(pid, :goal_operation_handle),
+         do: GoalIntegration.fork(handle, target_writer, cwd, target_transcript)
+  end
+
+  def retire_goal(pid), do: GenServer.call(pid, :retire_goal, :infinity)
+
+  def retire_runtime_store(pid), do: GenServer.call(pid, :retire_runtime_store, :infinity)
+
+  @doc false
+  def retire_host(pid), do: GenServer.call(pid, :retire_host, :infinity)
+
+  def async_interaction_snapshot(pid),
+    do: GenServer.call(pid, :async_interaction_snapshot, :infinity)
+
+  @doc "Resolves this session's configured plugin host outside its command loop."
+  def plugin_installation_host(pid) do
+    config = GenServer.call(pid, :plugin_installation_config)
+    Sigma.Agent.Backplane.PluginResources.open(config)
+  end
+
+  def reply_async_interaction(pid, item_id, payload, expected_leaf_id),
+    do:
+      GenServer.call(
+        pid,
+        {:reply_async_interaction, item_id, payload, expected_leaf_id},
+        :infinity
+      )
+
+  def dismiss_async_interaction(pid, item_id, expected_leaf_id),
+    do: GenServer.call(pid, {:dismiss_async_interaction, item_id, expected_leaf_id}, :infinity)
+
+  def upload_async_reply_chunk(pid, request),
+    do: GenServer.call(pid, {:upload_async_reply_chunk, request}, :infinity)
+
+  def commit_async_reply_upload(pid, request),
+    do: GenServer.call(pid, {:commit_async_reply_upload, request}, :infinity)
+
+  def cancel_async_reply_upload(pid, request),
+    do: GenServer.call(pid, {:cancel_async_reply_upload, request}, :infinity)
+
   @doc "Changes the session context limit only after a successful idle-time persistence callback."
   def change_context_limit(pid, limit, persist) when is_function(persist, 0) do
     GenServer.call(pid, {:change_context_limit, limit, persist}, :infinity)
@@ -120,6 +221,9 @@ defmodule Sigma.Agent do
   end
 
   def status(pid), do: GenServer.call(pid, :status)
+
+  @doc "Returns the current canonical transcript without replaying or executing messages."
+  def messages(pid), do: GenServer.call(pid, :messages)
 
   def reload_context(pid, %SessionContext{} = session_context) do
     GenServer.call(pid, {:reload_context, session_context})
@@ -137,7 +241,7 @@ defmodule Sigma.Agent do
   end
 
   def begin_session_operation(pid), do: GenServer.call(pid, :begin_session_operation)
-  def end_session_operation(pid), do: GenServer.call(pid, :end_session_operation)
+  def end_session_operation(pid), do: GenServer.call(pid, :end_session_operation, :infinity)
   def compact(pid, opts \\ []), do: GenServer.call(pid, {:compact, opts}, :infinity)
 
   def ask_user_question(pid, request, opts \\ []) when is_map(request) do
@@ -239,9 +343,13 @@ defmodule Sigma.Agent do
   def init(opts) do
     Process.flag(:trap_exit, true)
 
-    case init_backplane_store(opts) do
-      {:ok, store, owned?} -> init_agent(opts, store, owned?)
-      {:error, reason} -> {:stop, reason}
+    if Keyword.get(opts, :native_tools, false) and is_nil(opts[:subagents]) do
+      {:stop, :native_tools_require_session_host}
+    else
+      case init_backplane_store(opts) do
+        {:ok, store, owned?} -> init_agent(opts, store, owned?)
+        {:error, reason} -> {:stop, reason}
+      end
     end
   end
 
@@ -280,7 +388,7 @@ defmodule Sigma.Agent do
         active_leaf: Keyword.get(opts, :active_leaf),
         model: opts[:model],
         source: Keyword.get(opts, :context_source, :runtime_start),
-        messages: opts[:messages] || [],
+        messages: opts[:context_messages] || opts[:messages] || [],
         system: :unknown,
         tools: :unknown,
         skills: :unknown,
@@ -303,6 +411,9 @@ defmodule Sigma.Agent do
       mcp_servers: opts[:mcp_servers] || %{},
       provider: opts[:provider] || Anthropic,
       messages: opts[:messages] || [],
+      context_window: opts[:context_window],
+      context_excluded_message_ids:
+        excluded_context_ids(opts[:messages] || [], opts[:context_messages]),
       cwd: cwd,
       on_event: opts[:on_event],
       writer: opts[:writer],
@@ -319,7 +430,13 @@ defmodule Sigma.Agent do
       context_snapshot: context_snapshot,
       context_limit: opts[:context_limit],
       context_policy:
-        context_policy(context_snapshot, opts[:model], opts[:options] || [], opts[:context_limit]),
+        context_policy(
+          context_snapshot,
+          opts[:provider] || Anthropic,
+          opts[:model],
+          opts[:options] || [],
+          opts[:context_limit]
+        ),
       hook_specs: hook_specs,
       start_hook_pending: :atomics.new(1, signed: false),
       hook_async_contexts: Hooks.async_contexts(),
@@ -334,27 +451,58 @@ defmodule Sigma.Agent do
         ),
       backplane_store: backplane_store,
       backplane_store_owned: backplane_store_owned,
+      backplane_store_path:
+        opts[:backplane_runtime_path] || backplane_runtime_path(opts[:transcript_path]),
+      native_tools: Keyword.get(opts, :native_tools, false),
+      native_memory_root:
+        Keyword.get_lazy(opts, :native_memory_root, fn ->
+          Path.join(apply(Sigma.Session.ConfigManager, :agent_dir, []), "memories")
+        end),
+      native_plugins:
+        Keyword.get_lazy(opts, :native_plugins, fn ->
+          apply(Sigma.Session.ConfigManager, :get_plugin_config, [])
+        end),
       subagents: opts[:subagents]
     }
 
-    {:ok, state, {:continue, :session_start}}
+    case init_goal(state) do
+      {:ok, state} ->
+        case RootRetirement.context(state) do
+          {:ok, context} ->
+            {:ok, %{state | host_retirement: context}, {:continue, :session_start}}
+
+          {:error, reason} ->
+            {:stop, reason}
+        end
+
+      {:error, reason} ->
+        {:stop, reason}
+    end
   end
 
   @impl true
   def handle_continue(:session_start, state) do
-    {:noreply, start_mcp_clients(state)}
+    {:noreply, state |> start_mcp_clients() |> refresh_async_interactions() |> maybe_goal_idle()}
   end
 
   @impl true
   def terminate(reason, state) do
     release_all_resources(state)
-    Sigma.Coding.Hooks.AsyncRuntime.shutdown(state.hook_async_runtime)
+    stop_goal_idle_task(state)
+    stop_host_recovery_task(state)
 
-    if reason in [:normal, :shutdown] or match?({:shutdown, _}, reason) do
-      run_session_end_hook(state)
+    if state.native_tools do
+      retire_root_on_terminate(state, reason)
+    else
+      Sigma.Coding.Hooks.AsyncRuntime.shutdown(state.hook_async_runtime)
+
+      if reason in [:normal, :shutdown] or match?({:shutdown, _}, reason) do
+        run_session_end_hook(state)
+      end
     end
 
     Sigma.Coding.MCP.stop(state.mcp_session)
+    GoalIntegration.close(state.goal_integration)
     stop_backplane_store(state)
 
     :ok
@@ -378,6 +526,213 @@ defmodule Sigma.Agent do
   @impl true
   def handle_call(:status, _from, state) do
     {:reply, status_snapshot(state), state}
+  end
+
+  def handle_call(:messages, _from, state) do
+    {:reply, state.messages, state}
+  end
+
+  def handle_call(:plugin_installation_config, _from, state),
+    do: {:reply, state.native_plugins, state}
+
+  def handle_call(:goal_handle, _from, %{goal_integration: nil} = state),
+    do: {:reply, {:error, :goal_unavailable}, state}
+
+  def handle_call(:goal_handle, _from, state),
+    do: {:reply, {:ok, state.goal_integration}, state}
+
+  def handle_call(:goal_operation_handle, _from, state) do
+    if not is_nil(state.goal_integration) and state.turn_state.phase == :session_operation and
+         is_nil(state.pending_host_prompt),
+       do: {:reply, {:ok, state.goal_integration}, state},
+       else: {:reply, {:error, :session_busy}, state}
+  end
+
+  def handle_call(:retire_goal, _from, state) do
+    if is_nil(state.current_turn_task) and is_nil(state.goal_idle_task) and
+         is_nil(state.pending_host_prompt) do
+      case GoalIntegration.close(state.goal_integration) do
+        :ok -> {:reply, :ok, %{state | goal_integration: nil, goal_admission: nil}}
+        error -> {:reply, error, state}
+      end
+    else
+      {:reply, {:error, :session_busy}, state}
+    end
+  end
+
+  def handle_call(:retire_runtime_store, _from, state) do
+    cond do
+      state.turn_state.phase != :session_operation or not is_nil(state.current_turn_task) or
+        not is_nil(state.goal_idle_task) or not is_nil(state.goal_integration) or
+          not is_nil(state.pending_host_prompt) ->
+        {:reply, {:error, :session_busy}, state}
+
+      is_nil(state.backplane_store) ->
+        {:reply, :ok, state}
+
+      not state.backplane_store_owned ->
+        {:reply, {:error, :runtime_store_not_owned}, state}
+
+      state.native_tools and
+          not match?(%{completion: {:ok, %{status: :confirmed}}}, state.host_retirement_facts) ->
+        {:reply, {:error, :host_retirement_unconfirmed}, state}
+
+      true ->
+        case Sigma.Agent.Backplane.Store.retire(state.backplane_store) do
+          :ok -> {:reply, :ok, %{state | backplane_store: nil}}
+          {:error, _} = error -> {:reply, error, state}
+        end
+    end
+  end
+
+  def handle_call(:retire_host, _from, %{native_tools: false} = state),
+    do: {:reply, :ok, state}
+
+  def handle_call(:retire_host, from, state) do
+    cond do
+      state.host_retirement_task ->
+        {:noreply, %{state | host_retirement_waiters: [from | state.host_retirement_waiters]}}
+
+      match?(%{completion: {:ok, %{status: :confirmed}}}, state.host_retirement_facts) ->
+        {:reply, state.host_retirement_facts.completion, state}
+
+      state.current_turn_task || state.goal_idle_task || state.pending_host_prompt ||
+        state.host_recovery_task ||
+          match?(%{status: :reserved}, state.goal_admission) ->
+        {:reply, {:error, :session_busy}, state}
+
+      true ->
+        state = %{
+          state
+          | host_retirement_waiters: [from],
+            turn_state: TurnState.transition(state.turn_state, :session_operation)
+        }
+
+        {:noreply, start_host_retirement(state)}
+    end
+  end
+
+  def handle_call({:goal_record_instruction, thread, instruction}, _from, state) do
+    content = instruction[:text] || instruction["text"]
+
+    if goal_thread?(state, thread) and
+         state.turn_state.phase not in [:session_operation, :cancelling] and is_binary(content) and
+         content != "" do
+      message =
+        Message.user("msg_goal_#{random_id(8)}", content)
+        |> Map.put(:metadata, %{goal_instruction: true})
+
+      case apply(Sigma.Session.Writer, :append, [state.writer, {:message_end, message}]) do
+        {:ok, _} ->
+          notify_subscribers(state, {:message_start, message})
+          notify_subscribers(state, {:message_end, message})
+
+          state = %{
+            state
+            | messages: state.messages ++ [message],
+              goal_instruction_pending:
+                state.goal_instruction_pending or not is_nil(state.current_turn_task)
+          }
+
+          {:reply, :ok, invalidate_context(state, :goal_instruction)}
+
+        {:error, reason} ->
+          {:reply,
+           {:error,
+            Backplane.AgentRuntime.Error.new(
+              :execution_failure,
+              "Goal instruction persistence failed",
+              cause: reason
+            )}, state}
+      end
+    else
+      {:reply,
+       {:error,
+        Backplane.AgentRuntime.Error.new(
+          :resource_conflict,
+          "Goal instruction requires an available owning session"
+        )}, state}
+    end
+  end
+
+  def handle_call({:goal_reserve, thread, request}, _from, state) do
+    counts = PromptQueue.counts(state.prompt_queue)
+
+    if goal_thread?(state, thread) and request.host_generation == state.goal_generation and
+         is_nil(state.current_turn_task) and is_nil(state.goal_admission) and
+         state.turn_state.phase not in [:cancelling, :session_operation] and
+         counts == %{steering: 0, follow_up: 0} do
+      case new_prompt_item(request.steering.text, []) do
+        {:ok, item} ->
+          item = %{item | metadata: %{goal_continuation: true}}
+          reservation = %{request: request, item: item, status: :reserved}
+
+          {:reply,
+           {:ok, {:started, %{run_id: item.turn_id, incarnation: 1, turn_id: item.turn_id}}},
+           %{state | goal_admission: reservation}}
+
+        {:error, reason} ->
+          {:reply,
+           {:error,
+            Backplane.AgentRuntime.Error.new(
+              :validation,
+              "Goal continuation prompt is invalid",
+              cause: reason
+            )}, state}
+      end
+    else
+      {:reply, {:ok, {:not_submitted, :superseded}}, state}
+    end
+  end
+
+  def handle_call({:goal_release, thread, admission}, _from, state) do
+    case state.goal_admission do
+      %{request: request, item: item, status: status}
+      when request.reservation_token == admission.reservation_token and
+             request.host_generation == admission.host_generation ->
+        cond do
+          not goal_thread?(state, thread) ->
+            {:reply,
+             {:error,
+              Backplane.AgentRuntime.Error.new(
+                :resource_conflict,
+                "Goal continuation owner changed"
+              )}, state}
+
+          status in [:cancelled, :superseded] ->
+            {:reply, {:ok, {:not_submitted, status}}, state}
+
+          status == :reserved and is_nil(state.current_turn_task) and
+              state.turn_state.phase != :session_operation ->
+            # The Task waits for its coordinator's exact monitored release.
+            # Only pure configuration preparation precedes that owner's
+            # effect gate; later failures keep ordinary Runtime recovery.
+            control = :atomics.new(1, signed: false)
+
+            item =
+              item
+              |> Map.put(:goal_admission, admission)
+              |> Map.put(:goal_executor_control, control)
+
+            state = start_ready_turn(%{state | goal_admission: nil}, item)
+            info = prompt_info(item, item.turn_id)
+            emit(state, {:prompt_admitted, :accepted, info})
+            emit_prompt_telemetry(state, :accepted)
+            {:reply, {:ok, %{executor: state.current_turn_task.pid, control: control}}, state}
+
+          true ->
+            {:reply, {:ok, {:not_submitted, :superseded}},
+             fence_goal_admission(state, :superseded)}
+        end
+
+      _ ->
+        {:reply,
+         {:error,
+          Backplane.AgentRuntime.Error.new(
+            :resource_conflict,
+            "Goal continuation reservation is unavailable"
+          )}, state}
+    end
   end
 
   @impl true
@@ -407,7 +762,7 @@ defmodule Sigma.Agent do
   @impl true
   def handle_call(:begin_session_operation, _from, state) do
     if is_nil(state.current_turn_task) and state.turn_state.phase != :session_operation and
-         subagents_can_stop?(state) do
+         is_nil(state.goal_idle_task) and subagents_can_stop?(state) do
       {:reply, :ok,
        %{state | turn_state: TurnState.transition(state.turn_state, :session_operation)}}
     else
@@ -416,16 +771,25 @@ defmodule Sigma.Agent do
   end
 
   @impl true
-  def handle_call(:end_session_operation, _from, state) do
-    if state.turn_state.phase == :session_operation do
-      {:reply, :ok, %{state | turn_state: TurnState.transition(state.turn_state, :idle)}}
-    else
-      {:reply, :ok, state}
+  def handle_call(:end_session_operation, from, state) do
+    cond do
+      state.host_retirement_task || state.pending_host_prompt ->
+        {:reply, {:error, :session_busy}, state}
+
+      state.turn_state.phase == :session_operation and
+        map_size(state.host_retirement_facts) > 0 and
+          not match?(%{completion: {:ok, %{status: :confirmed}}}, state.host_retirement_facts) ->
+        state = %{state | host_retirement_waiters: [{:session_reopen, from}]}
+        {:noreply, start_host_retirement(state)}
+
+      true ->
+        finish_session_operation(state)
     end
   end
 
   def handle_call({:compact, opts}, _from, state) do
-    if state.turn_state.phase == :session_operation and is_nil(state.current_turn_task) do
+    if state.turn_state.phase == :session_operation and is_nil(state.current_turn_task) and
+         is_nil(state.pending_host_prompt) do
       {state, result} = run_compact(state, Keyword.put(opts, :trigger, :manual))
       {:reply, result, state}
     else
@@ -439,7 +803,8 @@ defmodule Sigma.Agent do
         state
       ) do
     cond do
-      state.turn_state.phase != :session_operation or not is_nil(state.current_turn_task) ->
+      state.turn_state.phase != :session_operation or not is_nil(state.current_turn_task) or
+          not is_nil(state.pending_host_prompt) ->
         release_resources(Keyword.get(opts, :prepared_resources, []))
         {:reply, {:rejected, :session_busy}, state}
 
@@ -453,8 +818,20 @@ defmodule Sigma.Agent do
 
         case new_prompt_item(content, opts) do
           {:ok, item} ->
-            item = Map.put(item, :retry_restore_messages, state.messages)
-            state = %{state | messages: context_messages}
+            item =
+              item
+              |> Map.put(:retry_restore_messages, state.messages)
+              |> Map.put(:retry_restore_context_window, state.context_window)
+              |> Map.put(:retry_restore_context_excluded_ids, state.context_excluded_message_ids)
+
+            state = %{
+              state
+              | messages: context_messages,
+                context_window: Keyword.get(opts, :context_window),
+                context_excluded_message_ids:
+                  excluded_context_ids(context_messages, opts[:provider_context_messages])
+            }
+
             state = start_turn(state, item)
             info = prompt_info(item, item.turn_id)
             emit(state, {:prompt_admitted, :accepted, info})
@@ -475,6 +852,89 @@ defmodule Sigma.Agent do
     end
   end
 
+  def handle_call(:async_interaction_snapshot, _from, state) do
+    state = refresh_async_interactions(state)
+
+    result =
+      cond do
+        state.async_interaction_error -> {:error, state.async_interaction_error}
+        is_nil(state.writer) -> {:ok, %{items: [], leaf_id: nil}}
+        true -> AsyncDelivery.snapshot(state.writer)
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:reconcile_async_interactions, turn_id}, _from, state) do
+    if state.turn_state.turn_id == turn_id do
+      {:reply, :ok, refresh_async_interactions(state)}
+    else
+      {:reply, {:error, :turn_changed}, state}
+    end
+  end
+
+  def handle_call({:reply_async_interaction, item_id, payload, expected_leaf}, _from, state) do
+    state = refresh_async_interactions(state)
+    {result, state} = admit_async_reply(state, item_id, payload, expected_leaf)
+    {:reply, result, refresh_async_interactions(state)}
+  end
+
+  def handle_call({:dismiss_async_interaction, item_id, expected_leaf}, _from, state) do
+    result =
+      if is_nil(state.writer),
+        do: {:error, :async_interactions_unavailable},
+        else: AsyncDelivery.dismiss(state.writer, item_id, expected_leaf)
+
+    {:reply, result, refresh_async_interactions(state)}
+  end
+
+  def handle_call({:upload_async_reply_chunk, request}, _from, state) do
+    # Reading a selected view must not reconcile durable facts or dispatch a reply.
+    with :ok <- AsyncReplyUploads.validate_request("async_interaction.reply_chunk", request),
+         {:ok, _item} <- async_upload_origin(state, request) do
+      upload_result(
+        AsyncReplyUploads.append(state.async_reply_uploads, request, upload_time()),
+        state
+      )
+    else
+      {:error, _} = error -> {:reply, error, state}
+    end
+  end
+
+  def handle_call({:commit_async_reply_upload, request}, _from, state) do
+    case AsyncReplyUploads.reply(state.async_reply_uploads, request, upload_time()) do
+      {:ok, uploads, payload} ->
+        state = %{state | async_reply_uploads: uploads}
+
+        with {:ok, item} <- async_upload_origin(state, request),
+             item <-
+               if(item["status"] in ~w(dispatching admitted consumed delivery_unknown),
+                 do: Map.put(item, "status", "saved"),
+                 else: item
+               ),
+             {:ok, _reply} <- AsyncInteractions.reply(payload, item) do
+          state = refresh_async_interactions(state)
+
+          {result, state} =
+            admit_async_reply(state, request["itemId"], payload, request["expectedLeafId"])
+
+          {:reply, result, refresh_async_interactions(state)}
+        else
+          {:error, _} = error -> {:reply, error, state}
+        end
+
+      {:error, reason, uploads} ->
+        {:reply, {:error, reason}, %{state | async_reply_uploads: uploads}}
+    end
+  end
+
+  def handle_call({:cancel_async_reply_upload, request}, _from, state) do
+    upload_result(
+      AsyncReplyUploads.cancel(state.async_reply_uploads, request, upload_time()),
+      state
+    )
+  end
+
   @impl true
   def handle_call({:peek_steering, turn_id}, _from, state) do
     cond do
@@ -488,8 +948,17 @@ defmodule Sigma.Agent do
   def handle_call({:ack_steering, turn_id, message_id}, _from, state) do
     if state.turn_state.turn_id == turn_id do
       case PromptQueue.ack(state.prompt_queue, :steering, message_id) do
-        {:ok, queue} -> {:reply, :ok, %{state | prompt_queue: queue}}
-        {:error, _reason} = error -> {:reply, error, state}
+        {:ok, queue} ->
+          state = %{
+            state
+            | prompt_queue: queue,
+              async_reply_messages: Map.delete(state.async_reply_messages, message_id)
+          }
+
+          {:reply, :ok, refresh_async_interactions(state)}
+
+        {:error, _reason} = error ->
+          {:reply, error, state}
       end
     else
       {:reply, {:error, :turn_changed}, state}
@@ -516,6 +985,32 @@ defmodule Sigma.Agent do
   end
 
   @impl true
+  def handle_call({:native_mcp_clients, turn_id}, _from, state) do
+    result =
+      if state.native_tools and state.turn_state.turn_id == turn_id and
+           not is_nil(state.current_turn_task) and state.turn_state.phase != :cancelling do
+        {:ok, state.mcp_session.clients}
+      else
+        {:error,
+         Backplane.AgentRuntime.Error.new(:cancelled, "MCP resource turn is no longer active")}
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call(:native_child_mcp_clients, _from, state) do
+    result =
+      if state.native_tools and state.turn_state.phase != :cancelling do
+        {:ok, state.mcp_session.clients}
+      else
+        {:error,
+         Backplane.AgentRuntime.Error.new(:cancelled, "MCP resource owner is unavailable")}
+      end
+
+    {:reply, result, state}
+  end
+
+  @impl true
   def handle_call(:reload_mcp_tools, _from, state) do
     Sigma.Coding.MCP.stop(state.mcp_session)
     state = %{state | mcp_session: empty_mcp_session()} |> start_mcp_clients()
@@ -526,6 +1021,15 @@ defmodule Sigma.Agent do
   @impl true
   def handle_call(:cancel, _from, state) do
     cond do
+      state.pending_host_prompt ->
+        turn_id = state.pending_host_prompt.item.turn_id
+        {:reply, {:cancelling, turn_id}, cancel_host_prompt(state)}
+
+      match?(%{status: :reserved}, state.goal_admission) and is_nil(state.current_turn_task) ->
+        turn_id = state.goal_admission.item.turn_id
+        state = fence_goal_admission(state, :cancelled)
+        {:reply, {:cancelling, turn_id}, %{state | last_cancelled_turn_id: turn_id}}
+
       state.turn_state.phase == :cancelling ->
         {:reply, {:already_cancelling, state.turn_state.turn_id}, state}
 
@@ -535,7 +1039,13 @@ defmodule Sigma.Agent do
       is_nil(state.current_turn_task) ->
         {:reply, {:error, :no_active_turn}, state}
 
+      fence_goal_executor_cancel(state) == :sealed ->
+        # DOWN already sealed this admission. Its settlement acknowledgement
+        # is still in flight; a new cancel cannot change that exact receipt.
+        {:reply, {:error, :no_active_turn}, state}
+
       true ->
+        state = fence_goal_admission(state, :cancelled)
         task = state.current_turn_task
         turn_id = state.turn_state.turn_id
         cancellation_ref = state.turn_state.cancellation_ref
@@ -555,7 +1065,18 @@ defmodule Sigma.Agent do
 
   def handle_call({:cancel_prompt, turn_id}, _from, state) do
     cond do
+      match?(%{item: %{turn_id: ^turn_id}}, state.pending_host_prompt) ->
+        {:reply, :ok, cancel_host_prompt(state)}
+
+      match?(%{status: :reserved, item: %{turn_id: ^turn_id}}, state.goal_admission) and
+          is_nil(state.current_turn_task) ->
+        {:reply, :ok, fence_goal_admission(state, :cancelled)}
+
+      state.turn_state.turn_id == turn_id and fence_goal_executor_cancel(state) == :sealed ->
+        {:reply, :ok, state}
+
       state.turn_state.turn_id == turn_id and not is_nil(state.current_turn_task) ->
+        state = fence_goal_admission(state, :cancelled)
         task = state.current_turn_task
         cancellation_ref = state.turn_state.cancellation_ref
         send(task.pid, {:cancel, cancellation_ref})
@@ -744,6 +1265,9 @@ defmodule Sigma.Agent do
   end
 
   @impl true
+  def handle_cast(:goal_changed, state),
+    do: {:noreply, maybe_goal_idle(%{state | goal_resume_pending: true})}
+
   def handle_cast({:notify_subscribers, event}, state) do
     notify_subscribers(state, event)
     {:noreply, state}
@@ -793,7 +1317,8 @@ defmodule Sigma.Agent do
 
   @impl true
   def handle_cast({:turn_phase, turn_id, phase}, state) do
-    if state.turn_state.turn_id == turn_id and state.turn_state.phase != :cancelling do
+    if state.turn_state.turn_id == turn_id and
+         state.turn_state.phase not in [:cancelling, :session_operation] do
       {:noreply, %{state | turn_state: TurnState.transition(state.turn_state, phase)}}
     else
       {:noreply, state}
@@ -821,29 +1346,144 @@ defmodule Sigma.Agent do
 
   @impl true
   def handle_info(
+        {ref, {:root_retirement, facts}},
+        %{host_retirement_task: %{ref: ref}} = state
+      ) do
+    Process.demonitor(ref, [:flush])
+    {:noreply, complete_host_retirement(state, facts)}
+  end
+
+  def handle_info(
+        {ref, {:host_completion, result}},
+        %{host_retirement_task: %{ref: ref}} = state
+      ) do
+    Process.demonitor(ref, [:flush])
+    facts = Map.put(state.host_retirement_facts, :completion, result)
+    {:noreply, settle_host_retirement(state, facts)}
+  end
+
+  def handle_info(
+        {ref, {:host_inspection, result}},
+        %{host_recovery_task: %{ref: ref}} = state
+      ) do
+    Process.demonitor(ref, [:flush])
+    state = %{state | host_recovery_task: nil}
+
+    state =
+      case {state.pending_host_prompt.cancelled?, result} do
+        {true, _} -> finish_host_prompt(state, :cancelled, nil)
+        {false, {:ok, false}} -> start_host_prompt(state)
+        {false, {:ok, true}} -> start_host_retirement(state)
+        {false, {:error, reason}} -> finish_host_prompt(state, :failed, reason)
+      end
+
+    {:noreply, state}
+  end
+
+  def handle_info(
+        {ref, {:host_recovery, result}},
+        %{host_recovery_task: %{ref: ref}} = state
+      ) do
+    Process.demonitor(ref, [:flush])
+    state = %{state | host_recovery_task: nil}
+
+    state =
+      case result do
+        {:ok, context} ->
+          facts =
+            Map.put(state.host_retirement_facts, :completion, state.host_retirement_facts.result)
+
+          state = settle_host_retirement(state, facts)
+
+          case adopt_host(state, context) do
+            {:ok, ready} -> start_host_prompt(ready)
+            {:error, reason, retained} -> finish_host_prompt(retained, :failed, reason)
+          end
+
+        {:error, reason} ->
+          facts = Map.put(state.host_retirement_facts, :completion, {:error, reason})
+          state |> settle_host_retirement(facts) |> finish_host_prompt(:failed, reason)
+      end
+
+    {:noreply, state}
+  end
+
+  def handle_info({ref, {:goal_idle, result}}, %{goal_idle_task: %{ref: ref}} = state) do
+    Process.demonitor(ref, [:flush])
+    stale? = state.goal_idle_generation != state.goal_generation
+    state = %{state | goal_idle_task: nil, goal_admission: nil}
+
+    case result do
+      {:error, error} -> emit(state, {:turn_error, error})
+      _ -> :ok
+    end
+
+    state =
+      if match?({:ok, {:started, _}}, result) or
+           (stale? and match?({:ok, _}, result)),
+         do: maybe_goal_idle(state),
+         else: state
+
+    {:noreply, inspect_host_prompt(state)}
+  end
+
+  def handle_info({ref, {:goal_unstarted, error}}, %{current_turn_task: %{ref: ref}} = state) do
+    Process.demonitor(ref, [:flush])
+    state = clear_cancel_timer(state)
+    {:noreply, finish_goal_unstarted(%{state | pending_goal_result: %{error: error}})}
+  end
+
+  def handle_info({ref, {:goal_host_stopped, result}}, %{current_turn_task: %{ref: ref}} = state) do
+    Process.demonitor(ref, [:flush])
+    state = clear_cancel_timer(state)
+    {:noreply, finish_goal_unstarted(%{state | pending_goal_result: %{host_result: result}})}
+  end
+
+  def handle_info(
+        {:goal_executor_settled, coordinator, executor, control, admission, result},
+        %{
+          goal_integration: %{coordinator: coordinator},
+          current_turn_task: %{pid: executor},
+          goal_executor_control: control
+        } = state
+      )
+      when admission.run_id == state.turn_state.turn_id do
+    {:noreply, finish_goal_unstarted(%{state | goal_executor_settlement: result})}
+  end
+
+  def handle_info(
         {ref,
          {:ok,
           %{
-            messages: new_messages,
-            outcome: task_outcome,
-            context_snapshot: context_snapshot,
-            context_policy: context_policy
-          }}},
+            messages: _,
+            outcome: _,
+            context_snapshot: _,
+            context_policy: _
+          } = result}},
         state
       )
       when is_reference(ref) do
     case state.current_turn_task do
       %Task{ref: ^ref} ->
         Process.demonitor(ref, [:flush])
-        outcome = if state.turn_state.phase == :cancelling, do: :cancelled, else: task_outcome
+        {state, result} = reconcile_goal_instructions(state, result)
+        new_messages = result.messages
+        outcome = if state.turn_state.phase == :cancelling, do: :cancelled, else: result.outcome
 
         new_state =
           state
           |> clear_cancel_timer()
           |> Map.put(:messages, new_messages)
-          |> Map.put(:context_snapshot, context_snapshot)
-          |> Map.put(:context_policy, context_policy)
+          |> Map.put(:context_snapshot, result.context_snapshot)
+          |> Map.put(:context_policy, result.context_policy)
+          |> Map.put(:context_window, Map.get(result, :context_window, state.context_window))
+          |> Map.put(
+            :context_excluded_message_ids,
+            Map.get(result, :context_excluded_message_ids, state.context_excluded_message_ids)
+          )
           |> Map.put(:current_turn_task, nil)
+          |> Map.put(:goal_resume_pending, Map.get(result, :goal_resume_pending, false))
+          |> Map.put(:context_reconciliation_required, state.goal_instruction_pending)
           |> finish_turn(outcome)
 
         emit(new_state, {:agent_end, new_messages})
@@ -867,6 +1507,7 @@ defmodule Sigma.Agent do
           state
           |> clear_cancel_timer()
           |> Map.put(:current_turn_task, nil)
+          |> Map.put(:context_reconciliation_required, true)
           |> finish_turn(:failed, reason, persist_metrics?: false)
 
         emit(new_state, {:turn_error, reason})
@@ -887,6 +1528,7 @@ defmodule Sigma.Agent do
           state
           |> clear_cancel_timer()
           |> Map.put(:current_turn_task, nil)
+          |> Map.put(:context_reconciliation_required, true)
           |> finish_turn(if(cancelling?, do: :cancelled, else: :failed), reason)
 
         unless cancelling?, do: emit(new_state, {:turn_error, reason})
@@ -899,32 +1541,115 @@ defmodule Sigma.Agent do
     end
   end
 
-  def handle_info({:canonical_messages, turn_id, messages}, state) do
+  def handle_info({:canonical_context, turn_id, messages, window, excluded}, state) do
     if state.turn_state.turn_id == turn_id and is_list(messages) do
-      {:noreply, %{state | messages: messages}}
+      {:noreply,
+       %{
+         state
+         | messages: messages,
+           context_window: window,
+           context_excluded_message_ids: excluded
+       }}
     else
       {:noreply, state}
     end
   end
 
+  def handle_info({:canonical_messages, turn_id, messages}, state) do
+    if state.turn_state.turn_id == turn_id and is_list(messages) do
+      {:noreply, refresh_async_interactions(%{state | messages: messages})}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %{host_retirement_task: %{ref: ref}, host_retirement_stage: :completion} = state
+      ) do
+    error =
+      {:error,
+       Backplane.AgentRuntime.Error.new(:unknown_outcome, "host archive completion task exited",
+         cause: reason
+       )}
+
+    facts = Map.put(state.host_retirement_facts, :completion, error)
+    {:noreply, settle_host_retirement(state, facts)}
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %{host_retirement_task: %{ref: ref}} = state
+      ) do
+    error =
+      {:error,
+       Backplane.AgentRuntime.Error.new(:unknown_outcome, "root retirement task exited",
+         cause: reason
+       )}
+
+    # The task may have executed SessionEnd before its result was lost. Retain
+    # uncertainty rather than executing an effect again to reconstruct a fact.
+    facts =
+      Map.merge(state.host_retirement_facts, %{
+        async_hooks: state.host_retirement_facts[:async_hooks] || error,
+        session_end: state.host_retirement_facts[:session_end] || error,
+        result: error
+      })
+
+    {:noreply, complete_host_retirement(state, facts)}
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %{host_recovery_task: %{ref: ref}} = state
+      ) do
+    error =
+      Backplane.AgentRuntime.Error.new(:unknown_outcome, "live host recovery task exited",
+        cause: reason
+      )
+
+    state = %{state | host_recovery_task: nil}
+
+    state =
+      if map_size(state.host_retirement_facts) > 0 do
+        facts = Map.put(state.host_retirement_facts, :completion, {:error, error})
+        settle_host_retirement(state, facts)
+      else
+        state
+      end
+
+    {:noreply, finish_host_prompt(state, :failed, error)}
+  end
+
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
-    case state.current_turn_task do
-      %Task{ref: ^ref} ->
-        cancelling? = state.turn_state.phase == :cancelling
+    case {state.goal_idle_task, state.current_turn_task} do
+      {%Task{ref: ^ref}, _} ->
+        emit(state, {:turn_error, {:goal_idle_failed, reason}})
+        {:noreply, inspect_host_prompt(%{state | goal_idle_task: nil})}
 
-        if not cancelling? and reason not in [:normal, :shutdown, :killed] do
-          emit(state, {:turn_error, reason})
+      {_, %Task{ref: ^ref}} ->
+        if goal_before_effects?(state) do
+          pending = state.pending_goal_result || %{error: reason}
+          state = clear_cancel_timer(state)
+          {:noreply, finish_goal_unstarted(%{state | pending_goal_result: pending})}
+        else
+          cancelling? = state.turn_state.phase == :cancelling
+
+          if not cancelling? and reason not in [:normal, :shutdown, :killed] do
+            emit(state, {:turn_error, reason})
+          end
+
+          outcome = if cancelling?, do: :cancelled, else: :failed
+
+          new_state =
+            state
+            |> clear_cancel_timer()
+            |> Map.put(:current_turn_task, nil)
+            |> Map.put(:context_reconciliation_required, true)
+            |> finish_turn(outcome, reason)
+
+          {:noreply, maybe_start_follow_up(new_state, outcome)}
         end
-
-        outcome = if cancelling?, do: :cancelled, else: :failed
-
-        new_state =
-          state
-          |> clear_cancel_timer()
-          |> Map.put(:current_turn_task, nil)
-          |> finish_turn(outcome, reason)
-
-        {:noreply, maybe_start_follow_up(new_state, outcome)}
 
       _ ->
         case remove_user_question_by_monitor(state, ref) do
@@ -959,15 +1684,29 @@ defmodule Sigma.Agent do
     case state.current_turn_task do
       %Task{ref: ^task_ref} = task
       when state.turn_state.turn_id == turn_id and state.turn_state.phase == :cancelling ->
-        Task.shutdown(task, :brutal_kill)
+        shutdown = Task.shutdown(task, :brutal_kill)
 
-        new_state =
-          state
-          |> clear_cancel_timer()
-          |> Map.put(:current_turn_task, nil)
-          |> finish_turn(:cancelled)
+        if goal_before_effects?(state) do
+          reason =
+            case shutdown do
+              {:ok, {:goal_unstarted, error}} -> error
+              {:exit, cause} -> cause
+              _ -> :killed
+            end
 
-        {:noreply, maybe_start_follow_up(new_state, :cancelled)}
+          pending = state.pending_goal_result || %{error: reason}
+          state = clear_cancel_timer(state)
+          {:noreply, finish_goal_unstarted(%{state | pending_goal_result: pending})}
+        else
+          new_state =
+            state
+            |> clear_cancel_timer()
+            |> Map.put(:current_turn_task, nil)
+            |> Map.put(:context_reconciliation_required, true)
+            |> finish_turn(:cancelled)
+
+          {:noreply, maybe_start_follow_up(new_state, :cancelled)}
+        end
 
       _task ->
         {:noreply, state}
@@ -977,6 +1716,359 @@ defmodule Sigma.Agent do
   def handle_info({:EXIT, _pid, :normal}, state), do: {:noreply, state}
   def handle_info({:EXIT, _pid, reason}, state), do: {:stop, reason, state}
   def handle_info(_msg, state), do: {:noreply, state}
+
+  defp complete_host_retirement(state, facts) do
+    state = %{
+      state
+      | host_retirement_task: nil,
+        host_retirement_stage: nil,
+        host_retirement_facts: facts
+    }
+
+    cond do
+      not match?({:ok, %{status: :confirmed}}, facts.result) ->
+        state = settle_host_retirement(state, facts)
+
+        if state.pending_host_prompt,
+          do: finish_host_prompt(state, :failed, elem(facts.result, 1)),
+          else: state
+
+      is_nil(state.pending_host_prompt) ->
+        start_host_completion(state)
+
+      match?({:ok, %{status: :confirmed}}, facts.result) ->
+        reconcile_host_prompt(state)
+    end
+  end
+
+  defp settle_host_retirement(state, facts) do
+    {reopens, retirements} =
+      Enum.split_with(state.host_retirement_waiters, &match?({:session_reopen, _}, &1))
+
+    result =
+      case facts.result do
+        {:ok, %{status: :confirmed}} -> facts[:completion] || facts.result
+        failure -> failure
+      end
+
+    Enum.each(retirements, &GenServer.reply(&1, result))
+
+    state = %{
+      state
+      | host_retirement_task: nil,
+        host_retirement_stage: nil,
+        host_retirement_waiters: [],
+        host_retirement_facts: facts
+    }
+
+    if reopens == [] do
+      state
+    else
+      {:reply, reply, state} = finish_session_operation(state)
+      Enum.each(reopens, fn {:session_reopen, from} -> GenServer.reply(from, reply) end)
+      state
+    end
+  end
+
+  defp start_host_retirement(
+         %{host_retirement_facts: %{result: {:ok, %{status: :confirmed}}}} = state
+       ),
+       do: start_host_completion(state)
+
+  defp start_host_retirement(state) do
+    task =
+      Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+        {:root_retirement, RootRetirement.close(state, state.host_retirement_facts, :shutdown)}
+      end)
+
+    %{state | host_retirement_task: task, host_retirement_stage: :components}
+  end
+
+  defp start_host_completion(state) do
+    if state.pending_host_prompt do
+      reconcile_host_prompt(state)
+    else
+      task =
+        Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+          result =
+            with :ok <- complete_host_generation(state, :archives),
+                 do: state.host_retirement_facts.result
+
+          {:host_completion, result}
+        end)
+
+      %{state | host_retirement_task: task, host_retirement_stage: :completion}
+    end
+  end
+
+  defp complete_host_generation(state, purpose \\ :admission) do
+    with :ok <- recover_generation_goal(state, purpose) do
+      case state.subagents && Sigma.Agent.Subagents.close(state.subagents) do
+        nil -> :ok
+        :ok -> :ok
+        {:ok, %{status: :confirmed}} -> :ok
+        error -> error
+      end
+    end
+  end
+
+  defp recover_generation_goal(state, :admission),
+    do: recover_retired_goal(state.goal_integration)
+
+  defp recover_generation_goal(%{subagents: nil}, :archives), do: :ok
+
+  defp recover_generation_goal(state, :archives) do
+    # Root-only retirement leaves ordinary root recovery to its existing
+    # admission/opening boundary. Only retained children require Goal ACKs
+    # before their public archives can be completed by this live manager.
+    with {:ok, sources} <- Sigma.Agent.Subagents.archive_sources(state.subagents) do
+      if sources.children == [], do: :ok, else: recover_retired_goal(state.goal_integration)
+    end
+  end
+
+  defp recover_retired_goal(nil), do: :ok
+
+  defp recover_retired_goal(handle) do
+    with {:ok, %{status: :ready}} <- GoalIntegration.recover_retired(handle), do: :ok
+  end
+
+  defp inspect_host_prompt(%{pending_host_prompt: nil} = state), do: state
+  defp inspect_host_prompt(%{goal_idle_task: %Task{}} = state), do: state
+  defp inspect_host_prompt(%{host_recovery_task: %Task{}} = state), do: state
+  defp inspect_host_prompt(%{host_retirement_task: %Task{}} = state), do: state
+
+  defp inspect_host_prompt(state) do
+    task =
+      Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+        result =
+          case RootRetirement.recovery_required?(state) do
+            {:ok, false} ->
+              with {:ok, %{status: :ready}} <-
+                     GoalIntegration.prepare_admission(state.goal_integration),
+                   do: {:ok, false}
+
+            result ->
+              result
+          end
+
+        {:host_inspection, result}
+      end)
+
+    %{state | host_recovery_task: task}
+  end
+
+  defp reconcile_host_prompt(state) do
+    task =
+      Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+        result =
+          with :ok <- complete_host_generation(state),
+               do: RootRetirement.context(state)
+
+        {:host_recovery, result}
+      end)
+
+    %{state | host_recovery_task: task, context_reconciliation_required: true}
+  end
+
+  defp start_host_prompt(%{pending_host_prompt: %{cancelled?: true}} = state),
+    do: finish_host_prompt(state, :cancelled, nil)
+
+  defp start_host_prompt(state) do
+    item = state.pending_host_prompt.item
+    start_ready_turn(%{state | pending_host_prompt: nil}, item)
+  end
+
+  defp cancel_host_prompt(state) do
+    state
+    |> fence_goal_admission(:cancelled)
+    |> Map.put(:pending_host_prompt, %{state.pending_host_prompt | cancelled?: true})
+    |> Map.put(:last_cancelled_turn_id, state.pending_host_prompt.item.turn_id)
+  end
+
+  defp finish_host_prompt(state, outcome, reason) do
+    item = state.pending_host_prompt.item
+    release_resources(item.prepared_resources)
+    notify_retry_admission(item, {:error, reason || :cancelled})
+    if reason, do: emit(state, {:turn_error, reason})
+
+    %{
+      state
+      | pending_host_prompt: nil,
+        messages: Map.get(item, :retry_restore_messages, state.messages),
+        context_window: Map.get(item, :retry_restore_context_window, state.context_window),
+        context_excluded_message_ids:
+          Map.get(item, :retry_restore_context_excluded_ids, state.context_excluded_message_ids),
+        context_reconciliation_required: true
+    }
+    |> finish_turn(outcome, reason, persist_metrics?: false)
+    |> maybe_start_follow_up(outcome)
+  end
+
+  defp stop_host_recovery_task(%{host_recovery_task: %Task{} = task}) do
+    Task.shutdown(task, :brutal_kill)
+    :ok
+  end
+
+  defp stop_host_recovery_task(_state), do: :ok
+
+  defp retire_root_on_terminate(%{host_retirement_task: %Task{} = task} = state, _reason) do
+    case Task.yield(task, 0) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:root_retirement, facts}} ->
+        complete_root_on_terminate(state, facts)
+
+      {:ok, {:host_completion, result}} ->
+        report_host_completion_on_terminate(state, state.host_retirement_facts, result)
+
+      result ->
+        Logger.error(
+          "[Sigma.Agent] Root retirement task stopped without receipts: #{inspect(result)}"
+        )
+
+        Sigma.Coding.Hooks.AsyncRuntime.shutdown(state.hook_async_runtime)
+
+        if state.host_retirement_stage == :completion do
+          maybe_stage_host_on_terminate(state, state.host_retirement_facts, result)
+        end
+    end
+  end
+
+  defp retire_root_on_terminate(state, reason) do
+    facts =
+      case state.host_retirement_facts do
+        %{result: {:ok, %{status: :confirmed}}} = confirmed ->
+          confirmed
+
+        previous ->
+          # An active Engine may need Agent callbacks during Session.close.
+          # terminate cannot serve them. Preserve the existing hook cleanup
+          # order and leave native cleanup to the Subagents owner in that case.
+          idle? =
+            is_nil(state.current_turn_task) and is_nil(state.goal_idle_task) and
+              root_can_retire_on_terminate?(state)
+
+          RootRetirement.close(state, previous, reason, native_close: idle?)
+      end
+
+    complete_root_on_terminate(state, facts)
+  end
+
+  defp complete_root_on_terminate(state, facts) do
+    RootRetirement.report(facts)
+
+    # Goal and the original manager are still alive here. Complete the same
+    # live ACK/archive gate before the supervisor retires either owner. An
+    # active/unconfirmed shutdown retains its original recovery boundary.
+    if match?({:ok, %{status: :confirmed}}, facts.result) do
+      case facts[:completion] do
+        {:ok, %{status: :confirmed}} ->
+          :ok
+
+        _ ->
+          result = complete_host_generation(state, :archives)
+          report_host_completion_on_terminate(state, facts, result)
+      end
+    end
+  end
+
+  defp report_host_completion_on_terminate(state, facts, result) do
+    report_host_completion(result)
+    maybe_stage_host_on_terminate(state, facts, result)
+  end
+
+  defp maybe_stage_host_on_terminate(state, facts, result) do
+    if match?(%{result: {:ok, %{status: :confirmed}}}, facts) and
+         result != :ok and not match?({:ok, %{status: :confirmed}}, result) do
+      stage_host_on_terminate(state)
+    end
+  end
+
+  defp stage_host_on_terminate(%{subagents: nil}), do: :ok
+
+  defp stage_host_on_terminate(state) do
+    case Sigma.Agent.Subagents.stage_shutdown(state.subagents) do
+      :ok -> :ok
+      error -> report_shutdown_stage(error)
+    end
+  catch
+    :exit, reason -> report_shutdown_stage({:error, reason})
+  end
+
+  defp report_shutdown_stage(result),
+    do: Logger.error("[Sigma.Agent] Shutdown export staging is unconfirmed: #{inspect(result)}")
+
+  defp report_host_completion(:ok), do: :ok
+  defp report_host_completion({:ok, %{status: :confirmed}}), do: :ok
+
+  defp report_host_completion(result),
+    do: Logger.error("[Sigma.Agent] Host archive completion is unconfirmed: #{inspect(result)}")
+
+  defp root_can_retire_on_terminate?(state) do
+    subagents_can_stop?(state)
+  catch
+    :exit, _ -> false
+  end
+
+  defp finish_session_operation(state) do
+    if state.turn_state.phase == :session_operation do
+      result =
+        case reopen_runtime_store(state) do
+          {:ok, reopened} ->
+            case if(is_nil(reopened.goal_integration),
+                   do: init_goal(reopened),
+                   else: {:ok, reopened}
+                 ) do
+              {:ok, ready} -> reopen_host(ready)
+              {:error, reason} -> {:error, reason, reopened}
+            end
+
+          {:error, reason} ->
+            {:error, reason, state}
+        end
+
+      case result do
+        {:ok, state} ->
+          state = %{state | turn_state: TurnState.transition(state.turn_state, :idle)}
+          {:reply, :ok, maybe_goal_idle(state)}
+
+        {:error, reason, retained} ->
+          {:reply, {:error, reason}, retained}
+      end
+    else
+      {:reply, :ok, state}
+    end
+  end
+
+  defp reopen_host(%{host_retirement_facts: facts} = state) when map_size(facts) == 0,
+    do: {:ok, state}
+
+  defp reopen_host(%{host_retirement_facts: %{completion: {:ok, %{status: :confirmed}}}} = state) do
+    case RootRetirement.context(state) do
+      {:ok, context} -> adopt_host(state, context)
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  defp reopen_host(%{host_retirement_facts: %{completion: {:error, reason}}} = state),
+    do: {:error, reason, state}
+
+  defp reopen_host(state), do: {:error, :host_retirement_unconfirmed, state}
+
+  defp adopt_host(state, context) do
+    with {:ok, runtime} <- Sigma.Coding.Hooks.AsyncRuntime.start(self()) do
+      :ets.delete(state.hook_async_contexts)
+
+      {:ok,
+       %{
+         state
+         | host_retirement: context,
+           hook_async_runtime: runtime,
+           hook_async_contexts: Hooks.async_contexts(),
+           host_retirement_facts: %{}
+       }}
+    else
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
 
   defp status_snapshot(state) do
     counts = PromptQueue.counts(state.prompt_queue)
@@ -1005,13 +2097,14 @@ defmodule Sigma.Agent do
         {{:rejected, :session_busy}, state}
 
       {:ok, item} when is_nil(state.current_turn_task) ->
-        state = start_turn(state, item)
+        state = state |> fence_goal_admission(:superseded) |> start_turn(item)
         info = prompt_info(item, item.turn_id)
         emit(state, {:prompt_admitted, :accepted, info})
         emit_prompt_telemetry(state, :accepted)
         {{:accepted, info}, state}
 
       {:ok, item} ->
+        state = fence_goal_admission(state, :superseded)
         mode = admission_mode(requested_mode, opts)
         item = if mode == :steering, do: %{item | turn_id: state.turn_state.turn_id}, else: item
         state = if mode == :steering, do: attach_turn_resources(state, item), else: state
@@ -1046,6 +2139,7 @@ defmodule Sigma.Agent do
            attachments: Keyword.get(opts, :attachments),
            retry_of_turn_id: Keyword.get(opts, :retry_of_turn_id),
            retry_admission_notify: Keyword.get(opts, :retry_admission_notify),
+           metadata: %{},
            dispatcher_opts: Keyword.get(opts, :dispatcher_opts, []),
            prepared_resources: prepared_resources
          }}
@@ -1053,6 +2147,170 @@ defmodule Sigma.Agent do
   end
 
   defp new_prompt_item(_content, _opts), do: {:error, :invalid_prompt}
+
+  defp upload_time, do: System.monotonic_time(:millisecond)
+
+  defp upload_result({:ok, uploads, progress}, state),
+    do: {:reply, {:ok, progress}, %{state | async_reply_uploads: uploads}}
+
+  defp upload_result({:error, reason, uploads}, state),
+    do: {:reply, {:error, reason}, %{state | async_reply_uploads: uploads}}
+
+  defp async_upload_origin(%{writer: nil}, _request),
+    do: {:error, :async_interactions_unavailable}
+
+  defp async_upload_origin(state, request) do
+    with true <- state.turn_state.phase not in [:cancelling, :session_operation],
+         {:ok, snapshot} <- AsyncDelivery.snapshot(state.writer),
+         true <- snapshot.leaf_id == request["expectedLeafId"],
+         %{} = item <- Enum.find(snapshot.items, &(&1["item_id"] == request["itemId"])),
+         true <- item["session_id"] == state.session_id,
+         true <-
+           item["status"] in ~w(open notice saved dispatching admitted consumed delivery_unknown),
+         true <- item["status"] != "delivery_unknown" or is_map(item["reply"]) do
+      {:ok, item}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_async_reply_origin}
+    end
+  end
+
+  defp admit_async_reply(%{writer: nil} = state, _id, _payload, _leaf),
+    do: {{:error, :async_interactions_unavailable}, state}
+
+  defp admit_async_reply(%{async_interaction_error: reason} = state, _id, _payload, _leaf)
+       when not is_nil(reason),
+       do: {{:error, reason}, state}
+
+  defp admit_async_reply(state, item_id, payload, expected_leaf) do
+    with true <- state.turn_state.phase not in [:cancelling, :session_operation],
+         {:ok, snapshot} <- AsyncDelivery.snapshot(state.writer),
+         true <- snapshot.leaf_id == expected_leaf,
+         %{} = item <- Enum.find(snapshot.items, &(&1["item_id"] == item_id)),
+         true <- item["session_id"] == state.session_id do
+      if item["status"] in ~w(dispatching admitted consumed delivery_unknown) do
+        with %{} <- item["reply"],
+             {:ok, _} <- AsyncInteractions.reply(payload, Map.put(item, "status", "saved")) do
+          {{:ok, %{item_id: item_id, status: item["status"]}}, state}
+        else
+          {:error, _} = error -> {error, state}
+          _ -> {{:error, :invalid_async_reply}, state}
+        end
+      else
+        dispatch_async_reply(state, item, payload, expected_leaf)
+      end
+    else
+      {:error, _} = error -> {error, state}
+      _ -> {{:error, :invalid_async_reply_origin}, state}
+    end
+  end
+
+  defp dispatch_async_reply(state, item, payload, expected_leaf) do
+    with {:ok, %{reply: reply}} <-
+           AsyncInbox.prepare_reply(state.writer, item["item_id"], payload, expected_leaf),
+         :ok <-
+           AsyncDelivery.fact(state.writer, item, "dispatch_started", %{
+             "reply_id" => reply["reply_id"]
+           }),
+         {:ok, queued} <- new_prompt_item(reply["content"], []) do
+      queued = %{
+        queued
+        | message_id: reply["message_id"],
+          turn_id: reply["turn_id"],
+          metadata: reply["metadata"]
+      }
+
+      {admission, state, queued} =
+        if is_nil(state.current_turn_task) do
+          state = %{
+            state
+            | async_reply_messages:
+                Map.put(state.async_reply_messages, queued.message_id, queued.turn_id)
+          }
+
+          {:accepted, start_turn(state, queued), queued}
+        else
+          queued = %{queued | turn_id: state.turn_state.turn_id}
+
+          state = %{
+            state
+            | async_reply_messages:
+                Map.put(state.async_reply_messages, queued.message_id, queued.turn_id),
+              prompt_queue: PromptQueue.enqueue(state.prompt_queue, :steering, queued)
+          }
+
+          {:queued_as_steering, state, queued}
+        end
+
+      emit(state, {:prompt_admitted, admission, prompt_info(queued, queued.turn_id)})
+      emit_prompt_telemetry(state, admission)
+
+      result =
+        case AsyncDelivery.fact(state.writer, item, "admitted", %{"reply_id" => reply["reply_id"]}) do
+          :ok ->
+            {:ok, %{item_id: item["item_id"], status: :admitted}}
+
+          {:error, reason} ->
+            {:error,
+             {:async_reply_accepted, %{item_id: item["item_id"], status: :dispatching}, reason}}
+        end
+
+      {result, state}
+    else
+      {:error, _} = error -> {error, state}
+    end
+  end
+
+  defp refresh_async_interactions(%{writer: nil} = state), do: state
+
+  defp refresh_async_interactions(state) do
+    pending = state.async_reply_messages |> Map.keys() |> MapSet.new()
+
+    case AsyncDelivery.refresh(state.writer, state.backplane_store, pending) do
+      {:ok, snapshot} ->
+        signature = :crypto.hash(:sha256, :erlang.term_to_binary(snapshot))
+
+        if signature != state.async_interaction_signature,
+          do: notify_subscribers(state, {:async_interactions_updated, snapshot})
+
+        %{state | async_interaction_signature: signature, async_interaction_error: nil}
+
+      {:error, reason} ->
+        if state.async_interaction_error != reason,
+          do: Logger.warning("Async interaction recovery is unavailable: #{inspect(reason)}")
+
+        %{state | async_interaction_error: reason}
+    end
+  end
+
+  defp finish_async_interactions(%{writer: nil} = state, _turn_id, _outcome), do: state
+
+  defp finish_async_interactions(state, turn_id, outcome) do
+    state = %{
+      state
+      | async_reply_messages:
+          Map.reject(state.async_reply_messages, fn {_id, turn} -> turn == turn_id end),
+        prompt_queue: %{
+          state.prompt_queue
+          | steering:
+              Enum.reject(state.prompt_queue.steering, fn item ->
+                item.turn_id == turn_id and
+                  Map.has_key?(Map.get(item, :metadata, %{}), "async_interaction")
+              end)
+        }
+    }
+
+    state = refresh_async_interactions(state)
+
+    if outcome in [:cancelled, :failed] do
+      case AsyncDelivery.close_run(state.writer, turn_id, outcome) do
+        :ok -> refresh_async_interactions(state)
+        {:error, reason} -> %{state | async_interaction_error: reason}
+      end
+    else
+      state
+    end
+  end
 
   defp admission_mode(:steering, _opts), do: :steering
   defp admission_mode(:follow_up, _opts), do: :follow_up
@@ -1065,6 +2323,19 @@ defmodule Sigma.Agent do
   end
 
   defp start_turn(state, item) do
+    if state.native_tools and not is_nil(state.goal_integration) and
+         not is_nil(state.host_retirement) do
+      state
+      |> fence_goal_admission(:superseded)
+      |> Map.put(:pending_host_prompt, %{item: item, cancelled?: false})
+      |> Map.put(:turn_state, %TurnState{turn_id: item.turn_id, phase: :session_operation})
+      |> inspect_host_prompt()
+    else
+      start_ready_turn(state, item)
+    end
+  end
+
+  defp start_ready_turn(state, item) do
     state = attach_turn_resources(state, item)
     control_pid = self()
     cancellation_ref = make_ref()
@@ -1098,13 +2369,55 @@ defmodule Sigma.Agent do
         provider_options: provider_options,
         turn_started_at: turn_started_at,
         turn_started_monotonic: turn_started_monotonic,
+        goal_execution_admission: Map.get(item, :goal_admission),
         turn_state: TurnState.start(item.turn_id, cancellation_ref)
     }
 
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
         try do
-          {:ok, execute_turn(task_state, item)}
+          case Map.get(item, :goal_admission) do
+            nil ->
+              {:ok, execute_turn(task_state, item)}
+
+            admission ->
+              GoalIntegration.execute_admission(
+                task_state.goal_integration,
+                admission,
+                fn ->
+                  if GenServer.call(control_pid, {:cancelled?, item.turn_id}, :infinity),
+                    do: {:not_submitted, :cancelled},
+                    else: Sigma.Agent.Backplane.Engine.prepare_hosted(task_state)
+                end,
+                fn ->
+                  {:ok, scope} =
+                    GoalIntegration.open_host_hooks(
+                      task_state.goal_integration,
+                      admission,
+                      task_state.hook_async_runtime
+                    )
+
+                  result = execute_turn(%{task_state | hook_execution: scope}, item)
+
+                  case Map.pop(result, :goal_host_terminal) do
+                    {nil, result} ->
+                      {:ok, result}
+
+                    {terminal, result} ->
+                      case GoalIntegration.stop_host_executor(
+                             task_state.goal_integration,
+                             admission,
+                             terminal
+                           ) do
+                        :ok -> :ok
+                        {:error, error} -> emit(task_state, {:turn_error, error})
+                      end
+
+                      {:goal_host_stopped, result}
+                  end
+                end
+              )
+          end
         catch
           {:event_persistence_failed, event_type, reason} ->
             {:error, {:event_persistence_failed, event_type, reason}}
@@ -1115,6 +2428,9 @@ defmodule Sigma.Agent do
       state
       | current_turn_task: task,
         current_turn_resources: state.current_turn_resources,
+        goal_executor_control: Map.get(item, :goal_executor_control),
+        goal_executor_settlement: nil,
+        pending_goal_result: nil,
         turn_started_at: turn_started_at,
         turn_started_monotonic: turn_started_monotonic,
         turn_state: TurnState.start(item.turn_id, cancellation_ref),
@@ -1159,12 +2475,14 @@ defmodule Sigma.Agent do
     end
 
     state = release_turn_resources(state)
+    state = finish_async_interactions(state, turn_id, outcome)
 
     state = %{
       state
       | turn_started_at: nil,
         turn_started_monotonic: nil,
-        current_request_id: nil
+        current_request_id: nil,
+        goal_executor_control: nil
     }
 
     case outcome do
@@ -1177,7 +2495,9 @@ defmodule Sigma.Agent do
         state
 
       :cancelled ->
-        Hooks.dispatch(:interrupt, state.hook_specs, hook_ctx(state, turn_id))
+        if Keyword.get(opts, :interrupt_hooks?, true),
+          do: Hooks.dispatch(:interrupt, state.hook_specs, hook_ctx(state, turn_id))
+
         emit(state, {:turn_cancelled})
         %{state | last_cancelled_turn_id: turn_id}
     end
@@ -1186,12 +2506,233 @@ defmodule Sigma.Agent do
   defp maybe_start_follow_up(state, outcome) when outcome in [:completed, :failed, :cancelled] do
     case PromptQueue.pop(state.prompt_queue, :follow_up) do
       {nil, _queue} ->
-        state
+        maybe_goal_idle(state)
 
       {item, queue} ->
         state = %{state | prompt_queue: queue}
         emit(state, {:prompt_consumed, :follow_up, prompt_info(item, item.turn_id)})
         start_turn(state, item)
+    end
+  end
+
+  defp goal_before_effects?(%{goal_executor_control: nil}), do: false
+
+  defp goal_before_effects?(state),
+    do: :atomics.get(state.goal_executor_control, 1) in [0, 2, 3, 4, 5]
+
+  defp fence_goal_executor_cancel(%{goal_executor_control: nil}), do: :active
+
+  defp fence_goal_executor_cancel(state) do
+    case :atomics.compare_exchange(state.goal_executor_control, 1, 0, 2) do
+      4 ->
+        :sealed
+
+      1 ->
+        case :atomics.compare_exchange(state.goal_executor_control, 1, 1, 5) do
+          4 -> :sealed
+          _ -> :active
+        end
+
+      _active ->
+        :active
+    end
+  end
+
+  defp finish_goal_unstarted(
+         %{pending_goal_result: %{error: reason}, goal_executor_settlement: settlement} = state
+       )
+       when not is_nil(settlement) do
+    cancelling? = state.turn_state.phase == :cancelling
+    outcome = if cancelling?, do: :cancelled, else: :failed
+
+    state =
+      state
+      |> clear_cancel_timer()
+      |> Map.put(:current_turn_task, nil)
+      |> Map.put(:pending_goal_result, nil)
+      |> Map.put(:goal_executor_settlement, nil)
+      |> Map.put(:goal_resume_pending, false)
+      |> finish_turn(outcome, reason, interrupt_hooks?: false)
+
+    unless cancelling?, do: emit(state, {:turn_error, reason})
+    if match?({:error, _}, settlement), do: emit(state, {:turn_error, elem(settlement, 1)})
+    emit(state, {:agent_end, state.messages})
+    maybe_start_follow_up(state, outcome)
+  end
+
+  defp finish_goal_unstarted(
+         %{
+           pending_goal_result: %{host_result: result},
+           goal_executor_settlement: settlement,
+           current_turn_task: %{ref: ref}
+         } = state
+       )
+       when not is_nil(settlement) do
+    if match?({:error, _}, settlement), do: emit(state, {:turn_error, elem(settlement, 1)})
+
+    # Settling an ordinary veto releases its reservation, not another prompt.
+    # A later real prompt restores the normal idle continuation decision.
+    state = %{state | pending_goal_result: nil, goal_executor_settlement: nil}
+    {:noreply, state} = handle_info({ref, {:ok, %{result | goal_resume_pending: false}}}, state)
+    state
+  end
+
+  defp finish_goal_unstarted(state), do: state
+
+  defp reconcile_goal_instructions(%{goal_instruction_pending: false} = state, result),
+    do: {state, result}
+
+  defp reconcile_goal_instructions(state, result) do
+    # A host Goal mutation records user provenance without sending another
+    # Provider request. Its selected journal entry can arrive during this Task.
+    case apply(Sigma.Session.Writer, :context_snapshot, [state.writer]) do
+      {:ok, snapshot} ->
+        result = %{
+          result
+          | messages: snapshot.messages,
+            context_window: snapshot.context_window,
+            context_excluded_message_ids:
+              excluded_context_ids(snapshot.messages, snapshot.context_messages),
+            context_snapshot: nil
+        }
+
+        {%{state | goal_instruction_pending: false}, result}
+
+      error ->
+        emit(state, {:turn_error, {:goal_instruction_reconciliation_failed, error}})
+        {state, %{result | outcome: :failed}}
+    end
+  end
+
+  defp init_goal(%{native_tools: true, writer: writer, transcript_path: path} = state)
+       when not is_nil(writer) and is_binary(path) and path != "" do
+    owner = self()
+
+    callbacks = %{
+      record_instruction: fn thread, instruction ->
+        GenServer.call(owner, {:goal_record_instruction, thread, instruction}, 5_000)
+      end,
+      reserve_turn: fn thread, request ->
+        GenServer.call(owner, {:goal_reserve, thread, request}, 5_000)
+      end,
+      release_turn: fn thread, admission ->
+        GenServer.call(owner, {:goal_release, thread, admission}, 5_000)
+      end
+    }
+
+    case GoalIntegration.open(
+           writer: writer,
+           transcript_path: path,
+           cwd: state.cwd,
+           root: Path.join(path <> ".subagents", "goal"),
+           runtime_store: state.backplane_store,
+           owner_pid: owner,
+           host_context: callbacks
+         ) do
+      {:ok, handle} ->
+        state = %{state | goal_integration: handle}
+        {:ok, %{state | goal_resume_pending: goal_pending?(state)}}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp init_goal(state), do: {:ok, state}
+
+  defp reopen_runtime_store(%{backplane_store: nil} = state) do
+    case init_backplane_store(backplane_runtime_path: state.backplane_store_path) do
+      {:ok, store, owned?} ->
+        {:ok, %{state | backplane_store: store, backplane_store_owned: owned?}}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp reopen_runtime_store(state), do: {:ok, state}
+
+  defp goal_thread?(%{goal_integration: %{thread_id: thread}}, thread), do: true
+  defp goal_thread?(_state, _thread), do: false
+
+  defp fence_goal_admission(state, reason) do
+    # Queued input keeps the current released Task; only an actual replacement
+    # or cancellation may fence that executor's first effect boundary.
+    if not is_nil(state.goal_executor_control) and
+         (reason == :cancelled or is_nil(state.current_turn_task)) do
+      disposition = if reason == :cancelled, do: 2, else: 3
+      :atomics.compare_exchange(state.goal_executor_control, 1, 0, disposition)
+    end
+
+    admission =
+      case state.goal_admission do
+        %{status: :reserved} = reservation -> %{reservation | status: reason}
+        other -> other
+      end
+
+    %{state | goal_admission: admission, goal_generation: state.goal_generation + 1}
+  end
+
+  defp maybe_goal_idle(%{goal_integration: nil} = state), do: state
+  defp maybe_goal_idle(%{goal_resume_pending: false} = state), do: state
+  defp maybe_goal_idle(%{goal_idle_task: %Task{}} = state), do: state
+
+  defp maybe_goal_idle(state) do
+    counts = PromptQueue.counts(state.prompt_queue)
+
+    if is_nil(state.current_turn_task) and
+         state.turn_state.phase not in [:session_operation, :cancelling] and
+         counts == %{steering: 0, follow_up: 0} do
+      handle = state.goal_integration
+      generation = state.goal_generation + 1
+
+      task =
+        Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+          result =
+            with {:ok, false} <- RootRetirement.recovery_required?(state) do
+              GoalIntegration.idle(handle, generation)
+            else
+              {:ok, true} ->
+                {:not_reserved, :host_recovery_required}
+
+              {:error, _} = error ->
+                error
+            end
+
+          {:goal_idle, result}
+        end)
+
+      %{
+        state
+        | goal_idle_task: task,
+          goal_generation: generation,
+          goal_idle_generation: generation
+      }
+    else
+      state
+    end
+  end
+
+  defp stop_goal_idle_task(%{goal_idle_task: %Task{} = task}) do
+    Task.shutdown(task, :brutal_kill)
+    :ok
+  end
+
+  defp stop_goal_idle_task(_state), do: :ok
+
+  defp goal_pending?(%{goal_integration: nil}), do: false
+
+  defp goal_pending?(state) do
+    case GoalIntegration.get(state.goal_integration) do
+      {:ok, %{goal: %{status: :active}}} ->
+        true
+
+      {:ok, _} ->
+        false
+
+      {:error, error} ->
+        emit(state, {:turn_error, error})
+        false
     end
   end
 
@@ -1254,7 +2795,12 @@ defmodule Sigma.Agent do
         |> Enum.flat_map(& &1.prepared_resources)
       end)
 
-    (state.current_turn_resources ++ queued_resources)
+    pending_resources =
+      if state.pending_host_prompt,
+        do: state.pending_host_prompt.item.prepared_resources,
+        else: []
+
+    (state.current_turn_resources ++ queued_resources ++ pending_resources)
     |> Enum.uniq_by(&Map.get(&1, :root))
     |> release_resources()
   end
@@ -1304,6 +2850,7 @@ defmodule Sigma.Agent do
   # Internal — runs inside the turn Task
 
   defp execute_turn(state, item) do
+    state = reconcile_context_after_interrupted_turn(state, item)
     emit(state, {:agent_start, state.cwd})
 
     emit(
@@ -1322,11 +2869,14 @@ defmodule Sigma.Agent do
     user_msg =
       Message.user(item.message_id, item.content)
       |> Map.put(:attachments, item.attachments)
-      |> Map.put(:metadata, %{
-        turn_id: item.turn_id,
-        retry_of_turn_id: item.retry_of_turn_id,
-        skill_preparations: prepared_resource_metadata(item.prepared_resources)
-      })
+      |> Map.put(
+        :metadata,
+        Map.merge(Map.get(item, :metadata, %{}), %{
+          turn_id: item.turn_id,
+          retry_of_turn_id: item.retry_of_turn_id,
+          skill_preparations: prepared_resource_metadata(item.prepared_resources)
+        })
+      )
 
     {admission, state} =
       case run_session_start_hook(state) do
@@ -1342,14 +2892,25 @@ defmodule Sigma.Agent do
         notify_retry_admission(item, {:error, reason})
         emit(state, {:turn_blocked, reason})
 
-        %{
+        result = %{
           messages: Map.get(item, :retry_restore_messages, state.messages),
+          context_window: Map.get(item, :retry_restore_context_window, state.context_window),
+          context_excluded_message_ids:
+            Map.get(item, :retry_restore_context_excluded_ids, state.context_excluded_message_ids),
           outcome: :failed,
           context_snapshot: state.context_snapshot,
-          context_policy: state.context_policy
+          context_policy: state.context_policy,
+          goal_resume_pending: goal_pending?(state)
         }
 
+        if state.goal_execution_admission do
+          Map.put(result, :goal_host_terminal, %{"status" => "blocked", "reason" => reason})
+        else
+          result
+        end
+
       {:ok, user_msg, state} ->
+        user_msg = prepare_hook_feedback(state, user_msg, item.turn_id)
         state = %{state | messages: state.messages ++ [user_msg]}
         emit(state, {:message_start, user_msg})
         emit(state, {:message_end, user_msg})
@@ -1361,14 +2922,59 @@ defmodule Sigma.Agent do
         {state, outcome} =
           if outcome == :completed, do: maybe_compact(state), else: {state, outcome}
 
-        %{
+        result = %{
           messages: state.messages,
-          outcome: outcome,
+          context_window: state.context_window,
+          context_excluded_message_ids: state.context_excluded_message_ids,
+          outcome: if(match?({:goal_host_stopped, _}, outcome), do: :failed, else: outcome),
           context_snapshot: state.context_snapshot,
-          context_policy: state.context_policy
+          context_policy: state.context_policy,
+          goal_resume_pending: goal_pending?(state)
         }
+
+        case outcome do
+          {:goal_host_stopped, terminal} -> Map.put(result, :goal_host_terminal, terminal)
+          _ -> result
+        end
     end
   end
+
+  defp prepare_hook_feedback(%{native_tools: true, writer: writer} = state, message, turn_id)
+       when not is_nil(writer) do
+    case HookDelivery.prepare_prompt(writer, state.backplane_store, message, turn_id) do
+      {:ok, message} -> message
+      error -> throw({:event_persistence_failed, :hook_feedback, error})
+    end
+  end
+
+  defp prepare_hook_feedback(_state, message, _turn_id), do: message
+
+  defp reconcile_context_after_interrupted_turn(
+         %{context_reconciliation_required: true, writer: writer} = state,
+         item
+       )
+       when not is_nil(writer) do
+    # A Writer append can commit after its Engine caller has died. Its selected
+    # branch, rather than the last in-memory acknowledgement, owns the boundary.
+    case apply(Sigma.Session.Writer, :context_snapshot, [writer]) do
+      {:ok, snapshot} ->
+        %{
+          state
+          | messages: snapshot.messages,
+            context_window: snapshot.context_window,
+            context_excluded_message_ids:
+              excluded_context_ids(snapshot.messages, snapshot.context_messages)
+        }
+        |> invalidate_context(:journal_recovery)
+
+      error ->
+        reason = {:event_persistence_failed, :context_recovery, error}
+        notify_retry_admission(item, {:error, reason})
+        throw(reason)
+    end
+  end
+
+  defp reconcile_context_after_interrupted_turn(state, _item), do: state
 
   defp notify_retry_admission(%{retry_admission_notify: {pid, ref}}, result)
        when is_pid(pid) and is_reference(ref) do
@@ -1393,7 +2999,8 @@ defmodule Sigma.Agent do
       ContextPolicy.policy(snapshot,
         model: state.model,
         context_limit: state.context_limit,
-        output_reserve: provider_output_reserve(state.provider_options)
+        output_reserve:
+          Provider.output_token_limit(state.provider, state.model, state.provider_options)
       )
 
     if policy.overflow in [:overflow, :hard_overflow] do
@@ -1403,10 +3010,6 @@ defmodule Sigma.Agent do
           "#{policy.output_reserve}, context window #{policy.context_window}"
       )
     end
-  end
-
-  defp provider_output_reserve(options) do
-    Keyword.get(options, :max_tokens) || Keyword.get(options, :max_output_tokens)
   end
 
   defp set_turn_phase(%{control_pid: control_pid}, turn_id, phase) when is_pid(control_pid),
@@ -1455,7 +3058,12 @@ defmodule Sigma.Agent do
 
   defp acknowledge_canonical(%{control_pid: control_pid, turn_state: %{turn_id: turn_id}} = state)
        when is_pid(control_pid) and is_binary(turn_id) do
-    send(control_pid, {:canonical_messages, turn_id, state.messages})
+    send(
+      control_pid,
+      {:canonical_context, turn_id, state.messages, state.context_window,
+       state.context_excluded_message_ids}
+    )
+
     :ok
   end
 
@@ -1518,7 +3126,8 @@ defmodule Sigma.Agent do
   end
 
   defp run_compact(state, opts) do
-    {to_summarize, to_keep} = find_compact_boundary(state.messages, 20)
+    active_messages = __backplane_context_messages__(state)
+    {to_summarize, to_keep} = find_compact_boundary(active_messages, 20)
 
     case to_summarize do
       [] ->
@@ -1571,7 +3180,13 @@ defmodule Sigma.Agent do
               timestamp: System.system_time(:millisecond)
             }
 
-            new_state = %{state | messages: [summary_msg | to_keep]}
+            excluded =
+              Enum.filter(
+                state.messages,
+                &MapSet.member?(state.context_excluded_message_ids, &1.id)
+              )
+
+            new_state = %{state | messages: excluded ++ [summary_msg | to_keep]}
             emit(new_state, {:compact, summary_msg, first_kept_id})
 
             emit(
@@ -1598,7 +3213,8 @@ defmodule Sigma.Agent do
 
             context =
               ContextBuilder.build(
-                messages: new_state.messages,
+                messages: __backplane_context_messages__(new_state),
+                context_window: (new_state.context_window || %{})[:window] || 1,
                 session_context: new_state.session_context,
                 system_prompt: new_state.system_prompt,
                 tools: Enum.map(new_state.tools, &Sigma.Coding.Tool.ai_definition/1),
@@ -1930,8 +3546,9 @@ defmodule Sigma.Agent do
     Hooks.context(Map.from_struct(state), %{
       turn_id: turn_id || state.turn_state.turn_id,
       transcript_path: transcript_path(state),
-      mcp_hook_executor: Sigma.Coding.MCP.hook_executor(state.mcp_session),
+      mcp_hook_executor: Sigma.Coding.MCP.hook_executor(state.mcp_session, with_evidence: true),
       hook_async_runtime: state.hook_async_runtime,
+      hook_execution: state.hook_execution,
       hook_async_callback: Hooks.async_callback(state.hook_async_contexts)
     })
   end
@@ -2250,7 +3867,10 @@ defmodule Sigma.Agent do
       end
     end
 
-    Hooks.dispatch(:session_end, state.hook_specs, hook_ctx(state), %{reason: "other"})
+    # Async hooks have already been joined. SessionEnd is synchronous and owned
+    # by this final shutdown call, rather than the now-closed async runtime.
+    context = Map.delete(hook_ctx(state), :hook_async_runtime)
+    Hooks.dispatch(:session_end, state.hook_specs, context, %{reason: "other"})
   rescue
     e -> Logger.warning("[Sigma.Agent] SessionEnd hook crashed: #{Exception.message(e)}")
   catch
@@ -2381,7 +4001,13 @@ defmodule Sigma.Agent do
       state
       | context_snapshot: snapshot,
         context_policy:
-          context_policy(snapshot, state.model, state.provider_options, state.context_limit)
+          context_policy(
+            snapshot,
+            state.provider,
+            state.model,
+            state.provider_options,
+            state.context_limit
+          )
     }
   end
 
@@ -2415,7 +4041,13 @@ defmodule Sigma.Agent do
       state
       | context_snapshot: snapshot,
         context_policy:
-          context_policy(snapshot, state.model, state.provider_options, state.context_limit)
+          context_policy(
+            snapshot,
+            state.provider,
+            state.model,
+            state.provider_options,
+            state.context_limit
+          )
     }
   end
 
@@ -2433,15 +4065,21 @@ defmodule Sigma.Agent do
       state
       | context_snapshot: snapshot,
         context_policy:
-          context_policy(snapshot, state.model, state.provider_options, state.context_limit)
+          context_policy(
+            snapshot,
+            state.provider,
+            state.model,
+            state.provider_options,
+            state.context_limit
+          )
     }
   end
 
-  defp context_policy(snapshot, model, options, limit) do
+  defp context_policy(snapshot, provider, model, options, limit) do
     ContextPolicy.policy(snapshot,
       model: model,
       context_limit: limit,
-      output_reserve: provider_output_reserve(options),
+      output_reserve: Provider.output_token_limit(provider, model, options),
       check_phase: :before_provider_dispatch
     )
   end
@@ -2496,15 +4134,49 @@ defmodule Sigma.Agent do
     do: set_turn_phase(state, state.turn_state.turn_id, phase)
 
   @doc false
-  def __backplane_build_context__(state, messages, tools \\ nil) do
+  def __backplane_build_context__(state, messages, tools \\ nil, window \\ nil) do
     ContextBuilder.build(
       messages: Hooks.async_messages(messages, state.hook_async_contexts),
       session_context: state.session_context,
       system_prompt: state.system_prompt,
       tools: tools || Enum.map(state.tools, &Sigma.Coding.Tool.ai_definition/1),
       cwd: state.cwd,
-      model: state.model
+      model: state.model,
+      context_window: (window || state.context_window || %{})[:window] || 1
     )
+  end
+
+  defp excluded_context_ids(_messages, nil), do: MapSet.new()
+
+  defp excluded_context_ids(messages, context_messages) do
+    included = MapSet.new(context_messages, & &1.id)
+    messages |> Enum.reject(&MapSet.member?(included, &1.id)) |> MapSet.new(& &1.id)
+  end
+
+  @doc false
+  def __backplane_context_messages__(state) do
+    Enum.reject(state.messages, &MapSet.member?(state.context_excluded_message_ids, &1.id))
+  end
+
+  @doc false
+  def __backplane_context_window__(state, window) do
+    event = {:context_window_started, window}
+
+    if state.writer do
+      case apply(Sigma.Session.Writer, :append, [state.writer, event]) do
+        {:ok, _id} -> :ok
+        error -> throw({:event_persistence_failed, :context_window, error})
+      end
+    end
+
+    emit(state, event)
+
+    %{
+      state
+      | context_window: window,
+        context_excluded_message_ids: MapSet.new(state.messages, & &1.id)
+    }
+    |> invalidate_context(:context_window_started)
   end
 
   @doc false
@@ -2558,28 +4230,20 @@ defmodule Sigma.Agent do
     }
 
     opts =
-      state.dispatcher_opts
-      |> Keyword.put(:cwd, state.cwd)
-      |> Keyword.put(:permission_policy, resolve_policy(state.policy))
-      |> Keyword.put(:session_id, state.session_id)
-      |> Keyword.put(:log_session_id, state.log_session_id)
-      |> Keyword.put(:turn_id, turn_id)
-      |> Keyword.put(:request_id, state.current_request_id)
-      |> Keyword.put(
-        :skill_roots,
-        merge_skill_roots(state.dispatcher_opts, skill_grant_roots(state.tool_state, turn_id))
-      )
-      |> Keyword.put(:transcript_path, transcript_path(state))
-      |> Keyword.put(:hook_specs, state.hook_specs)
-      |> Keyword.put(:model, hook_ctx(state).model)
-      |> Keyword.put(:mcp_hook_executor, Sigma.Coding.MCP.hook_executor(state.mcp_session))
-      |> Keyword.put(:hook_async_runtime, state.hook_async_runtime)
-      |> Keyword.put(:hook_async_callback, Hooks.async_callback(state.hook_async_contexts))
-      |> Keyword.put(:tool_state, state.tool_state)
-      |> Keyword.put(:on_tool_fact, fn fact -> emit(state, {:metrics, :tool_finished, fact}) end)
+      __backplane_permission_options__(state, turn_id)
       |> Keyword.put(:on_tool_update, fn update ->
         send(owner, {:backplane_tool_update, tool_call, update})
       end)
+
+    opts =
+      if state.native_tools,
+        do:
+          Keyword.put(
+            opts,
+            :hook_async_callback_factory,
+            HookDelivery.factory(state.writer, operation)
+          ),
+        else: opts
 
     case Sigma.Coding.Dispatcher.dispatch(tool_call, state.tools, opts) do
       {:ok, result} ->
@@ -2592,6 +4256,32 @@ defmodule Sigma.Agent do
       other ->
         other
     end
+  end
+
+  @doc false
+  def __backplane_permission_options__(state, turn_id) do
+    state.dispatcher_opts
+    |> Keyword.put(:cwd, state.cwd)
+    |> Keyword.put(:permission_policy, resolve_policy(state.policy))
+    |> Keyword.put(:session_id, state.session_id)
+    |> Keyword.put(:log_session_id, state.log_session_id)
+    |> Keyword.put(:turn_id, turn_id)
+    |> Keyword.put(:request_id, state.current_request_id)
+    |> Keyword.put(
+      :skill_roots,
+      merge_skill_roots(state.dispatcher_opts, skill_grant_roots(state.tool_state, turn_id))
+    )
+    |> Keyword.put(:transcript_path, transcript_path(state))
+    |> Keyword.put(:hook_specs, state.hook_specs)
+    |> Keyword.put(:model, hook_ctx(state).model)
+    |> Keyword.put(
+      :mcp_hook_executor,
+      Sigma.Coding.MCP.hook_executor(state.mcp_session, with_evidence: true)
+    )
+    |> Keyword.put(:hook_async_runtime, state.hook_async_runtime)
+    |> Keyword.put(:hook_async_callback, Hooks.async_callback(state.hook_async_contexts))
+    |> Keyword.put(:tool_state, state.tool_state)
+    |> Keyword.put(:on_tool_fact, fn fact -> emit(state, {:metrics, :tool_finished, fact}) end)
   end
 
   defp subagents_can_stop?(%{subagents: nil}), do: true

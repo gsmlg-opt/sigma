@@ -93,6 +93,42 @@ defmodule Sigma.Agent.SubagentHostTest do
 
   @moduletag :tmp_dir
 
+  test "native children start through the public manager adoption protocol", ctx do
+    session_id = "native-child"
+
+    assert {:ok, handle} =
+             Runtime.get_session(ctx.repo, session_id,
+               cwd: ctx.repo,
+               transcript_path: Path.join(ctx.repo, "native-child.jsonl"),
+               provider: Provider,
+               model: %{id: "test", provider: "test", api: "test"},
+               native_tools: true,
+               native_memory_root: Path.join(ctx.repo, "memories"),
+               tools: [],
+               hook_specs: [],
+               options: [test_pid: self()]
+             )
+
+    assert :ok = Sigma.Agent.subscribe(handle.agent)
+    assert {:accepted, _} = Sigma.Agent.prompt(handle.agent, "delegate with native tools")
+    root = provider(session_id)
+
+    call(root.pid, "spawn_agent", %{
+      "task_name" => "native_child",
+      "message" => "work",
+      "fork_turns" => "none"
+    })
+
+    child = child_provider()
+    root = provider(session_id)
+    assert_native_result(root.params, "spawn_agent", "task_name", "/root/native_child")
+    assert Enum.any?(child.params.context.tools, &(&1.name == "update_plan"))
+    host = Runtime.lookup(ctx.repo, session_id, :subagents)
+    assert {:ok, %{subagents: %{counts: %{created: 1}}}} = Subagents.snapshot(host)
+    finish(child.pid)
+    finish(root.pid)
+  end
+
   test "writerless Runtime sessions complete chat with an empty tool catalog", ctx do
     session_id = "writerless"
 
@@ -981,6 +1017,97 @@ defmodule Sigma.Agent.SubagentHostTest do
     assert {:ok, %{binding: binding}} = Subagents.prepare_root(ctx.host, context)
     assert Backplane.AgentRuntime.Codex.Session.status(binding.session).phase == :reserved
     refute_receive {:host_provider, _, _}, 20
+  end
+
+  test "existing child host questions reconnect and resolve through the generic protocol", ctx do
+    # This exercises the existing host ask API, not upstream native child interactions (#81).
+    Sigma.Agent.prompt(ctx.agent, "delegate")
+    root = provider("root")
+
+    call(root.pid, "spawn_agent", %{
+      "task_name" => "question_child",
+      "message" => "wait",
+      "fork_turns" => "none"
+    })
+
+    child = child_provider()
+    root = provider("root")
+    [row] = roster(ctx.host).agents
+    identity = identity(row)
+
+    first =
+      Task.async(fn ->
+        Subagents.ask(ctx.host, identity, %{
+          question: "Choose?",
+          options: [%{label: "Continue", value: "continue", description: "Keep working"}],
+          allow_freeform: true
+        })
+      end)
+
+    assert_receive {:ask_user_question, first_id, %{source: %{agent_id: agent_id}}}, 5_000
+    assert agent_id == row.agent_id
+    context = %{repo_path: ctx.repo, sessions_dir: ctx.repo}
+
+    assert {:ok, attach} =
+             Sigma.Protocol.Envelope.command("subscription.attach", "root", %{
+               "requiredCapabilities" => ["questions.v1"]
+             })
+
+    assert {:ok, snapshot} = PublicRuntime.execute(attach, context)
+    subscription = snapshot.payload["subscriptionId"]
+
+    assert [%{"requestId" => ^first_id, "request" => %{"source" => %{"agent_id" => ^agent_id}}}] =
+             snapshot.payload["pendingQuestions"]
+
+    assert {:ok, answer} =
+             Sigma.Protocol.Envelope.command("question.resolve", "root", %{
+               "requestId" => first_id,
+               "action" => "answer",
+               "answer" => "保留原文\n"
+             })
+
+    assert {:ok, _} = PublicRuntime.execute(answer, context)
+    assert {:ok, "保留原文\n"} = Task.await(first)
+
+    assert_receive {:sigma_protocol, ^subscription,
+                    %{type: "question.resolved", payload: %{"requestId" => ^first_id}}},
+                   5_000
+
+    second =
+      Task.async(fn -> Subagents.ask(ctx.host, identity, %{question: "Still waiting?"}) end)
+
+    assert_receive {:ask_user_question, second_id, _}, 5_000
+
+    assert_receive {:sigma_protocol, ^subscription,
+                    %{type: "question.required", payload: %{"requestId" => ^second_id}}},
+                   5_000
+
+    finish(child.pid)
+    assert {:error, :cancelled} = Task.await(second)
+
+    assert_receive {:sigma_protocol, ^subscription,
+                    %{type: "question.resolved", payload: %{"requestId" => ^second_id}}},
+                   5_000
+
+    assert {:error, :stale_subagent_request} =
+             Subagents.ask(ctx.host, identity, %{question: "Stale?"})
+
+    assert {:ok, late} =
+             Sigma.Protocol.Envelope.command("question.resolve", "root", %{
+               "requestId" => second_id,
+               "action" => "answer",
+               "answer" => "late"
+             })
+
+    assert {:error, %{error: %{code: "not_found"}}} = PublicRuntime.execute(late, context)
+
+    assert {:ok, status} =
+             Sigma.Protocol.Envelope.command("session.status", "root", %{
+               "requiredCapabilities" => ["questions.v1"]
+             })
+
+    assert {:ok, %{payload: %{"pendingQuestions" => []}}} = PublicRuntime.execute(status, context)
+    finish(root.pid)
   end
 
   defp identity(row) do

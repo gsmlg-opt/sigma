@@ -46,19 +46,40 @@ defmodule Sigma.Session.Metrics do
   def reduce_all(facts, session_id \\ nil),
     do: Enum.reduce(facts, new(session_id), &reduce(&2, &1))
 
-  @doc "Marks requests without a durable terminal fact as interrupted after restart."
-  @spec finalize_in_flight(t()) :: t()
-  def finalize_in_flight(%__MODULE__{} = state) do
+  @doc """
+  Marks unfinished requests and turns as interrupted, except exact live identities
+  supplied by the host. Live records must belong to this session; a live request
+  must also match the supplied turn, including nil for an auxiliary request.
+  """
+  @spec finalize_in_flight(t(), keyword()) :: t()
+  def finalize_in_flight(%__MODULE__{} = state, opts \\ []) do
+    active_turn_id = Keyword.get(opts, :active_turn_id)
+    active_request_id = Keyword.get(opts, :active_request_id)
+
     requests =
       Map.new(state.requests, fn {request_id, request} ->
-        {request_id, finalize_request(request)}
+        live? =
+          active_metric?(request, state.session_id, :request_id, active_request_id) and
+            request.turn_id == active_turn_id
+
+        {request_id, if(live?, do: request, else: finalize_request(request))}
       end)
 
-    turns = Map.new(state.turns, fn {turn_id, turn} -> {turn_id, finalize_turn(turn)} end)
+    turns =
+      Map.new(state.turns, fn {turn_id, turn} ->
+        live? = active_metric?(turn, state.session_id, :turn_id, active_turn_id)
+        {turn_id, if(live?, do: turn, else: finalize_turn(turn))}
+      end)
 
     %{state | requests: requests, turns: turns}
     |> rebuild_projection()
   end
+
+  defp active_metric?(record, session_id, identity_key, identity)
+       when is_binary(session_id) and session_id != "" and is_binary(identity) and identity != "",
+       do: record.session_id == session_id and Map.get(record, identity_key) == identity
+
+  defp active_metric?(_record, _session_id, _identity_key, _identity), do: false
 
   @doc "Returns deterministic work counters used by performance regression tests."
   @spec projection_stats(t()) :: map()

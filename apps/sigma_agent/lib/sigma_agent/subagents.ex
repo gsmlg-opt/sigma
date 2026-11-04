@@ -5,11 +5,22 @@ defmodule Sigma.Agent.Subagents do
   require Logger
 
   alias Backplane.AgentRuntime.{Error, Codex.MultiAgent, Codex.Session}
-  alias Sigma.Agent.Backplane.{ChildIO, Store}
+
+  alias Sigma.Agent.Backplane.{
+    ChildArchiveEvidence,
+    ChildIO,
+    ChildInteractionResponder,
+    CodexResources,
+    LifetimeEvidence,
+    LifetimeRecovery,
+    Store,
+    UserInput
+  }
+
   alias Sigma.Session.{Subagents, Writer}
 
   @collaboration ~w(spawn_agent send_message followup_task interrupt_agent list_agents wait_agent)
-  @configuration ~w(model provider provider_options system_prompt session_context context_limit cwd tools mcp_servers hook_specs dispatcher_opts policy task_supervisor)a
+  @configuration ~w(model provider provider_options system_prompt session_context context_limit cwd tools mcp_servers hook_specs dispatcher_opts policy task_supervisor native_tools native_memory_root native_plugins)a
   @terminal [:completed, :errored, :interrupted, :shutdown]
 
   def child_spec(opts) do
@@ -19,8 +30,20 @@ defmodule Sigma.Agent.Subagents do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
   def prepare_root(host, context), do: GenServer.call(host, {:prepare_root, context}, :infinity)
   def snapshot(host), do: GenServer.call(host, :snapshot, :infinity)
+  def archive_sources(host), do: GenServer.call(host, :archive_sources, :infinity)
+
+  def message_board_context(host, agent_name, operation),
+    do: GenServer.call(host, {:message_board_context, agent_name, operation}, :infinity)
+
   def can_stop(host), do: GenServer.call(host, :can_stop)
   def close(host), do: GenServer.call(host, :close, :infinity)
+
+  @doc "Confirms execution retirement while retaining owners needed for Goal ACK and archive export."
+  def close_execution(host), do: GenServer.call(host, :close_execution, :infinity)
+
+  @doc "Persists public export stages before orderly shutdown; does not confirm full closure."
+  def stage_shutdown(host), do: GenServer.call(host, :stage_shutdown, :infinity)
+
   def origin(host, operation), do: GenServer.call(host, {:origin, operation})
 
   def rejected_before_start?(host, error),
@@ -68,9 +91,13 @@ defmodule Sigma.Agent.Subagents do
              not Enum.any?(roster.agents, &(&1.agent_id == attempt.intent.agent_id)))
       end)
 
-    recovery_required =
-      unresolved or
-        Enum.any?(roster.agents, &(&1.status == :unknown_outcome or &1.closure == :unknown))
+    uncertain =
+      Enum.filter(roster.agents, &(&1.status == :unknown_outcome or &1.closure == :unknown))
+
+    retired =
+      uncertain != [] and retired_roster?(writer, Keyword.get(opts, :transcript_path), uncertain)
+
+    recovery_required = unresolved or (uncertain != [] and not retired)
 
     {:ok,
      %{
@@ -86,10 +113,22 @@ defmodule Sigma.Agent.Subagents do
        recovered_admissions: evidence.admissions,
        generation: nil,
        session: nil,
+       codex_resources: nil,
+       lifetime_recovery: nil,
+       generation_closed: false,
+       execution_closed: false,
+       execution_result: nil,
+       archive_result: :not_started,
+       completion_stage: :pending,
        manager: nil,
+       interaction_responder: nil,
        contracts: [],
        root: nil,
+       root_binding: nil,
        children: %{},
+       child_retirements: %{},
+       archive_aliases: %{},
+       restored_children: %{},
        attempts: %{},
        origins: %{},
        pending: %{},
@@ -100,11 +139,35 @@ defmodule Sigma.Agent.Subagents do
        preparing: false,
        closing: false,
        close_waiters: [],
+       execution_close_waiters: [],
+       shutdown_stage_waiters: [],
        error: if(recovery_required, do: :recovery_required)
      }}
   end
 
   @impl true
+  def handle_call(:archive_sources, _from, state) do
+    {:reply,
+     {:ok,
+      %{
+        root: %{
+          writer: state.writer,
+          transcript_path: state.transcript_path,
+          host_lifetime_id:
+            get_in(state.root, [:config, :host_retirement, :identity, :host_lifetime_id])
+        },
+        error: state.error,
+        generation_closed: state.generation_closed,
+        execution_closed: state.execution_closed,
+        execution_result: state.execution_result,
+        archive_result: state.archive_result,
+        completion_stage: state.completion_stage,
+        roster: state.projection,
+        children:
+          Enum.map(state.children, fn {_id, child} -> Map.take(child, [:identity, :io]) end)
+      }}, state}
+  end
+
   def handle_call(:snapshot, _from, state) do
     {:reply,
      {:ok,
@@ -114,9 +177,61 @@ defmodule Sigma.Agent.Subagents do
       }}, state}
   end
 
+  def handle_call({:message_board_context, name, operation}, _from, state) do
+    caller =
+      cond do
+        name == "/root" and is_map(state.root_binding) and
+          state.root_binding.run_id == operation.run_id and
+            state.root_binding.run_incarnation == operation.incarnation ->
+          %{agent_id: state.root_session_id, agent_path: "/root"}
+
+        true ->
+          Enum.find_value(state.children, fn {_id, child} ->
+            identity = child.identity
+
+            if identity.agent_path == name and identity.run_id == operation.run_id and
+                 identity.incarnation == operation.incarnation,
+               do: Map.take(identity, [:agent_id, :agent_path])
+          end)
+      end
+
+    result =
+      if caller && state.writer && is_binary(state.transcript_path) do
+        agents =
+          state.roster.agents
+          |> Enum.sort_by(& &1.revision)
+          |> Map.new(&{&1.agent_path, &1.agent_id})
+          |> Map.merge(
+            Map.new(state.children, fn {_id, child} ->
+              {child.identity.agent_path, child.identity.agent_id}
+            end)
+          )
+          |> Map.put("/root", state.root_session_id)
+
+        {:ok,
+         %{
+           writer: state.writer,
+           root_transcript: state.transcript_path,
+           caller: caller,
+           agents: agents,
+           manager: state.manager,
+           root_agent_id: state.root_session_id,
+           root_binding: state.root_binding
+         }}
+      else
+        failure(:resource_conflict, "message-board caller is no longer in the current run tree")
+      end
+
+    {:reply, result, state}
+  end
+
   def handle_call(:can_stop, _from, state) do
+    unknown = Enum.filter(state.roster.agents, &(&1.status == :unknown_outcome))
+    retired = unknown != [] and closed_roster?(state.writer, state.transcript_path, unknown)
+
     active =
-      state.roster.counts.executing + state.roster.counts.pending + state.roster.counts.unknown
+      state.roster.counts.executing + state.roster.counts.pending +
+        if(retired, do: 0, else: state.roster.counts.unknown)
 
     uncertain = Enum.any?(state.roster.agents, &(&1.closure == :unknown))
     unresolved = Enum.any?(state.attempts, fn {_id, attempt} -> attempt.status == :reserved end)
@@ -130,20 +245,39 @@ defmodule Sigma.Agent.Subagents do
     {:reply, result, state}
   end
 
-  def handle_call({:prepare_root, _context}, _from, %{writer: nil} = state),
-    do: {:reply, {:ok, %{contracts: [], binding: nil}}, state}
+  def handle_call(
+        {:prepare_root, %{config: %{native_tools: false}}},
+        _from,
+        %{writer: nil} = state
+      ),
+      do: {:reply, {:ok, %{contracts: [], binding: nil, native_context: nil}}, state}
 
-  def handle_call({:prepare_root, _context}, _from, %{enabled: false} = state),
-    do: {:reply, {:ok, %{contracts: [], binding: nil}}, state}
+  def handle_call({:prepare_root, context}, _from, %{writer: nil} = state)
+      when not is_map_key(context.config, :native_tools),
+      do: {:reply, {:ok, %{contracts: [], binding: nil, native_context: nil}}, state}
+
+  def handle_call(
+        {:prepare_root, %{config: %{native_tools: false}}},
+        _from,
+        %{enabled: false} = state
+      ),
+      do: {:reply, {:ok, %{contracts: [], binding: nil, native_context: nil}}, state}
+
+  def handle_call({:prepare_root, context}, _from, %{enabled: false} = state)
+      when not is_map_key(context.config, :native_tools),
+      do: {:reply, {:ok, %{contracts: [], binding: nil, native_context: nil}}, state}
 
   def handle_call({:prepare_root, context}, from, state) do
-    if state.preparing or state.closing or state.error != nil do
+    state = refresh_recovery_gate(state)
+
+    if state.preparing or state.closing or state.error != nil or
+         (state.execution_closed and not state.generation_closed) do
       {:reply, failure(:resource_conflict, "subagent host is unavailable"), state}
     else
       host = self()
       # Preparation may retire a confirmed-closed generation. The host owns
       # these links; unlink here before the control task stops the old owners.
-      Enum.each([state.session, state.manager], fn pid ->
+      Enum.each([state.session, state.manager, state.codex_resources], fn pid ->
         if is_pid(pid), do: Process.unlink(pid)
       end)
 
@@ -187,6 +321,19 @@ defmodule Sigma.Agent.Subagents do
 
   def handle_call(:pending, _from, state),
     do: {:reply, Enum.map(state.pending, fn {_id, item} -> item.request end), state}
+
+  def handle_call({:native_interaction_handler, correlation, kind}, _from, state) do
+    child = state.children[qualify(state, correlation.agent_id)]
+
+    if (child && correlation.manager_id == state.manager_id) and
+         correlation.run_id == child.identity.run_id and
+         correlation.incarnation == child.identity.incarnation and
+         current_child?(state, child.identity) do
+      {:reply, native_interaction_handler(state, child.identity, kind), state}
+    else
+      {:reply, {:error, :stale_subagent_request}, state}
+    end
+  end
 
   def handle_call({:ask, identity, request, waiter}, _from, state) do
     if current_child?(state, identity) and not state.closing do
@@ -233,12 +380,62 @@ defmodule Sigma.Agent.Subagents do
     end
   end
 
+  def handle_call(:close, _from, %{generation_closed: true, error: nil} = state),
+    do: {:reply, {:ok, %{status: :confirmed}}, state}
+
+  def handle_call(:close_execution, _from, %{execution_closed: true} = state),
+    do: {:reply, state.execution_result, state}
+
+  def handle_call(:close_execution, from, state) do
+    request_close(state, :execution_close_waiters, from)
+  end
+
   def handle_call(:close, from, state) do
+    request_close(state, :close_waiters, from)
+  end
+
+  def handle_call(:stage_shutdown, from, state) do
+    state = %{state | shutdown_stage_waiters: [from | state.shutdown_stage_waiters]}
+    {:noreply, drain_shutdown_stages(state)}
+  end
+
+  defp drain_shutdown_stages(%{shutdown_stage_waiters: []} = state), do: state
+
+  defp drain_shutdown_stages(state)
+       when state.preparing or state.closing or map_size(state.jobs) != 0,
+       do: state
+
+  defp drain_shutdown_stages(state) do
+    result =
+      cond do
+        not state.execution_closed or
+            not match?({:ok, %{status: :confirmed}}, state.execution_result) ->
+          failure(:unknown_outcome, "shutdown staging requires confirmed execution retirement")
+
+        state.generation_closed ->
+          :ok
+
+        true ->
+          runtime_call(fn ->
+            ChildArchiveEvidence.stage(state.lifetime_recovery, state.manager)
+          end)
+      end
+
+    # Join all existing control and observer jobs before checking the actual
+    # execution acknowledgement. A stage never changes the archive outcome.
+    Enum.each(state.shutdown_stage_waiters, &GenServer.reply(&1, result))
+    %{state | shutdown_stage_waiters: []}
+  end
+
+  defp finish_shutdown_stages({:noreply, state}),
+    do: {:noreply, drain_shutdown_stages(state)}
+
+  defp request_close(state, waiters, from) do
     was_closing = state.closing
 
     state =
       invalidate_questions(
-        %{state | closing: true, close_waiters: [from | state.close_waiters]},
+        state |> Map.put(:closing, true) |> Map.update!(waiters, &[from | &1]),
         fn _ -> true end
       )
 
@@ -263,107 +460,196 @@ defmodule Sigma.Agent.Subagents do
   def handle_cast({:forget_question, id}, state), do: {:noreply, forget_question(state, id)}
 
   @impl true
+  def handle_info(
+        {:generation_completion, generation, stage},
+        %{generation: generation} = state
+      )
+      when state.closing or state.preparing do
+    {:noreply, %{state | completion_stage: stage}}
+  end
+
   def handle_info({ref, result}, state) when is_reference(ref) do
-    case Map.pop(state.jobs, ref) do
-      {nil, _} ->
-        {:noreply, state}
+    finished =
+      case Map.pop(state.jobs, ref) do
+        {nil, _} ->
+          {:noreply, state}
 
-      {{from, :prepare}, jobs} ->
-        Process.demonitor(ref, [:flush])
-        state = %{state | jobs: jobs}
+        {{from, :prepare}, jobs} ->
+          Process.demonitor(ref, [:flush])
+          state = %{state | jobs: jobs}
 
-        case result do
-          {:ok, runtime} ->
-            Process.link(runtime.session)
-            Process.link(runtime.manager)
-            state = adopt_generation(state, runtime)
+          case result do
+            {:ok, runtime} ->
+              Enum.each(
+                [
+                  runtime.session,
+                  runtime.manager,
+                  runtime.codex_resources,
+                  runtime.lifetime_recovery
+                ],
+                fn pid ->
+                  if is_pid(pid), do: Process.link(pid)
+                end
+              )
 
-            if state.closing do
-              GenServer.reply(from, failure(:resource_conflict, "subagent admission is closing"))
-              start_close(%{state | preparing: false})
-            else
-              job(state, from, :bind, fn ->
-                Session.bind(state.session, state.root.authority, incarnation: 1)
+              state = adopt_generation(state, runtime)
+
+              if state.closing do
+                GenServer.reply(
+                  from,
+                  failure(:resource_conflict, "subagent admission is closing")
+                )
+
+                start_close(%{state | preparing: false})
+              else
+                job(state, from, :bind, fn ->
+                  recorded =
+                    if state.lifetime_recovery,
+                      do:
+                        LifetimeRecovery.register_root(
+                          state.lifetime_recovery,
+                          state.root.authority.run_id,
+                          1
+                        ),
+                      else: :ok
+
+                  with :ok <- recorded do
+                    if state.codex_resources,
+                      do:
+                        CodexResources.bind(state.codex_resources, state.root.authority,
+                          incarnation: 1
+                        ),
+                      else: Session.bind(state.session, state.root.authority, incarnation: 1)
+                  end
+                end)
+              end
+
+            {:error, _} = error ->
+              Enum.each([state.session, state.manager, state.codex_resources], fn pid ->
+                if is_pid(pid) and Process.alive?(pid), do: Process.link(pid)
               end)
-            end
 
-          {:error, _} = error ->
-            Enum.each([state.session, state.manager], fn pid ->
-              if is_pid(pid) and Process.alive?(pid), do: Process.link(pid)
-            end)
+              GenServer.reply(from, error)
+              state = %{state | preparing: false}
 
-            GenServer.reply(from, error)
-            state = %{state | preparing: false}
+              state =
+                if state.closing,
+                  do:
+                    reply_closes(
+                      %{state | error: :preparation_failed},
+                      failure(:unknown_outcome, "subagent preparation failed while closing")
+                    ),
+                  else: state
 
-            state =
-              if state.closing,
-                do:
-                  reply_closes(
-                    %{state | error: :preparation_failed},
-                    failure(:unknown_outcome, "subagent preparation failed while closing")
-                  ),
-                else: state
-
-            {:noreply, state}
-        end
-
-      {{from, :bind}, jobs} ->
-        Process.demonitor(ref, [:flush])
-        state = %{state | jobs: jobs, preparing: false}
-
-        reply =
-          with {:ok, binding} <- result do
-            contracts =
-              Enum.map(state.contracts, fn contract ->
-                %{
-                  contract
-                  | backend_context: Map.put(contract.backend_context, :session_binding, binding)
-                }
-              end)
-
-            {:ok, %{contracts: contracts, binding: binding}}
+              {:noreply, state}
           end
 
-        if state.closing do
-          GenServer.reply(from, failure(:resource_conflict, "subagent admission is closing"))
-          start_close(state)
-        else
-          GenServer.reply(from, reply)
-          {:noreply, state}
-        end
+        {{from, :bind}, jobs} ->
+          Process.demonitor(ref, [:flush])
+          state = %{state | jobs: jobs, preparing: false}
 
-      {{nil, :close}, jobs} ->
-        Process.demonitor(ref, [:flush])
-        {result, snapshot} = result
-        state = %{state | jobs: jobs, closing: false}
-        state = reconcile_snapshot(state, snapshot)
+          state =
+            case result do
+              {:ok, binding} -> %{state | root_binding: binding}
+              _ -> %{state | root_binding: nil}
+            end
 
-        state =
-          if match?({:ok, %{status: :confirmed}}, result),
-            do: state,
-            else: mark_unknown(%{state | error: :cleanup_unconfirmed}, "cleanup_unconfirmed")
+          reply =
+            with {:ok, binding} <- result do
+              contracts =
+                Enum.map(state.contracts, fn contract ->
+                  %{
+                    contract
+                    | backend_context:
+                        Map.put(contract.backend_context, :session_binding, binding)
+                  }
+                end)
 
-        if match?({:ok, %{status: :confirmed}}, result) do
-          Enum.each(state.children, fn {_id, child} ->
-            if Process.alive?(child.io), do: GenServer.stop(child.io, :normal)
-          end)
-        end
+              with {:ok, native_context} <- native_context(state, binding) do
+                {:ok, %{contracts: contracts, binding: binding, native_context: native_context}}
+              end
+            end
 
-        reply =
-          if(state.error,
-            do: failure(:unknown_outcome, "subagent cleanup requires reconciliation"),
-            else: result
-          )
+          if state.closing do
+            GenServer.reply(from, failure(:resource_conflict, "subagent admission is closing"))
+            start_close(state)
+          else
+            GenServer.reply(from, reply)
+            {:noreply, state}
+          end
 
-        {:noreply, reply_closes(state, reply)}
+        {{nil, kind}, jobs} when kind in [:close, :close_execution] ->
+          Process.demonitor(ref, [:flush])
+          {execution, result, snapshot, retirements} = result
+          state = %{state | jobs: jobs, closing: false, child_retirements: retirements}
+          state = if state.manager, do: reconcile_snapshot(state, snapshot), else: state
+          retired = child_retirement_result(retirements)
 
-      {{nil, :resync}, jobs} ->
-        Process.demonitor(ref, [:flush])
-        state = %{state | jobs: jobs}
-        state = reconcile_snapshot(state, result)
-        if state.observer_buffer == [], do: {:noreply, state}, else: resync(state)
-    end
+          state =
+            if match?({:ok, %{status: :confirmed}}, execution) and retired == :ok,
+              do: %{
+                state
+                | execution_closed: true,
+                  execution_result: execution,
+                  archive_result:
+                    if(kind == :close, do: result, else: pending_archive(state.archive_result)),
+                  generation_closed:
+                    state.generation_closed or
+                      (kind == :close and match?({:ok, %{status: :confirmed}}, result)),
+                  error: if(state.error == :cleanup_unconfirmed, do: nil, else: state.error)
+              },
+              else: mark_unknown(%{state | error: :cleanup_unconfirmed}, "cleanup_unconfirmed")
+
+          execution_reply =
+            if(match?({:ok, %{status: :confirmed}}, execution) and retired == :ok,
+              do: execution,
+              else:
+                if(state.error,
+                  do:
+                    {:error,
+                     Error.new(:unknown_outcome, "subagent cleanup requires reconciliation",
+                       cause: %{generation: execution, child_retirements: retirements}
+                     )},
+                  else: execution
+                )
+            )
+
+          state =
+            reply_execution_closes(%{state | execution_result: execution_reply}, execution_reply)
+
+          reply =
+            if(state.error,
+              do:
+                {:error,
+                 Error.new(:unknown_outcome, "subagent cleanup requires reconciliation",
+                   cause: %{generation: result, child_retirements: retirements}
+                 )},
+              else: result
+            )
+
+          cond do
+            kind == :close -> {:noreply, reply_closes(state, reply)}
+            not state.execution_closed -> {:noreply, reply_closes(state, execution_reply)}
+            state.close_waiters != [] -> start_close(%{state | closing: true})
+            true -> {:noreply, state}
+          end
+
+        {{nil, :resync}, jobs} ->
+          Process.demonitor(ref, [:flush])
+          state = %{state | jobs: jobs}
+          state = reconcile_snapshot(state, result)
+          if state.observer_buffer == [], do: {:noreply, state}, else: resync(state)
+      end
+
+    finish_shutdown_stages(finished)
   end
+
+  def handle_info(
+        {:codex_collaboration, %{manager_id: manager_id} = event},
+        %{preparing: true, manager_id: previous_manager_id} = state
+      )
+      when manager_id != previous_manager_id,
+      do: {:noreply, %{state | observer_buffer: [event | state.observer_buffer]}}
 
   def handle_info({:codex_collaboration, event}, state) do
     cond do
@@ -409,41 +695,68 @@ defmodule Sigma.Agent.Subagents do
     {:noreply, child_activity(state, identity, activity)}
   end
 
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
-    case Map.pop(state.jobs, ref) do
-      {{from, kind}, jobs} ->
-        if from,
-          do:
-            GenServer.reply(
-              from,
-              failure(:execution_failure, "subagent control operation failed")
-            )
+  def handle_info({:child_interaction_error, correlation, reason}, state) do
+    Logger.warning("[Sigma.Agent.Subagents] Native child interaction failed: #{inspect(reason)}")
 
-        state = %{state | jobs: jobs, preparing: false, error: :control_failed}
-
-        state =
-          if kind == :close or state.closing,
-            do:
-              reply_closes(state, failure(:unknown_outcome, "subagent control operation failed")),
-            else: state
-
-        {:noreply, state}
-
-      {nil, _} ->
-        ids = for {id, item} <- state.pending, item.monitor == ref, do: id
-        {:noreply, Enum.reduce(ids, state, &forget_question(&2, &1))}
-    end
+    notify(state, {:subagent_interaction_error, correlation, reason})
+    {:noreply, state}
   end
 
-  def handle_info({:EXIT, pid, _reason}, state) when pid == state.manager or pid == state.session,
-    do: {:noreply, mark_unknown(%{state | error: :runtime_down}, "runtime_down")}
+  def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
+    finished =
+      case Map.pop(state.jobs, ref) do
+        {{nil, :close}, jobs} when state.execution_closed ->
+          result =
+            {:error,
+             Error.new(:unknown_outcome, "subagent archive completion did not acknowledge",
+               cause: reason
+             )}
+
+          state = %{state | jobs: jobs, archive_result: result}
+          {:noreply, reply_closes(state, result)}
+
+        {{from, kind}, jobs} ->
+          if from,
+            do:
+              GenServer.reply(
+                from,
+                failure(:execution_failure, "subagent control operation failed")
+              )
+
+          state = %{state | jobs: jobs, preparing: false, error: :control_failed}
+
+          state =
+            if kind == :close or state.closing,
+              do:
+                reply_closes(
+                  state,
+                  failure(:unknown_outcome, "subagent control operation failed")
+                ),
+              else: state
+
+          {:noreply, state}
+
+        {nil, _} ->
+          ids = for {id, item} <- state.pending, item.monitor == ref, do: id
+          {:noreply, Enum.reduce(ids, state, &forget_question(&2, &1))}
+      end
+
+    finish_shutdown_stages(finished)
+  end
+
+  def handle_info({:EXIT, pid, :normal}, %{closing: true, lifetime_recovery: pid} = state),
+    do: {:noreply, state}
+
+  def handle_info({:EXIT, pid, _reason}, state)
+      when pid == state.manager or pid == state.session or pid == state.lifetime_recovery,
+      do: {:noreply, mark_unknown(%{state | error: :runtime_down}, "runtime_down")}
 
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
   @impl true
   def terminate(_reason, state) do
-    if is_pid(state.session) and Process.alive?(state.session) do
-      task = Task.async(fn -> runtime_call(fn -> Session.close(state.session) end) end)
+    if is_pid(state.session) and not state.generation_closed do
+      task = Task.async(fn -> runtime_call(fn -> close_generation(state) end) end)
       result = Task.yield(task, 6_000) || Task.shutdown(task, :brutal_kill)
 
       unless match?({:ok, {:ok, %{status: :confirmed}}}, result) do
@@ -454,7 +767,14 @@ defmodule Sigma.Agent.Subagents do
     end
 
     owners =
-      [state.session, state.manager] ++ Enum.map(state.children, fn {_id, child} -> child.io end)
+      [
+        state.interaction_responder,
+        state.codex_resources,
+        state.session,
+        state.manager,
+        state.lifetime_recovery
+      ] ++
+        Enum.map(state.children, fn {_id, child} -> child.io end)
 
     deadline = System.monotonic_time(:millisecond) + 2_500
 
@@ -491,12 +811,190 @@ defmodule Sigma.Agent.Subagents do
   end
 
   defp start_close(state) do
-    job(state, nil, :close, fn ->
-      result = runtime_call(fn -> Session.close(state.session) end)
-      snapshot = runtime_call(fn -> MultiAgent.snapshot(state.manager) end)
-      {result, snapshot}
+    if state.codex_resources, do: Process.unlink(state.session)
+    if state.lifetime_recovery, do: Process.unlink(state.lifetime_recovery)
+
+    # Publish execution acknowledgements before starting any archive work, even
+    # when the first caller requested full closure. Concurrent execution-only
+    # callers must never depend on a later archive or owner-retirement result.
+    kind = if state.execution_closed, do: :close, else: :close_execution
+    host = self()
+
+    job(state, nil, kind, fn ->
+      {execution, retirements} =
+        if state.execution_closed do
+          {state.execution_result, state.child_retirements}
+        else
+          initial = runtime_call(fn -> close_generation(state) end)
+          retirements = retire_children(state)
+
+          execution =
+            with :ok <- child_retirement_result(retirements) do
+              if state.lifetime_recovery,
+                do: reconcile_generation(state, initial),
+                else: initial
+            end
+
+          {execution, retirements}
+        end
+
+      result =
+        if kind == :close,
+          do: complete_generation(host, state, execution),
+          else: execution
+
+      snapshot = if state.manager, do: runtime_call(fn -> MultiAgent.snapshot(state.manager) end)
+      {execution, result, snapshot, retirements}
     end)
   end
+
+  defp pending_archive({:error, _} = error), do: error
+  defp pending_archive(_previous), do: :pending
+
+  defp complete_generation(_host, %{lifetime_recovery: nil}, result), do: result
+
+  defp complete_generation(host, state, {:ok, %{status: :confirmed}} = execution) do
+    case state.completion_stage do
+      :pending ->
+        with :ok <- LifetimeEvidence.finalize(state.lifetime_recovery, state.manager),
+             :ok <- refresh_root_session(state),
+             :ok <- ChildArchiveEvidence.finalize(state.lifetime_recovery, state.manager) do
+          completion_advanced(host, state, :archived, execution)
+        end
+
+      :archived ->
+        with :ok <- stop_retained_session(state),
+             do: completion_advanced(host, state, :session_stopped, execution)
+
+      :session_stopped ->
+        with :ok <- LifetimeRecovery.retire(state.lifetime_recovery),
+             do: completion_advanced(host, state, :completed, execution)
+
+      :completed ->
+        execution
+    end
+  end
+
+  defp complete_generation(_host, _state, execution), do: execution
+
+  defp completion_advanced(host, state, stage, execution) do
+    # A later owner failure must not erase an already acknowledged archive or
+    # make a retry read a Session that this job has successfully stopped.
+    send(host, {:generation_completion, state.generation, stage})
+    complete_generation(host, %{state | completion_stage: stage}, execution)
+  end
+
+  defp refresh_root_session(%{root_binding: nil}), do: :ok
+
+  defp refresh_root_session(state) do
+    with {:ok, manifests} <- LifetimeRecovery.manifests(state.lifetime_recovery) do
+      captured? =
+        Enum.any?(manifests, fn {_reference, manifest} ->
+          manifest["subject"]["kind"] == "session" and
+            Enum.any?(manifest["run_refs"], fn reference ->
+              reference["store_ref"] == "root" and
+                reference["run_id"] == state.root_binding.run_id
+            end)
+        end)
+
+      if captured?, do: capture_root_session(state), else: :ok
+    end
+  end
+
+  # A normal public close remains sufficient for ordinary and genuinely
+  # pre-execution generations. It is not a Reconciliation receipt and does not
+  # authorize recovery of an unknown historical run. In particular, a failed
+  # Goal preparation has no Conversation record for a Session manifest.
+  defp reconcile_generation(state, {:ok, %{status: :confirmed}} = initial) do
+    with {:ok, required?} <- unknown_root?(state) do
+      if required? do
+        # A cancelled provider-only Conversation may leave a terminal unknown
+        # run even when native Session.close itself succeeded. Capture its
+        # public ownership ACKs while this exact Session is still available.
+        with :ok <- LifetimeEvidence.finalize(state.lifetime_recovery, state.manager),
+             :ok <- capture_root_session(state),
+             do: initial
+      else
+        initial
+      end
+    end
+  end
+
+  defp reconcile_generation(state, _initial) do
+    with :ok <- LifetimeEvidence.finalize(state.lifetime_recovery, state.manager),
+         :ok <- capture_root_session(state),
+         do: close_generation(state)
+  end
+
+  defp unknown_root?(%{lifetime_recovery: nil}), do: {:ok, false}
+  defp unknown_root?(%{root_binding: nil}), do: {:ok, false}
+
+  defp unknown_root?(state) do
+    case Store.load(state.root.store, state.root_binding.run_id) do
+      {:ok, %{run: run}} -> {:ok, run.state == :unknown_outcome}
+      {:error, %Error{class: :not_found}} -> {:ok, false}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp stop_retained_session(%{session: session}) do
+    if is_pid(session) and Process.alive?(session),
+      do: GenServer.stop(session, :normal),
+      else: :ok
+  end
+
+  defp capture_root_session(%{codex_resources: resources}) when is_pid(resources),
+    do: resources |> CodexResources.retirement_context() |> LifetimeEvidence.capture_session()
+
+  defp capture_root_session(_state), do: :ok
+
+  defp retire_children(state) do
+    Map.new(state.children, fn {id, child} ->
+      result =
+        case state.child_retirements[id] do
+          {:ok, %{status: :confirmed}} = confirmed -> confirmed
+          _ -> retire_child(child.io)
+        end
+
+      {id, result}
+    end)
+  end
+
+  defp retire_child(io) do
+    case ChildIO.retire(io) do
+      {:ok, %{status: :confirmed}} = confirmed ->
+        GenServer.stop(io, :normal)
+        confirmed
+
+      error ->
+        error
+    end
+  catch
+    :exit, reason -> {:error, {:child_retirement_unconfirmed, reason}}
+  end
+
+  defp child_retirement_result(retirements) do
+    failed =
+      Map.reject(retirements, fn {_id, result} ->
+        match?({:ok, %{status: :confirmed}}, result)
+      end)
+
+    if map_size(failed) == 0,
+      do: :ok,
+      else:
+        {:error,
+         Error.new(:unknown_outcome, "child host retirement requires reconciliation",
+           cause: failed
+         )}
+  end
+
+  defp close_generation(%{codex_resources: resources}) when is_pid(resources),
+    do: CodexResources.close(resources)
+
+  defp close_generation(state), do: Session.close(state.session)
+
+  defp native_context(%{codex_resources: nil}, _binding), do: {:ok, nil}
+  defp native_context(state, binding), do: CodexResources.context(state.codex_resources, binding)
 
   defp runtime_call(fun) do
     fun.()
@@ -506,22 +1004,45 @@ defmodule Sigma.Agent.Subagents do
 
   defp reply_closes(state, result) do
     Enum.each(state.close_waiters, &GenServer.reply(&1, result))
-    %{state | close_waiters: [], closing: false}
+    reply_execution_closes(%{state | close_waiters: [], closing: false}, result)
+  end
+
+  defp reply_execution_closes(state, result) do
+    Enum.each(state.execution_close_waiters, &GenServer.reply(&1, result))
+    %{state | execution_close_waiters: []}
   end
 
   defp prepare_generation(host, state, context), do: runtime_generation(host, state, context)
 
+  defp runtime_generation(host, %{generation_closed: true} = state, context) do
+    with :ok <- retire_generation(state), do: new_generation(host, state, context)
+  end
+
   defp runtime_generation(host, %{session: session} = state, context) when is_pid(session) do
     case Session.status(session) do
       %{phase: :idle} ->
-        {:ok, Map.take(state, [:generation, :session, :manager, :contracts])}
+        {:ok,
+         Map.take(state, [
+           :generation,
+           :session,
+           :manager,
+           :contracts,
+           :codex_resources,
+           :lifetime_recovery,
+           :archive_aliases,
+           :restored_children
+         ])}
 
       %{phase: :closed, cleanup: {:ok, %{status: :confirmed}}} ->
-        Process.unlink(state.manager)
-        Process.unlink(session)
-        GenServer.stop(state.manager, :shutdown)
-        GenServer.stop(session, :shutdown)
-        new_generation(host, state, context)
+        case close_generation(state) do
+          {:ok, %{status: :confirmed}} = closed ->
+            with {:ok, %{status: :confirmed}} <- complete_generation(host, state, closed),
+                 :ok <- retire_generation(state),
+                 do: new_generation(host, state, context)
+
+          error ->
+            error
+        end
 
       _ ->
         failure(:unknown_outcome, "previous subagent generation is not settled")
@@ -533,31 +1054,150 @@ defmodule Sigma.Agent.Subagents do
   defp new_generation(host, state, context) do
     generation = unique()
 
-    with {:ok, session} <- Session.start_link(owner_pid: host) do
-      result = start_manager(host, state, context, generation, session)
-      Process.unlink(session)
-      if match?({:error, _}, result), do: stop_owner(session)
-      result
+    with {:ok, recovery} <- start_lifetime_recovery(state, context),
+         {:ok, session, resources} <- start_lifetime_session(host, context, recovery) do
+      result =
+        if state.enabled and state.writer != nil do
+          start_manager(host, state, context, generation, session, recovery)
+        else
+          {:ok,
+           %{
+             generation: generation,
+             session: session,
+             manager: nil,
+             contracts: [],
+             interaction_responder: nil,
+             manager_id: nil,
+             archive_aliases: %{},
+             restored_children: %{}
+           }}
+        end
+
+      result =
+        if match?({:error, _}, result) do
+          stop_owner(resources || session)
+
+          case if(recovery, do: LifetimeRecovery.retire(recovery), else: :ok) do
+            :ok -> result
+            {:error, _} = error -> error
+          end
+        else
+          result
+        end
+
+      case result do
+        {:ok, runtime} ->
+          {:ok,
+           Map.merge(runtime, %{
+             codex_resources: resources,
+             lifetime_recovery: recovery,
+             generation_closed: false,
+             execution_closed: false,
+             execution_result: nil,
+             archive_result: :not_started,
+             completion_stage: :pending
+           })}
+
+        error ->
+          error
+      end
     end
   end
 
-  defp start_manager(host, state, context, generation, session) do
+  defp start_lifetime_recovery(%{writer: writer, transcript_path: path} = state, %{
+         config: %{native_tools: true} = config
+       })
+       when not is_nil(writer) and is_binary(path) do
+    with {:ok, header} <- root_header_id(writer, config.cwd),
+         {:ok, recovery} <-
+           LifetimeRecovery.start_link(
+             transcript: state.transcript_path,
+             # The journal header survives rename/adopt. Route session names
+             # belong to each manager's admission, not the transcript writer.
+             root_header_id: header
+           ) do
+      Process.unlink(recovery)
+      {:ok, recovery}
+    end
+  end
+
+  defp start_lifetime_recovery(_state, _context), do: {:ok, nil}
+
+  defp start_lifetime_session(host, context, recovery) do
+    case start_generation_session(host, context, recovery) do
+      {:ok, _, _} = result ->
+        result
+
+      {:error, _} = failure ->
+        case if(recovery, do: LifetimeRecovery.retire(recovery), else: :ok) do
+          :ok -> failure
+          {:error, _} = error -> error
+        end
+    end
+  end
+
+  defp start_generation_session(host, %{config: %{native_tools: true} = config}, recovery) do
+    with {:ok, resources} <-
+           CodexResources.start_link(
+             workspace: config.cwd,
+             owner_pid: host,
+             plugins: config[:native_plugins],
+             archive: config[:native_archive],
+             host_retirement: config[:host_retirement],
+             lifetime_recovery: if(recovery, do: %{writer: recovery, store_ref: "root"}),
+             memory_root:
+               Map.get(config, :native_memory_root) ||
+                 Path.join(apply(Sigma.Session.ConfigManager, :agent_dir, []), "memories")
+           ) do
+      Process.unlink(resources)
+      {:ok, CodexResources.session(resources), resources}
+    end
+  end
+
+  defp start_generation_session(host, _context, _recovery) do
+    with {:ok, session} <- Session.start_link(owner_pid: host) do
+      Process.unlink(session)
+      {:ok, session, nil}
+    end
+  end
+
+  defp retire_generation(state) do
+    with :ok <- child_retirement_result(retire_children(state)) do
+      stop_owner(state.interaction_responder)
+      stop_owner(state.manager)
+      stop_owner(state.codex_resources || state.session)
+      :ok
+    end
+  end
+
+  defp start_manager(host, state, context, generation, session, recovery) do
+    recovery_options =
+      if recovery,
+        do: [
+          recovery: LifetimeRecovery.configuration(recovery),
+          recovery_scope_id: LifetimeRecovery.scope(recovery),
+          root_agent_id: state.root_session_id
+        ],
+        else: []
+
     case MultiAgent.start_link(
-           parent_run_id: context.authority.run_id,
-           parent_name: "/root",
-           parent_authority: context.authority,
-           subscriber: host,
-           max_concurrent_threads_per_session: state.max_threads,
-           child_options: fn request, run_id, parent ->
-             GenServer.call(
-               host,
-               {:child_options, generation, request, run_id, parent},
-               :infinity
-             )
-           end,
-           admission_receipt: fn receipt ->
-             GenServer.call(host, {:receipt, generation, receipt}, :infinity)
-           end
+           [
+             parent_run_id: context.authority.run_id,
+             parent_name: "/root",
+             parent_authority: context.authority,
+             subscriber: host,
+             max_concurrent_threads_per_session: state.max_threads,
+             child_options: fn request, run_id, parent ->
+               GenServer.call(
+                 host,
+                 {:child_options, generation, request, run_id, parent},
+                 :infinity
+               )
+             end,
+             admission_receipt: fn receipt ->
+               GenServer.call(host, {:receipt, generation, receipt}, :infinity)
+             end
+           ] ++ recovery_options
          ) do
       {:ok, manager} ->
         Process.unlink(manager)
@@ -575,14 +1215,24 @@ defmodule Sigma.Agent.Subagents do
                 }
               end)
 
-            with {:ok, snapshot} <- MultiAgent.snapshot(manager) do
+            with {:ok, restored} <-
+                   ChildArchiveEvidence.restore(recovery, manager, state.roster.agents),
+                 {:ok, snapshot} <- MultiAgent.snapshot(manager),
+                 {:ok, responder} <- start_interaction_responder(host, state, manager) do
               {:ok,
                %{
                  generation: generation,
                  session: session,
                  manager: manager,
+                 interaction_responder: responder,
                  contracts: contracts,
-                 manager_id: snapshot.manager_id
+                 manager_id: snapshot.manager_id,
+                 initial_snapshot: snapshot,
+                 restored_children: restored,
+                 archive_aliases:
+                   Map.new(restored, fn {_name, archive} ->
+                     {archive["child_identity"]["agent_id"], archive["host_metadata"]["agent_id"]}
+                   end)
                }}
             end
           catch
@@ -597,59 +1247,149 @@ defmodule Sigma.Agent.Subagents do
     end
   end
 
-  defp stop_owner(pid) do
+  defp stop_owner(pid) when is_pid(pid) do
     Process.unlink(pid)
     if Process.alive?(pid), do: GenServer.stop(pid, :shutdown)
   catch
     :exit, _ -> :ok
   end
 
+  defp stop_owner(_pid), do: :ok
+
+  defp start_interaction_responder(host, state, manager) do
+    if Map.get(state.root.config, :native_tools, false) or
+         Keyword.get(state.root.config.dispatcher_opts, :native_child_interactions, false) do
+      request = fn correlation, request, current? ->
+        with true <- current?.(),
+             {:ok, handler} <-
+               GenServer.call(
+                 host,
+                 {:native_interaction_handler, correlation, request.kind}
+               ) do
+          handler.(request, current?)
+        else
+          false -> {:error, :stale_subagent_request}
+          {:error, _} = error -> error
+        end
+      end
+
+      with {:ok, responder} <-
+             ChildInteractionResponder.start_link(
+               owner_pid: host,
+               subscriber: host,
+               request_fn: request
+             ) do
+        case ChildInteractionResponder.attach(responder, manager) do
+          :ok ->
+            Process.unlink(responder)
+            {:ok, responder}
+
+          error ->
+            GenServer.stop(responder, :normal)
+            error
+        end
+      end
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp native_interaction_handler(state, identity, :request_user_input) do
+    case child_callbacks(state)[:ask_user_question_fn] do
+      callback when is_function(callback, 3) ->
+        {:ok, UserInput.resolver(fn request, opts -> callback.(identity, request, opts) end)}
+
+      _ ->
+        {:error, :user_input_handler_unavailable}
+    end
+  end
+
+  defp native_interaction_handler(state, identity, :sigma_tool_permission) do
+    case child_callbacks(state)[:permission_request_fn] do
+      callback when is_function(callback, 2) ->
+        {:ok, fn %{tool_call: call}, _current? -> callback.(identity, call) end}
+
+      _ ->
+        {:error, :permission_handler_unavailable}
+    end
+  end
+
+  defp native_interaction_handler(state, identity, :permission) do
+    case Keyword.get(state.root.config.dispatcher_opts, :runtime_permission_request_fn) do
+      callback when is_function(callback, 2) ->
+        source =
+          Map.take(
+            identity,
+            [:agent_id, :agent_path, :child_session_id, :public_run_id, :incarnation]
+          )
+
+        {:ok, fn request, current? -> callback.(Map.put(request, :source, source), current?) end}
+
+      _ ->
+        {:error, :runtime_permission_handler_unavailable}
+    end
+  end
+
+  defp native_interaction_handler(_state, _identity, _kind),
+    do: {:error, :unsupported_interaction_request}
+
   defp adopt_generation(%{generation: generation} = state, %{generation: generation}), do: state
 
   defp adopt_generation(state, runtime) do
-    old_children = state.children
+    if is_pid(state.interaction_responder), do: stop_owner(state.interaction_responder)
+
+    buffered = Enum.filter(state.observer_buffer, &(&1.manager_id == runtime.manager_id))
 
     state =
       Map.merge(state, runtime)
       |> Map.merge(%{
         children: %{},
+        child_retirements: %{},
         attempts: %{},
         manager_revision: 0,
-        observer_buffer: [],
+        observer_buffer: buffered,
         origins: %{},
+        root_binding: nil,
         error: nil
       })
 
     state =
       Enum.reduce(state.roster.agents, state, fn row, acc ->
         row =
-          if row.status in @terminal,
-            do: row,
-            else: %{
-              row
-              | status: :unknown_outcome,
-                activity: nil,
-                closure: :unknown,
-                reason: "owner_restart"
-            }
+          if row.status in @terminal or
+               (row.status == :unknown_outcome and
+                  retired_roster?(state.writer, state.transcript_path, [row])),
+             do: row,
+             else: %{
+               row
+               | status: :unknown_outcome,
+                 activity: nil,
+                 closure: :unknown,
+                 reason: "owner_restart"
+             }
 
         commit_fact(acc, :recovered, row)
       end)
 
-    Enum.each(old_children, fn {_id, child} ->
-      if Process.alive?(child.io), do: GenServer.stop(child.io, :normal)
-    end)
-
-    state
+    case runtime[:initial_snapshot] do
+      nil -> state
+      snapshot -> reconcile_snapshot(state, {:ok, snapshot})
+    end
   end
 
   defp prepare_child(state, request, run_id, parent) do
     child = parent.child
     agent_id = qualify(state, child.agent_id)
     existing = state.children[agent_id]
+    restored = state.restored_children[child.name]
+    original = if restored, do: restored["host_metadata"]["sigma_identity"], else: %{}
 
     child_session =
-      if existing, do: existing.identity.child_session_id, else: "child_" <> unique()
+      cond do
+        existing -> existing.identity.child_session_id
+        restored -> restored["host_metadata"]["child_session_id"]
+        true -> "child_" <> unique()
+      end
 
     parent_id =
       if parent.name == "/root",
@@ -671,9 +1411,15 @@ defmodule Sigma.Agent.Subagents do
       public_run_id: qualify(state, run_id),
       incarnation: child.incarnation,
       origin_turn_id:
-        if(existing, do: existing.identity.origin_turn_id, else: root_turn(state, parent)),
+        if(existing,
+          do: existing.identity.origin_turn_id,
+          else: original["origin_turn_id"] || root_turn(state, parent)
+        ),
       origin_tool_call_id:
-        if(existing, do: existing.identity.origin_tool_call_id, else: origin.tool_call_id),
+        if(existing,
+          do: existing.identity.origin_tool_call_id,
+          else: original["origin_tool_call_id"] || origin.tool_call_id
+        ),
       depth: length(String.split(child.name, "/", trim: true)) - 1
     }
 
@@ -703,13 +1449,28 @@ defmodule Sigma.Agent.Subagents do
             Keyword.put(prepared.options, :host_metadata, %{
               child_session_id: child_session,
               agent_id: agent_id,
-              transcript_path: metadata.transcript_path
+              transcript_path: metadata.transcript_path,
+              sigma_identity: identity
             })
 
-          {{:ok, options}, state}
+          with {:ok, options} <- lifetime_child_options(state, child, request, options, metadata) do
+            state =
+              update_in(
+                state.attempts[child.attempt_id],
+                &Map.put(&1, :executor_name, options[:name])
+              )
+
+            {{:ok, options}, state}
+          else
+            {:error, _} = error -> {error, state}
+          end
         else
-          {:error, %Error{}} = error -> {error, state}
-          {:error, _} -> {failure(:execution_failure, "child IO preparation failed"), state}
+          {:error, %Error{}} = error ->
+            {error, state}
+
+          {:error, cause} ->
+            {{:error, Error.new(:execution_failure, "child IO preparation failed", cause: cause)},
+             state}
         end
 
       {:error, _} ->
@@ -717,6 +1478,69 @@ defmodule Sigma.Agent.Subagents do
          %{state | error: :storage_failed}}
     end
   end
+
+  defp refresh_recovery_gate(%{error: :recovery_required} = state) do
+    uncertain =
+      Enum.filter(state.roster.agents, &(&1.status == :unknown_outcome or &1.closure == :unknown))
+
+    complete =
+      Enum.all?(state.recovered_admissions, fn {_id, attempt} ->
+        attempt.receipts != [] and
+          (not List.last(attempt.receipts).process_started or
+             Enum.any?(state.roster.agents, &(&1.agent_id == attempt.intent.agent_id)))
+      end)
+
+    if complete and uncertain != [] and
+         retired_roster?(state.writer, state.transcript_path, uncertain),
+       do: %{state | error: nil},
+       else: state
+  end
+
+  defp refresh_recovery_gate(state), do: state
+
+  defp lifetime_child_options(%{lifetime_recovery: nil}, _child, _request, options, _metadata),
+    do: {:ok, options}
+
+  defp lifetime_child_options(state, child, request, options, metadata) do
+    configuration = %{
+      provider: to_string(state.root.config.provider),
+      model: model_id(state.root.config.model),
+      cwd: state.root.config.cwd,
+      system_prompt: state.root.config.system_prompt,
+      request_options: request.options
+    }
+
+    with {:ok, reference} <-
+           LifetimeRecovery.admit(
+             state.lifetime_recovery,
+             child.recovery_identity,
+             request,
+             options,
+             metadata,
+             configuration
+           ),
+         do: {:ok, Keyword.put(options, :recovery_admission_ref, reference)}
+  end
+
+  defp retired_roster?(writer, transcript, rows)
+       when not is_nil(writer) and is_binary(transcript) do
+    with {:ok, %{entries: entries}} <- apply(Writer, :selected_journal, [writer]),
+         %{"id" => header} <- Enum.find(entries, &(&1["type"] == "session")),
+         do: LifetimeEvidence.retired_roster?(transcript, header, rows),
+         else: (_ -> false)
+  end
+
+  defp retired_roster?(_writer, _transcript, _rows), do: false
+
+  defp closed_roster?(writer, transcript, rows)
+       when not is_nil(writer) and is_binary(transcript) do
+    with {:ok, %{entries: entries}} <- apply(Writer, :selected_journal, [writer]),
+         %{"id" => header} <- Enum.find(entries, &(&1["type"] == "session")),
+         do: LifetimeEvidence.closed_roster?(transcript, header, rows),
+         else: (_ -> false)
+  end
+
+  defp closed_roster?(_writer, _transcript, _rows), do: false
 
   defp parent_transcript_path(state, "/root"), do: state.transcript_path
 
@@ -753,17 +1577,31 @@ defmodule Sigma.Agent.Subagents do
     directory = Path.join(state.transcript_path <> ".subagents", identity.child_session_id)
     host = self()
 
-    with :ok <- File.mkdir_p(directory) do
+    with :ok <- File.mkdir_p(directory),
+         {:ok, root_header_id} <- root_header_id(state.writer, root_config.cwd) do
       ChildIO.start_link(
         [
           config: root_config,
           identity: identity,
+          root_header_id: root_header_id,
+          lifetime_recovery: state.lifetime_recovery,
           messages: messages,
           transcript_path: Path.join(directory, "session.jsonl"),
           backplane_store_path: Path.join(directory, "runtime"),
           notify: fn identity, phase -> send(host, {:subagent_activity, identity, phase}) end
         ] ++ child_callbacks(state)
       )
+    end
+  end
+
+  defp root_header_id(writer, cwd) do
+    with result when result == :ignored or (is_tuple(result) and elem(result, 0) == :ok) <-
+           apply(Writer, :append, [writer, {:agent_start, cwd}]),
+         {:ok, %{entries: entries}} <- apply(Writer, :selected_journal, [writer]) do
+      case Enum.filter(entries, &(&1["type"] == "session")) do
+        [%{"id" => id}] when is_binary(id) and id != "" -> {:ok, id}
+        _ -> failure(:malformed_result, "root session requires one immutable header")
+      end
     end
   end
 
@@ -859,7 +1697,24 @@ defmodule Sigma.Agent.Subagents do
                 process_started: receipt.process_started
             }
 
-            {:ok, %{state | attempts: Map.put(state.attempts, receipt.attempt_id, attempt)}}
+            state = %{state | attempts: Map.put(state.attempts, receipt.attempt_id, attempt)}
+
+            executor =
+              if state.lifetime_recovery && receipt.status == :created,
+                do:
+                  LifetimeRecovery.observe_executor(
+                    state.lifetime_recovery,
+                    attempt.identity,
+                    attempt.executor_name
+                  ),
+                else: :ok
+
+            cleanup = with :ok <- executor, do: cleanup_unstarted_child(state, attempt)
+
+            case cleanup do
+              :ok -> {:ok, state}
+              {:error, _} = error -> {error, %{state | error: :cleanup_unconfirmed}}
+            end
 
           {:error, _} ->
             {failure(:execution_failure, "subagent receipt could not be persisted"),
@@ -867,6 +1722,26 @@ defmodule Sigma.Agent.Subagents do
         end
     end
   end
+
+  defp cleanup_unstarted_child(state, %{
+         status: status,
+         process_started: false,
+         identity: identity
+       })
+       when status in [:rejected, :failed] do
+    case state.children[identity.agent_id] do
+      %{identity: ^identity, io: io} ->
+        case ChildIO.reject_preparation(io, {identity.run_id, identity.incarnation}) do
+          {:ok, %{status: :confirmed}} -> :ok
+          {:error, _} = error -> error
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp cleanup_unstarted_child(_state, _attempt), do: :ok
 
   defp admission(state, attempt, phase) do
     id = attempt.identity
@@ -927,7 +1802,12 @@ defmodule Sigma.Agent.Subagents do
   defp observe(state, %{agent: agent}) do
     id = qualify(state, agent.agent_id)
     row = Enum.find(state.roster.agents, &(&1.agent_id == id))
-    run_id = qualify(state, agent.run_id)
+    original = get_in(agent.host_metadata, ["sigma_identity", "public_run_id"])
+
+    run_id =
+      if Map.get(agent, :archived, false) and is_binary(original),
+        do: original,
+        else: qualify(state, agent.run_id)
 
     if row do
       status =
@@ -938,10 +1818,17 @@ defmodule Sigma.Agent.Subagents do
       status =
         if status == :unknown_outcome and row.status in @terminal, do: row.status, else: status
 
+      reconciled = not is_nil(Map.get(agent, :retirement_receipt_ref))
+
+      status =
+        if reconciled and row.status in (@terminal ++ [:unknown_outcome]),
+          do: row.status,
+          else: status
+
       data = %{
         agent_id: id,
         run_id: run_id,
-        incarnation: agent.incarnation,
+        incarnation: if(reconciled, do: row.incarnation, else: agent.incarnation),
         status: status,
         reason: agent.reason,
         activity: if(status == :running, do: row.activity),
@@ -1283,15 +2170,26 @@ defmodule Sigma.Agent.Subagents do
   def configuration(state) do
     state
     |> Map.take(@configuration)
+    |> Map.update(:provider_options, [], &Keyword.delete(&1, :hosted_web_search))
+    |> Map.put(:mcp_clients, Map.get(Map.get(state, :mcp_session, %{}), :clients, %{}))
+    |> Map.put(:mcp_client_source, Map.get(state, :control_pid))
+    |> Map.put(:native_archive, archive_configuration(state))
+    |> Map.put(:host_retirement, Map.get(state, :host_retirement))
     |> Map.put(
       :mcp_hook_executor,
       Sigma.Coding.MCP.hook_executor(Map.get(state, :mcp_session, %{}))
     )
   end
 
+  defp archive_configuration(%{writer: writer, transcript_path: path, subagents: host})
+       when not is_nil(writer) and is_binary(path) and path != "" and not is_nil(host),
+       do: %{host: host, root_transcript: path, agent_name: "/root"}
+
+  defp archive_configuration(_state), do: nil
+
   defp model_id(model) when is_map(model), do: model[:id] || model["id"]
   defp model_id(model), do: to_string(model)
-  defp qualify(state, id), do: state.generation <> ":" <> id
+  defp qualify(state, id), do: Map.get(state.archive_aliases, id, state.generation <> ":" <> id)
   defp unique, do: Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
   defp now, do: System.system_time(:millisecond)
   defp failure(class, message), do: {:error, Error.new(class, message)}

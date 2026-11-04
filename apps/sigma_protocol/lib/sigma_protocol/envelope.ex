@@ -19,6 +19,18 @@ defmodule Sigma.Protocol.Envelope do
     prompt.follow_up
     turn.cancel
     permission.resolve
+    question.resolve
+    async_interaction.reply
+    async_interaction.dismiss
+    async_interactions.list
+    async_interaction.read
+    async_interaction.reply_chunk
+    async_interaction.reply_commit
+    async_interaction.reply_cancel
+    provider_hosted.list
+    provider_hosted.read
+    plugins.requests
+    plugins.install
     mcp.elicitation.resolve
     model.select
     skill.invoke
@@ -41,6 +53,19 @@ defmodule Sigma.Protocol.Envelope do
     tool.update
     tool.completed
     permission.required
+    question.required
+    question.resolved
+    async_interactions.updated
+    async_interactions.changed
+    async_interactions.page
+    async_interaction.chunk
+    async_interaction.uploaded
+    provider.hosted
+    provider_hosted.changed
+    provider_hosted.page
+    provider_hosted.chunk
+    plugins.requests.page
+    plugins.installed
     turn.completed
     turn.failed
     turn.cancelled
@@ -48,7 +73,7 @@ defmodule Sigma.Protocol.Envelope do
     skill.invocation.updated
   )
 
-  @capabilities ~w(metrics.v1 skills.v1 subagents.v1 subscription.cursor.v1 subscription.resync.v1)
+  @capabilities ~w(metrics.v1 skills.v1 subagents.v1 subscription.cursor.v1 subscription.resync.v1 questions.v1 async_interactions.v1 async_interactions.pages.v1 async_interactions.uploads.v1 provider_hosted.v1 provider_hosted.pages.v1 plugins.install.v1)
 
   @enforce_keys [:version, :id, :session_id, :timestamp, :type, :kind]
   defstruct [

@@ -171,12 +171,17 @@ defmodule Sigma.Coding.Hooks.CodexOutput do
         control =
           if event not in [:pre_tool_use, :permission_request, :subagent_start] and
                json["continue"] == false,
-             do: {:halt, json["stopReason"]},
+             do: {:halt, stop_reason(event, json)},
              else: control
 
         {with_context(control, event, hso), warnings}
     end
   end
+
+  defp stop_reason(:post_tool_use, json),
+    do: nonempty(json["reason"]) || json["stopReason"] || "PostToolUse hook stopped execution"
+
+  defp stop_reason(_event, json), do: json["stopReason"]
 
   defp with_context(control, event, hso) do
     context = if event in @context_events, do: hso["additionalContext"]
@@ -270,7 +275,10 @@ defmodule Sigma.Coding.Hooks.CodexOutput do
       json["suppressOutput"] == true or not is_nil(hso["updatedMCPToolOutput"]) ->
         {:error, "PostToolUse hook returned unsupported output fields."}
 
-      is_nil(json["decision"]) and json["continue"] != false and not is_nil(json["reason"]) ->
+      json["continue"] == false ->
+        :proceed
+
+      is_nil(json["decision"]) and not is_nil(json["reason"]) ->
         {:error, "PostToolUse hook returned reason without decision."}
 
       true ->

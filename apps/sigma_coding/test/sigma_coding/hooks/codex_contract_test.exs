@@ -269,8 +269,43 @@ defmodule Sigma.Coding.Hooks.CodexContractTest do
 
     assert warning =~ "reason without decision"
 
-    assert {{:halt, nil}, []} =
+    assert {{:halt, "why"}, []} =
              Outcome.evaluate(:post_tool_use, raw(%{"continue" => false, "reason" => "why"}), :pi)
+  end
+
+  test "stopped post tools use reason, stopReason and the Codex fallback in order" do
+    for {output, feedback} <- [
+          {%{"reason" => "  检查结果  ", "stopReason" => "fallback"}, "检查结果"},
+          {%{"reason" => " \n", "stopReason" => "  keep this text  "}, "  keep this text  "},
+          {%{"stopReason" => "explain the stop"}, "explain the stop"},
+          {%{"decision" => "block", "stopReason" => "review"}, "review"},
+          {%{"decision" => "block", "reason" => " \n", "stopReason" => "review"}, "review"},
+          {%{"decision" => "block", "reason" => " \n"}, "PostToolUse hook stopped execution"},
+          {%{"decision" => "block", "reason" => "  reason  ", "stopReason" => "fallback"},
+           "reason"},
+          {%{}, "PostToolUse hook stopped execution"},
+          {%{"stopReason" => ""}, ""}
+        ] do
+      assert {{:halt, ^feedback}, []} =
+               Outcome.evaluate(:post_tool_use, raw(Map.put(output, "continue", false)), :codex)
+    end
+
+    for unsupported <- [
+          %{"suppressOutput" => true},
+          %{
+            "hookSpecificOutput" => %{
+              "hookEventName" => "PostToolUse",
+              "updatedMCPToolOutput" => %{}
+            }
+          }
+        ] do
+      assert {:proceed, ["PostToolUse hook returned unsupported output fields."]} =
+               Outcome.evaluate(
+                 :post_tool_use,
+                 raw(Map.put(unsupported, "continue", false)),
+                 :codex
+               )
+    end
   end
 
   test "async outputs retain context while ignoring unsupported controls" do

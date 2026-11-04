@@ -29,6 +29,17 @@ defmodule Sigma.Session.EntryEncoder do
     {:ok, entry("message", parent_id, %{"message" => message_to_map(message)})}
   end
 
+  def encode({:context_window_started, attrs}, parent_id, _header?) do
+    with {:ok, window} <- Sigma.Session.EntryDecoder.context_window(attrs) do
+      {:ok,
+       entry("context_window", parent_id, %{
+         "runId" => window.run_id,
+         "incarnation" => window.incarnation,
+         "window" => window.window
+       })}
+    end
+  end
+
   def encode({:compact, %{content: summary}, first_kept_id}, parent_id, _header?)
       when is_binary(summary) and is_binary(first_kept_id) and first_kept_id != "" do
     {:ok,
@@ -82,6 +93,18 @@ defmodule Sigma.Session.EntryEncoder do
   end
 
   alias Sigma.Protocol.Metrics
+
+  def encode({:hook_feedback, attrs}, parent_id, _header?) do
+    with {:ok, event} <- Sigma.Session.HookFeedback.event(attrs) do
+      {:ok, entry("hook_feedback", parent_id, %{"event" => event})}
+    end
+  end
+
+  def encode({:async_interaction, attrs}, parent_id, _header?) do
+    with {:ok, event} <- Sigma.Protocol.AsyncInteractions.event(attrs) do
+      {:ok, entry("async_interaction", parent_id, %{"event" => event})}
+    end
+  end
 
   def encode({:subagent_admission, attrs}, parent_id, _header?) do
     with {:ok, event} <- Sigma.Session.SubagentAdmissions.normalize(attrs) do
@@ -165,6 +188,10 @@ defmodule Sigma.Session.EntryEncoder do
     Map.new(data, fn {key, value} -> {to_string(key), encode_value(value)} end)
   end
 
+  defp encode_value(value)
+       when is_nil(value) or is_boolean(value) or is_number(value) or is_binary(value),
+       do: value
+
   defp encode_value(value) when is_atom(value), do: Atom.to_string(value)
 
   defp encode_value(value) when is_struct(value) do
@@ -174,10 +201,6 @@ defmodule Sigma.Session.EntryEncoder do
   defp encode_value(value) when is_map(value), do: encode_data(value)
   defp encode_value(value) when is_list(value), do: Enum.map(value, &encode_value/1)
   defp encode_value(value) when is_tuple(value), do: value |> Tuple.to_list() |> encode_value()
-
-  defp encode_value(value)
-       when is_nil(value) or is_boolean(value) or is_number(value) or is_binary(value),
-       do: value
 
   defp encode_value(value), do: inspect(value, limit: 50, printable_limit: 1_000)
 

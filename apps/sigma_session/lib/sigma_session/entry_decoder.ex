@@ -3,6 +3,21 @@ defmodule Sigma.Session.EntryDecoder do
 
   alias Sigma.Agent.Message
 
+  def context_window(attrs) when is_map(attrs) do
+    run_id = Map.get(attrs, :run_id, attrs["runId"])
+    incarnation = Map.get(attrs, :incarnation, attrs["incarnation"])
+    window = Map.get(attrs, :window, attrs["window"])
+
+    if is_binary(run_id) and run_id != "" and is_integer(incarnation) and incarnation > 0 and
+         is_integer(window) and window > 1 do
+      {:ok, %{run_id: run_id, incarnation: incarnation, window: window}}
+    else
+      {:error, :invalid_context_window}
+    end
+  end
+
+  def context_window(_attrs), do: {:error, :invalid_context_window}
+
   @message_fields [
     {"api", :api, :nullable_string},
     {"provider", :provider, :nullable_string},
@@ -33,17 +48,24 @@ defmodule Sigma.Session.EntryDecoder do
     "redacted" => :redacted,
     "data" => :data,
     "mime_type" => :mime_type,
+    "detail" => :detail,
     "arguments" => :arguments,
+    "input_kind" => :input_kind,
     "thought_signature" => :thought_signature
   }
 
   @usage_fields %{
     "input" => :input,
+    "input_tokens" => :input_tokens,
     "output" => :output,
     "cache_read" => :cache_read,
     "cache_write" => :cache_write,
+    "reasoning_tokens" => :reasoning_tokens,
     "total_tokens" => :total_tokens
   }
+
+  @usage_provenance_fields ~w(source adapter input_tokens output_tokens cache_read_tokens cache_write_tokens reasoning_tokens visible_output_tokens total_tokens)
+  @usage_provenance_values ~w(provider adapter reported derived estimated unknown input input_tokens prompt_tokens output output_tokens completion_tokens cache_read cache_read_tokens cache_write cache_write_tokens reasoning reasoning_tokens visible_output visible_output_tokens total_tokens included excluded subset)
 
   @cost_fields %{
     "input" => :input,
@@ -169,6 +191,18 @@ defmodule Sigma.Session.EntryDecoder do
   def metrics(_entry), do: {:error, :invalid_metrics}
 
   @doc "Decodes a lifecycle fact without creating a conversation message."
+  def async_interaction(%{"type" => "async_interaction", "event" => event}),
+    do: Sigma.Protocol.AsyncInteractions.event(event)
+
+  def async_interaction(_), do: {:error, :invalid_async_interaction}
+
+  @doc "Decodes a Sigma hook receipt without creating a model message."
+  def hook_feedback(%{"type" => "hook_feedback", "event" => event}),
+    do: Sigma.Session.HookFeedback.event(event)
+
+  def hook_feedback(_), do: {:error, :invalid_hook_feedback}
+
+  @doc "Decodes a lifecycle fact without creating a conversation message."
   def subagent(%{"type" => "subagent"} = entry), do: Sigma.Protocol.Subagents.event(entry)
   def subagent(_entry), do: {:error, {:invalid_event, :invalid_subagent}}
 
@@ -249,9 +283,9 @@ defmodule Sigma.Session.EntryDecoder do
       {:ok, content_type} ->
         decoded = item |> take_known(@content_fields) |> Map.put(:type, content_type)
 
-        case validate_content_item(content_type, decoded) do
-          :ok -> {:ok, decoded}
-          {:error, reason} -> {:error, reason}
+        with {:ok, decoded} <- decode_input_kind(decoded),
+             :ok <- validate_content_item(content_type, decoded) do
+          {:ok, decoded}
         end
 
       :error ->
@@ -260,6 +294,16 @@ defmodule Sigma.Session.EntryDecoder do
   end
 
   defp content_item(_item), do: {:error, :invalid_content_item}
+
+  defp decode_input_kind(%{type: :tool_call, input_kind: kind} = item) do
+    case kind do
+      "function" -> {:ok, %{item | input_kind: :function}}
+      "custom" -> {:ok, %{item | input_kind: :custom}}
+      _ -> {:error, {:invalid_content_field, :tool_call, :input_kind}}
+    end
+  end
+
+  defp decode_input_kind(item), do: {:ok, item}
 
   defp validate_content_item(:text, item) do
     with :ok <- required_content_field(item, :text, :text, &is_binary/1),
@@ -278,7 +322,8 @@ defmodule Sigma.Session.EntryDecoder do
 
   defp validate_content_item(:image, item) do
     with :ok <- required_content_field(item, :image, :data, &is_binary/1),
-         :ok <- required_content_field(item, :image, :mime_type, &is_binary/1) do
+         :ok <- required_content_field(item, :image, :mime_type, &is_binary/1),
+         :ok <- optional_content_field(item, :image, :detail, &(&1 in ~w(auto low high original))) do
       :ok
     end
   end
@@ -286,11 +331,30 @@ defmodule Sigma.Session.EntryDecoder do
   defp validate_content_item(:tool_call, item) do
     with :ok <- required_content_field(item, :tool_call, :id, &non_empty_binary?/1),
          :ok <- required_content_field(item, :tool_call, :name, &non_empty_binary?/1),
-         :ok <- required_content_field(item, :tool_call, :arguments, &is_map/1),
+         :ok <- required_content_field(item, :tool_call, :arguments, &valid_tool_input?/1),
+         :ok <- validate_input_kind(item),
          :ok <- nullable_content_field(item, :tool_call, :thought_signature, &is_binary/1) do
       :ok
     end
   end
+
+  defp valid_tool_input?(input), do: is_map(input) or is_binary(input)
+
+  defp validate_input_kind(%{input_kind: :function, arguments: arguments})
+       when not is_map(arguments),
+       do: {:error, {:invalid_content_field, :tool_call, :arguments}}
+
+  defp validate_input_kind(%{input_kind: :custom, arguments: arguments})
+       when not is_binary(arguments),
+       do: {:error, {:invalid_content_field, :tool_call, :arguments}}
+
+  defp validate_input_kind(%{arguments: arguments} = item) when is_binary(arguments) do
+    if item[:input_kind] == :custom,
+      do: :ok,
+      else: {:error, {:invalid_content_field, :tool_call, :input_kind}}
+  end
+
+  defp validate_input_kind(_item), do: :ok
 
   defp required_content_field(item, content_type, field, validator) do
     case Map.fetch(item, field) do
@@ -450,23 +514,47 @@ defmodule Sigma.Session.EntryDecoder do
   defp usage(nil), do: {:ok, nil}
 
   defp usage(data) when is_map(data) do
+    # Providers retain explicit nil counters when usage or cache details are
+    # unknown. Inclusive input_tokens must survive independently of legacy input.
     with :ok <- required_usage_field(data, "input", :input),
          :ok <- required_usage_field(data, "output", :output),
          {:ok, decoded} <-
-           take_validated(data, @usage_fields, &is_integer/1, :invalid_usage_field),
+           take_validated(data, @usage_fields, &nullable_usage_counter?/1, :invalid_usage_field),
+         {:ok, provenance} <- usage_provenance(Map.get(data, "provenance")),
          {:ok, cost} <- usage_cost(Map.get(data, "cost")) do
-      {:ok, maybe_put(decoded, :cost, cost)}
+      {:ok, decoded |> maybe_put(:provenance, provenance) |> maybe_put(:cost, cost)}
     end
   end
 
   defp usage(_data), do: {:error, :invalid_usage}
 
   defp required_usage_field(data, string_key, atom_key) do
-    case Map.get(data, string_key) do
-      value when is_integer(value) -> :ok
-      _value -> {:error, {:invalid_usage_field, atom_key}}
+    case Map.fetch(data, string_key) do
+      {:ok, value} ->
+        if nullable_usage_counter?(value),
+          do: :ok,
+          else: {:error, {:invalid_usage_field, atom_key}}
+
+      :error ->
+        {:error, {:invalid_usage_field, atom_key}}
     end
   end
+
+  defp nullable_usage_counter?(value),
+    do: is_nil(value) or (is_integer(value) and value >= 0)
+
+  defp usage_provenance(nil), do: {:ok, nil}
+
+  defp usage_provenance(data) when is_map(data) do
+    known = Map.take(data, @usage_provenance_fields)
+
+    if Enum.all?(known, fn {_key, value} -> value in @usage_provenance_values end),
+      do: {:ok, known},
+      else: {:error, {:invalid_usage_field, :provenance}}
+  end
+
+  defp usage_provenance(value) when value in @usage_provenance_values, do: {:ok, value}
+  defp usage_provenance(_), do: {:error, {:invalid_usage_field, :provenance}}
 
   defp usage_cost(nil), do: {:ok, nil}
 

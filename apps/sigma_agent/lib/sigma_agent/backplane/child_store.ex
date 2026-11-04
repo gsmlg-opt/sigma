@@ -10,7 +10,7 @@ defmodule Sigma.Agent.Backplane.ChildStore do
 
   alias Backplane.AgentRuntime.Error
   alias Backplane.AgentRuntime.Store, as: RuntimeStore
-  alias Sigma.Agent.Backplane.ChildIO
+  alias Sigma.Agent.Backplane.{CanonicalHistory, ChildIO}
   alias Sigma.Agent.Backplane.Store, as: Sidecar
 
   @impl true
@@ -36,7 +36,24 @@ defmodule Sigma.Agent.Backplane.ChildStore do
     with :ok <- ChildIO.validate(io, key),
          :ok <- matching_run(stage.run, key),
          {:ok, result} <- Sidecar.acknowledge_commit(store, stage, meta) do
-      messages = get_in(stage, [:run, :context, :conversation, :messages]) || []
+      conversation = get_in(stage, [:run, :context, :conversation]) || %{}
+
+      messages =
+        conversation
+        |> Map.get(:messages, [])
+        |> Enum.map(&with_actual_settlement(&1, stage.run))
+
+      # Runtime projects feedback at a complete provider boundary. Only a
+      # terminal checkpoint may supplement records that never reached one;
+      # inserting them during preparation would split an unfinished tool batch.
+      messages =
+        if Backplane.AgentRuntime.Kernel.terminal?(Map.get(stage.run, :state)) do
+          ids = for %{host_feedback: %{"id" => id}} <- messages, into: MapSet.new(), do: id
+          feedback = CanonicalHistory.checkpoint_messages(%{conversation: conversation})
+          messages ++ Enum.reject(feedback, &MapSet.member?(ids, &1.host_feedback["id"]))
+        else
+          messages
+        end
 
       case project(io, key, messages) do
         :ok -> {:ok, result}
@@ -57,6 +74,18 @@ defmodule Sigma.Agent.Backplane.ChildStore do
   catch
     :exit, reason -> {:error, {:child_io_unavailable, reason}}
   end
+
+  defp with_actual_settlement(%{role: :tool, invocation_id: id} = message, run) do
+    success =
+      case get_in(run, [:tool_results, id]) do
+        %{is_error: false} = actual -> not Map.has_key?(actual, :error)
+        _ -> false
+      end
+
+    Map.put(message, :native_effect_success, success)
+  end
+
+  defp with_actual_settlement(message, _run), do: message
 
   defp matching_run(%{run_id: run_id, incarnation: incarnation}, {run_id, incarnation}), do: :ok
 

@@ -283,6 +283,69 @@ defmodule Sigma.Web.ImageAttachmentsTest do
     end
   end
 
+  describe "tool_data_urls/1" do
+    test "renders a native image up to ten MiB while upload limits stay at five MiB" do
+      bytes = @png <> :binary.copy(<<0>>, 10 * 1024 * 1024 - byte_size(@png))
+      block = %{type: :image, mime_type: "image/png", data: Base.encode64(bytes)}
+      expected = "data:image/png;base64," <> block.data
+
+      assert {:ok, [^expected]} = tool_data_urls([block])
+      assert {:error, :too_large} = ImageAttachments.data_urls([block])
+    end
+
+    test "renders structurally valid animated GIF output while uploads still reject it" do
+      animated = gif_global_prefix() <> gif_frame() <> gif_frame() <> <<0x3B>>
+      block = canonical_gif(animated)
+      expected = "data:image/gif;base64," <> block.data
+
+      assert {:ok, [^expected]} = tool_data_urls([block])
+      assert {:error, :animated_gif} = ImageAttachments.data_urls([block])
+    end
+
+    test "rejects tool images above ten MiB individually or in aggregate" do
+      oversized = @png <> :binary.copy(<<0>>, 10 * 1024 * 1024 + 1 - byte_size(@png))
+
+      assert {:error, :too_large} =
+               tool_data_urls([
+                 %{type: :image, mime_type: "image/png", data: Base.encode64(oversized)}
+               ])
+
+      bytes = @png <> :binary.copy(<<0>>, 6 * 1024 * 1024 - byte_size(@png))
+      block = %{type: :image, mime_type: "image/png", data: Base.encode64(bytes)}
+      assert {:error, :too_large} = tool_data_urls([block, block])
+    end
+
+    test "rejects unsafe types, malformed base64 and signatures, and malformed GIF structure" do
+      malformed_gif = binary_part(@single_gif, 0, byte_size(@single_gif) - 1)
+
+      for {image, reason} <- [
+            {%{type: :image, mime_type: "image/svg+xml", data: Base.encode64("<svg/>")},
+             :unsupported_type},
+            {%{type: :image, mime_type: "image/png", data: "not/base64!"}, :invalid_data},
+            {%{type: :image, mime_type: "image/png", data: Base.encode64(@jpeg)}, :invalid_data},
+            {canonical_gif(malformed_gif), :invalid_data},
+            {%{
+               type: :image,
+               mime_type: "image/gif",
+               data: Base.encode64(gif_global_prefix() <> <<0x3B>>)
+             }, :invalid_data},
+            {%{type: :image, mime_type: "image/png", url: "javascript:alert(1)"}, :invalid_data}
+          ] do
+        assert {:error, ^reason} = tool_data_urls([image])
+      end
+    end
+
+    test "validates complete canonical lists and retains the four-image chat bound" do
+      block = %{type: :image, mime_type: "image/png", data: Base.encode64(@png)}
+      assert {:ok, []} = tool_data_urls([])
+      assert {:error, :too_many} = tool_data_urls(List.duplicate(block, 5))
+      assert {:error, :invalid_data} = tool_data_urls([block, %{type: :image}])
+      assert {:error, :invalid_data} = tool_data_urls(nil)
+    end
+  end
+
+  defp tool_data_urls(images), do: apply(ImageAttachments, :tool_data_urls, [images])
+
   defp raw_image(mime, bytes),
     do: %{"mime_type" => mime, "data" => Base.encode64(bytes)}
 

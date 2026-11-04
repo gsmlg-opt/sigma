@@ -2,7 +2,113 @@ defmodule Sigma.Session.EntryDecoderTest do
   use ExUnit.Case, async: true
 
   alias Sigma.Agent.Message
-  alias Sigma.Session.EntryDecoder
+  alias Sigma.Session.{EntryDecoder, EntryEncoder}
+
+  test "raw custom tool input survives JSONL encoding and replay without JSON decoding" do
+    for input <- [
+          "*** Begin Patch\n*** Add File: 中文.txt\n+hello\n*** End Patch\n",
+          ~s({"literal":"this is custom input, not function arguments"})
+        ] do
+      message =
+        Message.assistant("custom-message", %{
+          content: [
+            %{
+              type: :tool_call,
+              id: "patch-call",
+              name: "apply_patch",
+              input_kind: :custom,
+              arguments: input
+            }
+          ],
+          stop_reason: :tool_use,
+          timestamp: 123
+        })
+
+      assert {:ok, entry} = EntryEncoder.encode({:message_end, message}, "previous", true)
+      wire_entry = entry |> Jason.encode!() |> Jason.decode!()
+      assert {:ok, replayed} = EntryDecoder.message(wire_entry)
+      assert replayed.content == message.content
+      assert replayed.stop_reason == :tool_use
+    end
+  end
+
+  test "custom input tags reject mismatched kinds without creating atoms" do
+    unknown = "custom_kind_#{System.unique_integer([:positive])}"
+
+    for {kind, arguments, field} <- [
+          {"custom", %{}, :arguments},
+          {"function", "raw", :arguments},
+          {unknown, "raw", :input_kind}
+        ] do
+      entry = %{
+        "message" => %{
+          "id" => "invalid-custom",
+          "role" => "assistant",
+          "timestamp" => 1,
+          "content" => [
+            %{
+              "type" => "tool_call",
+              "id" => "call",
+              "name" => "apply_patch",
+              "input_kind" => kind,
+              "arguments" => arguments
+            }
+          ]
+        }
+      }
+
+      assert {:error, {:invalid_content_field, :tool_call, ^field}} = EntryDecoder.message(entry)
+    end
+
+    assert_raise ArgumentError, fn -> String.to_existing_atom(unknown) end
+
+    entry = %{
+      "message" => %{
+        "id" => "untagged-custom",
+        "role" => "assistant",
+        "timestamp" => 1,
+        "content" => [
+          %{
+            "type" => "tool_call",
+            "id" => "call",
+            "name" => "apply_patch",
+            "arguments" => ~s({"raw":"custom input"})
+          }
+        ]
+      }
+    }
+
+    assert {:error, {:invalid_content_field, :tool_call, :input_kind}} =
+             EntryDecoder.message(entry)
+  end
+
+  test "namespaced calls and image result metadata retain their canonical journal values" do
+    message =
+      Message.assistant("clock-message", %{
+        content: [%{type: :tool_call, id: "clock-call", name: "clock::curr_time", arguments: %{}}],
+        timestamp: 123
+      })
+
+    assert {:ok, entry} = EntryEncoder.encode({:message_end, message}, nil, true)
+    assert {:ok, replayed} = entry |> Jason.encode!() |> Jason.decode!() |> EntryDecoder.message()
+    assert replayed.content == message.content
+
+    image = %{type: :image, data: Base.encode64(<<137, 80, 78, 71>>), mime_type: "image/png"}
+
+    result =
+      Message.tool_result("image-message", %{
+        tool_call_id: "image-call",
+        tool_name: "view_image",
+        content: [image],
+        metadata: %{structured_result: %{path: "plot.png", bytes: 4, detail: "original"}},
+        timestamp: 124
+      })
+
+    assert {:ok, entry} = EntryEncoder.encode({:message_end, result}, entry["id"], true)
+    assert {:ok, replayed} = entry |> Jason.encode!() |> Jason.decode!() |> EntryDecoder.message()
+    assert replayed.content == [image]
+    assert replayed.metadata["structured_result"]["detail"] == "original"
+  end
 
   test "decodes known message, content, usage, and enum fields" do
     entry = %{
@@ -266,6 +372,110 @@ defmodule Sigma.Session.EntryDecoderTest do
 
     assert {:error, {:invalid_usage_field, :input}} = EntryDecoder.message(empty_usage)
     assert {:error, {:invalid_usage_field, :output}} = EntryDecoder.message(input_only)
+  end
+
+  @tag :tmp_dir
+  test "real Responses unknown and partial usage survives JSONL and Writer recovery", %{
+    tmp_dir: dir
+  } do
+    wire_usages = [
+      nil,
+      %{"input_tokens" => 10, "output_tokens" => 2},
+      %{
+        "input_tokens" => 80,
+        "output_tokens" => 5,
+        "input_tokens_details" => %{"cached_tokens" => 20},
+        "output_tokens_details" => %{"reasoning_tokens" => 2}
+      }
+    ]
+
+    usages = Enum.map(wire_usages, &Sigma.Ai.ProviderUsage.from_wire(&1, :openai_responses))
+    [unknown, partial, cached] = usages
+    assert is_nil(unknown.input) and is_nil(unknown.output)
+    assert is_nil(partial.input) and partial.input_tokens == 10 and partial.output == 2
+    assert cached.input == 60 and cached.input_tokens == 80 and cached.reasoning_tokens == 2
+
+    path = Path.join(dir, "nullable-usage.jsonl")
+    opts = [storage_id: path, session_id: "nullable-usage", cwd: dir]
+    writer = start_supervised!({Sigma.Session.Writer, opts})
+
+    messages =
+      Enum.with_index(usages, fn usage, index ->
+        message =
+          Message.assistant("usage-#{index}", %{
+            content: [%{type: :text, text: "Answer #{index}"}],
+            timestamp: 123 + index,
+            stop_reason: :stop,
+            usage: usage
+          })
+
+        assert {:ok, entry} = EntryEncoder.encode({:message_end, message}, nil, true)
+
+        assert {:ok, decoded} =
+                 entry |> Jason.encode!() |> Jason.decode!() |> EntryDecoder.message()
+
+        assert decoded.usage ==
+                 Map.put(usage, :provenance, %{
+                   "source" => "provider",
+                   "input_tokens" => "included"
+                 })
+
+        assert Sigma.Ai.ProviderUsage.normalize(decoded.usage) ==
+                 Sigma.Ai.ProviderUsage.normalize(usage)
+
+        assert {:ok, _entry_id} = Sigma.Session.Writer.append(writer, {:message_end, message})
+        decoded
+      end)
+
+    assert :ok = stop_supervised(Sigma.Session.Writer)
+    assert {:ok, snapshot} = Sigma.Session.Log.snapshot(path)
+    assert snapshot.diagnostics == []
+    assert Enum.map(snapshot.messages, & &1.usage) == Enum.map(messages, & &1.usage)
+
+    reopened = start_supervised!({Sigma.Session.Writer, opts})
+    assert {:ok, restored} = Sigma.Session.Writer.context_snapshot(reopened)
+    assert Enum.map(restored.messages, & &1.usage) == Enum.map(messages, & &1.usage)
+  end
+
+  test "nullable usage still rejects malformed and negative known counters" do
+    for {key, field} <- [
+          {"input", :input},
+          {"input_tokens", :input_tokens},
+          {"output", :output},
+          {"cache_read", :cache_read},
+          {"cache_write", :cache_write},
+          {"reasoning_tokens", :reasoning_tokens},
+          {"total_tokens", :total_tokens}
+        ],
+        value <- ["10", -1, 1.5, true, %{}, []] do
+      usage = %{"input" => nil, "output" => nil} |> Map.put(key, value)
+
+      assert {:error, {:invalid_usage_field, ^field}} =
+               EntryDecoder.message(message_entry(%{"usage" => usage}))
+    end
+  end
+
+  test "usage provenance keeps only semantic JSON fields without creating atoms" do
+    unknown = "usage_provenance_#{System.unique_integer([:positive])}"
+
+    usage = %{
+      "input" => nil,
+      "output" => nil,
+      "provenance" => %{"source" => "provider", "input_tokens" => "included", unknown => "secret"}
+    }
+
+    assert {:ok, decoded} = EntryDecoder.message(message_entry(%{"usage" => usage}))
+    assert decoded.usage.provenance == %{"source" => "provider", "input_tokens" => "included"}
+    assert_raise ArgumentError, fn -> String.to_existing_atom(unknown) end
+
+    for provenance <- [%{"source" => unknown}, "secret", [], 42] do
+      assert {:error, {:invalid_usage_field, :provenance}} =
+               EntryDecoder.message(
+                 message_entry(%{"usage" => Map.put(usage, "provenance", provenance)})
+               )
+    end
+
+    assert_raise ArgumentError, fn -> String.to_existing_atom(unknown) end
   end
 
   test "requires non-empty tool result identities" do

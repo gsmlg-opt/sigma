@@ -2,6 +2,7 @@ defmodule Sigma.Coding.PermissionTest do
   use ExUnit.Case, async: true
 
   alias Sigma.Coding.Dispatcher
+  alias Sigma.Coding.PermissionInterceptor
   alias Sigma.Coding.PermissionPolicy
   alias Sigma.Coding.Hooks.Spec
   alias Sigma.Coding.Hooks.Spec.Command
@@ -185,5 +186,130 @@ defmodule Sigma.Coding.PermissionTest do
 
       assert File.read!(order_path) == "pre_tool\npermission\napproval\n"
     end
+  end
+
+  describe "raw custom input permission preparation" do
+    @describetag :tmp_dir
+
+    test "context-only empty patches retain raw input through approval", %{tmp_dir: dir} do
+      policy = start_supervised!({PermissionPolicy, default: :ask})
+      call = %{id: "raw", name: "apply_patch", arguments: "raw patch\n"}
+
+      specs = [
+        raw_hook(:pre_tool_use, :codex, %{
+          "hookSpecificOutput" => %{
+            "hookEventName" => "PreToolUse",
+            "additionalContext" => "keep context"
+          }
+        })
+      ]
+
+      for reply <- [:allow, {:allow, %{}}] do
+        assert {:allow, %{}, "keep context"} =
+                 PermissionInterceptor.check(call,
+                   cwd: dir,
+                   hook_specs: specs,
+                   permission_policy: policy,
+                   permission_request_fn: fn received ->
+                     assert received == call
+                     reply
+                   end
+                 )
+      end
+    end
+
+    test "legacy nonempty PreToolUse map patches reject raw input before approval", %{
+      tmp_dir: dir
+    } do
+      policy = start_supervised!({PermissionPolicy, default: :ask})
+      call = %{id: "raw", name: "apply_patch", arguments: "raw patch\n"}
+
+      specs = [
+        raw_hook(:pre_tool_use, :claude, %{
+          "hookSpecificOutput" => %{
+            "permissionDecision" => "allow",
+            "updatedInput" => %{"input" => "unsafe object edit"}
+          }
+        })
+      ]
+
+      assert {:deny, {:unsupported_input_edit, "apply_patch"}} =
+               PermissionInterceptor.check(call,
+                 cwd: dir,
+                 hook_specs: specs,
+                 permission_policy: policy,
+                 permission_request_fn: fn _ ->
+                   flunk("invalid input must not request approval")
+                 end
+               )
+    end
+
+    test "Codex full map replacement rejects raw input before approval", %{tmp_dir: dir} do
+      policy = start_supervised!({PermissionPolicy, default: :ask})
+      call = %{id: "raw", name: "apply_patch", arguments: "raw patch\n"}
+
+      specs = [
+        raw_hook(:pre_tool_use, :codex, %{
+          "hookSpecificOutput" => %{
+            "hookEventName" => "PreToolUse",
+            "permissionDecision" => "allow",
+            "updatedInput" => %{}
+          }
+        })
+      ]
+
+      assert {:deny, {:unsupported_input_edit, "apply_patch"}} =
+               PermissionInterceptor.check(call,
+                 cwd: dir,
+                 hook_specs: specs,
+                 permission_policy: policy,
+                 permission_request_fn: fn _ ->
+                   flunk("invalid input must not request approval")
+                 end
+               )
+    end
+
+    test "approval and legacy PermissionRequest nonempty map edits reject raw input", %{
+      tmp_dir: dir
+    } do
+      policy = start_supervised!({PermissionPolicy, default: :ask})
+      call = %{id: "raw", name: "apply_patch", arguments: "raw patch\n"}
+
+      assert {:deny, {:unsupported_input_edit, "apply_patch"}} =
+               PermissionInterceptor.check(call,
+                 permission_policy: policy,
+                 permission_request_fn: fn _ -> {:allow, %{"input" => "unsafe object edit"}} end
+               )
+
+      specs = [
+        raw_hook(:permission_request, :claude, %{
+          "hookSpecificOutput" => %{
+            "behavior" => "allow",
+            "updatedInput" => %{"input" => "unsafe object edit"}
+          }
+        })
+      ]
+
+      assert {:deny, {:unsupported_input_edit, "apply_patch"}} =
+               PermissionInterceptor.check(call,
+                 cwd: dir,
+                 hook_specs: specs,
+                 permission_policy: policy,
+                 permission_request_fn: fn _ -> flunk("hook already supplied its decision") end
+               )
+    end
+  end
+
+  defp raw_hook(event, dialect, output) do
+    command = "printf '%s' '" <> String.replace(Jason.encode!(output), "'", "'\\''") <> "'"
+
+    %Spec{
+      event: event,
+      matcher: :any,
+      handler: %Command{cmd: command, timeout_ms: 1_000},
+      origin: {:user, "test"},
+      dialect: dialect,
+      trusted?: true
+    }
   end
 end

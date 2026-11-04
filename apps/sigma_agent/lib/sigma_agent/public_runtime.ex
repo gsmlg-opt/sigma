@@ -8,8 +8,16 @@ defmodule Sigma.Agent.PublicRuntime do
   none of those internal terms enter protocol payloads.
   """
 
-  alias Sigma.Agent.{ProtocolEventMapper, ProtocolSubscription, Runtime}
-  alias Sigma.Protocol.{Codec, Envelope}
+  alias Sigma.Agent.{ProtocolEventMapper, ProtocolHostedResults, ProtocolSubscription, Runtime}
+  alias Sigma.Agent.PluginInstallations, as: PluginInstallationHost
+
+  alias Sigma.Protocol.{
+    AsyncInteractionPages,
+    Envelope,
+    HostedResultPages,
+    PluginInstallations,
+    Questions
+  }
 
   @skill_callbacks %{
     "skill.invoke" => :skill_invoke,
@@ -62,7 +70,7 @@ defmodule Sigma.Agent.PublicRuntime do
   def execute(%Envelope{kind: :command} = command, context) when is_map(context) do
     case dispatch(command, context) do
       {:ok, %Envelope{type: "session.snapshot"} = event} ->
-        case Codec.encode(event) do
+        case encode_async_event(event) do
           {:ok, _encoded} ->
             {:ok, event}
 
@@ -163,8 +171,10 @@ defmodule Sigma.Agent.PublicRuntime do
              target_id,
              Map.take(command.payload, ["requiredCapabilities"])
            ),
-         {:ok, _target_event} <- resume(target_command, context, repo_path, target_path) do
-      snapshot_event(target_id, snapshot, %{}, requested_capabilities(command))
+         {:ok, target_event} <- resume(target_command, context, repo_path, target_path) do
+      if "provider_hosted.pages.v1" in requested_capabilities(command),
+        do: {:ok, target_event},
+        else: snapshot_event(target_id, snapshot, %{}, requested_capabilities(command))
     else
       nil -> {:error, :missing_target_session_id}
       false -> {:error, :missing_target_session_id}
@@ -187,7 +197,14 @@ defmodule Sigma.Agent.PublicRuntime do
              Keyword.merge([fallback_cwd: repo_path], operation_opts(command))
            ),
          {:ok, target_path} <- session_path(sessions_dir, target_id),
-         {:ok, snapshot} <- apply(Sigma.Session.Log, :snapshot, [target_path]) do
+         {:ok, snapshot} <-
+           protocol_session_snapshot(
+             repo_path,
+             target_id,
+             target_path,
+             context,
+             requested_capabilities(command)
+           ) do
       snapshot_event(target_id, snapshot, %{}, requested_capabilities(command))
     else
       nil -> {:error, :missing_target_session_id}
@@ -266,11 +283,171 @@ defmodule Sigma.Agent.PublicRuntime do
     with {:ok, agent} <- running_agent(command, context),
          request_id when is_binary(request_id) <- command.payload["requestId"],
          {:ok, reply} <- permission_reply(command.payload["decision"]),
+         {:ok, request} <- pending_question(command, context, request_id),
+         true <- Questions.permission?(request),
          :ok <- answer_question(agent, command, context, request_id, reply) do
       status_event(command.session_id, agent)
     else
       nil -> {:error, :missing_request_id}
+      false -> {:error, :question_kind_mismatch}
       {:error, _reason} = error -> error
+    end
+  end
+
+  defp dispatch(%Envelope{type: "question.resolve"} = command, context) do
+    with {:ok, agent} <- running_agent(command, context),
+         request_id when is_binary(request_id) and request_id != "" <-
+           command.payload["requestId"],
+         {:ok, request} <- pending_question(command, context, request_id),
+         {:ok, reply} <- Questions.reply(command.payload, request),
+         :ok <- answer_question(agent, command, context, request_id, reply) do
+      status_event(command.session_id, agent)
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_question_response}
+    end
+  end
+
+  defp dispatch(%Envelope{type: type} = command, context)
+       when type in ~w(plugins.requests plugins.install) do
+    result =
+      with {:ok, capabilities} <- negotiate_capabilities(command),
+           true <- "plugins.install.v1" in capabilities,
+           {:ok, _encoded} <- encode_async_event(command),
+           {:ok, agent} <- running_agent(command, context),
+           {:ok, host} <- Sigma.Agent.plugin_installation_host(agent) do
+        case type do
+          "plugins.requests" ->
+            with {:ok, page} <-
+                   PluginInstallationHost.list(
+                     host,
+                     Map.take(command.payload, ~w(offset limit expectedRevision))
+                   ),
+                 do: PluginInstallations.page(command.session_id, page)
+
+          "plugins.install" ->
+            with {:ok, receipt} <-
+                   PluginInstallationHost.install(host, command.payload["requestId"], :protocol),
+                 do: PluginInstallations.installed(command.session_id, receipt)
+        end
+      else
+        false -> {:error, {:required_capability_missing, "plugins.install.v1"}}
+        {:error, _} = error -> error
+      end
+
+    case result do
+      {:error, %Backplane.AgentRuntime.Error{} = error} ->
+        {:ok, event} =
+          Envelope.event("session.error", command.session_id, %{},
+            turn_id: command.turn_id,
+            error: Sigma.Protocol.Error.new(Atom.to_string(error.class), error.message)
+          )
+
+        {:error, event}
+
+      result ->
+        result
+    end
+  end
+
+  defp dispatch(%Envelope{type: type} = command, context)
+       when type in ~w(provider_hosted.list provider_hosted.read) do
+    with {:ok, capabilities} <- negotiate_capabilities(command),
+         true <- "provider_hosted.pages.v1" in capabilities,
+         {:ok, _encoded} <- encode_async_event(command),
+         {:ok, repo_path, sessions_dir} <- paths(command, context),
+         {:ok, storage_path} <- session_path(sessions_dir, command.session_id),
+         {:ok, %{view: view}} <-
+           ProtocolHostedResults.load(repo_path, command.session_id, storage_path) do
+      case type do
+        "provider_hosted.list" ->
+          HostedResultPages.list(view, command.session_id, command.payload)
+
+        "provider_hosted.read" ->
+          HostedResultPages.read(view, command.session_id, command.payload)
+      end
+    else
+      false -> {:error, {:required_capability_missing, "provider_hosted.pages.v1"}}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp dispatch(%Envelope{type: type} = command, context)
+       when type in ~w(async_interactions.list async_interaction.read) do
+    with {:ok, capabilities} <- negotiate_capabilities(command),
+         true <- "async_interactions.pages.v1" in capabilities,
+         {:ok, _encoded} <- encode_async_event(command),
+         {:ok, agent} <- running_agent(command, context),
+         {:ok, snapshot} <- async_snapshot(agent, context) do
+      case type do
+        "async_interactions.list" ->
+          AsyncInteractionPages.list(snapshot, command.session_id, command.payload)
+
+        "async_interaction.read" ->
+          AsyncInteractionPages.read(snapshot, command.session_id, command.payload)
+      end
+    else
+      false -> {:error, {:required_capability_missing, "async_interactions.pages.v1"}}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp dispatch(%Envelope{type: type} = command, context)
+       when type in ~w(async_interaction.reply_chunk async_interaction.reply_commit async_interaction.reply_cancel) do
+    with {:ok, capabilities} <- negotiate_capabilities(command),
+         true <- "async_interactions.uploads.v1" in capabilities,
+         {:ok, _encoded} <- encode_async_event(command),
+         {:ok, agent} <- running_agent(command, context) do
+      case type do
+        "async_interaction.reply_commit" ->
+          result = Sigma.Agent.commit_async_reply_upload(agent, command.payload)
+
+          with {:ok, acknowledgement} <- async_reply_ack(result, command.payload["itemId"]) do
+            async_ack_response(command, agent, context, capabilities, acknowledgement)
+          else
+            {:error, {:async_reply_accepted, acknowledgement, reason}} ->
+              async_acceptance_error(command, acknowledgement, reason)
+
+            {:error, _} = error ->
+              error
+          end
+
+        _ ->
+          result =
+            if type == "async_interaction.reply_chunk",
+              do: Sigma.Agent.upload_async_reply_chunk(agent, command.payload),
+              else: Sigma.Agent.cancel_async_reply_upload(agent, command.payload)
+
+          with {:ok, progress} <- result,
+               {:ok, event} <-
+                 Envelope.event("async_interaction.uploaded", command.session_id, progress),
+               {:ok, _encoded} <- encode_async_event(event) do
+            {:ok, event}
+          end
+      end
+    else
+      false -> {:error, {:required_capability_missing, "async_interactions.uploads.v1"}}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp dispatch(%Envelope{type: type} = command, context)
+       when type in ~w(async_interaction.reply async_interaction.dismiss) do
+    with {:ok, capabilities} <- negotiate_capabilities(command),
+         true <- async_capable?(capabilities),
+         {:ok, _encoded} <- encode_async_event(command),
+         {:ok, agent} <- running_agent(command, context),
+         {:ok, acknowledgement} <- execute_async_command(agent, command, context) do
+      async_ack_response(command, agent, context, capabilities, acknowledgement)
+    else
+      false ->
+        {:error, {:required_capability_missing, "async_interactions.v1"}}
+
+      {:error, {:async_reply_accepted, acknowledgement, reason}} ->
+        async_acceptance_error(command, acknowledgement, reason)
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -339,40 +516,30 @@ defmodule Sigma.Agent.PublicRuntime do
          {:ok, repo_path, sessions_dir} <- paths(command, context),
          {:ok, storage_path} <- session_path(sessions_dir, command.session_id),
          {:ok, agent} <- running_agent(command, context),
-         {:ok, subscription_id, cursor, turn_snapshot, session_snapshot} <-
+         {:ok, _subscription_id, _cursor, _turn_snapshot, _session_snapshot, event} <-
            ProtocolSubscription.attach_snapshot(agent, command.session_id, sink,
              max_sink_queue: context[:max_subscriber_queue] || 256,
              capabilities: capabilities,
              snapshot_loader: fn ->
-               Runtime.session_snapshot(repo_path, command.session_id, storage_path)
+               protocol_session_snapshot(
+                 repo_path,
+                 command.session_id,
+                 storage_path,
+                 context,
+                 capabilities
+               )
+             end,
+             snapshot_validator: fn subscription_id, cursor, turn_snapshot, session_snapshot ->
+               attachment_event(
+                 command,
+                 repo_path,
+                 capabilities,
+                 subscription_id,
+                 cursor,
+                 turn_snapshot,
+                 session_snapshot
+               )
              end
-           ),
-         {:ok, event} <-
-           Envelope.event(
-             "session.snapshot",
-             command.session_id,
-             session_snapshot
-             |> ProtocolEventMapper.snapshot_payload(command.session_id, capabilities)
-             |> Map.merge(%{
-               "subscriptionId" => subscription_id,
-               "attached" => true,
-               "enabledCapabilities" => capabilities,
-               "cursor" => cursor,
-               "watermark" => cursor,
-               "turn" => public_turn_snapshot(turn_snapshot),
-               "metrics" =>
-                 ProtocolEventMapper.metrics_snapshot(
-                   session_snapshot.metrics,
-                   command.session_id
-                 ),
-               "runtimeSnapshot" =>
-                 runtime_snapshot(
-                   Runtime.session_status(repo_path, command.session_id),
-                   turn_snapshot,
-                   session_snapshot,
-                   cursor
-                 )
-             })
            ) do
       {:ok, event}
     else
@@ -398,12 +565,60 @@ defmodule Sigma.Agent.PublicRuntime do
     end
   end
 
+  defp attachment_event(
+         command,
+         repo_path,
+         capabilities,
+         subscription_id,
+         cursor,
+         turn_snapshot,
+         session_snapshot
+       ) do
+    with {:ok, event} <-
+           Envelope.event(
+             "session.snapshot",
+             command.session_id,
+             session_snapshot
+             |> ProtocolEventMapper.snapshot_payload(command.session_id, capabilities)
+             |> Map.merge(%{
+               "subscriptionId" => subscription_id,
+               "attached" => true,
+               "enabledCapabilities" => capabilities,
+               "cursor" => cursor,
+               "watermark" => cursor,
+               "turn" => public_turn_snapshot(turn_snapshot),
+               "metrics" =>
+                 ProtocolEventMapper.metrics_snapshot(
+                   session_snapshot.metrics,
+                   command.session_id
+                 ),
+               "runtimeSnapshot" =>
+                 runtime_snapshot(
+                   Runtime.session_status(repo_path, command.session_id),
+                   turn_snapshot,
+                   session_snapshot,
+                   cursor
+                 )
+             })
+           ),
+         {:ok, _encoded} <- encode_async_event(event) do
+      {:ok, event}
+    end
+  end
+
   defp resume(command, context, repo_path, storage_path) do
     with {:ok, snapshot} <- apply(Sigma.Session.Log, :snapshot, [storage_path]),
          :ok <- require_session_header(snapshot),
          :ok <- recover_skill_invocations(context, command.session_id),
          :ok <- ensure_runtime_session(command, context, repo_path, storage_path, snapshot),
-         {:ok, snapshot} <- Runtime.session_snapshot(repo_path, command.session_id, storage_path) do
+         {:ok, snapshot} <-
+           protocol_session_snapshot(
+             repo_path,
+             command.session_id,
+             storage_path,
+             context,
+             requested_capabilities(command)
+           ) do
       snapshot_event(command.session_id, snapshot, %{}, requested_capabilities(command))
     end
   end
@@ -446,6 +661,8 @@ defmodule Sigma.Agent.PublicRuntime do
       {:ok,
        opts
        |> Keyword.put(:messages, snapshot.messages)
+       |> Keyword.put(:context_messages, snapshot.context_messages)
+       |> Keyword.put(:context_window, snapshot.context_window)
        |> Keyword.put(:active_leaf, Map.get(snapshot, :active_leaf_id))
        |> Keyword.put(:context_revision, length(Map.get(snapshot, :branch_entry_ids, [])))
        |> Keyword.put(:context_source, :journal_replay)
@@ -520,12 +737,24 @@ defmodule Sigma.Agent.PublicRuntime do
     end
   end
 
+  defp pending_question(command, context, request_id) do
+    with {:ok, repo_path, _sessions_dir} <- paths(command, context) do
+      case Enum.find(
+             Runtime.pending_questions(repo_path, command.session_id),
+             &(&1[:id] == request_id)
+           ) do
+        nil -> {:error, :not_found}
+        request -> {:ok, request}
+      end
+    end
+  end
+
   defp cancel_detached_children(command, context) do
     with {:ok, repo, _dir} <- paths(command, context),
          host when is_pid(host) <- Runtime.lookup(repo, command.session_id, :subagents),
          {:ok, %{subagents: roster}} <- Sigma.Agent.Subagents.snapshot(host),
          true <- roster.counts.executing + roster.counts.pending > 0,
-         {:ok, %{status: :confirmed}} <- Sigma.Agent.Subagents.close(host) do
+         {:ok, %{status: :confirmed}} <- Sigma.Agent.Subagents.close_execution(host) do
       {:cancelled_children, nil}
     else
       false -> {:error, :no_active_turn}
@@ -688,6 +917,167 @@ defmodule Sigma.Agent.PublicRuntime do
     end
   end
 
+  defp protocol_session_snapshot(repo_path, session_id, storage_path, context, capabilities) do
+    with {:ok, snapshot} <-
+           Runtime.session_snapshot(repo_path, session_id, storage_path,
+             questions: "questions.v1" in capabilities,
+             selected_journal: "provider_hosted.pages.v1" in capabilities
+           ) do
+      agent = Runtime.lookup(repo_path, session_id, :agent)
+
+      if async_capable?(capabilities) and is_pid(agent) do
+        with {:ok, async} <- async_snapshot(agent, context),
+             {:ok, _payload} <- ProtocolEventMapper.async_interaction_payload(async, session_id) do
+          {:ok, Map.put(snapshot, :async_interaction_snapshot, async)}
+        end
+      else
+        {:ok, snapshot}
+      end
+    end
+  end
+
+  defp execute_async_command(
+         agent,
+         %Envelope{type: "async_interaction.reply", payload: payload},
+         context
+       ) do
+    callback = context[:reply_async_interaction] || (&Sigma.Agent.reply_async_interaction/4)
+
+    result = callback.(agent, payload["itemId"], payload["reply"], payload["expectedLeafId"])
+    async_reply_ack(result, payload["itemId"])
+  end
+
+  defp execute_async_command(
+         agent,
+         %Envelope{type: "async_interaction.dismiss", payload: payload},
+         context
+       ) do
+    callback = context[:dismiss_async_interaction] || (&Sigma.Agent.dismiss_async_interaction/3)
+
+    with :ok <- callback.(agent, payload["itemId"], payload["expectedLeafId"]) do
+      {:ok, %{"itemId" => payload["itemId"], "status" => "dismissed"}}
+    end
+  end
+
+  defp async_reply_status(status)
+       when status in [:saved, :dispatching, :admitted, :consumed, :delivery_unknown],
+       do: {:ok, Atom.to_string(status)}
+
+  defp async_reply_status(status)
+       when status in ~w(saved dispatching admitted consumed delivery_unknown),
+       do: {:ok, status}
+
+  defp async_reply_status(_), do: {:error, :invalid_async_reply_acknowledgement}
+
+  defp async_reply_ack({:ok, result}, item_id) when is_map(result) do
+    with {:ok, status} <- async_reply_status(result[:status]),
+         do: {:ok, %{"itemId" => item_id, "status" => status}}
+  end
+
+  defp async_reply_ack({:error, {:async_reply_accepted, receipt, reason}}, item_id) do
+    with {:ok, acknowledgement} <- async_reply_ack({:ok, receipt}, item_id),
+         do: {:error, {:async_reply_accepted, acknowledgement, reason}}
+  end
+
+  defp async_reply_ack({:error, _} = error, _item_id), do: error
+  defp async_reply_ack(_, _), do: {:error, :invalid_async_reply_acknowledgement}
+
+  defp async_acceptance_error(command, acknowledgement, reason) do
+    event = error_event(command, reason)
+
+    event = %{
+      event
+      | payload: %{"acknowledgement" => acknowledgement, "snapshotRequired" => true},
+        error: %{
+          event.error
+          | message:
+              "The reply was accepted for dispatch, but its admission receipt could not be saved."
+        }
+    }
+
+    with {:ok, _encoded} <- encode_async_event(event), do: {:error, event}
+  end
+
+  defp async_snapshot(agent, context) do
+    callback = context[:async_interaction_snapshot] || (&Sigma.Agent.async_interaction_snapshot/1)
+    callback.(agent)
+  end
+
+  defp async_capable?(capabilities),
+    do: Enum.any?(~w(async_interactions.v1 async_interactions.pages.v1), &(&1 in capabilities))
+
+  defp async_response(snapshot, session_id, capabilities) do
+    if "async_interactions.pages.v1" in capabilities do
+      with {:ok, descriptor} <- AsyncInteractionPages.descriptor(snapshot, session_id),
+           do: {:ok, "async_interactions.changed", %{"inbox" => descriptor}}
+    else
+      with {:ok, payload} <- ProtocolEventMapper.async_interaction_payload(snapshot, session_id),
+           do: {:ok, "async_interactions.updated", payload}
+    end
+  end
+
+  # The mutation already returned a durable receipt. A later read/encoding
+  # failure must not make that acceptance disappear from the client response.
+  defp async_ack_response(command, agent, context, capabilities, acknowledgement) do
+    result =
+      try do
+        with {:ok, snapshot} <- async_snapshot(agent, context),
+             {:ok, type, payload} <- async_response(snapshot, command.session_id, capabilities),
+             {:ok, event} <-
+               Envelope.event(
+                 type,
+                 command.session_id,
+                 Map.put(payload, "acknowledgement", acknowledgement)
+               ),
+             {:ok, _encoded} <- encode_async_event(event) do
+          {:ok, event}
+        else
+          {:error, _} = error -> error
+          _ -> {:error, :invalid_async_snapshot}
+        end
+      rescue
+        exception -> {:error, {:snapshot_refresh_exception, exception.__struct__}}
+      catch
+        kind, _reason -> {:error, {:snapshot_refresh_failure, kind}}
+      end
+
+    case result do
+      {:ok, _} = success ->
+        success
+
+      {:error, reason} ->
+        event = error_event(command, reason)
+
+        event = %{
+          event
+          | payload: %{"acknowledgement" => acknowledgement, "snapshotRequired" => true},
+            error: %{
+              event.error
+              | message: "The interaction was accepted, but its updated snapshot is unavailable."
+            }
+        }
+
+        with {:ok, _encoded} <- encode_async_event(event), do: {:error, event}
+    end
+  end
+
+  defp encode_async_event(%Envelope{payload: payload} = event) do
+    if Map.has_key?(payload, "asyncInteractionError") do
+      {:error, :async_payload_rejected}
+    else
+      case ProtocolEventMapper.encode_hosted_event(event) do
+        {:error, :payload_too_large} ->
+          if event.type in ~w(async_interactions.updated async_interaction.reply async_interaction.dismiss) or
+               Map.has_key?(payload, "asyncInteractions"),
+             do: {:error, :async_payload_too_large},
+             else: {:error, :payload_too_large}
+
+        result ->
+          result
+      end
+    end
+  end
+
   defp status_snapshot(command, context, repo_path, storage_path) do
     case command.payload["subscriptionId"] do
       subscription_id when is_binary(subscription_id) and subscription_id != "" ->
@@ -697,7 +1087,15 @@ defmodule Sigma.Agent.PublicRuntime do
           ProtocolSubscription.snapshot(
             subscription_id,
             sink,
-            fn -> Runtime.session_snapshot(repo_path, command.session_id, storage_path) end,
+            fn ->
+              protocol_session_snapshot(
+                repo_path,
+                command.session_id,
+                storage_path,
+                context,
+                requested_capabilities(command)
+              )
+            end,
             fn cursor, turn_snapshot, snapshot ->
               runtime_status = Runtime.session_status(repo_path, command.session_id)
               turn = public_turn_snapshot(turn_snapshot)
@@ -722,10 +1120,15 @@ defmodule Sigma.Agent.PublicRuntime do
                        },
                        requested_capabilities(command)
                      ),
-                   {:ok, _encoded} <- Codec.encode(event) do
+                   {:ok, _encoded} <- encode_async_event(event) do
                 {:ok, event}
               end
-            end
+            end,
+            %{
+              session_id: command.session_id,
+              agent: Runtime.lookup(repo_path, command.session_id, :agent),
+              capabilities: requested_capabilities(command)
+            }
           )
         else
           false -> {:error, :subscriber_required}
@@ -733,7 +1136,13 @@ defmodule Sigma.Agent.PublicRuntime do
 
       _subscription_id ->
         with {:ok, snapshot} <-
-               Runtime.session_snapshot(repo_path, command.session_id, storage_path) do
+               protocol_session_snapshot(
+                 repo_path,
+                 command.session_id,
+                 storage_path,
+                 context,
+                 requested_capabilities(command)
+               ) do
           runtime_status = Runtime.session_status(repo_path, command.session_id)
           turn = agent_status(repo_path, command.session_id)
 
@@ -772,11 +1181,26 @@ defmodule Sigma.Agent.PublicRuntime do
           capabilities = Enum.uniq(capabilities)
           missing = capabilities -- Envelope.capabilities()
 
-          if missing == [] do
-            {:ok, capabilities}
-          else
-            {:error,
-             {:unsupported_capabilities, %{missing: missing, supported: Envelope.capabilities()}}}
+          cond do
+            missing != [] ->
+              {:error,
+               {:unsupported_capabilities,
+                %{missing: missing, supported: Envelope.capabilities()}}}
+
+            "async_interactions.v1" in capabilities and
+                "async_interactions.pages.v1" in capabilities ->
+              {:error, :incompatible_protocol_capabilities}
+
+            "async_interactions.uploads.v1" in capabilities and
+                "async_interactions.pages.v1" not in capabilities ->
+              {:error, :incompatible_protocol_capabilities}
+
+            "provider_hosted.v1" in capabilities and
+                "provider_hosted.pages.v1" in capabilities ->
+              {:error, :incompatible_protocol_capabilities}
+
+            true ->
+              {:ok, capabilities}
           end
         else
           {:error, :invalid_protocol_capabilities}
@@ -824,6 +1248,8 @@ defmodule Sigma.Agent.PublicRuntime do
       provider_id: payload["providerId"],
       model_id: payload["modelId"],
       messages: [],
+      context_messages: [],
+      context_window: nil,
       mcp_server_ids: []
     }
   end

@@ -35,6 +35,15 @@ jobs:
           rustup toolchain install stable --profile minimal --no-self-update
           rustup default stable
 
+      - name: Set up Deno for native Code Mode tests
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: "v2.8.3"
+
+      - name: Set up bubblewrap and verify sandbox prerequisites
+        timeout-minutes: 10
+        run: scripts/setup-ci-bubblewrap.sh
+
       - name: Restore exact test cache
         uses: actions/cache@v6
         with:
@@ -49,14 +58,20 @@ jobs:
             native/sigma_terminal_helper/target
           key: test-${{ runner.os }}-${{ runner.arch }}-otp-28.5-elixir-1.18.4-${{ hashFiles('mix.lock', '**/mix.exs', '**/Cargo.lock') }}
 
+      - name: Build debug native helpers before compilation
+        run: scripts/build-terminal-helper.sh debug
+
       - name: Install dependencies
         run: mix deps.get
 
       - name: Rebuild test applications
         run: mix compile --force --warnings-as-errors
 
-      - name: Build debug terminal helper for native tests
-        run: scripts/build-terminal-helper.sh debug
+      - name: Build MCP stdio guardian for plugin lifecycle checks
+        run: mix backplane.mcp.stdio.build
 
       - name: Run unit tests
         run: mix test
+
+      - name: Run native sandbox tests
+        run: cargo test --locked --manifest-path native/sigma_terminal_helper/Cargo.toml --test sandbox

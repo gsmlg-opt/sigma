@@ -92,6 +92,55 @@ defmodule Sigma.Web.SessionLiveTest do
     end
   end
 
+  defmodule AsyncToolsProvider do
+    @behaviour Sigma.Ai.Provider
+
+    @impl true
+    def stream(params) do
+      send(Application.fetch_env!(:sigma_web, :capture_provider_pid), {:provider_params, params})
+
+      content =
+        if Enum.any?(params.context.messages, &(&1.role == :tool_result)) do
+          [%{type: :text, text: "Async work continued"}]
+        else
+          [
+            %{
+              type: :tool_call,
+              id: "async-questions",
+              name: "request_user_input_async",
+              arguments: %{
+                "questions" => [
+                  %{"title" => "Choose a direction", "options" => ["Continue", "Wait"]},
+                  %{"title" => "Add your instructions"}
+                ]
+              }
+            },
+            %{
+              type: :tool_call,
+              id: "async-notice",
+              name: "send_message_to_user_async",
+              arguments: %{"message" => "The agent can continue while you review"}
+            }
+          ]
+        end
+
+      reason = if Enum.any?(content, &(&1.type == :tool_call)), do: :tool_use, else: :stop
+
+      message = %{
+        role: :assistant,
+        content: content,
+        model: "mock-model",
+        provider: "mock-provider",
+        api: "openai-responses",
+        usage: %{input: 1, output: 1, total_tokens: 2, cost: %{total: 0.0}},
+        stop_reason: reason,
+        timestamp: System.system_time(:millisecond)
+      }
+
+      [{:start, %{message | content: []}}, {:done, reason, message}]
+    end
+  end
+
   defmodule PermissionToolProvider do
     @behaviour Sigma.Ai.Provider
 
@@ -140,6 +189,29 @@ defmodule Sigma.Web.SessionLiveTest do
     end
   end
 
+  defmodule ReloadMetricsProvider do
+    @behaviour Sigma.Ai.Provider
+
+    @impl true
+    def stream(params) do
+      if Enum.any?(params.context.messages, &(&1.role == :tool_result)) do
+        test_pid = Application.fetch_env!(:sigma_web, :capture_provider_pid)
+        cancellation_ref = Keyword.fetch!(params.options, :cancellation_ref)
+        send(test_pid, {:reload_provider_waiting, self()})
+
+        receive do
+          :release_reload_provider ->
+            Sigma.Web.MockProvider.stream(params)
+
+          {:cancel, ^cancellation_ref} ->
+            [{:provider_error, Sigma.Ai.ProviderError.from_reason(:cancelled)}]
+        end
+      else
+        AsyncToolsProvider.stream(params)
+      end
+    end
+  end
+
   defmodule BlockingTurnProvider do
     @behaviour Sigma.Ai.Provider
 
@@ -182,7 +254,6 @@ defmodule Sigma.Web.SessionLiveTest do
 
     on_exit(fn ->
       stop_repository_supervisors(@workdir)
-      Process.sleep(50)
       File.rm_rf!(@workdir)
       File.rm_rf!(agent_dir)
 
@@ -203,8 +274,23 @@ defmodule Sigma.Web.SessionLiveTest do
     :ok
   end
 
+  test "fixture cleanup stops the repository and its session writers", %{conn: conn} do
+    session_id = unique_session_id("fixture-cleanup")
+    {:ok, _view, _html} = live_loaded(conn, session_path(session_id))
+
+    processes = [
+      Sigma.Agent.Runtime.lookup(@workdir, :supervisor),
+      Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent),
+      Sigma.Agent.Runtime.lookup(@workdir, session_id, :writer)
+    ]
+
+    assert Enum.all?(processes, &is_pid/1)
+    stop_repository_supervisors(@workdir)
+    refute Enum.any?(processes, &Process.alive?/1)
+  end
+
   @tag :tmp_dir
-  test "new Web sessions advertise only native collaboration and complete chat", %{
+  test "new Web sessions advertise the native profile and collaboration and complete chat", %{
     conn: conn,
     tmp_dir: tmp_dir
   } do
@@ -217,11 +303,19 @@ defmodule Sigma.Web.SessionLiveTest do
           render_submit(view, "send_prompt", %{"value" => "hello", "images" => []})
 
           assert_receive {:provider_params, params}, 3_000
+          advertised_names = Enum.map(params.context.tools, & &1.name)
+          assert "apply_patch" in advertised_names
 
-          assert Enum.sort(Enum.map(params.context.tools, & &1.name)) ==
-                   Enum.sort(
-                     ~w(spawn_agent send_message followup_task interrupt_agent list_agents wait_agent)
-                   )
+          expected_names =
+            Sigma.Agent.Backplane.NativeTools.names() ++
+              Sigma.Agent.Backplane.NativeTools.async_names() ++
+              Sigma.Agent.Backplane.NativeTools.skill_names() ++
+              Sigma.Agent.Backplane.NativeTools.memory_names() ++
+              Sigma.Agent.Backplane.NativeTools.archive_names() ++
+              Sigma.Agent.Subagents.collaboration_tools()
+
+          assert Enum.sort(advertised_names) == Enum.sort(expected_names)
+          assert length(params.context.tools) == length(expected_names)
 
           assert_eventually(fn ->
             snapshot = chat_snapshot(view)
@@ -230,6 +324,267 @@ defmodule Sigma.Web.SessionLiveTest do
               Enum.any?(snapshot.messages, &(&1.content == "I am a mock response."))
           end)
         end)
+      end)
+    end)
+  end
+
+  @tag skip:
+         "Blocked by gsmlg-opt/backplane#104/#105; restore after a fixed package is adopted and raw patch safety is verified"
+  test "native questions and raw patch approvals pass through LiveView and survive reload", %{
+    conn: conn
+  } do
+    path = Path.join(@workdir, "native-ui.txt")
+    Application.put_env(:sigma_web, :native_tools_test, %{test: self(), path: path})
+    on_exit(fn -> Application.delete_env(:sigma_web, :native_tools_test) end)
+
+    assert {:ok, _} =
+             ConfigManager.update_permissions(%{
+               "default" => "allow",
+               "rules" => %{"apply_patch" => "ask"}
+             })
+
+    with_mock_provider(Sigma.Web.NativeToolsProvider, fn ->
+      session_id = unique_session_id("native-ui")
+      {:ok, view, _} = live_loaded(conn, session_path(session_id))
+      render_submit(view, "send_prompt", %{"value" => "native flow", "images" => []})
+      assert_eventually(fn -> render(view) =~ "Continue with the native patch?" end)
+      refute File.exists?(path)
+
+      {:ok, refreshed, html} = live_loaded(conn, session_path(session_id))
+      assert html =~ "Continue with the native patch?"
+
+      assert [%{id: "native-question", name: "request_user_input", status: "running"}] =
+               refreshed |> chat_snapshot() |> Map.fetch!(:messages) |> Enum.flat_map(& &1.tools)
+
+      assert {:ok, pending_snapshot} = Log.snapshot(session_storage_path(session_id))
+
+      refute Enum.any?(pending_snapshot.messages, fn message ->
+               Enum.any?(List.wrap(message.content), &match?(%{type: :tool_call}, &1))
+             end)
+
+      refreshed
+      |> form("#ask-user-questions form", %{"selected_answer" => "Proceed", "answer" => ""})
+      |> render_submit()
+
+      assert_eventually(fn -> render(refreshed) =~ "Allow apply_patch for this tool call?" end)
+      refute File.exists?(path)
+
+      refreshed
+      |> form("#ask-user-questions form", %{"selected_answer" => "allow_once"})
+      |> render_submit()
+
+      assert_eventually(fn -> File.read(path) == {:ok, "native client verified\n"} end)
+      assert_eventually(fn -> not chat_snapshot(refreshed).runtime.active end)
+
+      messages = chat_snapshot(refreshed).messages
+      tools = Enum.flat_map(messages, & &1.tools)
+      assert Enum.count(tools, &(&1.id == "native-question" and &1.status == "success")) == 1
+      assert Enum.count(tools, &(&1.id == "native-patch" and &1.status == "success")) == 1
+      refute Enum.any?(messages, &(&1.role == :tool_result))
+      assert {:ok, snapshot} = Log.snapshot(session_storage_path(session_id))
+
+      assert Enum.any?(
+               snapshot.messages,
+               &(&1.role == :assistant and
+                   Enum.any?(List.wrap(&1.content), fn
+                     %{type: :tool_call, name: "apply_patch", input_kind: :custom, arguments: raw} ->
+                       is_binary(raw) and String.contains?(raw, "native client verified")
+
+                     _ ->
+                       false
+                   end))
+             )
+
+      assert Enum.any?(
+               snapshot.messages,
+               &(&1.role == :tool_result and &1.tool_name == "request_user_input")
+             )
+
+      {:ok, reloaded, _} = live_loaded(conn, session_path(session_id))
+      refute has_element?(reloaded, "#ask-user-questions")
+      assert File.read!(path) == "native client verified\n"
+    end)
+  end
+
+  test "native questions and plan approvals pass through LiveView and survive pending reload", %{
+    conn: conn
+  } do
+    Application.put_env(:sigma_web, :native_tools_test, %{test: self(), mode: :plan})
+    on_exit(fn -> Application.delete_env(:sigma_web, :native_tools_test) end)
+
+    assert {:ok, _} =
+             ConfigManager.update_permissions(%{
+               "default" => "allow",
+               "rules" => %{"update_plan" => "ask"}
+             })
+
+    with_mock_provider(Sigma.Web.NativeToolsProvider, fn ->
+      session_id = unique_session_id("native-plan-ui")
+      {:ok, view, _} = live_loaded(conn, session_path(session_id))
+      render_submit(view, "send_prompt", %{"value" => "native plan flow", "images" => []})
+      assert_eventually(fn -> render(view) =~ "Continue with the native plan?" end)
+      refute has_element?(view, "#session-plan")
+      agent = Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent)
+      [%{id: question_id}] = Sigma.Agent.pending_user_questions(agent)
+
+      {:ok, refreshed, html} = live_loaded(conn, session_path(session_id))
+      assert html =~ "Continue with the native plan?"
+
+      assert [%{id: "native-question", name: "request_user_input", status: "running"}] =
+               refreshed |> chat_snapshot() |> Map.fetch!(:messages) |> Enum.flat_map(& &1.tools)
+
+      assert {:ok, pending_snapshot} = Log.snapshot(session_storage_path(session_id))
+
+      refute Enum.any?(pending_snapshot.messages, fn message ->
+               Enum.any?(List.wrap(message.content), &match?(%{type: :tool_call}, &1))
+             end)
+
+      refreshed
+      |> form("#ask-user-questions form", %{"selected_answer" => "Proceed", "answer" => ""})
+      |> render_submit()
+
+      assert_eventually(fn -> render(refreshed) =~ "Allow update_plan for this tool call?" end)
+      refute has_element?(refreshed, "#session-plan")
+      assert {:ok, before_approval} = Log.snapshot(session_storage_path(session_id))
+      assert Sigma.Agent.Backplane.PlanProjection.latest(before_approval.messages) == nil
+
+      {:ok, approval_view, approval_html} = live_loaded(conn, session_path(session_id))
+      assert approval_html =~ "Allow update_plan for this tool call?"
+      refute has_element?(approval_view, "#session-plan")
+
+      approval_view
+      |> form("#ask-user-questions form", %{"selected_answer" => "allow_once"})
+      |> render_submit()
+
+      assert_eventually(fn ->
+        has_element?(approval_view, "#session-plan", "Native client verified")
+      end)
+
+      assert_eventually(fn -> not chat_snapshot(approval_view).runtime.active end)
+      messages = chat_snapshot(approval_view).messages
+      tools = Enum.flat_map(messages, & &1.tools)
+      assert Enum.count(tools, &(&1.id == "native-question" and &1.status == "success")) == 1
+      assert Enum.count(tools, &(&1.id == "native-plan" and &1.status == "success")) == 1
+      refute Enum.any?(messages, &(&1.role == :tool_result))
+      assert {:ok, snapshot} = Log.snapshot(session_storage_path(session_id))
+
+      assert %{
+               "revision" => 2,
+               "plan" => [%{"step" => "Native client verified", "status" => "completed"}]
+             } =
+               Sigma.Agent.Backplane.PlanProjection.latest(snapshot.messages)
+
+      before_late_reply = File.read!(session_storage_path(session_id))
+
+      html =
+        render_hook(approval_view, "answer_user_question", %{
+          "question_id" => question_id,
+          "answer" => "late answer",
+          "selected_answer" => ""
+        })
+
+      assert html =~ "Could not answer question"
+      assert File.read!(session_storage_path(session_id)) == before_late_reply
+
+      {:ok, reloaded, _} = live_loaded(conn, session_path(session_id))
+      refute has_element?(reloaded, "#ask-user-questions")
+      assert has_element?(reloaded, "#session-plan", "Native client verified")
+      assert chat_snapshot(reloaded).messages == messages
+      assert {:ok, restored} = Log.snapshot(session_storage_path(session_id))
+      assert restored.messages == snapshot.messages
+    end)
+  end
+
+  test "async cards survive reload, require complete replies and deliver once", %{conn: conn} do
+    with_mock_provider(AsyncToolsProvider, fn ->
+      with_capture_provider_pid(self(), fn ->
+        session_id = unique_session_id("async-ui")
+        {:ok, view, _} = live_loaded(conn, session_path(session_id))
+        render_submit(view, "send_prompt", %{"value" => "Ask asynchronously", "images" => []})
+
+        assert_eventually(fn ->
+          has_element?(view, "#async-interactions details", "Agent questions")
+        end)
+
+        assert_eventually(fn -> not chat_snapshot(view).runtime.active end)
+        assert_receive {:provider_params, _}, 3_000
+        assert_receive {:provider_params, _}, 3_000
+
+        agent = Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent)
+        assert {:ok, %{items: items}} = Sigma.Agent.async_interaction_snapshot(agent)
+        question = Enum.find(items, & &1["questions"])
+        notice = Enum.find(items, & &1["message"])
+        assert question["can_reply"] and notice["can_reply"]
+        before_messages = Sigma.Agent.messages(agent)
+        {:ok, refreshed, html} = live_loaded(conn, session_path(session_id))
+        assert html =~ "Choose a direction"
+        assert html =~ "The agent can continue while you review"
+        refute has_element?(refreshed, "[aria-label='Alternative executions']")
+        assert Sigma.Agent.messages(agent) == before_messages
+        refute_receive {:provider_params, _}, 50
+
+        refreshed
+        |> form("#async-reply-#{question["item_id"]}", %{
+          "answers" => %{"0" => %{"selected" => "Continue", "text" => ""}}
+        })
+        |> render_submit()
+
+        assert render(refreshed) =~ "Could not confirm reply delivery"
+        assert Sigma.Agent.messages(agent) == before_messages
+
+        refreshed
+        |> form("#async-reply-#{question["item_id"]}", %{
+          "answers" => %{
+            "0" => %{"selected" => "Continue", "text" => ""},
+            "1" => %{"text" => "  preserve my answer\n"}
+          }
+        })
+        |> render_submit()
+
+        assert_receive {:provider_params, params}, 5_000
+
+        replies =
+          Enum.filter(params.context.messages, fn message ->
+            message.role == :user and is_map(message[:metadata]) and
+              Map.has_key?(message.metadata, "async_interaction")
+          end)
+
+        assert [reply] = replies
+        assert reply.content =~ "  preserve my answer\n"
+
+        assert_eventually(fn -> not chat_snapshot(refreshed).runtime.active end)
+        assert {:ok, %{items: delivered_items}} = Sigma.Agent.async_interaction_snapshot(agent)
+        delivered_question = Enum.find(delivered_items, &(&1["item_id"] == question["item_id"]))
+
+        assert delivered_question["status"] == "consumed",
+               inspect(delivered_question, limit: :infinity, printable_limit: :infinity)
+
+        assert_eventually(fn ->
+          has_element?(
+            refreshed,
+            "#async-interaction-#{question["item_id"]}[data-status=consumed]"
+          )
+        end)
+
+        refreshed |> element("#async-dismiss-#{notice["item_id"]}") |> render_click()
+
+        assert has_element?(
+                 refreshed,
+                 "#async-interaction-#{notice["item_id"]}[data-status=dismissed]"
+               )
+
+        before_messages = Sigma.Agent.messages(agent)
+        {:ok, reloaded, _} = live_loaded(conn, session_path(session_id))
+
+        assert has_element?(
+                 reloaded,
+                 "#async-interaction-#{question["item_id"]}[data-status=consumed]"
+               )
+
+        refute has_element?(reloaded, "#async-reply-#{question["item_id"]}")
+        refute has_element?(reloaded, "[aria-label='Alternative executions']")
+        assert Sigma.Agent.messages(agent) == before_messages
+        refute_receive {:provider_params, _}, 50
       end)
     end)
   end
@@ -2191,6 +2546,357 @@ defmodule Sigma.Web.SessionLiveTest do
     assert render(view) =~ "read"
   end
 
+  test "tool result lifecycle updates its assistant tool without creating a message row", %{
+    conn: conn
+  } do
+    {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("tool-result-row")))
+
+    assistant = %Message{
+      id: "native-assistant",
+      role: :assistant,
+      content: [
+        %{type: :tool_call, id: "native-call", name: "update_plan", arguments: %{"plan" => []}}
+      ]
+    }
+
+    result = %Message{
+      id: "native-result",
+      role: :tool_result,
+      tool_call_id: "native-call",
+      tool_name: "update_plan",
+      content: [%{type: :text, text: "Plan updated"}],
+      is_error: false
+    }
+
+    send(view.pid, {:message_end, assistant})
+    send(view.pid, {:message_start, result})
+    send(view.pid, {:message_update, result, :tool_result})
+    assert [%{id: "native-assistant"}] = chat_snapshot(view).messages
+
+    send(view.pid, {:message_end, result})
+
+    assert [%{id: "native-assistant", tools: [tool]}] = chat_snapshot(view).messages
+    assert %{id: "native-call", result: "Plan updated", status: "success"} = tool
+  end
+
+  @tag :cancelled_tool_projection
+  test "cancelled turns stop showing unfinished tools as running across turns and reload", %{
+    conn: conn
+  } do
+    session_id = unique_session_id("cancelled-tool-projection")
+    path = session_storage_path(session_id)
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    File.mkdir_p!(Path.dirname(path))
+    writer = Sigma.Agent.Runtime.lookup(@workdir, session_id, :writer)
+
+    emit = fn event ->
+      assert {:ok, _} = Sigma.Session.Writer.append(writer, event)
+      send(view.pid, event)
+    end
+
+    emit.({:metrics, :turn_started, %{session_id: session_id, turn_id: "cancelled-turn"}})
+
+    for {message_id, calls} <- [
+          {"first-cancelled-tools", ["unfinished-first", "settled-success", "settled-error"]},
+          {"last-cancelled-tools", ["unfinished-last"]}
+        ] do
+      emit.(
+        {:message_end,
+         %Message{
+           id: message_id,
+           role: :assistant,
+           metadata: %{turn_id: "cancelled-turn"},
+           content:
+             Enum.map(calls, fn id ->
+               %{
+                 type: :tool_call,
+                 id: id,
+                 name: "exec",
+                 arguments: "return 1;",
+                 input_kind: :custom
+               }
+             end)
+         }}
+      )
+    end
+
+    for {id, is_error} <- [{"settled-success", false}, {"settled-error", true}] do
+      emit.(
+        {:message_end,
+         %Message{
+           id: id <> "-result",
+           role: :tool_result,
+           tool_call_id: id,
+           tool_name: "exec",
+           content: [%{type: :text, text: id}],
+           is_error: is_error
+         }}
+      )
+    end
+
+    assert [first, last] = chat_snapshot(view).messages
+    assert [%{status: "running"}, %{status: "success"}, %{status: "error"}] = first.tools
+    assert [%{status: "running"}] = last.tools
+
+    emit.(
+      {:metrics, :turn_finished,
+       %{session_id: session_id, turn_id: "cancelled-turn", revision: 1, status: :cancelled}}
+    )
+
+    # Both assistant rows must refresh through the live event stream, without a resync.
+    for id <- ["first-cancelled-tools", "last-cancelled-tools"] do
+      assert_push_event(view, "chat:event", %{
+        type: "chat.message",
+        message_id: ^id,
+        message: %{tools: [%{status: "pending", statusLabel: "turn cancelled"} | _]}
+      })
+    end
+
+    assert [cancelled_first, cancelled_last] = chat_snapshot(view).messages
+
+    assert [%{result: nil, images: []}, %{status: "success"}, %{status: "error"}] =
+             cancelled_first.tools
+
+    assert Enum.drop(cancelled_first.tools, 1) == Enum.drop(first.tools, 1)
+    assert [%{result: nil, images: []}] = cancelled_last.tools
+    assert {:ok, %{active_leaf_id: cancelled_leaf}} = Sigma.Session.Writer.flush(writer)
+
+    emit.({:metrics, :turn_started, %{session_id: session_id, turn_id: "next-turn"}})
+
+    emit.(
+      {:message_end,
+       %Message{
+         id: "next-tools",
+         role: :assistant,
+         metadata: %{turn_id: "next-turn"},
+         content: [
+           %{
+             type: :tool_call,
+             id: "next-call",
+             name: "exec",
+             arguments: "return 2;",
+             input_kind: :custom
+           }
+         ]
+       }}
+    )
+
+    assert [first_after, last_after, %{tools: [%{status: "running"}]}] =
+             chat_snapshot(view).messages
+
+    assert first_after.tools == cancelled_first.tools
+    assert last_after.tools == cancelled_last.tools
+
+    before_reload = File.read!(path)
+    GenServer.stop(view.pid)
+    {:ok, reloaded, _html} = live_loaded(conn, session_path(session_id))
+
+    assert [first_reloaded, last_reloaded, _] = chat_snapshot(reloaded).messages
+    assert first_reloaded.tools == cancelled_first.tools
+    assert last_reloaded.tools == cancelled_last.tools
+    assert File.read!(path) == before_reload
+
+    assert {:ok, replayed} = Log.snapshot(path)
+
+    refute Enum.any?(replayed.context_messages, fn message ->
+             Enum.any?(List.wrap(message.content), fn
+               %{type: :tool_call, id: id} -> id in ["unfinished-first", "unfinished-last"]
+               _ -> false
+             end)
+           end)
+
+    assert {:ok, _} =
+             Sigma.Session.Writer.append(
+               writer,
+               {:metrics, :turn_finished,
+                %{session_id: session_id, turn_id: "next-turn", revision: 1, status: :cancelled}}
+             )
+
+    assert {:ok, %{active_leaf_id: next_leaf}} = Sigma.Session.Writer.flush(writer)
+    assert :ok = Sigma.Session.Writer.checkout(writer, cancelled_leaf, next_leaf)
+    before_branch_reload = File.read!(path)
+    GenServer.stop(reloaded.pid)
+    {:ok, selected, _html} = live_loaded(conn, session_path(session_id))
+    assert [first_selected, last_selected, %{tools: []}] = chat_snapshot(selected).messages
+    assert first_selected.tools == cancelled_first.tools
+    assert last_selected.tools == cancelled_last.tools
+    assert File.read!(path) == before_branch_reload
+  end
+
+  test "native image results stay attached to their tool during updates and reload", %{conn: conn} do
+    session_id = unique_session_id("native-image-result")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    assistant = %Message{
+      id: "image-assistant",
+      role: :assistant,
+      content: [
+        %{
+          type: :tool_call,
+          id: "image-call",
+          name: "view_image",
+          arguments: %{"path" => "image.png"}
+        }
+      ]
+    }
+
+    result = %Message{
+      id: "image-result",
+      role: :tool_result,
+      tool_call_id: "image-call",
+      tool_name: "view_image",
+      content: [
+        %{type: :image, mime_type: "image/png", data: @png_data}
+      ],
+      is_error: false
+    }
+
+    send(view.pid, {:message_end, assistant})
+    send(view.pid, {:message_end, result})
+    url = "data:image/png;base64,#{@png_data}"
+    assert [%{id: "image-assistant", tools: [tool]}] = chat_snapshot(view).messages
+    assert %{result: "", images: [^url], status: "success"} = tool
+
+    path = session_storage_path(session_id)
+    File.mkdir_p!(Path.dirname(path))
+    :ok = Log.persist_event(path, {:message_end, assistant})
+    :ok = Log.persist_event(path, {:message_end, result})
+    before_reload = File.read!(path)
+    {:ok, reloaded, _html} = live_loaded(conn, session_path(session_id))
+    assert [%{id: "image-assistant", tools: [^tool]}] = chat_snapshot(reloaded).messages
+    assert File.read!(path) == before_reload
+  end
+
+  test "malformed tool image results retain error text without exposing an unsafe URL", %{
+    conn: conn
+  } do
+    {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("unsafe-tool-image")))
+
+    assistant = %Message{
+      id: "unsafe-image-assistant",
+      role: :assistant,
+      content: [%{type: :tool_call, id: "unsafe-image-call", name: "view_image", arguments: %{}}]
+    }
+
+    result = %Message{
+      id: "unsafe-image-result",
+      role: :tool_result,
+      tool_call_id: "unsafe-image-call",
+      tool_name: "view_image",
+      content: [
+        %{type: :text, text: "Invalid image"},
+        %{
+          type: :image,
+          mime_type: "image/svg+xml",
+          data: Base.encode64("<svg onload='alert(1)'/>")
+        }
+      ],
+      is_error: true
+    }
+
+    send(view.pid, {:message_end, assistant})
+    send(view.pid, {:message_end, result})
+    assert [%{tools: [tool]}] = chat_snapshot(view).messages
+    assert %{result: "Invalid image", images: [], status: "error"} = tool
+    refute render(view) =~ "data:image/svg"
+  end
+
+  test "confirmed plan metadata updates the details rail and failed updates retain it", %{
+    conn: conn
+  } do
+    {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("confirmed-plan")))
+    refute has_element?(view, "#session-plan")
+
+    invocation = %{
+      tool_name: "update_plan",
+      run_id: "plan-run",
+      incarnation: 1,
+      tool_call_id: "plan-call",
+      arguments: %{"plan" => [%{"step" => "Approved UI plan", "status" => "in_progress"}]}
+    }
+
+    assert {:ok, snapshot} =
+             Sigma.Agent.Backplane.PlanProjection.capture(invocation, %{
+               revision: 2,
+               status: :updated
+             })
+
+    result = %Message{
+      id: "plan-result",
+      role: :tool_result,
+      tool_call_id: "plan-call",
+      tool_name: "update_plan",
+      content: [],
+      is_error: false,
+      metadata: %{
+        native_plan: snapshot,
+        structured_result: %{"revision" => 2, "status" => "updated"}
+      }
+    }
+
+    send(view.pid, {:message_end, result})
+    assert has_element?(view, "#session-plan", "Approved UI plan")
+    assert has_element?(view, "#session-plan [aria-current=step]")
+
+    failed = %{
+      result
+      | id: "failed-plan",
+        is_error: true,
+        metadata: %{native_plan: %{snapshot | "plan" => []}}
+    }
+
+    send(view.pid, {:message_end, failed})
+    assert has_element?(view, "#session-plan", "Approved UI plan")
+  end
+
+  test "reload displays a persisted plan archived before compaction and reset", %{conn: conn} do
+    session_id = unique_session_id("archived-plan")
+    path = session_storage_path(session_id)
+    File.mkdir_p!(Path.dirname(path))
+
+    invocation = %{
+      tool_name: "update_plan",
+      run_id: "persisted-plan-run",
+      incarnation: 1,
+      tool_call_id: "persisted-plan-call",
+      arguments: %{"plan" => [%{"step" => "Archived approved plan", "status" => "completed"}]}
+    }
+
+    assert {:ok, snapshot} =
+             Sigma.Agent.Backplane.PlanProjection.capture(invocation, %{
+               revision: 2,
+               status: :updated
+             })
+
+    result = %Message{
+      id: "persisted-plan-result",
+      role: :tool_result,
+      tool_call_id: "persisted-plan-call",
+      tool_name: "update_plan",
+      content: [],
+      is_error: false,
+      metadata: %{
+        native_plan: snapshot,
+        structured_result: %{"revision" => 2, "status" => "updated"}
+      }
+    }
+
+    assert :ok = Log.persist_event(path, {:agent_start, @workdir})
+    assert :ok = Log.persist_event(path, {:message_end, result})
+    assert :ok = Log.persist_event(path, {:message_end, Message.user("kept-plan-user", "Keep")})
+    assert :ok = Log.persist_event(path, {:compact, %{content: "Summary"}, "kept-plan-user"})
+
+    assert :ok =
+             Log.persist_event(
+               path,
+               {:context_window_started, %{run_id: "reset", incarnation: 1, window: 2}}
+             )
+
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    assert has_element?(view, "#session-plan", "Archived approved plan")
+    assert has_element?(view, "#session-plan", "1 of 1 completed")
+  end
+
   test "publishes user content and Resend actions", %{conn: conn} do
     {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("user_left")))
 
@@ -2482,6 +3188,59 @@ defmodule Sigma.Web.SessionLiveTest do
     assert_eventually(fn ->
       html = render(view)
       html =~ "Session usage" and html =~ "150" and html =~ "coverage: 1/1"
+    end)
+  end
+
+  test "reload keeps a running native tool turn active until its actual terminal event", %{
+    conn: conn
+  } do
+    write_selectable_provider_configs()
+    session_id = unique_session_id("reload-native-metrics")
+    Application.put_env(:sigma_web, :capture_provider_pid, self())
+    on_exit(fn -> Application.delete_env(:sigma_web, :capture_provider_pid) end)
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+
+    with_mock_provider(ReloadMetricsProvider, fn ->
+      {:ok, first, _html} = live_loaded(conn, session_path(session_id))
+      render_hook(first, "send_prompt", %{"value" => "native work before reload", "images" => []})
+      assert_reply(first, %{status: "accepted"})
+      assert_receive {:reload_provider_waiting, provider}, 2_000
+      assert_eventually(fn -> chat_footer_html(first) =~ "running" end)
+      original = File.read!(session_storage_path(session_id))
+      agent = Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent)
+      %{turn_id: turn_id, current_request_id: request_id} = Sigma.Agent.status(agent)
+      assert is_binary(turn_id) and is_binary(request_id)
+
+      GenServer.stop(first.pid)
+      {:ok, reloaded, _html} = live_loaded(conn, session_path(session_id))
+      assert Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent) == agent
+      assert Process.alive?(provider)
+      summary = chat_footer_html(reloaded)
+      assert summary =~ "running"
+      refute summary =~ "interrupted"
+      assert chat_snapshot(reloaded).runtime.active
+
+      assert {:ok, live} =
+               Sigma.Agent.Runtime.session_snapshot(
+                 @workdir,
+                 session_id,
+                 session_storage_path(session_id)
+               )
+
+      assert live.metrics.requests[request_id].status == :running
+      assert live.metrics.turns[turn_id].status == :running
+      assert File.read!(session_storage_path(session_id)) == original
+      refute_receive {:reload_provider_waiting, _}, 20
+
+      send(provider, :release_reload_provider)
+      assert_receive {:turn_completed, _}, 2_000
+      assert_eventually(fn -> chat_footer_html(reloaded) =~ "completed" end)
+      completed = File.read!(session_storage_path(session_id))
+      GenServer.stop(reloaded.pid)
+      {:ok, finished, _html} = live_loaded(conn, session_path(session_id))
+      assert chat_footer_html(finished) =~ "completed"
+      refute chat_snapshot(finished).runtime.active
+      assert File.read!(session_storage_path(session_id)) == completed
     end)
   end
 
@@ -3274,6 +4033,7 @@ defmodule Sigma.Web.SessionLiveTest do
         log_search: "",
         model_options: [],
         model_unavailable: false,
+        native_plan: nil,
         branch_summaries: [],
         pending_mcp_elicitations: [],
         pending_compaction: false,
@@ -3283,6 +4043,7 @@ defmodule Sigma.Web.SessionLiveTest do
         subagents_available: false,
         subagent_filter: "all",
         pending_user_questions: [],
+        async_interactions: %{items: [], leaf_id: nil},
         parent_session_id: nil,
         runtime_status: :idle,
         session_id: "render_session",
@@ -3382,7 +4143,7 @@ defmodule Sigma.Web.SessionLiveTest do
   defp stop_repository_supervisors(repo) do
     repo = Sigma.Agent.Runtime.normalize_repo_path(repo)
 
-    for {_id, pid, :supervisor, [Sigma.Agent.RepositorySupervisor]} <-
+    for {_id, pid, _type, [Sigma.Agent.RepositorySupervisor]} <-
           DynamicSupervisor.which_children(Sigma.Agent.DynamicSupervisor),
         Process.alive?(pid),
         repo_supervisor_for?(pid, repo) do

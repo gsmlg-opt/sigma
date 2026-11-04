@@ -113,10 +113,19 @@ jobs:
         with:
           bun-version: "1.3.13"
 
+      - name: Set up Deno for native Code Mode tests
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: "v2.8.3"
+
       - name: Set up Rust
         run: |
           rustup toolchain install stable --profile minimal --component clippy --component rustfmt --no-self-update
           rustup default stable
+
+      - name: Set up bubblewrap and verify sandbox prerequisites
+        timeout-minutes: 10
+        run: scripts/setup-ci-bubblewrap.sh
 
       - name: Restore exact verification cache
         uses: actions/cache@v6
@@ -133,6 +142,9 @@ jobs:
             native/sigma_terminal_helper/target
           key: release-verify-${{ runner.os }}-${{ runner.arch }}-otp-28.5-elixir-1.18.4-bun-1.3.13-${{ hashFiles('mix.lock', 'package-lock.json', '**/package.json', '**/Cargo.lock') }}
 
+      - name: Build debug native helpers before Mix commands
+        run: scripts/build-terminal-helper.sh debug
+
       - name: Install dependencies
         run: |
           mix deps.get
@@ -145,8 +157,8 @@ jobs:
       - name: Compile with warnings as errors
         run: mix compile --force --warnings-as-errors
 
-      - name: Build debug terminal helper for native tests
-        run: scripts/build-terminal-helper.sh debug
+      - name: Build MCP stdio guardian for plugin lifecycle checks
+        run: mix backplane.mcp.stdio.build
 
       - name: Run core tests
         run: mix test
@@ -229,6 +241,9 @@ jobs:
             native/sigma_terminal_helper/target
           key: release-${{ matrix.os }}-${{ matrix.arch }}-otp-28.5-elixir-1.18.4-${{ hashFiles('mix.lock', 'package-lock.json', '**/Cargo.lock', '**/package.json') }}
 
+      - name: Prepare native helpers before Mix commands
+        run: scripts/build-terminal-helper.sh release
+
       - name: Install production dependencies
         run: |
           mix deps.get --only prod
@@ -239,8 +254,10 @@ jobs:
         run: |
           export SIGMA_RELEASE_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "SIGMA_RELEASE_TIME=${SIGMA_RELEASE_TIME}" >> "$GITHUB_ENV"
-          scripts/build-terminal-helper.sh release
           mix compile --force
+
+      - name: Build MCP stdio guardian
+        run: mix backplane.mcp.stdio.build
 
       - name: Build production assets
         run: mix assets.deploy
@@ -249,13 +266,24 @@ jobs:
         run: |
           rm -rf _build/prod/rel/sigma
           mix release sigma --overwrite
-          test -x "$(
+          for binary in sigma-terminal-helper sigma-sandbox-launcher; do
+            test -x "$(
+              find _build/prod/rel/sigma/lib \
+                -path "*/sigma_agent-*/priv/native/$binary" \
+                -type f \
+                -print \
+                -quit
+            )"
+          done
+          guardian="$(
             find _build/prod/rel/sigma/lib \
-              -path '*/sigma_agent-*/priv/native/sigma-terminal-helper' \
+              -path '*/backplane_mcp_protocol-*/priv/bin/backplane-mcp-stdio-guardian' \
               -type f \
               -print \
               -quit
           )"
+          test -x "$guardian"
+          "$guardian" --probe
 
       - name: Add user service files
         run: |
@@ -293,6 +321,9 @@ jobs:
             sigma/service/README.md; do
             grep -Fxq "$service_file" "dist/${archive}.contents"
           done
+          for binary in sigma-terminal-helper sigma-sandbox-launcher; do
+            grep -Eq "^sigma/lib/sigma_agent-[^/]+/priv/native/${binary}$" "dist/${archive}.contents"
+          done
           rm "dist/${archive}.contents"
 
           cd dist
@@ -301,6 +332,17 @@ jobs:
           else
             shasum -a 256 "$archive" > "${archive}.sha256"
           fi
+
+      - name: Verify native helpers from installed archive
+        if: matrix.os == 'linux' && matrix.arch == 'amd64'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          scripts/setup-ci-bubblewrap.sh
+          native_smoke_root="$(mktemp -d "${RUNNER_TEMP:?}/sigma-native-install.XXXXXXXX")"
+          trap 'rm -rf "$native_smoke_root"' EXIT
+          tar -xzf "dist/sigma-v${VERSION}-linux-amd64.tar.gz" -C "$native_smoke_root"
+          python3 scripts/verify-release-native-smoke.py "$native_smoke_root/sigma"
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v7

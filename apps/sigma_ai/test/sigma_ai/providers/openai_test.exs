@@ -48,6 +48,48 @@ defmodule Sigma.Ai.Providers.OpenAITest do
     end)
   end
 
+  test "Responses real plural usage details reach normalized facts without invented cached zeros" do
+    for details <- [
+          %{
+            "input_tokens_details" => %{"cached_tokens" => 3},
+            "output_tokens_details" => %{"reasoning_tokens" => 1}
+          },
+          %{}
+        ] do
+      usage = Map.merge(%{"input_tokens" => 10, "output_tokens" => 2}, details)
+
+      sse = [
+        sse_json(%{
+          "type" => "response.completed",
+          "response" => %{"status" => "completed", "usage" => usage}
+        }),
+        "data: [DONE]\n\n"
+      ]
+
+      with_request_capture_server(sse, fn base_url, _captured ->
+        events =
+          OpenAIResponses.stream(%{
+            model: %{id: "gpt-5", api: "openai", provider: "openai"},
+            context: %{messages: [%{role: :user, content: "Hi"}], tools: []},
+            options: [api_key: "test", base_url: base_url, receive_timeout: 1_000]
+          })
+          |> Enum.to_list()
+
+        assert {:done, :stop, message} = Enum.find(events, &match?({:done, _, _}, &1))
+        fact = Sigma.Ai.ProviderUsage.normalize(message.usage)
+        assert fact.input_tokens == 10
+
+        if map_size(details) == 0 do
+          assert is_nil(fact.cache_read_tokens)
+          assert is_nil(fact.reasoning_tokens)
+        else
+          assert fact.cache_read_tokens == 3
+          assert fact.reasoning_tokens == 1
+        end
+      end)
+    end
+  end
+
   test "empty bash output preserves the function result and permits the next request" do
     sse = [
       sse_json(%{"type" => "response.completed", "response" => %{"status" => "completed"}}),
@@ -97,6 +139,25 @@ defmodule Sigma.Ai.Providers.OpenAITest do
       end
 
     assert %{kind: :invalid_request, retryable: false} = ProviderError.from_exception(error)
+  end
+
+  test "raw replay requires an explicit custom tag even when the bytes are valid JSON" do
+    for kind <- [:untagged, :function],
+        raw <- ["freeform patch", ~s({"literal":"raw custom input"})] do
+      call = %{type: :tool_call, id: "raw-1", name: "apply_patch", arguments: raw}
+      call = if kind == :untagged, do: call, else: Map.put(call, :input_kind, kind)
+
+      error =
+        assert_raise ProviderError, fn ->
+          OpenAIResponses.stream(%{
+            model: %{id: "gpt-5", api: "openai", provider: "openai"},
+            context: %{messages: [%{role: :assistant, content: [call]}], tools: []},
+            options: [api_key: "test", base_url: "http://127.0.0.1:1"]
+          })
+        end
+
+      assert error.kind == :invalid_request
+    end
   end
 
   test "accepts enum JSON Schema through the Backplane AI protocol request" do
@@ -192,7 +253,8 @@ defmodule Sigma.Ai.Providers.OpenAITest do
         |> Enum.to_list()
 
       assert {:toolcall_end, 0,
-              %{id: "call_1", name: "read", arguments: %{"path" => "README.md"}}, _} =
+              %{id: "call_1", name: "read", arguments: %{"path" => "README.md"}},
+              _} =
                Enum.find(events, &match?({:toolcall_end, _, _, _}, &1))
 
       assert {:done, :tool_use, %{content: [%{id: "call_1", name: "read"}]}} =
@@ -259,6 +321,537 @@ defmodule Sigma.Ai.Providers.OpenAITest do
 
       refute Enum.any?(events, &(&1.type == :response_completed))
     end)
+  end
+
+  test "preserves native namespaces, custom grammar, output schemas and replay bytes on the wire" do
+    raw = "*** Begin Patch\n*** Add File: quote.txt\n+\"hello\"\n*** End Patch"
+    format = %{"type" => "grammar", "syntax" => "lark", "definition" => "start: /.+/"}
+    output_schema = %{"type" => "object", "properties" => %{"ok" => %{"type" => "boolean"}}}
+    image = %{type: :image, data: "iVBORw0KGgo=", mime_type: "image/png"}
+    sse = [sse_json(%{"type" => "response.completed", "response" => %{"status" => "completed"}})]
+
+    with_request_capture_server(sse, fn base_url, captured ->
+      OpenAIResponses.stream(%{
+        model: %{id: "gpt-5", api: "openai", provider: "openai"},
+        context: %{
+          messages: [
+            %{role: :user, content: [image]},
+            %{
+              role: :assistant,
+              content: [
+                %{
+                  type: :tool_call,
+                  id: "patch-1",
+                  name: "functions::apply_patch",
+                  input_kind: :custom,
+                  arguments: raw
+                },
+                %{
+                  type: :tool_call,
+                  id: "exec-1",
+                  name: "functions::exec_command",
+                  arguments: %{"cmd" => "pwd"}
+                }
+              ]
+            },
+            %{
+              role: :tool_result,
+              tool_call_id: "patch-1",
+              content: [%{type: :text, text: "patched"}, image]
+            },
+            %{role: :tool_result, tool_call_id: "exec-1", content: [image]}
+          ],
+          tools: [
+            %{
+              type: "custom",
+              name: "functions::apply_patch",
+              description: "Patch",
+              format: format
+            },
+            %{
+              type: "function",
+              name: "functions::exec_command",
+              description: "Run",
+              parameters: %{"type" => "object"},
+              output_schema: output_schema
+            }
+          ]
+        },
+        options: [api_key: "test", base_url: base_url, receive_timeout: 1_000]
+      })
+      |> Enum.to_list()
+
+      body = Agent.get(captured, & &1.body)
+
+      assert [
+               %{
+                 "type" => "namespace",
+                 "name" => "functions",
+                 "description" => description,
+                 "tools" => [custom, function]
+               }
+             ] =
+               body["tools"]
+
+      assert is_binary(description) and String.trim(description) != ""
+      assert custom["type"] == "custom"
+      assert custom["name"] == "apply_patch"
+      assert custom["format"] == format
+      refute Map.has_key?(custom, "parameters")
+      assert function["name"] == "exec_command"
+      assert function["output_schema"] == output_schema
+      assert [user, custom_call, function_call, custom_result, function_result] = body["input"]
+
+      assert [%{"type" => "input_image", "image_url" => "data:image/png;base64,iVBORw0KGgo="}] =
+               user["content"]
+
+      assert %{
+               "type" => "custom_tool_call",
+               "namespace" => "functions",
+               "name" => "apply_patch",
+               "input" => ^raw
+             } = custom_call
+
+      assert %{"type" => "function_call", "namespace" => "functions", "name" => "exec_command"} =
+               function_call
+
+      assert Jason.decode!(function_call["arguments"]) == %{"cmd" => "pwd"}
+
+      assert %{
+               "type" => "custom_tool_call_output",
+               "call_id" => "patch-1",
+               "output" => [
+                 %{"type" => "input_text", "text" => "patched"},
+                 %{"type" => "input_image"}
+               ]
+             } = custom_result
+
+      assert %{
+               "type" => "function_call_output",
+               "call_id" => "exec-1",
+               "output" => [%{"type" => "input_image"}]
+             } = function_result
+    end)
+  end
+
+  test "custom replay infers output kind from history after declarations are removed" do
+    raw = "{this is raw input}\nsecond line"
+    sse = [sse_json(%{"type" => "response.completed", "response" => %{"status" => "completed"}})]
+
+    with_request_capture_server(sse, fn base_url, captured ->
+      OpenAIResponses.stream(%{
+        model: %{id: "gpt-5", api: "openai", provider: "openai"},
+        context: %{
+          tools: [],
+          messages: [
+            %{
+              role: :assistant,
+              content: [
+                %{
+                  type: :tool_call,
+                  id: "raw-1",
+                  name: "apply_patch",
+                  input_kind: :custom,
+                  arguments: raw
+                }
+              ]
+            },
+            %{role: :tool_result, tool_call_id: "raw-1", content: []}
+          ]
+        },
+        options: [api_key: "test", base_url: base_url, receive_timeout: 1_000]
+      })
+      |> Enum.to_list()
+
+      assert [%{"input" => ^raw}, %{"type" => "custom_tool_call_output", "output" => ""}] =
+               Agent.get(captured, & &1.body["input"])
+    end)
+  end
+
+  test "custom calls retain raw bytes and canonical identity through every completion path" do
+    raw = "*** Begin Patch\n+\"quoted\"\n*** End Patch"
+
+    item = %{
+      "type" => "custom_tool_call",
+      "id" => "native-1",
+      "call_id" => "custom-1",
+      "namespace" => "functions",
+      "name" => "apply_patch",
+      "input" => raw
+    }
+
+    for completion <- [:input_done, :item_done, :terminal_output] do
+      completion_frames =
+        case completion do
+          :input_done ->
+            [
+              sse_json(%{
+                "type" => "response.custom_tool_call_input.done",
+                "item_id" => "native-1",
+                "input" => raw
+              }),
+              sse_json(%{"type" => "response.output_item.done", "item" => item})
+            ]
+
+          :item_done ->
+            [sse_json(%{"type" => "response.output_item.done", "item" => item})]
+
+          :terminal_output ->
+            []
+        end
+
+      sse =
+        [
+          sse_json(%{
+            "type" => "response.output_item.added",
+            "item" => Map.put(item, "input", "")
+          }),
+          sse_json(%{
+            "type" => "response.custom_tool_call_input.delta",
+            "item_id" => "native-1",
+            "delta" => raw
+          })
+        ] ++
+          completion_frames ++
+          [
+            sse_json(%{
+              "type" => "response.completed",
+              "response" => %{"status" => "completed", "output" => [item]}
+            })
+          ]
+
+      with_sse_server(sse, fn base_url ->
+        events = normalized_responses_events(base_url)
+
+        assert [
+                 %{
+                   tool_call: %{
+                     arguments: ^raw,
+                     input_kind: :custom,
+                     name: "functions::apply_patch"
+                   }
+                 }
+               ] = Enum.filter(events, &(&1.type == :tool_call_completed))
+
+        assert Enum.any?(events, &(&1.type == :response_completed))
+        refute Enum.any?(events, &(&1.type == :response_failed))
+      end)
+    end
+  end
+
+  test "terminal output can supply a complete custom call without earlier tool frames" do
+    item = %{
+      "type" => "custom_tool_call",
+      "id" => "native-1",
+      "call_id" => "custom-1",
+      "name" => "apply_patch",
+      "input" => "raw\ninput"
+    }
+
+    sse = [
+      sse_json(%{
+        "type" => "response.completed",
+        "response" => %{"status" => "completed", "output" => [item]}
+      })
+    ]
+
+    with_sse_server(sse, fn base_url ->
+      events = normalized_responses_events(base_url)
+
+      assert [%{tool_call: %{arguments: "raw\ninput", input_kind: :custom}}] =
+               Enum.filter(events, &(&1.type == :tool_call_completed))
+    end)
+  end
+
+  test "non-completed tool items never become executable through terminal output fallback" do
+    for kind <- ["custom_tool_call", "function_call"],
+        event <- ["response.completed", "response.incomplete"],
+        status <- ["in_progress", "incomplete", "failed"] do
+      input =
+        if kind == "custom_tool_call",
+          do: %{"input" => "partial patch"},
+          else: %{"arguments" => "{}"}
+
+      item =
+        Map.merge(input, %{
+          "type" => kind,
+          "id" => "native-1",
+          "call_id" => "call-1",
+          "name" => "tool",
+          "status" => status
+        })
+
+      response_status = if event == "response.completed", do: "completed", else: "incomplete"
+
+      sse = [
+        sse_json(%{
+          "type" => event,
+          "response" => %{"status" => response_status, "output" => [item]}
+        })
+      ]
+
+      with_sse_server(sse, fn base_url ->
+        events = normalized_responses_events(base_url)
+
+        assert Enum.any?(
+                 events,
+                 &(&1.type == :response_failed and &1.error.kind == :malformed_stream)
+               )
+
+        refute Enum.any?(events, &(&1.type in [:tool_call_completed, :response_completed]))
+      end)
+    end
+  end
+
+  test "incomplete terminal-only calls without a completed item status are rejected" do
+    item = %{
+      "type" => "custom_tool_call",
+      "id" => "native-1",
+      "call_id" => "call-1",
+      "name" => "apply_patch",
+      "input" => "partial patch"
+    }
+
+    sse = [
+      sse_json(%{
+        "type" => "response.incomplete",
+        "response" => %{"status" => "incomplete", "output" => [item]}
+      })
+    ]
+
+    with_sse_server(sse, fn base_url ->
+      events = normalized_responses_events(base_url)
+      assert Enum.any?(events, &(&1.type == :response_failed))
+      refute Enum.any?(events, &(&1.type in [:tool_call_completed, :response_completed]))
+    end)
+  end
+
+  test "output item done rejects explicit non-completed tool status" do
+    for kind <- ["custom_tool_call", "function_call"] do
+      input =
+        if kind == "custom_tool_call", do: %{"input" => "patch"}, else: %{"arguments" => "{}"}
+
+      item =
+        Map.merge(input, %{
+          "type" => kind,
+          "id" => "native-1",
+          "call_id" => "call-1",
+          "name" => "tool"
+        })
+
+      sse = [
+        sse_json(%{"type" => "response.output_item.added", "item" => item}),
+        sse_json(%{
+          "type" => "response.output_item.done",
+          "item" => Map.put(item, "status", "in_progress")
+        })
+      ]
+
+      with_sse_server(sse, fn base_url ->
+        events = normalized_responses_events(base_url)
+        assert Enum.any?(events, &(&1.type == :response_failed))
+        refute Enum.any?(events, &(&1.type in [:tool_call_completed, :response_completed]))
+      end)
+    end
+  end
+
+  test "duplicate call IDs cannot retag earlier function results during replay" do
+    error =
+      assert_raise ProviderError, fn ->
+        OpenAIResponses.stream(%{
+          model: %{id: "gpt-5", api: "openai", provider: "openai"},
+          context: %{
+            tools: [],
+            messages: [
+              %{
+                role: :assistant,
+                content: [%{type: :tool_call, id: "reused", name: "function", arguments: %{}}]
+              },
+              %{role: :tool_result, tool_call_id: "reused", content: "function result"},
+              %{
+                role: :assistant,
+                content: [
+                  %{
+                    type: :tool_call,
+                    id: "reused",
+                    name: "apply_patch",
+                    input_kind: :custom,
+                    arguments: "raw"
+                  }
+                ]
+              }
+            ]
+          },
+          options: [api_key: "test", base_url: "http://127.0.0.1:1"]
+        })
+      end
+
+    assert error.kind == :invalid_request
+    assert error.message =~ "Duplicate tool name or call ID"
+  end
+
+  test "malformed custom tool streams fail without an executable call or completion" do
+    item = %{
+      "type" => "custom_tool_call",
+      "id" => "native-1",
+      "call_id" => "custom-1",
+      "namespace" => "functions",
+      "name" => "apply_patch",
+      "input" => ""
+    }
+
+    added = sse_json(%{"type" => "response.output_item.added", "item" => item})
+
+    terminal =
+      sse_json(%{"type" => "response.completed", "response" => %{"status" => "completed"}})
+
+    cases = [
+      [
+        added,
+        sse_json(%{
+          "type" => "response.custom_tool_call_input.delta",
+          "item_id" => "native-1",
+          "delta" => %{}
+        }),
+        terminal
+      ],
+      [
+        added,
+        sse_json(%{
+          "type" => "response.custom_tool_call_input.done",
+          "item_id" => "native-1",
+          "input" => %{}
+        }),
+        terminal
+      ],
+      [
+        added,
+        sse_json(%{
+          "type" => "response.custom_tool_call_input.delta",
+          "item_id" => "missing",
+          "delta" => "raw"
+        }),
+        terminal
+      ],
+      [
+        added,
+        sse_json(%{
+          "type" => "response.function_call_arguments.delta",
+          "item_id" => "native-1",
+          "delta" => "{}"
+        }),
+        terminal
+      ],
+      [
+        added,
+        sse_json(%{
+          "type" => "response.output_item.done",
+          "item" => Map.merge(item, %{"namespace" => "other", "input" => "raw"})
+        }),
+        terminal
+      ],
+      [
+        added,
+        sse_json(%{
+          "type" => "response.custom_tool_call_input.delta",
+          "item_id" => "native-1",
+          "delta" => "first"
+        }),
+        sse_json(%{
+          "type" => "response.custom_tool_call_input.done",
+          "item_id" => "native-1",
+          "input" => "different"
+        }),
+        terminal
+      ],
+      [
+        added,
+        sse_json(%{
+          "type" => "response.custom_tool_call_input.delta",
+          "item_id" => "native-1",
+          "delta" => "truncated"
+        })
+      ],
+      [
+        added,
+        sse_json(%{
+          "type" => "response.custom_tool_call_input.delta",
+          "item_id" => "native-1",
+          "delta" => "truncated"
+        }),
+        sse_json(%{"type" => "response.incomplete", "response" => %{"status" => "incomplete"}})
+      ]
+    ]
+
+    for sse <- cases do
+      with_sse_server(sse, fn base_url ->
+        events = normalized_responses_events(base_url)
+
+        assert Enum.any?(
+                 events,
+                 &(&1.type == :response_failed and &1.error.kind == :malformed_stream)
+               )
+
+        refute Enum.any?(events, &(&1.type in [:tool_call_completed, :response_completed]))
+      end)
+    end
+  end
+
+  test "Chat and Anthropic reject native custom and namespaced declarations or replay before HTTP" do
+    contexts = [
+      %{
+        messages: [],
+        tools: [%{type: "custom", name: "apply_patch", format: %{"type" => "text"}}]
+      },
+      %{messages: [], tools: [%{name: "functions::exec_command", parameters: %{}}]},
+      %{
+        messages: [],
+        tools: [%{name: "exec_command", parameters: %{}, output_schema: %{"type" => "object"}}]
+      },
+      %{
+        messages: [
+          %{
+            role: :assistant,
+            content: [
+              %{
+                type: :tool_call,
+                id: "raw-1",
+                name: "apply_patch",
+                input_kind: :custom,
+                arguments: "raw"
+              }
+            ]
+          }
+        ],
+        tools: []
+      }
+    ]
+
+    for provider <- [OpenAI, Sigma.Ai.Providers.Anthropic], context <- contexts do
+      error =
+        assert_raise ProviderError, fn ->
+          provider.stream(%{
+            model: %{id: "test", api: "test", provider: "test"},
+            context: context,
+            options: [api_key: "test", base_url: "http://127.0.0.1:1"]
+          })
+        end
+
+      assert error.kind == :invalid_request
+      refute error.retryable
+      assert error.message =~ "use OpenAI Responses"
+    end
+  end
+
+  defp normalized_responses_events(base_url) do
+    request =
+      Sigma.Ai.ProviderRequest.from_legacy(%{
+        model: %{id: "gpt-5", api: "openai", provider: "openai"},
+        context: %{messages: [], tools: []},
+        options: [api_key: "test", base_url: base_url, receive_timeout: 1_000]
+      })
+
+    Sigma.Ai.Provider.stream(OpenAIResponses, request) |> Enum.to_list()
   end
 
   test "captures prompt tokens from stream usage chunk" do
@@ -771,6 +1364,45 @@ defmodule Sigma.Ai.Providers.OpenAITest do
             }} = Enum.find(events, &match?({[:sigma, :llm, :request, :stop], _, _}, &1))
 
     assert is_integer(duration)
+  end
+
+  test "shared reserve matches the real Chat and Responses HTTP output caps" do
+    fixtures = [
+      {OpenAI, "max_tokens", ["data: [DONE]\n\n"]},
+      {OpenAIResponses, "max_output_tokens",
+       [
+         sse_json(%{"type" => "response.completed", "response" => %{"status" => "completed"}}),
+         "data: [DONE]\n\n"
+       ]}
+    ]
+
+    for {provider, field, sse} <- fixtures,
+        {model, request_options} <- [
+          {%{"maxTokens" => 6_000, id: "output-context"}, []},
+          {%{id: "output-context", max_tokens: 6_000}, [maxTokens: 2_000]},
+          {%{id: "output-context"}, []}
+        ] do
+      model = Map.merge(%{api: "openai", provider: "openai"}, model)
+
+      with_capture_server(sse, fn base_url, captured ->
+        options =
+          Keyword.merge(request_options,
+            api_key: "test-key",
+            base_url: base_url,
+            receive_timeout: 1_000
+          )
+
+        reserve = Sigma.Ai.Provider.output_token_limit(provider, model, options)
+
+        provider.stream(%{model: model, context: %{messages: [], tools: []}, options: options})
+        |> Enum.to_list()
+
+        assert Agent.get(captured, & &1[field]) == reserve
+
+        assert reserve ==
+                 (request_options[:maxTokens] || model[:max_tokens] || model["maxTokens"])
+      end)
+    end
   end
 
   test "uses model maxTokens as the default OpenAI output cap" do

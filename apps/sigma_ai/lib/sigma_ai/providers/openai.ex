@@ -23,6 +23,7 @@ defmodule Sigma.Ai.Providers.OpenAI do
   def stream(params) do
     model = params.model
     context = params.context
+    Sigma.Ai.Providers.ToolTransport.require_json_functions!(context, "OpenAI Chat Completions")
     options = params.options
     session_id = Map.get(params, :session_id)
     log_session_id = Map.get(params, :log_session_id, session_id)
@@ -233,14 +234,7 @@ defmodule Sigma.Ai.Providers.OpenAI do
       api: model.api,
       provider: model.provider,
       model: model.id,
-      usage: %{
-        input: 0,
-        output: 0,
-        cache_read: 0,
-        cache_write: 0,
-        total_tokens: 0,
-        cost: %{input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0, total: 0.0}
-      },
+      usage: Sigma.Ai.ProviderUsage.from_wire(nil, :openai),
       stop_reason: nil,
       response_id: nil,
       timestamp: System.system_time(:millisecond)
@@ -380,7 +374,8 @@ defmodule Sigma.Ai.Providers.OpenAI do
 
   defp system_block_text(_block), do: ""
 
-  defp output_token_limit(model, options) do
+  @impl true
+  def output_token_limit(model, options) do
     positive_integer(options[:max_tokens]) ||
       positive_integer(options[:maxTokens]) ||
       model_max_tokens(model)
@@ -612,16 +607,7 @@ defmodule Sigma.Ai.Providers.OpenAI do
   defp transform_stop_reason("tool_calls"), do: :tool_use
   defp transform_stop_reason(_), do: nil
 
-  defp transform_usage(usage) do
-    %{
-      input: usage["prompt_tokens"] || 0,
-      output: usage["completion_tokens"] || 0,
-      cache_read: 0,
-      cache_write: 0,
-      total_tokens: usage["total_tokens"] || 0,
-      cost: %{input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0, total: 0.0}
-    }
-  end
+  defp transform_usage(usage), do: Sigma.Ai.ProviderUsage.from_wire(usage, :openai)
 
   defp provider_error_message(error) when is_map(error) do
     message = error["message"] || inspect(error)

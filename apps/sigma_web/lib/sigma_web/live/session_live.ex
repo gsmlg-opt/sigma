@@ -2,6 +2,7 @@ defmodule Sigma.Web.SessionLive do
   use Sigma.Web, :live_view
 
   alias Sigma.Agent.SessionContext
+  alias Sigma.Agent.Backplane.PlanProjection
   alias Sigma.Session.ConfigManager
   alias Sigma.Session.ConfigEvents
   alias Sigma.Session.Models
@@ -13,6 +14,7 @@ defmodule Sigma.Web.SessionLive do
   alias Sigma.Web.ImageAttachments
   alias Sigma.Web.Session.TerminalBinding
   alias Sigma.Web.SessionObservability
+  alias Sigma.Web.SessionPlan
   alias Sigma.Web.SessionSubagents
   alias Sigma.Web.SessionTerminalComponents
   alias Phoenix.LiveView.AsyncResult
@@ -192,14 +194,18 @@ defmodule Sigma.Web.SessionLive do
                  on_event: session_event_handler(repo_key, session_id),
                  permission_config: ConfigManager.get_permissions(),
                  tools: [],
+                 native_tools: true,
                  mcp_servers: mcp_servers,
                  messages: initial_messages,
+                 context_messages: snapshot.context_messages,
+                 context_window: snapshot.context_window,
                  cwd: effective_cwd,
                  transcript_path: storage_path,
                  log_session_id: log_session_id,
                  terminal_backend: TerminalBinding.runtime_backend(terminal_capability)
                ),
-             {:ok, sessions} <- Sigma.Session.Log.list_session_summaries(sessions_dir) do
+             {:ok, sessions} <- Sigma.Session.Log.list_session_summaries(sessions_dir),
+             {:ok, native_plan} <- load_native_plan(workdir, session_id) do
           agent = runtime_session.agent
           runtime_status = Sigma.Agent.Runtime.session_status(workdir, session_id)
 
@@ -209,7 +215,10 @@ defmodule Sigma.Web.SessionLive do
           pending_user_questions = load_pending_user_questions(agent)
           model_options = model_options(system_config, provider_id)
           current_model_value = model_option_value(provider_id, model_id)
-          {stream_messages, tool_results, tool_call_to_msg} = split_messages(initial_messages)
+
+          {stream_messages, tool_results, tool_call_to_msg} =
+            snapshot |> live_display_messages(agent, workdir, session_id) |> split_messages()
+
           {display_messages, turn_last_message_ids} = index_display_messages(stream_messages)
           session_metrics_state = ensure_metrics_session(snapshot.metrics, session_id)
           session_metrics = Sigma.Session.Metrics.snapshot(session_metrics_state)
@@ -244,6 +253,7 @@ defmodule Sigma.Web.SessionLive do
              mcp_server_ids: mcp_server_ids,
              model_options: model_options,
              subagents: snapshot.subagents,
+             native_plan: native_plan,
              subagents_available: snapshot.subagents_available,
              pending_user_questions: pending_user_questions,
              pending_mcp_elicitations: load_pending_mcp_elicitations(agent),
@@ -316,8 +326,10 @@ defmodule Sigma.Web.SessionLive do
         not configured_model?(session_data.active_provider_id, session_data.current_model)
       )
       |> assign(:subagents, session_data.subagents)
+      |> assign(:native_plan, session_data.native_plan)
       |> assign(:subagents_available, session_data.subagents_available)
       |> assign(:pending_user_questions, session_data.pending_user_questions)
+      |> assign(:async_interactions, load_async_interactions(agent))
       |> assign(:pending_mcp_elicitations, session_data.pending_mcp_elicitations)
       |> assign(:sessions, session_data.sessions)
       |> assign(:session_ready, true)
@@ -414,7 +426,11 @@ defmodule Sigma.Web.SessionLive do
     # Recover messages committed between the async load and this subscription.
     case Sigma.Agent.Runtime.session_snapshot(workdir, session_id, storage_path) do
       {:ok, snapshot} ->
-        {messages, tool_results, tool_call_to_msg} = split_messages(snapshot.messages)
+        {messages, tool_results, tool_call_to_msg} =
+          snapshot
+          |> live_display_messages(session_data.agent, workdir, session_id)
+          |> split_messages()
+
         {display_messages, turn_last_message_ids} = index_display_messages(messages)
         metrics = ensure_metrics_session(snapshot.metrics, session_id)
 
@@ -428,6 +444,7 @@ defmodule Sigma.Web.SessionLive do
             session_metrics_state: metrics,
             session_metrics: Sigma.Session.Metrics.snapshot(metrics),
             subagents: snapshot.subagents,
+            native_plan: refreshed_native_plan(workdir, session_id, session_data.native_plan),
             subagents_available: snapshot.subagents_available,
             pending_user_questions:
               load_session_questions(session_data.agent, workdir, session_id)
@@ -692,6 +709,7 @@ defmodule Sigma.Web.SessionLive do
             </div>
 
             <.pending_user_questions questions={@pending_user_questions} />
+            <.async_interactions_view snapshot={@async_interactions} />
             <.pending_mcp_elicitations elicitations={@pending_mcp_elicitations} />
 
             <details
@@ -748,6 +766,7 @@ defmodule Sigma.Web.SessionLive do
           available={@subagents_available}
           filter={@subagent_filter}
         />
+        <SessionPlan.plan id="session-plan" snapshot={@native_plan} />
         <SessionObservability.session_overview_rail snapshot={session_observability_snapshot(assigns)} />
         <section id="session-context-details" class="mt-4" tabindex="-1" aria-label="Context details">
           <form id="context-limit-form" phx-change="select_context_limit" class="mb-2">
@@ -1036,6 +1055,52 @@ defmodule Sigma.Web.SessionLive do
     """
   end
 
+  defp async_interactions_view(assigns) do
+    ~H"""
+    <section :if={@snapshot.items != [] or @snapshot[:error]} id="async-interactions" class="mb-3 max-h-80 space-y-3 overflow-y-auto" aria-label="Agent messages and questions">
+      <p :if={@snapshot[:error]} role="status" class="text-sm text-error">Async messages are unavailable. Reconnect to refresh.</p>
+      <details :for={item <- @snapshot.items} id={"async-interaction-#{item["item_id"]}"} open={item["can_reply"]} data-status={item["status"]} class="rounded-lg border border-outline-variant bg-surface-container-low p-3">
+        <summary class="cursor-pointer text-sm font-medium">
+          {if item["questions"], do: "Agent questions", else: "Agent message"}
+          <.dm_badge size="sm">{async_status_label(item["status"])}</.dm_badge>
+        </summary>
+        <p :if={item["message"]} class="mt-2 whitespace-pre-wrap break-words">{item["message"]}</p>
+        <form :if={item["can_reply"]} id={"async-reply-#{item["item_id"]}"} phx-submit="reply_async_interaction" class="mt-3 space-y-3">
+          <input type="hidden" name="item_id" value={item["item_id"]} />
+          <input type="hidden" name="expected_leaf" value={@snapshot.leaf_id} />
+          <input type="hidden" name="reply_id" value={get_in(item, ["reply", "reply_id"]) || "web_#{item["item_id"]}"} />
+          <fieldset :for={{question, index} <- Enum.with_index(item["questions"] || [])} class="space-y-2">
+            <legend class="whitespace-pre-wrap text-sm font-medium">{question["title"]}</legend>
+            <label :for={{option, option_index} <- Enum.with_index(question["options"] || [])} class="flex items-start gap-2 text-sm">
+              <input type="radio" name={"answers[#{index}][selected]"} value={option} checked={option_index == 0} />
+              <span class="whitespace-pre-wrap break-words">{option}</span>
+            </label>
+            <.dm_textarea id={"async-answer-#{item["item_id"]}-#{index}"} name={"answers[#{index}][text]"} value="" label="Your answer" rows={2} />
+          </fieldset>
+          <.dm_textarea :if={item["message"]} id={"async-text-#{item["item_id"]}"} name="text" value="" label="Optional reply" rows={2} />
+          <div class="flex justify-end gap-2">
+            <.dm_btn id={"async-dismiss-#{item["item_id"]}"} type="button" variant="ghost" size="sm" phx-hook="WebComponentHook" phx-click="dismiss_async_interaction" phx-value-item-id={item["item_id"]} phx-value-expected-leaf={@snapshot.leaf_id}>Dismiss</.dm_btn>
+            <.dm_btn id={"async-submit-#{item["item_id"]}"} type="submit" variant="primary" size="sm" phx-hook="WebComponentHook">Send reply</.dm_btn>
+          </div>
+        </form>
+        <div :if={not item["can_reply"]} class="mt-2 space-y-2 text-sm">
+          <p :for={question <- item["questions"] || []} class="whitespace-pre-wrap">{question["title"]}</p>
+          <p :if={item["reply"]} class="whitespace-pre-wrap break-words">{item["reply"]["content"]}</p>
+        </div>
+      </details>
+    </section>
+    """
+  end
+
+  defp async_status_label("open"), do: "Awaiting your reply"
+  defp async_status_label("notice"), do: "Reply optional"
+  defp async_status_label("saved"), do: "Reply saved"
+  defp async_status_label(status) when status in ["dispatching", "admitted"], do: "Reply queued"
+  defp async_status_label("consumed"), do: "Reply received"
+  defp async_status_label("delivery_unknown"), do: "Delivery unconfirmed"
+  defp async_status_label("dismissed"), do: "Closed"
+  defp async_status_label(_), do: "Unavailable"
+
   defp pending_mcp_elicitations(assigns) do
     ~H"""
     <div
@@ -1194,16 +1259,22 @@ defmodule Sigma.Web.SessionLive do
     blocks =
       if message.role == :assistant, do: assistant_content_blocks(message.content), else: []
 
+    turn_status =
+      get_in(socket.assigns.session_metrics, [:turns, message_turn_id(message), :status])
+
     tools =
       for %{type: :tool_call, id: id} = block <- blocks do
         result = socket.assigns.tool_results[id]
+        status = tool_call_status(socket.assigns.tool_results, id, turn_status)
 
         %{
           id: id,
           name: block.name,
           input: format_tool_call_args(block),
           result: if(result, do: elem(result, 0)),
-          status: tool_call_status(socket.assigns.tool_results, id)
+          images: if(result, do: elem(result, 2), else: []),
+          status: status,
+          statusLabel: if(status == "pending", do: "turn cancelled", else: status)
         }
       end
 
@@ -1247,6 +1318,7 @@ defmodule Sigma.Web.SessionLive do
       metadata: %{
         timestamp: message.timestamp,
         images: user_images(message.content),
+        sources: Sigma.Web.HostedCitations.sources(message),
         reasoning:
           Enum.find_value(blocks, fn block -> if block.type == :thinking, do: block.thinking end),
         footerHtml: footer |> Enum.map(&Phoenix.HTML.Safe.to_iodata/1) |> IO.iodata_to_binary()
@@ -1382,10 +1454,11 @@ defmodule Sigma.Web.SessionLive do
 
   defp user_images(_), do: []
 
-  defp tool_call_status(tool_results, tool_call_id) do
+  defp tool_call_status(tool_results, tool_call_id, turn_status) do
     case Map.get(tool_results, tool_call_id) do
+      nil when turn_status == :cancelled -> "pending"
       nil -> "running"
-      {_, true} -> "error"
+      {_, true, _} -> "error"
       _ -> "success"
     end
   end
@@ -1418,14 +1491,23 @@ defmodule Sigma.Web.SessionLive do
   defp render_tool_result_content(content) when is_binary(content), do: content
   defp render_tool_result_content(_), do: ""
 
+  defp tool_result_view(message) do
+    images = message.content |> List.wrap() |> Enum.filter(&match?(%{type: :image}, &1))
+
+    urls =
+      case ImageAttachments.tool_data_urls(images) do
+        {:ok, urls} -> urls
+        {:error, _reason} -> []
+      end
+
+    {render_tool_result_content(message.content), message.is_error, urls}
+  end
+
   defp split_messages(messages) do
     Enum.reduce(messages, {[], %{}, %{}}, fn msg, {stream_msgs, tool_results, tc_map} ->
       case msg.role do
         :tool_result ->
-          content_str = render_tool_result_content(msg.content)
-
-          {stream_msgs, Map.put(tool_results, msg.tool_call_id, {content_str, msg.is_error}),
-           tc_map}
+          {stream_msgs, Map.put(tool_results, msg.tool_call_id, tool_result_view(msg)), tc_map}
 
         :assistant ->
           new_tc_map =
@@ -1439,6 +1521,71 @@ defmodule Sigma.Web.SessionLive do
           {stream_msgs ++ [msg], tool_results, tc_map}
       end
     end)
+  end
+
+  defp live_display_messages(snapshot, agent, workdir, session_id) do
+    # Replay removes unfinished tool batches for safe model input. An active
+    # Agent's canonical transcript retains those calls for display only.
+    messages =
+      if active_runtime_phase?(Sigma.Agent.status(agent).phase),
+        do: Sigma.Agent.messages(agent),
+        else: snapshot.messages
+
+    cancelled_display_messages(%{snapshot | messages: messages}, workdir, session_id)
+  catch
+    :exit, _reason -> snapshot.messages
+  end
+
+  defp cancelled_display_messages(snapshot, workdir, session_id) do
+    cancelled_turns =
+      for {id, %{status: :cancelled}} <- snapshot.metrics.turns, into: MapSet.new(), do: id
+
+    if MapSet.size(cancelled_turns) == 0 do
+      snapshot.messages
+    else
+      writer = Sigma.Agent.Runtime.lookup(workdir, session_id, :writer)
+
+      with writer when is_pid(writer) <- writer,
+           {:ok, %{entries: entries, leaf_id: leaf_id}} <-
+             Sigma.Session.Writer.selected_journal(writer),
+           {:ok, {_leaf, nodes}} <-
+             Sigma.Session.Journal.Index.path(Sigma.Session.Journal.Index.build(entries), leaf_id) do
+        branch_ids = MapSet.new(snapshot.branch_entry_ids)
+
+        originals =
+          for %{entry: %{"type" => "message", "id" => entry_id} = entry} <- nodes,
+              MapSet.member?(branch_ids, entry_id),
+              {:ok, %{role: :assistant} = message} <- [Sigma.Session.EntryDecoder.message(entry)],
+              MapSet.member?(cancelled_turns, message_turn_id(message)),
+              into: %{},
+              do: {message.id, message}
+
+        Enum.map(snapshot.messages, fn message -> Map.get(originals, message.id, message) end)
+      else
+        _ -> snapshot.messages
+      end
+    end
+  end
+
+  defp load_native_plan(workdir, session_id) do
+    case Sigma.Agent.Runtime.lookup(workdir, session_id, :writer) do
+      nil ->
+        {:error, :plan_journal_unavailable}
+
+      writer ->
+        with {:ok, selected} <- Sigma.Session.Writer.selected_journal(writer) do
+          PlanProjection.latest_entries(selected.entries, leaf_id: selected.leaf_id)
+        end
+    end
+  catch
+    :exit, _ -> {:error, :plan_journal_unavailable}
+  end
+
+  defp refreshed_native_plan(workdir, session_id, previous) do
+    case load_native_plan(workdir, session_id) do
+      {:ok, snapshot} -> snapshot
+      {:error, _} -> previous
+    end
   end
 
   defp index_display_messages(messages) do
@@ -1510,6 +1657,19 @@ defmodule Sigma.Web.SessionLive do
     request = Map.get(metrics_state.requests, request_id) || %{}
     message_id = attrs[:message_id] || attrs["message_id"] || request[:message_id]
 
+    tool_message_ids =
+      if fact == :turn_finished do
+        socket.assigns.tool_call_to_msg
+        |> Map.values()
+        |> Enum.map(& &1.id)
+        |> Enum.uniq()
+        |> Enum.filter(fn id ->
+          message_turn_id(socket.assigns.display_messages[id]) == turn_id
+        end)
+      else
+        []
+      end
+
     ids =
       [
         if(
@@ -1524,6 +1684,7 @@ defmodule Sigma.Web.SessionLive do
         ),
         if(fact in [:request_finished, :request_usage], do: message_id)
       ]
+      |> Kernel.++(tool_message_ids)
       |> Enum.reject(&is_nil/1)
       |> Enum.uniq()
 
@@ -2176,16 +2337,26 @@ defmodule Sigma.Web.SessionLive do
   def handle_event("cancel_turn", _, socket) do
     with true <- is_pid(socket.assigns.agent),
          {:ok, command} <-
-           Sigma.Protocol.Envelope.command("turn.cancel", socket.assigns.session_id),
-         {_status, _event} <-
-           Sigma.Agent.PublicRuntime.execute(command, %{
+           Sigma.Protocol.Envelope.command("turn.cancel", socket.assigns.session_id) do
+      case Sigma.Agent.PublicRuntime.execute(command, %{
              repo_path: socket.assigns.workdir,
              sessions_dir: socket.assigns.sessions_dir
            }) do
-      :ok
-    end
+        {:ok, %{payload: %{"cancellation" => %{"status" => "cancelled_children"}}}} ->
+          {:noreply, socket}
 
-    {:noreply, assign(socket, :runtime_status, :cancelling)}
+        {:ok, %{payload: %{"cancellation" => %{"status" => "already_cancelled"}}}} ->
+          {:noreply, assign(socket, :runtime_status, :cancelled)}
+
+        {:ok, _event} ->
+          {:noreply, assign(socket, :runtime_status, :cancelling)}
+
+        {:error, %{error: error}} ->
+          {:noreply, put_flash(socket, :error, error.message)}
+      end
+    else
+      _ -> {:noreply, socket}
+    end
   end
 
   @impl true
@@ -2202,6 +2373,71 @@ defmodule Sigma.Web.SessionLive do
   @impl true
   def handle_event("cancel_user_question", %{"question-id" => question_id}, socket) do
     reply_to_user_question(socket, question_id, {:error, "User cancelled the question."})
+  end
+
+  def handle_event("reply_async_interaction", params, socket) do
+    result =
+      with true <- is_pid(socket.assigns.agent),
+           %{} = item <-
+             Enum.find(
+               socket.assigns.async_interactions.items,
+               &(&1["item_id"] == params["item_id"])
+             ),
+           {:ok, reply} <- async_form_reply(item, params) do
+        call_async_interaction(fn ->
+          Sigma.Agent.reply_async_interaction(
+            socket.assigns.agent,
+            item["item_id"],
+            reply,
+            params["expected_leaf"]
+          )
+        end)
+      else
+        _ -> {:error, :invalid_async_reply}
+      end
+
+    socket = refresh_async_view(socket)
+
+    case result do
+      {:ok, _} ->
+        {:noreply, socket}
+
+      {:error, {:async_reply_accepted, _receipt, _reason}} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Reply accepted for dispatch, but its admission receipt could not be saved. Check the updated card."
+         )}
+
+      _ ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Could not confirm reply delivery. Check the updated card before retrying."
+         )}
+    end
+  end
+
+  def handle_event(
+        "dismiss_async_interaction",
+        %{"item-id" => id, "expected-leaf" => leaf},
+        socket
+      ) do
+    result =
+      if is_pid(socket.assigns.agent),
+        do:
+          call_async_interaction(fn ->
+            Sigma.Agent.dismiss_async_interaction(socket.assigns.agent, id, leaf)
+          end),
+        else: {:error, :unavailable}
+
+    socket = refresh_async_view(socket)
+
+    if result == :ok,
+      do: {:noreply, socket},
+      else: {:noreply, put_flash(socket, :error, "The card changed. Review it and try again.")}
   end
 
   @impl true
@@ -2944,6 +3180,10 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
+  def handle_info({:async_interactions_updated, snapshot}, socket) do
+    {:noreply, assign(socket, :async_interactions, snapshot)}
+  end
+
   def handle_info({:ask_user_question, question_id, request}, socket) do
     question =
       request
@@ -3020,6 +3260,8 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
+  def handle_info({:message_start, %{role: :tool_result}}, socket), do: {:noreply, socket}
+
   def handle_info({:message_start, %{role: :assistant} = message}, socket) do
     socket =
       socket
@@ -3035,21 +3277,29 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
+  def handle_info({:message_update, %{role: :tool_result}, _event}, socket),
+    do: {:noreply, socket}
+
   def handle_info({:message_update, message, _event}, socket) do
     {:noreply, stream_display_message(socket, message)}
   end
 
   @impl true
   def handle_info({:message_end, %{role: :tool_result} = message}, socket) do
-    content_str = render_tool_result_content(message.content)
     parent_msg = Map.get(socket.assigns.tool_call_to_msg, message.tool_call_id)
 
     socket =
       update(
         socket,
         :tool_results,
-        &Map.put(&1, message.tool_call_id, {content_str, message.is_error})
+        &Map.put(&1, message.tool_call_id, tool_result_view(message))
       )
+
+    socket =
+      case PlanProjection.latest([message]) do
+        nil -> socket
+        plan -> assign(socket, :native_plan, plan)
+      end
 
     socket = if parent_msg, do: queue_chat_message(socket, parent_msg), else: socket
     {:noreply, socket}
@@ -3948,8 +4198,10 @@ defmodule Sigma.Web.SessionLive do
     |> assign(:context_trace, [])
     |> assign(:subagents, Sigma.Session.Subagents.snapshot(Sigma.Session.Subagents.new()))
     |> assign(:subagents_available, false)
+    |> assign(:native_plan, nil)
     |> assign(:subagent_filter, "all")
     |> assign(:pending_user_questions, [])
+    |> assign(:async_interactions, %{items: [], leaf_id: nil})
     |> assign(:pending_mcp_elicitations, [])
     |> assign(:logs_available, true)
     |> assign(:mcp_server_ids, [])
@@ -4163,6 +4415,62 @@ defmodule Sigma.Web.SessionLive do
     :exit, _reason -> []
   end
 
+  defp load_async_interactions(agent) do
+    case call_async_interaction(fn -> Sigma.Agent.async_interaction_snapshot(agent) end) do
+      {:ok, snapshot} -> snapshot
+      {:error, _} -> %{items: [], leaf_id: nil, error: true}
+    end
+  end
+
+  defp refresh_async_view(%{assigns: %{agent: agent}} = socket) when not is_pid(agent), do: socket
+
+  defp refresh_async_view(socket) do
+    case call_async_interaction(fn ->
+           Sigma.Agent.async_interaction_snapshot(socket.assigns.agent)
+         end) do
+      {:ok, snapshot} ->
+        assign(socket, :async_interactions, snapshot)
+
+      {:error, _} ->
+        assign(
+          socket,
+          :async_interactions,
+          socket.assigns.async_interactions
+          |> Map.update!(:items, &Enum.map(&1, fn item -> Map.put(item, "can_reply", false) end))
+          |> Map.put(:error, true)
+        )
+    end
+  end
+
+  defp call_async_interaction(fun) do
+    fun.()
+  catch
+    :exit, _ -> {:error, :async_interactions_unavailable}
+  end
+
+  defp async_form_reply(%{"questions" => questions}, params) do
+    answers = params["answers"]
+    expected = Enum.map(0..(length(questions) - 1), &Integer.to_string/1)
+
+    if is_map(answers) and Enum.sort(Map.keys(answers)) == Enum.sort(expected) do
+      replies =
+        Enum.with_index(questions, fn _question, index ->
+          answer = answers[Integer.to_string(index)]
+          text = if is_map(answer), do: answer["text"]
+          selected = if is_map(answer), do: answer["selected"]
+          value = if is_binary(text) and String.trim(text) != "", do: text, else: selected
+          %{"questionIndex" => index, "answer" => value}
+        end)
+
+      {:ok, %{"replyId" => params["reply_id"], "answers" => replies}}
+    else
+      {:error, :invalid_async_reply}
+    end
+  end
+
+  defp async_form_reply(%{"message" => _}, params),
+    do: {:ok, %{"replyId" => params["reply_id"], "text" => params["text"]}}
+
   defp load_agent_status(agent) do
     GenServer.call(agent, :status, @session_start_timeout_ms)
   end
@@ -4255,7 +4563,8 @@ defmodule Sigma.Web.SessionLive do
       api_key: config["resolved_key"] || "",
       base_url: config["base_url"] || "",
       auth_type: config["auth_type"] || default_auth_type(api_type),
-      auth_header_name: config["auth_header_name"] || ""
+      auth_header_name: config["auth_header_name"] || "",
+      hosted_web_search: Sigma.Agent.Backplane.HostedTools.from_config(config)
     ]
   end
 

@@ -89,11 +89,21 @@ defmodule Sigma.Session.Operations do
       "entries" => valid_entries,
       "activeLeafId" => accepted.snapshot.active_leaf_id,
       "branchEntryIds" => accepted.snapshot.branch_entry_ids,
-      "diagnostics" => accepted.snapshot.diagnostics,
-      "unknownEntries" =>
-        Enum.reject(valid_entries, &(&1["type"] in @known_entry_types))
+      "diagnostics" => diagnostic_json(accepted.snapshot.diagnostics),
+      "unknownEntries" => Enum.reject(valid_entries, &(&1["type"] in @known_entry_types))
     }
   end
+
+  defp diagnostic_json(value) when is_map(value) do
+    Map.new(value, fn {key, nested} -> {key, diagnostic_json(nested)} end)
+  end
+
+  defp diagnostic_json(value) when is_list(value), do: Enum.map(value, &diagnostic_json/1)
+
+  defp diagnostic_json(value) when is_tuple(value),
+    do: value |> Tuple.to_list() |> diagnostic_json()
+
+  defp diagnostic_json(value), do: value
 
   defp render_markdown(snapshot) do
     settings = [
@@ -147,13 +157,20 @@ defmodule Sigma.Session.Operations do
 
   defp render_content(content) when is_list(content) do
     Enum.map_join(content, "\n\n", fn
-      %{type: :text, text: text} -> text
-      %{type: :thinking, thinking: thinking} -> "> Thinking: #{thinking}"
+      %{type: :text, text: text} ->
+        text
+
+      %{type: :thinking, thinking: thinking} ->
+        "> Thinking: #{thinking}"
+
       %{type: :tool_call, name: name, arguments: arguments} ->
         "Tool call `#{name}`\n\n```json\n#{Jason.encode!(arguments, pretty: true)}\n```"
 
-      %{type: :image, mime_type: mime_type} -> "[Image: #{mime_type}]"
-      part -> "```text\n#{inspect(part, limit: 50)}\n```"
+      %{type: :image, mime_type: mime_type} ->
+        "[Image: #{mime_type}]"
+
+      part ->
+        "```text\n#{inspect(part, limit: 50)}\n```"
     end)
   end
 

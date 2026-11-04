@@ -141,6 +141,176 @@ defmodule Sigma.Web.SessionChannelTest do
              receive_type("session.snapshot")
   end
 
+  @tag skip:
+         "Blocked by gsmlg-opt/backplane#104/#105; restore after a fixed package is adopted and raw patch safety is verified"
+  test "configured Protocol sessions execute native questions and permission-gated raw patches",
+       context do
+    session_id = "native-channel"
+    path = Path.join(context.repo, "native-channel.txt")
+    Application.put_env(:sigma_web, :native_tools_test, %{test: self(), path: path})
+    Application.put_env(:sigma_web, :mock_provider_module, Sigma.Web.NativeToolsProvider)
+    on_exit(fn -> Application.delete_env(:sigma_web, :native_tools_test) end)
+
+    assert {:ok, _} =
+             ConfigManager.update_permissions(%{
+               "default" => "allow",
+               "rules" => %{"apply_patch" => "ask"}
+             })
+
+    socket = join_session!(context, session_id)
+    push_command(socket, command!("session.create", session_id, %{"cwd" => context.repo}))
+    receive_type("session.snapshot")
+
+    push_command(
+      socket,
+      command!("subscription.attach", session_id, %{"requiredCapabilities" => ["questions.v1"]})
+    )
+
+    receive_type("session.snapshot")
+    push_command(socket, command!("prompt.submit", session_id, %{"content" => "native flow"}))
+    question = receive_type("question.required")
+    assert question.payload["request"]["question"] == "[Flow] Continue with the native patch?"
+    refute File.exists?(path)
+
+    push_command(
+      socket,
+      command!("question.resolve", session_id, %{
+        "requestId" => question.payload["requestId"],
+        "action" => "answer",
+        "answer" => "Proceed"
+      })
+    )
+
+    permission = receive_type("permission.required")
+    refute File.exists?(path)
+
+    push_command(
+      socket,
+      command!("permission.resolve", session_id, %{
+        "requestId" => permission.payload["requestId"],
+        "decision" => "allow"
+      })
+    )
+
+    receive_until("turn.completed", [])
+    assert File.read!(path) == "native client verified\n"
+
+    assert {:ok, snapshot} =
+             Sigma.Session.Log.snapshot(Path.join(context.sessions_dir, session_id <> ".jsonl"))
+
+    assert Enum.any?(
+             snapshot.messages,
+             &(&1.role == :tool_result and &1.tool_name == "apply_patch" and not &1.is_error)
+           )
+
+    push_command(
+      socket,
+      command!("question.resolve", session_id, %{
+        "requestId" => question.payload["requestId"],
+        "action" => "answer",
+        "answer" => "late answer"
+      })
+    )
+
+    assert %{type: "session.error"} = receive_type("session.error")
+    assert File.read!(path) == "native client verified\n"
+  end
+
+  test "configured Protocol sessions execute native questions and permission-gated plans",
+       context do
+    session_id = "native-plan-channel"
+    Application.put_env(:sigma_web, :native_tools_test, %{test: self(), mode: :plan})
+    Application.put_env(:sigma_web, :mock_provider_module, Sigma.Web.NativeToolsProvider)
+    on_exit(fn -> Application.delete_env(:sigma_web, :native_tools_test) end)
+
+    assert {:ok, _} =
+             ConfigManager.update_permissions(%{
+               "default" => "allow",
+               "rules" => %{"update_plan" => "ask"}
+             })
+
+    socket = join_session!(context, session_id)
+    push_command(socket, command!("session.create", session_id, %{"cwd" => context.repo}))
+    receive_type("session.snapshot")
+
+    push_command(
+      socket,
+      command!("subscription.attach", session_id, %{"requiredCapabilities" => ["questions.v1"]})
+    )
+
+    receive_type("session.snapshot")
+
+    push_command(
+      socket,
+      command!("prompt.submit", session_id, %{"content" => "native plan flow"})
+    )
+
+    question = receive_type("question.required")
+    assert question.payload["request"]["question"] == "[Flow] Continue with the native plan?"
+
+    push_command(
+      socket,
+      command!("question.resolve", session_id, %{
+        "requestId" => question.payload["requestId"],
+        "action" => "answer",
+        "answer" => "Proceed"
+      })
+    )
+
+    permission = receive_type("permission.required")
+
+    assert permission.payload["request"]["question"] ==
+             "Allow update_plan for this tool call?"
+
+    storage_path = Path.join(context.sessions_dir, session_id <> ".jsonl")
+    assert {:ok, pending} = Sigma.Session.Log.snapshot(storage_path)
+    assert Sigma.Agent.Backplane.PlanProjection.latest(pending.messages) == nil
+
+    push_command(
+      socket,
+      command!("permission.resolve", session_id, %{
+        "requestId" => permission.payload["requestId"],
+        "decision" => "allow"
+      })
+    )
+
+    events = receive_until("turn.completed", [])
+
+    assert Enum.any?(events, fn event ->
+             event.type == "tool.completed" and event.payload["name"] == "update_plan" and
+               event.payload["isError"] == false
+           end)
+
+    assert {:ok, snapshot} = Sigma.Session.Log.snapshot(storage_path)
+
+    assert %{
+             "revision" => 2,
+             "plan" => [%{"step" => "Native client verified", "status" => "completed"}]
+           } =
+             Sigma.Agent.Backplane.PlanProjection.latest(snapshot.messages)
+
+    assert Enum.any?(snapshot.messages, fn message ->
+             message.role == :tool_result and message.tool_name == "request_user_input" and
+               not message.is_error
+           end)
+
+    before_late_reply = File.read!(storage_path)
+
+    push_command(
+      socket,
+      command!("question.resolve", session_id, %{
+        "requestId" => question.payload["requestId"],
+        "action" => "answer",
+        "answer" => "late answer"
+      })
+    )
+
+    assert %{type: "session.error"} = receive_type("session.error")
+    assert File.read!(storage_path) == before_late_reply
+    assert {:ok, unchanged} = Sigma.Session.Log.snapshot(storage_path)
+    assert unchanged.messages == snapshot.messages
+  end
+
   test "WebSocket creation persists the configured budget and rejects a subsequently removed model",
        context do
     alias Sigma.Session.Models

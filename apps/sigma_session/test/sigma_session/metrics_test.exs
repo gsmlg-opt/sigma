@@ -171,6 +171,91 @@ defmodule Sigma.Session.MetricsTest do
     assert Metrics.snapshot(state).coverage == %{known: 1, total: 2, ratio: 0.5}
   end
 
+  test "live finalization preserves only the exact current session request and turn" do
+    state =
+      Metrics.reduce_all(
+        for {session_id, turn_id, request_id} <- [
+              {"s1", "active-turn", "active-request"},
+              {"s1", "active-turn", "previous-request"},
+              {"s1", "old-turn", "old-request"},
+              {"inherited", "foreign-turn", "foreign-request"}
+            ],
+            fact <- [
+              {:turn_started, %{session_id: session_id, turn_id: turn_id}},
+              {:request_started,
+               %{
+                 session_id: session_id,
+                 turn_id: turn_id,
+                 request_id: request_id,
+                 status: :running,
+                 usage_status: :reported,
+                 input_tokens_total: 12,
+                 output_tokens_total: 3
+               }}
+            ] do
+          fact
+        end,
+        "s1"
+      )
+
+    live =
+      Metrics.finalize_in_flight(state,
+        active_turn_id: "active-turn",
+        active_request_id: "active-request"
+      )
+
+    assert live.requests["active-request"] == state.requests["active-request"]
+    assert live.turns["active-turn"] == state.turns["active-turn"]
+
+    for request_id <- ["previous-request", "old-request", "foreign-request"] do
+      assert live.requests[request_id].status == :interrupted
+    end
+
+    assert live.turns["old-turn"].status == :interrupted
+    assert live.turns["foreign-turn"].status == :interrupted
+    assert Metrics.snapshot(live).turns["active-turn"].status == :running
+    assert Metrics.snapshot(live).own_usage == Metrics.snapshot(state).own_usage
+
+    inherited =
+      Metrics.finalize_in_flight(state,
+        active_turn_id: "foreign-turn",
+        active_request_id: "foreign-request"
+      )
+
+    assert inherited.requests["foreign-request"].status == :interrupted
+    assert inherited.turns["foreign-turn"].status == :interrupted
+
+    mismatched =
+      Metrics.finalize_in_flight(state,
+        active_turn_id: "old-turn",
+        active_request_id: "active-request"
+      )
+
+    assert mismatched.requests["active-request"].status == :interrupted
+  end
+
+  test "live finalization does not revive terminal facts or preserve absent identities" do
+    state =
+      Metrics.new("s1")
+      |> Metrics.reduce({:turn_finished, %{turn_id: "t1", session_id: "s1", status: :cancelled}})
+      |> Metrics.reduce(
+        {:request_finished,
+         %{request_id: "r1", turn_id: "t1", session_id: "s1", status: :completed}}
+      )
+      |> Metrics.reduce(
+        {:request_started, %{request_id: "aux", session_id: "s1", status: :started}}
+      )
+
+    live = Metrics.finalize_in_flight(state, active_turn_id: "t1", active_request_id: "r1")
+    assert live.turns["t1"].status == :cancelled
+    assert live.requests["r1"].status == :completed
+    assert live.requests["aux"].status == :interrupted
+    assert Metrics.finalize_in_flight(state).requests["aux"].status == :interrupted
+
+    auxiliary = Metrics.finalize_in_flight(state, active_request_id: "aux")
+    assert auxiliary.requests["aux"] == state.requests["aux"]
+  end
+
   test "uses weighted throughput and replaces duplicate revisions" do
     state =
       Metrics.new("s1")

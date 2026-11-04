@@ -134,6 +134,77 @@ defmodule Sigma.Coding.Hooks.RunnerTest do
     refute File.exists?(Path.join(directory, "escaped"))
   end
 
+  test "shutdown joins the command worker before acknowledging cancellation", %{
+    ctx: ctx,
+    tmp_dir: directory
+  } do
+    runtime =
+      start_supervised!({AsyncRuntime, {self(), task_supervisor: ctx.hook_task_supervisor}})
+
+    ctx = Map.put(ctx, :hook_async_runtime, runtime)
+
+    script =
+      "printf '%s' \"$$\" > shell-pid; touch started; while [ ! -f release ]; do sleep 0.01; done; touch escaped"
+
+    assert {:proceed, []} = Runner.run(:stop, [command(:stop, script, async: true)], ctx)
+    await_file(Path.join(directory, "started"), 200)
+
+    outer = for {_ref, task} <- :sys.get_state(runtime).running, do: task.pid
+    assert [worker] = Task.Supervisor.children(ctx.hook_task_supervisor) -- outer
+    worker_ref = Process.monitor(worker)
+    :erlang.suspend_process(worker)
+
+    try do
+      shutdown = Task.async(fn -> AsyncRuntime.shutdown(runtime) end)
+      assert Task.yield(shutdown, 100) == nil
+      :erlang.resume_process(worker)
+      assert Task.await(shutdown, 1_000) == :ok
+      refute Process.alive?(worker)
+      assert Task.Supervisor.children(ctx.hook_task_supervisor) == []
+      pid = File.read!(Path.join(directory, "shell-pid"))
+
+      case File.read("/proc/#{pid}/stat") do
+        {:ok, stat} ->
+          assert String.split(stat, ") ", parts: 2) |> List.last() |> String.starts_with?("Z ")
+
+        {:error, :enoent} ->
+          :ok
+      end
+
+      File.write!(Path.join(directory, "release"), "ready")
+      refute File.exists?(Path.join(directory, "escaped"))
+    after
+      if Process.alive?(worker) do
+        try do
+          :erlang.resume_process(worker)
+        rescue
+          ArgumentError -> :ok
+        end
+      end
+
+      AsyncRuntime.shutdown(runtime)
+      assert_receive {:DOWN, ^worker_ref, :process, ^worker, _}, 1_000
+    end
+  end
+
+  test "a closed session runtime rejects a command before OS launch", %{
+    ctx: ctx,
+    tmp_dir: directory
+  } do
+    runtime =
+      start_supervised!({AsyncRuntime, {self(), task_supervisor: ctx.hook_task_supervisor}})
+
+    assert :ok = AsyncRuntime.shutdown(runtime)
+    context = Map.put(ctx, :hook_async_runtime, runtime)
+
+    assert {:proceed, warnings} =
+             Runner.run(:stop, [command(:stop, "touch escaped")], context)
+
+    assert Enum.any?(warnings, &String.contains?(&1, "Hook cancelled"))
+    assert Task.Supervisor.children(ctx.hook_task_supervisor) == []
+    refute File.exists?(Path.join(directory, "escaped"))
+  end
+
   test "owner death preserves helpers released by a completed async hook", %{
     ctx: ctx,
     tmp_dir: directory

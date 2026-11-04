@@ -3,6 +3,7 @@ import { createPortal } from "react-dom"
 import { Chat } from "@duskmoon-dev/components/chat"
 import { Markdown } from "@duskmoon-dev/components/markdown"
 import { Button } from "@duskmoon-dev/components/button"
+import { Typography } from "@duskmoon-dev/components/typography"
 import { createDuskmoonReactChat, useChatSubmission } from "phoenix_duskmoon/react-chat"
 import { encodeImageFiles, validateImageFiles } from "../chat_attachments.js"
 import { filterSkillCandidates, insertSkillCandidate, searchableRemoteSources } from "../skill_completion.js"
@@ -171,10 +172,19 @@ function Message({ message, bridge, targetId, timeline, active, connected, synch
     h(Chat.Bubble, { streaming: message.status === "streaming", color: message.role === "user" ? "secondary" : undefined },
       metadata.reasoning && h(Chat.Reasoning, null, h("summary", null, "Reasoning"), metadata.reasoning),
       ...(message.tools || []).map((tool) => h(Chat.Tool, { key: tool.id, status: tool.status },
-        h(Chat.ToolHeader, null, tool.name, ": ", tool.status),
+        h(Chat.ToolHeader, null, tool.name, ": ", tool.statusLabel || tool.status),
         h(Chat.ToolCall, null, h("pre", { className: "overflow-x-auto whitespace-pre-wrap text-xs" }, tool.input)),
-        tool.result != null && h(Chat.ToolResult, null, h("pre", { className: "overflow-x-auto whitespace-pre-wrap text-xs" }, tool.result)))),
+        tool.result != null && h(Chat.ToolResult, null,
+          tool.result && h("pre", { className: "overflow-x-auto whitespace-pre-wrap text-xs" }, tool.result),
+          ...(tool.images || []).map((src, index) => h("img", {
+            key: index, src, alt: `${tool.name} result ${index + 1}`, loading: "lazy",
+            className: "max-h-96 max-w-full rounded object-contain"
+          }))))),
       message.content && h(Markdown, { markdown: message.content, className: "chat-bubble-content" }),
+      metadata.sources?.length > 0 && h("nav", { "aria-label": "Sources", className: "mt-2 text-sm" },
+        h("span", null, "Sources"),
+        h("ol", { className: "list-inside list-decimal" }, ...metadata.sources.map((source) =>
+          h("li", { key: source.url }, h(Typography.Link, { href: source.url, target: "_blank", rel: "noopener noreferrer", className: "break-words" }, source.title))))),
       ...(metadata.images || []).map((src, index) => h("img", { key: index, src, alt: "Attached image", loading: "lazy", className: "max-h-96 max-w-full rounded object-contain" }))),
     h(Chat.Footer, null,
       metadata.footerHtml && h(Metrics, { html: metadata.footerHtml }),

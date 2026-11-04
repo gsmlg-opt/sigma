@@ -86,6 +86,7 @@ defmodule Sigma.Web.ProtocolSessionOptions do
         session_context: session_context,
         permission_config: ConfigManager.get_permissions(),
         tools: [],
+        native_tools: true,
         mcp_servers: ConfigManager.mcp_servers_for(mcp_ids),
         cwd: effective_cwd
       ]
@@ -141,7 +142,8 @@ defmodule Sigma.Web.ProtocolSessionOptions do
       api_key: config["resolved_key"] || "",
       base_url: config["base_url"] || "",
       auth_type: config["auth_type"] || default_auth_type(api_type),
-      auth_header_name: config["auth_header_name"] || ""
+      auth_header_name: config["auth_header_name"] || "",
+      hosted_web_search: Sigma.Agent.Backplane.HostedTools.from_config(config)
     ]
   end
 

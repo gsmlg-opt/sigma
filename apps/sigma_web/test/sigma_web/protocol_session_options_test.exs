@@ -4,7 +4,7 @@ defmodule Sigma.Web.ProtocolSessionOptionsTest do
   alias Sigma.Web.ProtocolSessionOptions
 
   @tag :tmp_dir
-  test "protocol sessions start without legacy built-in tools", %{tmp_dir: tmp} do
+  test "protocol sessions select native tools through the session host", %{tmp_dir: tmp} do
     with_config(tmp, fn ->
       snapshot = %{
         cwd: tmp,
@@ -17,7 +17,35 @@ defmodule Sigma.Web.ProtocolSessionOptionsTest do
       opts = ProtocolSessionOptions.resolve(snapshot, tmp, tmp, "retired-tools")
       assert opts[:provider] == Sigma.Ai.Providers.OpenAIResponses
       assert opts[:tools] == []
+      assert opts[:native_tools]
       assert opts[:mcp_servers] == %{}
+    end)
+  end
+
+  @tag :tmp_dir
+  test "protocol sessions use the selected model's complete hosted configuration", %{tmp_dir: tmp} do
+    with_config(tmp, fn ->
+      path = Path.join([tmp, "agent", "models.json"])
+      config = Jason.decode!(File.read!(path))
+      enabled = %{"webSearch" => %{"supported" => true, "enabled" => true, "mode" => "cached"}}
+      config = put_in(config, ["providers", "p", "hostedTools"], enabled)
+      File.write!(path, Jason.encode!(config))
+      snapshot = %{cwd: tmp, mcp_server_ids: [], provider_id: "p", model_id: "kept"}
+
+      opts = ProtocolSessionOptions.resolve(snapshot, tmp, tmp, "hosted")
+
+      assert opts[:options][:hosted_web_search] == %{
+               supported: true,
+               enabled: true,
+               mode: :cached
+             }
+
+      config =
+        put_in(config, ["providers", "p", "models"], [%{"id" => "kept", "hostedTools" => %{}}])
+
+      File.write!(path, Jason.encode!(config))
+      opts = ProtocolSessionOptions.resolve(snapshot, tmp, tmp, "hosted")
+      assert is_nil(opts[:options][:hosted_web_search])
     end)
   end
 

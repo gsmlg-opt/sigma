@@ -141,6 +141,61 @@ defmodule Sigma.Agent.RuntimeTest do
     end)
   end
 
+  test "live snapshots preserve the current native turn without changing offline recovery",
+       context do
+    repo = tmp_repo!(context, "live-metrics")
+    cold_repo = tmp_repo!(context, "cold-metrics")
+    source_path = Path.join(repo, "source.jsonl")
+    cold_path = Path.join(cold_repo, "source.jsonl")
+    :ok = Sigma.Session.Log.persist_event(source_path, {:agent_start, repo})
+
+    assert {:ok, handle} =
+             Sigma.Agent.Runtime.get_session(
+               repo,
+               "source",
+               session_opts(
+                 cwd: repo,
+                 model: %{id: "mock-model", api: "openai-responses", provider: "mock-provider"},
+                 provider: BlockingProvider,
+                 native_tools: true,
+                 options: [test_pid: self()],
+                 transcript_path: source_path
+               )
+             )
+
+    :ok = Sigma.Agent.subscribe(handle.agent)
+    assert {:accepted, _} = Sigma.Agent.prompt(handle.agent, "remain active across snapshots")
+    assert_receive {:runtime_provider_waiting, provider}, 1_000
+
+    assert_receive {:metrics, :request_started, %{request_id: request_id, turn_id: turn_id}},
+                   1_000
+
+    original = File.read!(source_path)
+    File.write!(cold_path, original)
+
+    assert %{turn_id: ^turn_id, current_request_id: ^request_id} =
+             Sigma.Agent.status(handle.agent)
+
+    assert Process.alive?(provider)
+    assert {:ok, live} = Sigma.Agent.Runtime.session_snapshot(repo, "source", source_path)
+    assert live.metrics.session_id == "source"
+    assert live.metrics.requests[request_id].status == :running
+    assert live.metrics.turns[turn_id].status == :running
+
+    assert {:ok, offline} = Sigma.Agent.Runtime.session_snapshot(cold_repo, "source", cold_path)
+    assert offline.metrics.requests[request_id].status == :interrupted
+    assert offline.metrics.turns[turn_id].status == :interrupted
+    assert File.read!(source_path) == original
+    assert File.read!(cold_path) == original
+    refute_receive {:runtime_provider_waiting, _}, 20
+
+    assert {:cancelling, ^turn_id} = Sigma.Agent.cancel(handle.agent)
+    assert_receive {:turn_cancelled}, 1_000
+    assert {:ok, cancelled} = Sigma.Agent.Runtime.session_snapshot(repo, "source", source_path)
+    assert cancelled.metrics.requests[request_id].status == :cancelled
+    assert cancelled.metrics.turns[turn_id].status == :cancelled
+  end
+
   test "starts repository supervisors lazily and reuses them per repo", context do
     repo = tmp_repo!(context, "repo-a")
 

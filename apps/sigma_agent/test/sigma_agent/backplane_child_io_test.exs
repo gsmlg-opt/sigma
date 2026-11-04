@@ -210,6 +210,146 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
     refute File.read!(ctx.opts[:transcript_path]) =~ "secret-child-token"
   end
 
+  test "native preparation narrows inherited grants and closes unadopted allocations", ctx do
+    config =
+      Map.merge(ctx.config, %{
+        native_tools: true,
+        native_memory_root: Path.join(ctx.path, "memories"),
+        tools: []
+      })
+
+    authority = %{ctx.authority | grants: ["update_plan"]}
+    io = start_supervised!({ChildIO, Keyword.put(ctx.opts, :config, config)})
+    assert {:ok, prepared} = ChildIO.prepare(io, ctx.identity, authority, [])
+    assert Enum.map(prepared.catalog.tools, & &1.name) == ["update_plan"]
+    binding = prepared.options[:session_binding]
+    assert is_map(binding)
+    assert prepared.catalog.authority.caller == ctx.identity.child_session_id
+    assert prepared.catalog.authority.run_id == ctx.identity.run_id
+    assert Backplane.AgentRuntime.Codex.Session.status(binding.session).phase == :reserved
+
+    assert {:error, %Error{class: :resource_conflict}} =
+             ChildIO.reject_preparation(io, {"stale", 1})
+
+    assert Backplane.AgentRuntime.Codex.Session.status(binding.session).phase == :reserved
+    assert {:ok, %{status: :confirmed}} = ChildIO.reject_preparation(io, prepared.key)
+    refute Process.alive?(binding.session)
+    assert {:ok, %{status: :confirmed}} = ChildIO.reject_preparation(io, prepared.key)
+
+    next_identity = %{
+      ctx.identity
+      | run_id: "child-run-2",
+        public_run_id: "generation:child-run-2",
+        incarnation: 2
+    }
+
+    assert {:ok, next} = ChildIO.prepare(io, next_identity, authority, [])
+    assert next.options[:session_binding].session != binding.session
+    assert {:ok, %{status: :confirmed}} = ChildIO.reject_preparation(io, next.key)
+  end
+
+  test "native preparation refuses a lost Session without confirmed resource cleanup", ctx do
+    config =
+      Map.merge(ctx.config, %{
+        native_tools: true,
+        native_memory_root: Path.join(ctx.path, "memories"),
+        tools: []
+      })
+
+    authority = %{ctx.authority | grants: ["update_plan"]}
+    io = start_supervised!({ChildIO, Keyword.put(ctx.opts, :config, config)})
+    assert {:ok, first} = ChildIO.prepare(io, ctx.identity, authority, [])
+    session = first.options[:session_binding].session
+    :ok = GenServer.stop(session, :normal)
+
+    next_identity = %{ctx.identity | run_id: "after-loss", incarnation: 2}
+
+    assert {:error, %Error{class: :unknown_outcome}} =
+             ChildIO.prepare(io, next_identity, authority, [])
+
+    assert {:error, %Error{class: :unknown_outcome}} =
+             ChildIO.reject_preparation(io, first.key)
+  end
+
+  test "fresh child resources hydrate confirmed Plan journal without invoking historical tools",
+       ctx do
+    plan = %{"plan" => [%{"step" => "Persisted child plan", "status" => "completed"}]}
+
+    config =
+      Map.merge(ctx.config, %{
+        native_tools: true,
+        native_memory_root: Path.join(ctx.path, "memories"),
+        tools: [],
+        provider: ToolProvider,
+        provider_options: [test_pid: self(), tool_name: "update_plan", tool_arguments: plan]
+      })
+
+    authority = %{ctx.authority | grants: ["update_plan"]}
+    opts = Keyword.put(ctx.opts, :config, config)
+    io = start_supervised!({ChildIO, opts})
+    assert {:ok, first} = ChildIO.prepare(io, ctx.identity, authority, [])
+    conversation = start_supervised!({Conversation, first.options ++ [subscriber: self()]})
+    assert {:ok, _} = Conversation.prompt(conversation, "save a plan")
+    assert_terminal(ctx.identity.run_id)
+    assert_receive {:child_tool_provider, _}
+    assert_receive {:child_provider, _}
+    assert {:ok, before} = Log.snapshot(ctx.opts[:transcript_path])
+    publication = Sigma.Agent.Backplane.PlanProjection.latest(before.messages)
+    assert publication["plan"] == plan["plan"]
+    assert :ok = stop_supervised(ctx.identity.run_id)
+    assert :ok = stop_supervised(ChildIO)
+
+    config = %{config | provider: ChildProvider, provider_options: [test_pid: self()]}
+    io = start_supervised!({ChildIO, Keyword.put(opts, :config, config)})
+    next_identity = %{ctx.identity | run_id: "restored-child", incarnation: 2}
+    assert {:ok, restored} = ChildIO.prepare(io, next_identity, authority, [])
+    assert restored.options[:session_binding].session != first.options[:session_binding].session
+    native_plan = restored.catalog.registry.tools["update_plan"].backend_context.context.plan
+
+    assert {:ok, %{content: %{"plan" => steps}}} = Backplane.AgentRuntime.Plan.read(native_plan)
+    assert steps == plan["plan"]
+    refute_receive {:child_tool_provider, _}, 50
+    assert {:ok, after_restore} = Log.snapshot(ctx.opts[:transcript_path])
+    assert after_restore.messages == before.messages
+    assert {:ok, %{status: :confirmed}} = ChildIO.reject_preparation(io, restored.key)
+  end
+
+  test "native followup with every native grant revoked still binds its fresh run", ctx do
+    config =
+      Map.merge(ctx.config, %{
+        native_tools: true,
+        native_memory_root: Path.join(ctx.path, "memories"),
+        tools: []
+      })
+
+    authority = %{ctx.authority | grants: ["update_plan"]}
+    io = start_supervised!({ChildIO, Keyword.put(ctx.opts, :config, config)})
+    assert {:ok, first} = ChildIO.prepare(io, ctx.identity, authority, [])
+    conversation = start_supervised!({Conversation, first.options ++ [subscriber: self()]})
+    assert {:ok, _} = Conversation.prompt(conversation, "first run")
+    assert_terminal(ctx.identity.run_id)
+
+    next_identity = %{
+      ctx.identity
+      | run_id: "child-run-2",
+        public_run_id: "generation:child-run-2",
+        incarnation: 2
+    }
+
+    assert {:ok, next} = ChildIO.prepare(io, next_identity, %{authority | grants: []}, [])
+    assert next.catalog.tools == []
+    assert next.options[:session_binding].session == first.options[:session_binding].session
+    assert next.options[:session_binding].run_id == next_identity.run_id
+
+    next_conversation =
+      start_supervised!({Conversation, next.options ++ [subscriber: self()]},
+        id: :narrowed_native_child
+      )
+
+    assert {:ok, _} = Conversation.prompt(next_conversation, "no native grants")
+    assert_terminal(next_identity.run_id)
+  end
+
   test "committed child messages are deduplicated and followups retain history with fresh tools",
        ctx do
     io = start_supervised!({ChildIO, ctx.opts})
@@ -230,6 +370,8 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
 
     assert {:ok, _} =
              descriptor.backend_context.execute.(%{
+               run_id: ctx.identity.run_id,
+               incarnation: ctx.identity.incarnation,
                tool_call_id: "tool-1",
                tool_name: EchoTool.name(),
                arguments: %{}
@@ -251,8 +393,21 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
     assert {:error, %Error{class: :resource_conflict}} = ChildIO.validate(io, first.key)
     assert :undefined == :ets.info(old_table)
 
+    assert {:error, %Error{class: :resource_conflict}} =
+             second.catalog.registry.tools[EchoTool.name()].backend_context.execute.(%{
+               run_id: ctx.identity.run_id,
+               incarnation: ctx.identity.incarnation,
+               tool_call_id: "stale-operation",
+               tool_name: EchoTool.name(),
+               arguments: %{}
+             })
+
+    refute_receive {:child_tool, _, _}
+
     assert {:ok, _} =
              second.catalog.registry.tools[EchoTool.name()].backend_context.execute.(%{
+               run_id: next_identity.run_id,
+               incarnation: next_identity.incarnation,
                tool_call_id: "tool-2",
                tool_name: EchoTool.name(),
                arguments: %{}
@@ -287,9 +442,12 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
 
     assert Map.keys(metadata) |> Enum.sort() == [
              :backplane_store_path,
+             :host_retirement,
              :identity,
              :transcript_path
            ]
+
+    assert is_nil(metadata.host_retirement)
   end
 
   test "child Conversation tools retain the issuing child request ID after provider completion",
@@ -483,6 +641,8 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
 
     assert {:ok, _} =
              prepared.catalog.registry.tools[EchoTool.name()].backend_context.execute.(%{
+               run_id: ctx.identity.run_id,
+               incarnation: ctx.identity.incarnation,
                tool_call_id: "approval",
                tool_name: EchoTool.name(),
                arguments: %{"value" => "checked"}
@@ -502,6 +662,8 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
 
     assert {:ok, %{is_error: true, content: [%{text: text}]}} =
              prepared.catalog.registry.tools[EchoTool.name()].backend.execute(%{
+               run_id: ctx.identity.run_id,
+               incarnation: ctx.identity.incarnation,
                tool_call_id: "approval",
                tool_name: EchoTool.name(),
                arguments: %{},
@@ -545,6 +707,8 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
 
     assert {:ok, _} =
              retained.catalog.registry.tools[tool.name()].backend_context.execute.(%{
+               run_id: second_identity.run_id,
+               incarnation: second_identity.incarnation,
                tool_call_id: "retained-question",
                tool_name: tool.name(),
                arguments: %{"question" => "Retained?"}
@@ -575,6 +739,8 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
 
     assert {:ok, %{is_error: true}} =
              refreshed.catalog.registry.tools[EchoTool.name()].backend_context.execute.(%{
+               run_id: third_identity.run_id,
+               incarnation: third_identity.incarnation,
                tool_call_id: "headless-approval",
                tool_name: EchoTool.name(),
                arguments: %{}
@@ -582,6 +748,8 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
 
     assert {:error, error} =
              refreshed.catalog.registry.tools[tool.name()].backend_context.execute.(%{
+               run_id: third_identity.run_id,
+               incarnation: third_identity.incarnation,
                tool_call_id: "headless-question",
                tool_name: tool.name(),
                arguments: %{"question" => "No inherited resolver?"}
@@ -591,6 +759,104 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
     refute_receive {:retained_permission, _}
     refute_receive {:retained_question, _}
     refute_receive {:child_tool, _, _}
+  end
+
+  test "terminal checkpoint feedback persists once and seeds a fresh child run", ctx do
+    io = start_supervised!({ChildIO, ctx.opts})
+    assert {:ok, prepared} = ChildIO.prepare(io, ctx.identity, ctx.authority, [])
+
+    feedback = %{
+      "id" => "child-terminal-feedback",
+      "source" => "sigma.hooks",
+      "stage" => "PreToolUse",
+      "text" => "Review before another child turn",
+      "correlation" => %{
+        "run_id" => ctx.identity.run_id,
+        "incarnation" => 1,
+        "turn_id" => "turn",
+        "step_id" => "step",
+        "attempt_id" => "attempt",
+        "invocation_id" => "invocation",
+        "tool_call_id" => "call",
+        "tool_name" => "child_echo",
+        "tool_revision" => 1,
+        "catalog_revision" => 1
+      },
+      "revision" => 1,
+      "store_mode" => "durable",
+      "projected" => false
+    }
+
+    message = Message.user("child-user", "work")
+
+    stage = %{
+      run: %{
+        run_id: ctx.identity.run_id,
+        incarnation: 1,
+        state: :cancelled,
+        expected_revision: 1,
+        context: %{conversation: %{messages: [message], host_feedback: [feedback]}}
+      },
+      revision: 1,
+      transition: %{},
+      effects: [],
+      outbox: [],
+      incarnation: 1
+    }
+
+    assert {:ok, _} = ChildStore.acknowledge_commit(prepared.options[:context], stage, %{})
+    assert {:ok, snapshot} = Log.snapshot(ctx.opts[:transcript_path])
+    assert [saved] = Enum.filter(snapshot.messages, &(&1.metadata["host_feedback"] != nil))
+    assert saved.metadata["host_feedback"]["id"] == feedback["id"]
+    next_identity = %{ctx.identity | run_id: "child-feedback-next", incarnation: 2}
+    assert {:ok, next} = ChildIO.prepare(io, next_identity, ctx.authority, [])
+    assert [seed] = Enum.filter(next.options[:messages], &Map.has_key?(&1, :host_feedback))
+    assert seed.host_feedback["id"] == feedback["id"]
+    assert seed.content =~ feedback["text"]
+    assert :ok = ChildIO.project(io, next.key, next.options[:messages])
+    assert {:ok, reprojected} = Log.snapshot(ctx.opts[:transcript_path])
+    assert length(Enum.filter(reprojected.messages, &(&1.metadata["host_feedback"] != nil))) == 1
+    conversation = start_supervised!({Conversation, next.options ++ [subscriber: self()]})
+    assert [accepted] = Conversation.status(conversation).conversation.host_feedback
+    assert accepted["id"] == feedback["id"]
+    assert accepted["projected"]
+  end
+
+  test "feedback stays out of JSONL until its assistant tool batch is complete", ctx do
+    io = start_supervised!({ChildIO, ctx.opts})
+    assert {:ok, prepared} = ChildIO.prepare(io, ctx.identity, ctx.authority, [])
+
+    feedback = %{
+      "id" => "waiting-feedback",
+      "source" => "sigma.hooks",
+      "stage" => "PreToolUse",
+      "text" => "Wait for the batch",
+      "projected" => false
+    }
+
+    stage = %{
+      run: %{
+        run_id: ctx.identity.run_id,
+        incarnation: 1,
+        state: :running,
+        expected_revision: 1,
+        context: %{
+          conversation: %{
+            messages: [Message.user("child-user", "work")],
+            host_feedback: [feedback]
+          }
+        }
+      },
+      revision: 1,
+      transition: %{},
+      effects: [],
+      outbox: [],
+      incarnation: 1
+    }
+
+    assert {:ok, _} = ChildStore.acknowledge_commit(prepared.options[:context], stage, %{})
+    assert {:ok, snapshot} = Log.snapshot(ctx.opts[:transcript_path])
+    refute Enum.any?(snapshot.messages, &(&1.metadata["host_feedback"] != nil))
   end
 
   defp assert_terminal(run_id) do

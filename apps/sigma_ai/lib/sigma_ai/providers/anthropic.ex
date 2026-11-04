@@ -23,6 +23,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
   def stream(params) do
     model = params.model
     context = params.context
+    Sigma.Ai.Providers.ToolTransport.require_json_functions!(context, "Anthropic")
     options = params.options
     session_id = Map.get(params, :session_id)
     log_session_id = Map.get(params, :log_session_id, session_id)
@@ -52,7 +53,6 @@ defmodule Sigma.Ai.Providers.Anthropic do
           body =
             body
             |> Map.put(:thinking, %{type: "enabled", budget_tokens: budget})
-            |> Map.update!(:max_tokens, &max(&1, budget + 1000))
 
           {body, ["interleaved-thinking-2025-05-14"]}
 
@@ -239,14 +239,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
       api: model.api,
       provider: model.provider,
       model: model.id,
-      usage: %{
-        input: 0,
-        output: 0,
-        cache_read: 0,
-        cache_write: 0,
-        total_tokens: 0,
-        cost: %{input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0, total: 0.0}
-      },
+      usage: Sigma.Ai.ProviderUsage.from_wire(nil, :anthropic),
       stop_reason: nil,
       response_id: nil,
       timestamp: System.system_time(:millisecond)
@@ -398,11 +391,16 @@ defmodule Sigma.Ai.Providers.Anthropic do
 
   defp transform_cache_control(_cache_control), do: nil
 
-  defp output_token_limit(model, options) do
-    positive_integer(options[:max_tokens]) ||
-      positive_integer(options[:maxTokens]) ||
-      model_max_tokens(model) ||
-      4096
+  @impl true
+  def output_token_limit(model, options) do
+    limit =
+      positive_integer(options[:max_tokens]) ||
+        positive_integer(options[:maxTokens]) || model_max_tokens(model) || 4096
+
+    case options[:thinking_budget] do
+      budget when is_integer(budget) and budget > 0 -> max(limit, budget + 1000)
+      _ -> limit
+    end
   end
 
   defp model_max_tokens(model) when is_map(model) do
@@ -617,34 +615,24 @@ defmodule Sigma.Ai.Providers.Anthropic do
     List.replace_at(content, idx, fun.(Enum.at(content, idx)))
   end
 
-  defp transform_usage(usage) do
-    %{
-      input: usage["input_tokens"] || 0,
-      output: usage["output_tokens"] || 0,
-      cache_read: usage["cache_read_input_tokens"] || 0,
-      cache_write: usage["cache_creation_input_tokens"] || 0,
-      total_tokens: (usage["input_tokens"] || 0) + (usage["output_tokens"] || 0),
-      cost: %{input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0, total: 0.0}
-    }
-  end
+  defp transform_usage(usage), do: Sigma.Ai.ProviderUsage.from_wire(usage, :anthropic)
 
-  # Merges output tokens from the message_delta event with input/cache tokens
-  # already captured from message_start. The delta may omit input fields entirely
-  # (real Anthropic API), so nil-coalesce back to the baseline values.
+  # Anthropic deltas are cumulative; absent/null values do not erase known facts.
+  defp merge_delta_usage(baseline, nil), do: baseline
+
   defp merge_delta_usage(baseline, delta_usage) do
-    input = delta_usage["input_tokens"] || baseline.input
-    cache_read = delta_usage["cache_read_input_tokens"] || baseline.cache_read
-    cache_write = delta_usage["cache_creation_input_tokens"] || baseline.cache_write
-    output = delta_usage["output_tokens"] || baseline.output
-
-    %{
-      baseline
-      | input: input,
-        output: output,
-        cache_read: cache_read,
-        cache_write: cache_write,
-        total_tokens: input + output
+    wire = %{
+      "input_tokens" => baseline.input,
+      "output_tokens" => baseline.output,
+      "cache_read_input_tokens" => baseline.cache_read,
+      "cache_creation_input_tokens" => baseline.cache_write
     }
+
+    wire
+    |> Map.merge(delta_usage, fn _key, previous, current ->
+      if is_nil(current), do: previous, else: current
+    end)
+    |> transform_usage()
   end
 
   defp provider_error_message(error) when is_map(error) do

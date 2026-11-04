@@ -2,6 +2,8 @@ defmodule Sigma.Agent.BackplaneToolCatalogTest do
   use ExUnit.Case, async: true
 
   alias Backplane.AgentRuntime.Codex.MultiAgent
+  alias Backplane.AgentRuntime.Codex
+  alias Backplane.AgentRuntime.Codex.Session
   alias Sigma.Agent.Backplane.ToolCatalog
 
   defmodule ReadTool do
@@ -137,6 +139,70 @@ defmodule Sigma.Agent.BackplaneToolCatalogTest do
     assert bundle.registry.tools == %{}
     assert bundle.authority.grants == []
     assert bundle.rejected == []
+  end
+
+  @tag :tmp_dir
+  test "native profile composition preserves raw format, namespace, binding and exact grants", %{
+    tmp_dir: workspace
+  } do
+    names = ["apply_patch", "clock::curr_time"]
+    authority = %{caller: "root", run_id: "turn-native", grants: names, tool_revision: 1}
+    session = start_supervised!({Session, owner_pid: self()})
+    assert {:ok, binding} = Session.bind(session, authority)
+
+    assert {:ok, profile} =
+             Codex.profile(
+               :pinned_local,
+               %{workspace: workspace, session_binding: binding},
+               authority,
+               tools: names
+             )
+
+    combined_authority = %{authority | grants: [ReadTool.name() | names]}
+
+    assert {:ok, bundle} =
+             ToolCatalog.admit([ReadTool], combined_authority, fn _ -> :unused end,
+               profiles: [profile]
+             )
+
+    assert MapSet.new(Map.keys(bundle.registry.tools)) == MapSet.new(combined_authority.grants)
+    assert MapSet.new(Enum.map(bundle.tools, & &1.name)) == MapSet.new(combined_authority.grants)
+    assert bundle.registry.tools["apply_patch"] == profile.registry.tools["apply_patch"]
+    assert bundle.registry.tools["apply_patch"].backend_context.session_binding == binding
+
+    assert %{type: "custom", format: %{"syntax" => "lark"}} =
+             Enum.find(bundle.tools, &(&1.name == "apply_patch"))
+
+    assert Enum.find(bundle.tools, &(&1.name == "clock::curr_time")).type == "function"
+
+    assert {:error, %{class: :forbidden}} =
+             ToolCatalog.admit(
+               [ReadTool],
+               %{combined_authority | grants: [ReadTool.name()]},
+               fn _ -> flunk("admission must not dispatch") end,
+               profiles: [profile]
+             )
+
+    assert {:error, %{class: :forbidden}} =
+             ToolCatalog.admit(
+               [ReadTool],
+               %{combined_authority | run_id: "different-turn"},
+               fn _ -> :unused end,
+               profiles: [profile]
+             )
+
+    assert {:ok, %{status: :confirmed}} = Session.close(session)
+  end
+
+  test "malformed native profiles fail before dispatch" do
+    authority = %{caller: "root", run_id: "turn-1", grants: [], tool_revision: 1}
+
+    for profiles <- [nil, [%{}]] do
+      assert {:error, %{class: :validation}} =
+               ToolCatalog.admit([], authority, fn _ -> flunk("no dispatch") end,
+                 profiles: profiles
+               )
+    end
   end
 
   test "actual V2 contracts join the same bundle without static Sigma tool modules" do

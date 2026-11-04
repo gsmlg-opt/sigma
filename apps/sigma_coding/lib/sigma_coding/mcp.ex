@@ -137,11 +137,11 @@ defmodule Sigma.Coding.MCP do
   the agent loop can detect a stuck transport without parsing the message
   string. Other errors keep the existing `{:error, message}` shape.
   """
-  def call_tool(%Tool{client: client} = tool, _tool_call_id, params, opts) do
+  def call_tool(%Tool{} = tool, tool_call_id, params, opts) do
     timeout = Keyword.get(opts, :timeout, @call_timeout)
 
     try do
-      case Client.call_tool(client, tool.server_tool_name, params || %{}, timeout: timeout) do
+      case request_tool(tool, tool_call_id, params || %{}, opts, timeout) do
         {:ok, %Response{} = response} ->
           result = Response.get_result(response) || %{}
           content = normalize_tool_content(result)
@@ -153,8 +153,19 @@ defmodule Sigma.Coding.MCP do
              is_error: Response.error?(response)
            }}
 
+        {:ok, result} when is_map(result) ->
+          {:ok,
+           %{
+             content: normalize_tool_content(result),
+             details: result,
+             is_error: result["isError"] == true
+           }}
+
         {:error, %Error{reason: :send_failure} = error} ->
           {:transport_failure, format_error(error), tool.name, tool.server_id, error.data}
+
+        {:error, %Sigma.Coding.ToolError{}} = error ->
+          error
 
         {:error, error} ->
           {:error, format_error(error)}
@@ -164,41 +175,71 @@ defmodule Sigma.Coding.MCP do
     end
   end
 
+  defp request_tool(%Tool{call_tool: call}, id, params, opts, _timeout)
+       when is_function(call, 3),
+       do: call.(id, params, opts)
+
+  defp request_tool(%Tool{client: client} = tool, _id, params, _opts, timeout),
+    do: Client.call_tool(client, tool.server_tool_name, params, timeout: timeout)
+
   @doc "Builds a hook executor using this session's already configured MCP clients."
-  def hook_executor(%{clients: clients}) do
+  def hook_executor(%{clients: clients}, opts \\ []) do
     fn server, tool, input, timeout_ms ->
       case Map.fetch(clients, server) do
-        {:ok, client} -> call_hook_tool(client, tool, input, timeout_ms)
-        :error -> {:error, "MCP hook server #{server} is not connected"}
+        {:ok, client} ->
+          call_hook_tool(client, tool, input, timeout_ms, opts)
+
+        :error ->
+          hook_result(
+            {:error, "MCP hook server #{server} is not connected"},
+            {:ok, %{status: :confirmed, completion: :not_started}},
+            opts
+          )
       end
     end
   end
 
-  defp call_hook_tool(client, tool, input, timeout_ms) do
-    case Client.call_tool(client, tool, input, timeout: timeout_ms) do
+  defp call_hook_tool(client, tool, input, timeout_ms, opts) do
+    result =
+      with {:ok, handle} <- Client.start_tool_call(client, tool, input, timeout: timeout_ms),
+           do: Client.await_tool_call(handle)
+
+    case result do
       {:ok, %Response{} = response} ->
         result = Response.get_result(response) || %{}
 
-        if Response.error?(response) or result["isError"] == true do
-          {:error, "MCP hook tool #{tool} failed"}
-        else
-          text =
-            result
-            |> Map.get("content", [])
-            |> Enum.flat_map(fn
-              %{"type" => "text", "text" => text} when is_binary(text) -> [text]
-              _ -> []
-            end)
-            |> Enum.join("\n")
+        outcome =
+          if Response.error?(response) or result["isError"] == true do
+            {:error, "MCP hook tool #{tool} failed"}
+          else
+            text =
+              result
+              |> Map.get("content", [])
+              |> Enum.flat_map(fn
+                %{"type" => "text", "text" => text} when is_binary(text) -> [text]
+                _ -> []
+              end)
+              |> Enum.join("\n")
 
-          {:ok, %{exit: 0, stdout: text, stderr: ""}}
-        end
+            {:ok, %{exit: 0, stdout: text, stderr: ""}}
+          end
+
+        hook_result(outcome, {:ok, %{status: :confirmed, completion: :mcp_result}}, opts)
 
       {:error, error} ->
-        {:error, format_error(error)}
+        hook_result({:error, format_error(error)}, {:error, error}, opts)
     end
   catch
-    :exit, reason -> {:error, "MCP hook tool call failed: #{inspect(reason)}"}
+    :exit, reason ->
+      hook_result(
+        {:error, "MCP hook tool call failed: #{inspect(reason)}"},
+        {:error, reason},
+        opts
+      )
+  end
+
+  defp hook_result({status, value} = result, cleanup, opts) do
+    if Keyword.get(opts, :with_evidence, false), do: {status, value, cleanup}, else: result
   end
 
   defp empty_session do
@@ -443,15 +484,9 @@ defmodule Sigma.Coding.MCP do
   end
 
   defp normalize_tool_content(result) when is_map(result) do
-    case normalize_content(result["content"]) do
-      [] ->
-        case Map.get(result, "structuredContent") do
-          nil -> []
-          structured -> [%{type: :text, text: inspect(structured)}]
-        end
-
-      content ->
-        content
+    case Map.get(result, "structuredContent") do
+      nil -> normalize_content(result["content"])
+      structured -> [%{type: :text, text: Jason.encode!(structured)}]
     end
   end
 
@@ -471,16 +506,20 @@ defmodule Sigma.Coding.MCP do
     %{type: :text, text: text}
   end
 
-  defp normalize_content_block(%{"type" => "image", "data" => data, "mimeType" => mime_type}) do
-    %{type: :image, data: data, mime_type: mime_type}
-  end
+  defp normalize_content_block(%{"type" => "image", "data" => data} = image) do
+    detail = get_in(image, ["_meta", "codex/imageDetail"])
+    detail = if detail in ~w(auto low high original), do: detail, else: "high"
 
-  defp normalize_content_block(%{"type" => "image", "data" => data, "mime_type" => mime_type}) do
-    %{type: :image, data: data, mime_type: mime_type}
+    %{
+      type: :image,
+      data: data,
+      mime_type: image["mimeType"] || image["mime_type"] || "image/png",
+      detail: detail
+    }
   end
 
   defp normalize_content_block(block) do
-    %{type: :text, text: inspect(block)}
+    %{type: :text, text: Jason.encode!(block)}
   end
 
   defp format_error(%Error{message: message, data: data}) when is_binary(message) do

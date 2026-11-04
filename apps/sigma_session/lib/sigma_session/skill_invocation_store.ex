@@ -41,7 +41,9 @@ defmodule Sigma.Session.SkillInvocationStore do
 
   @spec update(binary(), binary(), binary(), map()) :: {:ok, map()} | {:error, term()}
   def update(sessions_dir, session_id, invocation_id, changes) when is_map(changes) do
-    with_lock(sessions_dir, session_id, fn -> update_locked(sessions_dir, session_id, invocation_id, changes) end)
+    with_lock(sessions_dir, session_id, fn ->
+      update_locked(sessions_dir, session_id, invocation_id, changes)
+    end)
   end
 
   @spec recover(binary(), binary()) :: {:ok, [map()]} | {:error, term()}
@@ -55,7 +57,7 @@ defmodule Sigma.Session.SkillInvocationStore do
                  else: record
              end),
            {:ok, path} <- path(sessions_dir, session_id),
-           :ok <- write(path, recovered) do
+           :ok <- if(recovered === records, do: :ok, else: write(path, recovered)) do
         {:ok, recovered}
       end
     end)
@@ -92,9 +94,12 @@ defmodule Sigma.Session.SkillInvocationStore do
   defp decode(content) do
     case Jason.decode(content) do
       {:ok, records} when is_list(records) ->
-        if Enum.all?(records, &is_map/1), do: {:ok, records}, else: {:error, :invalid_invocation_store}
+        if Enum.all?(records, &is_map/1),
+          do: {:ok, records},
+          else: {:error, :invalid_invocation_store}
 
-      _ -> {:error, :invalid_invocation_store}
+      _ ->
+        {:error, :invalid_invocation_store}
     end
   end
 
@@ -120,34 +125,6 @@ defmodule Sigma.Session.SkillInvocationStore do
   end
 
   defp with_lock(sessions_dir, session_id, fun) do
-    table = lock_table()
-    key = {sessions_dir, session_id}
-
-    if :ets.insert_new(table, {key, self()}) do
-      try do
-        fun.()
-      after
-        :ets.delete(table, key)
-      end
-    else
-      receive do
-      after
-        1 -> with_lock(sessions_dir, session_id, fun)
-      end
-    end
-  end
-
-  defp lock_table do
-    case :ets.whereis(:sigma_skill_invocation_locks) do
-      :undefined ->
-        try do
-          :ets.new(:sigma_skill_invocation_locks, [:named_table, :set, :public])
-        rescue
-          ArgumentError -> :sigma_skill_invocation_locks
-        end
-
-      _table ->
-        :sigma_skill_invocation_locks
-    end
+    :global.trans({{__MODULE__, sessions_dir, session_id}, self()}, fun, [node()])
   end
 end

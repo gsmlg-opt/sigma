@@ -169,11 +169,15 @@ defmodule Sigma.Agent.MessageTransformer do
   end
 
   defp convert_user(msg) do
-    %{
+    converted = %{
       role: :user,
       content: msg.content,
       timestamp: msg.timestamp
     }
+
+    if is_map(msg.metadata) and map_size(msg.metadata) > 0,
+      do: Map.put(converted, :metadata, msg.metadata),
+      else: converted
   end
 
   defp convert_tool_result(msg) do
@@ -231,6 +235,7 @@ defmodule Sigma.Agent.MessageTransformer do
       model: msg.model,
       response_model: msg.response_model,
       response_id: msg.response_id,
+      metadata: msg.metadata,
       usage: msg.usage || empty_usage(),
       stop_reason: msg.stop_reason,
       error_message: msg.error_message,

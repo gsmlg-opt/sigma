@@ -19,13 +19,16 @@ in {
       lolcat
       watchman
       tailwindcss_4
+      deno
       pkg-config
       openssl
       cargo
       rustc
+      stdenv.cc
       beam28Packages.elixir-ls
     ]
     ++ lib.optionals stdenv.isLinux [
+      bubblewrap
       inotify-tools
     ];
 

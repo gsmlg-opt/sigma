@@ -38,6 +38,7 @@ defmodule Sigma.Web.Router do
     live("/settings/hooks", SettingsLive, :hooks)
     live("/settings/mcp", SettingsLive, :mcp)
     live("/settings/models", SettingsLive, :models)
+    live("/settings/plugins", SettingsLive, :plugins)
     live("/settings/providers", SettingsLive, :providers)
     live("/settings/skills", SettingsLive, :skills)
     live("/settings/system_prompt", SettingsLive, :system_prompt)

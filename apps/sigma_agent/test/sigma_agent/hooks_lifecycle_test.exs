@@ -212,52 +212,36 @@ defmodule Sigma.Agent.HooksLifecycleTest do
   end
 
   test "session shutdown cancels detached hook commands before SessionEnd", %{tmp_dir: dir} do
-    started = Path.join(dir, "async-started")
-    escaped = Path.join(dir, "async-escaped")
-
-    spec =
-      write_hook(
-        dir,
-        :user_prompt_submit,
-        "touch #{quote_shell(started)}; (sleep 0.4; touch #{quote_shell(escaped)}) & wait",
-        []
-      )
+    {spec, pid_file, release, escaped} = waiting_hook(dir, :user_prompt_submit)
 
     spec = %{spec | handler: %{spec.handler | async: true, timeout_ms: 5_000}}
     agent = start_agent(dir, [spec, capture_hook(dir, :session_end)])
     runtime = :sys.get_state(agent).hook_async_runtime
     Sigma.Agent.prompt(agent, "first")
     assert_receive {:agent_end, _}, 3_000
-    eventually(fn -> File.exists?(started) end)
+    process = await_hook_process(pid_file)
     assert Process.alive?(runtime)
 
     assert :ok = stop_supervised(Sigma.Agent)
     refute Process.alive?(runtime)
     assert [_] = payloads(dir, :session_end)
-    Process.sleep(500)
+    eventually(fn -> not File.exists?(process) end)
+    File.touch!(release)
     refute File.exists?(escaped)
   end
 
   test "session shutdown cancels a synchronous PostModelRequest command", %{tmp_dir: dir} do
-    started = Path.join(dir, "post-started")
-    escaped = Path.join(dir, "post-escaped")
-
-    spec =
-      write_hook(
-        dir,
-        :post_model_request,
-        "touch #{quote_shell(started)}; (sleep 0.4; touch #{quote_shell(escaped)}) & wait",
-        []
-      )
+    {spec, pid_file, release, escaped} = waiting_hook(dir, :post_model_request)
 
     spec = %{spec | handler: %{spec.handler | timeout_ms: 5_000}}
     agent = start_agent(dir, [spec, capture_hook(dir, :session_end)])
     Sigma.Agent.prompt(agent, "first")
-    eventually(fn -> File.exists?(started) end)
+    process = await_hook_process(pid_file)
 
     assert :ok = stop_supervised(Sigma.Agent)
     assert [_] = payloads(dir, :session_end)
-    Process.sleep(500)
+    eventually(fn -> not File.exists?(process) end)
+    File.touch!(release)
     refute File.exists?(escaped)
   end
 
@@ -369,6 +353,34 @@ defmodule Sigma.Agent.HooksLifecycleTest do
 
   defp capture_hook(dir, event, output \\ %{}, opts \\ []) do
     write_hook(dir, event, "printf '%s' #{quote_shell(Jason.encode!(output))}\n", opts)
+  end
+
+  defp waiting_hook(dir, event) do
+    pid_file = Path.join(dir, "#{event}.pid")
+    release = Path.join(dir, "#{event}.release")
+    escaped = Path.join(dir, "#{event}.escaped")
+
+    descendant = """
+    printf '%s\\n' "$$" > #{quote_shell(pid_file)}
+    while [ ! -e #{quote_shell(release)} ]; do sleep 0.01; done
+    touch #{quote_shell(escaped)}
+    """
+
+    spec = write_hook(dir, event, "sh -c #{quote_shell(descendant)} & wait", [])
+    {spec, pid_file, release, escaped}
+  end
+
+  defp await_hook_process(pid_file) do
+    eventually(fn ->
+      case File.read(pid_file) do
+        {:ok, text} -> Regex.match?(~r/\A[0-9]+\n\z/, text)
+        _ -> false
+      end
+    end)
+
+    process = Path.join("/proc", pid_file |> File.read!() |> String.trim())
+    assert File.exists?(process)
+    process
   end
 
   defp repeating_stop_hook(dir, event, opts \\ []) do

@@ -58,6 +58,78 @@ defmodule Sigma.Web.ImageAttachments do
 
   def data_urls(_images), do: {:error, :invalid_data}
 
+  # Native view_image results allow ten MiB and animated GIFs. Upload policy
+  # remains narrower; both projections validate bytes before building a URL.
+  def tool_data_urls(images) when is_list(images) do
+    with :ok <- validate_canonical_shape(images),
+         :ok <- validate_count(images),
+         images <- Enum.map(images, &normalize_tool_data_uri/1),
+         :ok <- validate_tool_encoded_bounds(images) do
+      Enum.reduce_while(images, {:ok, [], 0}, fn image, {:ok, urls, total} ->
+        case decode_tool_image(image) do
+          {:ok, size} when total + size <= @max_total_bytes ->
+            url = "data:#{image.mime_type};base64,#{image.data}"
+            {:cont, {:ok, [url | urls], total + size}}
+
+          {:ok, _size} ->
+            {:halt, {:error, :too_large}}
+
+          error ->
+            {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, urls, _total} -> {:ok, Enum.reverse(urls)}
+        error -> error
+      end
+    end
+  end
+
+  def tool_data_urls(_images), do: {:error, :invalid_data}
+
+  defp normalize_tool_data_uri(%{mime_type: mime, data: data} = image) do
+    prefix = "data:#{mime};base64,"
+
+    if String.starts_with?(data, prefix),
+      do: %{
+        image
+        | data: binary_part(data, byte_size(prefix), byte_size(data) - byte_size(prefix))
+      },
+      else: image
+  end
+
+  defp validate_tool_encoded_bounds(images) do
+    per_image = 4 * div(@max_total_bytes + 2, 3)
+
+    if Enum.any?(images, &(byte_size(&1.data) > per_image)) or
+         Enum.reduce(images, 0, &(byte_size(&1.data) + &2)) > @max_encoded_total_bytes,
+       do: {:error, :too_large},
+       else: :ok
+  end
+
+  defp decode_tool_image(%{mime_type: mime, data: data}) when mime in @allowed_mime_types do
+    with {:ok, bytes} <- Base.decode64(data, strict: true),
+         true <- byte_size(bytes) <= @max_total_bytes or {:error, :too_large},
+         :ok <- validate_signature(mime, bytes),
+         :ok <- validate_tool_animation(mime, bytes) do
+      {:ok, byte_size(bytes)}
+    else
+      :error -> {:error, :invalid_data}
+      error -> error
+    end
+  end
+
+  defp decode_tool_image(_image), do: {:error, :unsupported_type}
+
+  defp validate_tool_animation("image/gif", bytes) do
+    case gif_frame_count(bytes) do
+      {:ok, frames} when frames > 0 -> :ok
+      _ -> {:error, :invalid_data}
+    end
+  end
+
+  defp validate_tool_animation(_mime, _bytes), do: :ok
+
   def client_error(code), do: Map.fetch(@client_messages, code)
   def error_message(reason), do: Map.fetch!(@server_messages, reason)
 

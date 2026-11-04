@@ -97,7 +97,13 @@ defmodule Sigma.Session.Journal.Index do
   end
 
   defp conversation_node?(%{entry: %{"type" => type}})
-       when type in ["metrics", "subagent", "subagent_admission"],
+       when type in [
+              "metrics",
+              "subagent",
+              "subagent_admission",
+              "async_interaction",
+              "hook_feedback"
+            ],
        do: false
 
   defp conversation_node?(_node), do: true

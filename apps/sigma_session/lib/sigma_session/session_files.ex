@@ -49,7 +49,7 @@ defmodule Sigma.Session.SessionFiles do
          {:ok, new_meta_path} <- meta_path(sessions_dir, new_id),
          :ok <- ensure_absent(new_jsonl_path),
          :ok <- ensure_absent(new_meta_path) do
-      with_subagents_move(old_jsonl_path, new_jsonl_path, fn ->
+      with_session_sidecars_move(old_jsonl_path, new_jsonl_path, fn ->
         with :ok <-
                run_operation_hook(:before_jsonl_move, %{
                  source: old_jsonl_path,
@@ -72,7 +72,8 @@ defmodule Sigma.Session.SessionFiles do
          {:ok, meta_path} <- meta_path(sessions_dir, id),
          :ok <- rm_optional(jsonl_path),
          :ok <- rm_optional(meta_path),
-         :ok <- remove_subagents(jsonl_path <> ".subagents") do
+         :ok <- remove_subagents(jsonl_path <> ".subagents"),
+         :ok <- remove_subagents(jsonl_path <> ".runtime") do
       :ok
     end
   end
@@ -86,6 +87,7 @@ defmodule Sigma.Session.SessionFiles do
          :ok <- ensure_absent(target_jsonl_path),
          :ok <- ensure_absent(target_meta_path),
          :ok <- ensure_absent(target_jsonl_path <> ".subagents"),
+         :ok <- ensure_absent(target_jsonl_path <> ".runtime"),
          {:ok, metadata} <- read_metadata(source_meta_path),
          {:ok, cwd} <- fork_cwd(metadata, source_jsonl_path, opts),
          {:ok, new_session_id} <-
@@ -118,7 +120,7 @@ defmodule Sigma.Session.SessionFiles do
       if source_jsonl_path == target_jsonl_path do
         adopt_in_place(target_meta_path, metadata_content, opts)
       else
-        with_subagents_move(source_jsonl_path, target_jsonl_path, fn ->
+        with_session_sidecars_move(source_jsonl_path, target_jsonl_path, fn ->
           adopt_across_directories(
             source_jsonl_path,
             source_meta_path,
@@ -157,11 +159,14 @@ defmodule Sigma.Session.SessionFiles do
 
   # Reserve the destination directory before rename so an existing or raced
   # destination is never replaced. Root-file publication remains responsible
-  # for its own rollback; this transaction rolls retained children back with it.
-  defp with_subagents_move(source_jsonl, target_jsonl, operation) do
-    source = source_jsonl <> ".subagents"
-    target = target_jsonl <> ".subagents"
+  # for its own rollback; both runtime snapshots and retained children follow it.
+  defp with_session_sidecars_move(source_jsonl, target_jsonl, operation) do
+    with_directory_move(source_jsonl <> ".runtime", target_jsonl <> ".runtime", fn ->
+      with_directory_move(source_jsonl <> ".subagents", target_jsonl <> ".subagents", operation)
+    end)
+  end
 
+  defp with_directory_move(source, target, operation) do
     with {:ok, moved?} <- move_optional_subagents(source, target) do
       case operation.() do
         :ok ->

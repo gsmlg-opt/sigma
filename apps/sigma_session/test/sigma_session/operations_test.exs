@@ -38,6 +38,7 @@ defmodule Sigma.Session.OperationsTest do
     dump = dump_path |> File.read!() |> Jason.decode!()
     assert dump["format"] == "sigma.session.dump"
     assert dump["activeLeafId"] == "unknown-entry"
+
     assert [%{"id" => "unknown-entry", "payload" => %{"kept" => true}}] =
              dump["unknownEntries"]
 
@@ -67,6 +68,111 @@ defmodule Sigma.Session.OperationsTest do
     refute Enum.any?(dump["entries"], &(get_in(&1, ["message", "id"]) == "after"))
     assert {:ok, replayed} = Log.replay(source)
     assert Enum.any?(replayed, &(&1.id == "after"))
+  end
+
+  test "dump preserves cancelled tool-call diagnostics and original journal data as JSON", %{
+    tmp_dir: tmp_dir
+  } do
+    source = Path.join(tmp_dir, "cancelled.jsonl")
+    sidecar = Path.join(tmp_dir, "cancelled.meta.json")
+    dump_path = Path.join(tmp_dir, "cancelled.json")
+    timestamp = "2026-10-30T03:00:00Z"
+
+    header = %{
+      "type" => "session",
+      "version" => 3,
+      "id" => "cancelled-session",
+      "timestamp" => timestamp,
+      "cwd" => tmp_dir
+    }
+
+    messages = [
+      {"user-entry", nil, %{"id" => "user-1", "role" => "user", "content" => "Wait"}},
+      {"assistant-entry", "user-entry",
+       %{
+         "id" => "assistant-1",
+         "role" => "assistant",
+         "stop_reason" => "aborted",
+         "metadata" => %{"turn_id" => "cancelled-turn", "retained" => [true, nil, "汉字\r\n"]},
+         "content" => [
+           %{"type" => "text", "text" => "Waiting 汉字\r\n"},
+           %{
+             "type" => "tool_call",
+             "id" => "client53-1",
+             "name" => "clock::sleep",
+             "arguments" => %{"duration_ms" => 60_000}
+           }
+         ]
+       }},
+      {"next-user-entry", "assistant-entry",
+       %{"id" => "user-2", "role" => "user", "content" => "Continue"}}
+    ]
+
+    entries =
+      [header] ++
+        Enum.map(messages, fn {id, parent, message} ->
+          %{
+            "type" => "message",
+            "id" => id,
+            "parentId" => parent,
+            "timestamp" => timestamp,
+            "message" => Map.put(message, "timestamp", 1_793_327_200_000)
+          }
+        end)
+
+    unknown = %{
+      "type" => "future_contract",
+      "id" => "future-entry",
+      "parentId" => "next-user-entry",
+      "timestamp" => timestamp,
+      "payload" => %{"values" => [false, nil, "exact\r\n"], "empty" => %{}}
+    }
+
+    entries = entries ++ [unknown]
+    source_bytes = Enum.map_join(entries, "\n", &Jason.encode!/1) <> "\n{\"type\":"
+    sidecar_bytes = ~s({"branch":"cancelled","exact":"汉字\\r\\n"})
+    File.write!(source, source_bytes)
+    File.write!(sidecar, sidecar_bytes)
+    stat_fields = [:size, :mtime, :inode, :mode]
+    source_stat = source |> File.stat!(time: :posix) |> Map.take(stat_fields)
+    sidecar_stat = sidecar |> File.stat!(time: :posix) |> Map.take(stat_fields)
+
+    assert {:ok, before_snapshot} = Log.snapshot(source)
+
+    assert before_snapshot.diagnostics == [
+             %{kind: :trailing_incomplete_json, line: 6},
+             %{
+               kind: :message_repair,
+               entry_id: "assistant-entry",
+               entry_index: 2,
+               reason: {:orphaned_tool_call, "client53-1"}
+             }
+           ]
+
+    assert {:ok, ^dump_path} = Log.dump(source, dump_path)
+    dump = dump_path |> File.read!() |> Jason.decode!()
+
+    assert dump["diagnostics"] == [
+             %{"kind" => "trailing_incomplete_json", "line" => 6},
+             %{
+               "kind" => "message_repair",
+               "entry_id" => "assistant-entry",
+               "entry_index" => 2,
+               "reason" => ["orphaned_tool_call", "client53-1"]
+             }
+           ]
+
+    assert dump["acceptedLength"] == byte_size(source_bytes)
+    assert dump["header"] == header
+    assert dump["entries"] == tl(entries)
+    assert dump["unknownEntries"] == [unknown]
+    assert dump["activeLeafId"] == before_snapshot.active_leaf_id
+    assert dump["branchEntryIds"] == before_snapshot.branch_entry_ids
+    assert File.read!(source) == source_bytes
+    assert File.read!(sidecar) == sidecar_bytes
+    assert Map.take(File.stat!(source, time: :posix), stat_fields) == source_stat
+    assert Map.take(File.stat!(sidecar, time: :posix), stat_fields) == sidecar_stat
+    assert {:ok, ^before_snapshot} = Log.snapshot(source)
   end
 
   test "session summaries enforce prefix and tail read budgets and retain orphaned cwd", %{
@@ -112,7 +218,11 @@ defmodule Sigma.Session.OperationsTest do
       }
     }
 
-    File.write!(path, Enum.map_join([header, filler, model, user], "\n", &Jason.encode!/1) <> "\n")
+    File.write!(
+      path,
+      Enum.map_join([header, filler, model, user], "\n", &Jason.encode!/1) <> "\n"
+    )
+
     test_pid = self()
 
     range_reader = fn read_path, offset, length ->

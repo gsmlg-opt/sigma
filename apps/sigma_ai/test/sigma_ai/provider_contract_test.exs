@@ -151,6 +151,41 @@ defmodule Sigma.Ai.ProviderContractTest do
     end
   end
 
+  test "explicit custom tool calls preserve raw input in legacy and normalized events" do
+    raw = "*** Begin Patch\n+\"quoted\"\n*** End Patch"
+    call = %{id: "patch-1", name: "functions::apply_patch", input_kind: :custom, arguments: raw}
+
+    assert [%ProviderEvent{type: :tool_call_completed, tool_call: ^call}] =
+             Provider.normalize_legacy_event({:toolcall_end, 0, call, %{content: []}})
+
+    event = %ProviderEvent{type: :tool_call_completed, tool_call: call}
+    assert [^event] = Provider.normalize_legacy_event(event)
+  end
+
+  test "invalid input kind or custom input never bypasses normalized event validation" do
+    for attrs <- [
+          %{arguments: "raw"},
+          %{input_kind: :custom, arguments: %{}},
+          %{input_kind: :unknown, arguments: %{}},
+          %{input_kind: :function, arguments: "{}"}
+        ] do
+      call = Map.merge(%{id: "call-1", name: "apply_patch"}, attrs)
+
+      for event <- [
+            {:toolcall_end, 0, call, %{}},
+            %ProviderEvent{type: :tool_call_completed, tool_call: call}
+          ] do
+        assert [
+                 %ProviderEvent{
+                   type: :response_failed,
+                   error: %ProviderError{kind: :malformed_stream}
+                 }
+               ] =
+                 Provider.normalize_legacy_event(event)
+      end
+    end
+  end
+
   test "normalizes legacy provider tuples into the provider-neutral lifecycle" do
     request = ProviderRequest.from_legacy(legacy_request())
     events = Provider.stream(AnthropicFixtureProvider, request) |> Enum.to_list()
@@ -209,7 +244,9 @@ defmodule Sigma.Ai.ProviderContractTest do
              ProviderError.from_http(400, %{"code" => "context_length_exceeded"})
 
     assert %ProviderError{kind: :timeout, retryable: true} = ProviderError.from_reason(:timeout)
-    assert %ProviderError{kind: :cancelled, retryable: false} = ProviderError.from_reason(:cancelled)
+
+    assert %ProviderError{kind: :cancelled, retryable: false} =
+             ProviderError.from_reason(:cancelled)
   end
 
   test "lazy adapter exceptions become structured terminal events" do
@@ -221,7 +258,7 @@ defmodule Sigma.Ai.ProviderContractTest do
   test "compatibility bridge pulls only on downstream demand" do
     request =
       legacy_request()
-      |> Map.put(:options, [test_pid: self()])
+      |> Map.put(:options, test_pid: self())
       |> ProviderRequest.from_legacy()
 
     assert [%ProviderEvent{type: :response_started}] =
@@ -234,7 +271,12 @@ defmodule Sigma.Ai.ProviderContractTest do
   test "bridge synthesizes missing terminals and suppresses failures after completion" do
     request = ProviderRequest.from_legacy(legacy_request())
 
-    assert [%ProviderEvent{type: :response_failed, error: %ProviderError{kind: :malformed_stream}}] =
+    assert [
+             %ProviderEvent{
+               type: :response_failed,
+               error: %ProviderError{kind: :malformed_stream}
+             }
+           ] =
              Provider.stream(EmptyProvider, request) |> Enum.to_list()
 
     events = Provider.stream(CompleteThenRaiseProvider, request) |> Enum.to_list()
@@ -255,22 +297,24 @@ defmodule Sigma.Ai.ProviderContractTest do
         request =
           legacy_request()
           |> put_in([:model, :provider], provider_id(provider))
-          |> put_in([:options], [
+          |> put_in([:options],
             api_key: "test-key",
             base_url: base_url,
             receive_timeout: 5_000,
             cancellation_ref: cancellation_ref
-          ])
+          )
           |> ProviderRequest.from_legacy()
 
         task = Task.async(fn -> Provider.stream(provider, request) |> Enum.to_list() end)
         assert_receive {:provider_connected, ^server_pid}, 1_000
         send(task.pid, {:cancel, cancellation_ref})
 
-        assert [%ProviderEvent{
-                 type: :response_failed,
-                 error: %ProviderError{kind: :cancelled, retryable: false}
-               }] = Task.await(task, 2_000)
+        assert [
+                 %ProviderEvent{
+                   type: :response_failed,
+                   error: %ProviderError{kind: :cancelled, retryable: false}
+                 }
+               ] = Task.await(task, 2_000)
       end)
     end
   end
@@ -317,6 +361,7 @@ defmodule Sigma.Ai.ProviderContractTest do
 
   defp with_hanging_sse_server(fun) do
     parent = self()
+
     {:ok, listen_socket} =
       :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
 

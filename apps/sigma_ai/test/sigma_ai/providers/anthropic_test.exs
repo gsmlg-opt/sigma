@@ -39,7 +39,8 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
     assert ai_msg.usage.cache_read == 200
     assert ai_msg.usage.cache_write == 500
     assert ai_msg.usage.output == 50
-    assert ai_msg.usage.total_tokens == 100_050
+    assert ai_msg.usage.input_tokens == 100_700
+    assert ai_msg.usage.total_tokens == 100_750
   end
 
   test "delta-only output_tokens without input fields preserves baseline input" do
@@ -73,7 +74,94 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
     assert ai_msg.usage.cache_read == 50
     assert ai_msg.usage.cache_write == 100
     assert ai_msg.usage.output == 200
-    assert ai_msg.usage.total_tokens == 5_200
+    assert ai_msg.usage.input_tokens == 5_150
+    assert ai_msg.usage.total_tokens == 5_350
+  end
+
+  test "null Anthropic delta usage preserves previously reported cumulative facts" do
+    usage = stream_delta_usage(nil)
+
+    assert usage.input_tokens == 95
+    assert usage.output_tokens == 1
+    assert usage.cache_read_tokens == 80
+    assert usage.cache_write_tokens == 5
+    assert usage.total_tokens == 96
+  end
+
+  test "nullable Anthropic delta counters preserve baseline while output advances" do
+    usage =
+      stream_delta_usage(%{
+        "input_tokens" => nil,
+        "cache_read_input_tokens" => nil,
+        "cache_creation_input_tokens" => nil,
+        "output_tokens" => 2
+      })
+
+    assert usage.input_tokens == 95
+    assert usage.output_tokens == 2
+    assert usage.cache_read_tokens == 80
+    assert usage.cache_write_tokens == 5
+    assert usage.total_tokens == 97
+  end
+
+  test "malformed nonnull Anthropic delta counters become unknown instead of retaining baseline" do
+    usage =
+      stream_delta_usage(%{
+        "input_tokens" => "invalid",
+        "cache_read_input_tokens" => -1,
+        "output_tokens" => 2
+      })
+
+    assert is_nil(usage.input_tokens)
+    assert is_nil(usage.cache_read_tokens)
+    assert usage.cache_write_tokens == 5
+    assert usage.output_tokens == 2
+    assert is_nil(usage.total_tokens)
+    refute Sigma.Ai.ProviderUsage.complete?(usage)
+  end
+
+  defp stream_delta_usage(delta_usage) do
+    sse =
+      Enum.map(
+        [
+          %{
+            "type" => "message_start",
+            "message" => %{
+              "id" => "msg_usage",
+              "usage" => %{
+                "input_tokens" => 10,
+                "output_tokens" => 1,
+                "cache_read_input_tokens" => 80,
+                "cache_creation_input_tokens" => 5
+              }
+            }
+          },
+          %{
+            "type" => "message_delta",
+            "delta" => %{"stop_reason" => "end_turn"},
+            "usage" => delta_usage
+          },
+          %{"type" => "message_stop"}
+        ],
+        fn event -> "data: " <> Jason.encode!(event) <> "\n\n" end
+      )
+
+    with_capture_server(sse, fn base_url, _captured ->
+      request =
+        Sigma.Ai.ProviderRequest.new(%{
+          model: %{id: "claude-usage", api: "anthropic-messages", provider: "anthropic"},
+          context: %{messages: [], tools: []},
+          options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+        })
+
+      events = Sigma.Ai.Provider.stream(Anthropic, request) |> Enum.to_list()
+      assert Enum.any?(events, &(&1.type == :response_completed))
+
+      assert %Sigma.Ai.ProviderEvent{usage: usage} =
+               Enum.find(events, &(&1.type == :usage_updated))
+
+      usage
+    end)
   end
 
   test "malformed finalized tool arguments emit a provider error" do
@@ -97,6 +185,41 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
              Enum.find(processed, &match?({:provider_error, _error}, &1))
 
     refute Enum.any?(processed, &match?({:toolcall_end, _, _, _}, &1))
+  end
+
+  test "shared output reserve matches the real thinking-adjusted Anthropic HTTP cap" do
+    sse = [
+      ~s(data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1,"output_tokens":0}}}\n\n),
+      ~s(data: {"type":"message_stop"}\n\n)
+    ]
+
+    model = %{
+      id: "claude-context",
+      api: "anthropic-messages",
+      provider: "anthropic",
+      max_tokens: 2_000
+    }
+
+    for request_options <- [[], [maxTokens: 3_000], [max_tokens: 1_000, thinking_budget: 8_000]] do
+      with_capture_server(sse, fn base_url, captured ->
+        options =
+          Keyword.merge(request_options,
+            api_key: "test-key",
+            base_url: base_url,
+            receive_timeout: 1_000
+          )
+
+        reserve = Sigma.Ai.Provider.output_token_limit(Anthropic, model, options)
+
+        Anthropic.stream(%{model: model, context: %{messages: [], tools: []}, options: options})
+        |> Enum.to_list()
+
+        assert Agent.get(captured, & &1["max_tokens"]) == reserve
+
+        assert reserve ==
+                 if(options[:thinking_budget], do: 9_000, else: options[:maxTokens] || 2_000)
+      end)
+    end
   end
 
   test "uses model maxTokens as the default Anthropic output cap" do

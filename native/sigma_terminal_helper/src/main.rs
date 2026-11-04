@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 struct Options {
@@ -47,6 +47,7 @@ const MIN_ROWS: u16 = 1;
 const MAX_ROWS: u16 = 300;
 const SCROLLBACK_ROWS: usize = 1_000;
 const MAX_CHECKPOINT_BYTES: usize = 2 * 1024 * 1024;
+const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
 enum ScreenTransition {
@@ -343,19 +344,48 @@ fn run() -> Result<()> {
         let _ = run_tx.send(RunEvent::ShellExited(child.wait()));
     });
 
+    let mut output_closed = false;
     let run_result = run_loop(
-        run_rx,
+        &run_rx,
         &mut stdout,
         &mut writer,
         master.as_ref(),
         &mut terminal_state,
         &mut sequence,
+        &mut output_closed,
     );
 
+    let shutdown_deadline = Instant::now() + SHUTDOWN_BUDGET;
+    let cleanup = cleanup_session(&identity, SHUTDOWN_BUDGET);
+    let drain_result = match &run_result {
+        Ok(Some(status)) => {
+            // Cleanup closes any remaining slave holders before waiting for EOF.
+            let drained = drain_output(
+                &run_rx,
+                &mut stdout,
+                &mut terminal_state,
+                &mut sequence,
+                output_closed,
+                shutdown_deadline,
+            );
+            let exited = write_event(
+                &mut stdout,
+                &json!({
+                    "event": "shell_exit",
+                    "status": status.exit_code(),
+                    "signal": status.signal()
+                }),
+            );
+            drained.and(exited)
+        }
+        _ => Ok(()),
+    };
+    // portable-pty's writer sends a newline and EOF on drop. Keep it until the
+    // slave holders have closed and output has drained, so echoed input cannot
+    // become synthetic command output during shutdown.
     drop(writer);
-    let cleanup = cleanup_session(&identity, Duration::from_secs(5));
     let cleanup_result = write_event(&mut stdout, &json!({"event": "cleanup", "result": cleanup}));
-    run_result.and(cleanup_result)
+    run_result.map(|_| ()).and(drain_result).and(cleanup_result)
 }
 
 #[cfg(unix)]
@@ -417,24 +447,20 @@ fn spawn_control_reader(tx: SyncSender<RunEvent>) {
 }
 
 fn run_loop(
-    rx: Receiver<RunEvent>,
+    rx: &Receiver<RunEvent>,
     stdout: &mut impl Write,
     writer: &mut impl Write,
     master: &dyn portable_pty::MasterPty,
     terminal_state: &mut TerminalState,
     sequence: &mut u64,
-) -> Result<()> {
+    output_closed: &mut bool,
+) -> Result<Option<ExitStatus>> {
     while let Ok(event) = rx.recv() {
         match event {
             RunEvent::Output(bytes) => {
-                terminal_state.process(&bytes);
-                *sequence += 1;
-                write_event(
-                    stdout,
-                    &json!({"event": "output", "seq": *sequence, "data": BASE64.encode(bytes)}),
-                )?;
+                write_output(stdout, terminal_state, sequence, &bytes)?;
             }
-            RunEvent::OutputClosed => {}
+            RunEvent::OutputClosed => *output_closed = true,
             RunEvent::Control(Command::Input { data }) => {
                 let bytes = BASE64.decode(data)?;
                 if bytes.len() > MAX_INPUT_BYTES {
@@ -489,19 +515,49 @@ fn run_loop(
             RunEvent::ControlError(error) => bail!(error),
             RunEvent::ShellExited(status) => {
                 let status = status.context("failed waiting for PTY child")?;
-                write_event(
-                    stdout,
-                    &json!({
-                        "event": "shell_exit",
-                        "status": status.exit_code(),
-                        "signal": status.signal()
-                    }),
-                )?;
-                break;
+                return Ok(Some(status));
             }
         }
     }
+    Ok(None)
+}
+
+fn drain_output(
+    rx: &Receiver<RunEvent>,
+    stdout: &mut impl Write,
+    terminal_state: &mut TerminalState,
+    sequence: &mut u64,
+    mut output_closed: bool,
+    deadline: Instant,
+) -> Result<()> {
+    while !output_closed {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .context("timed out draining PTY output after child exit")?;
+        match rx
+            .recv_timeout(remaining)
+            .context("PTY output did not close after child exit")?
+        {
+            RunEvent::Output(bytes) => write_output(stdout, terminal_state, sequence, &bytes)?,
+            RunEvent::OutputClosed => output_closed = true,
+            _ => {}
+        }
+    }
     Ok(())
+}
+
+fn write_output(
+    stdout: &mut impl Write,
+    terminal_state: &mut TerminalState,
+    sequence: &mut u64,
+    bytes: &[u8],
+) -> Result<()> {
+    terminal_state.process(bytes);
+    *sequence += 1;
+    write_event(
+        stdout,
+        &json!({"event": "output", "seq": *sequence, "data": BASE64.encode(bytes)}),
+    )
 }
 
 fn write_event(writer: &mut impl Write, event: &Value) -> Result<()> {
