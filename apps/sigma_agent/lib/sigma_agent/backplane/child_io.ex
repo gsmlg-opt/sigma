@@ -241,12 +241,25 @@ defmodule Sigma.Agent.Backplane.ChildIO do
             messages =
               if state.messages == [], do: Keyword.get(opts, :messages, []), else: state.messages
 
+            admitted_tools =
+              if state.config[:native_tools] == true do
+                {_eager, deferred} = partition_tools(state, tools)
+
+                Enum.filter(
+                  tools,
+                  &(&1 in deferred or Map.has_key?(catalog.registry.tools, Tool.name(&1)))
+                ) ++
+                  plugin_tools(state.native_context)
+              else
+                Enum.filter(tools, &Map.has_key?(catalog.registry.tools, Tool.name(&1)))
+              end
+
             state = %{
               state
               | identity: identity,
                 key: key,
                 tool_state: tool_state,
-                active_tools: tools ++ plugin_tools(state.native_context),
+                active_tools: admitted_tools,
                 catalog_tools: catalog.tools,
                 native_names: native_names,
                 request: nil,
@@ -849,7 +862,10 @@ defmodule Sigma.Agent.Backplane.ChildIO do
   defp prepare_catalog(state, authority, tools, contracts, _selected, key) do
     io = self()
 
-    case ToolCatalog.admit(tools, authority, &execute(io, key, &1), contracts: contracts) do
+    case ToolCatalog.admit(tools, authority, &execute(io, key, &1),
+           contracts: contracts,
+           mode: :quarantine
+         ) do
       {:ok, catalog} -> {:ok, catalog, state}
       {:error, error} -> {:error, error, state}
     end
@@ -915,7 +931,8 @@ defmodule Sigma.Agent.Backplane.ChildIO do
              {:ok, catalog} <-
                ToolCatalog.admit(eager, authority, &execute(io, key, &1),
                  contracts: contracts,
-                 profiles: [profile]
+                 profiles: [profile],
+                 mode: :quarantine
                ),
              do: {:ok, catalog, state}
 

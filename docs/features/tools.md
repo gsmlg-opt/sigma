@@ -1,5 +1,13 @@
 # Tool availability
 
+The 2026-11-04 delivery integrates remote `7a2e480`, retaining its Provider
+stream repairs, ordered tool projection, 90% compaction policy and dependency
+updates. The current source locks all five Backplane packages to **1.10.55**
+with four direct minima of the same version. The complete remote lock graph is
+preserved, including HTTP 0.21.19. Versioned production-package evidence below
+continues to describe **1.10.53**; it is not package/online acceptance on 1.10.55.
+Merge verification is recorded in the alignment plan.
+
 Sigma has retired its own built-in tool implementations and registers replacements
 through the public Backplane Codex protocol. Web and protocol entrypoints select
 `native_tools: true`; their legacy `tools: []` list stays empty. This describes the
@@ -17,7 +25,7 @@ remain TODOs and are excluded from this phase's
 completion gates. Existing configured plugin support and its functional/lifecycle
 acceptance remain in scope.
 
-Current dependencies are the five official Backplane **1.10.53** packages,
+The 2026-10-30 acceptance used the five official Backplane **1.10.53** packages,
 source `012b7a750dcee5cfa48118d9c3eb87e03e411e22`. Four direct dependency minima
 are updated; relative to 1.10.52 the lockfile changes only those five Backplane
 entries. HTTP 0.21.17, ex_json_pointer 0.8.0 and plug_crypto 2.2.0 remain.

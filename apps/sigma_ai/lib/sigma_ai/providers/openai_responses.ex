@@ -2,7 +2,15 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   @behaviour Sigma.Ai.Provider
 
   alias Backplane.AiProtocol.{Codec, Request, Serialization, SSE}
-  alias Sigma.Ai.{ProviderAuth, ProviderCapabilities, ProviderError, ProviderRequest}
+
+  alias Sigma.Ai.{
+    ProviderAuth,
+    ProviderCapabilities,
+    ProviderError,
+    ProviderRequest,
+    ToolCallJson
+  }
+
   alias Sigma.Ai.Providers.OpenAIResponses.Hosted
 
   @impl true
@@ -37,6 +45,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
       options[:base_url] || System.get_env("OPENAI_BASE_URL") || "https://api.openai.com/v1"
 
     hosted = Hosted.prepare!(model, context, options, base_url)
+    native_transport? = native_tool_transport?(context) or hosted.enabled
 
     image_outputs =
       case protocol_request(model, Map.put(context, :tools, hosted.local_tools)) do
@@ -88,7 +97,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
         options,
         session_id,
         log_session_id,
-        hosted
+        hosted,
+        native_transport?
       )
 
     Elixir.Stream.transform(
@@ -121,6 +131,24 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     )
   end
 
+  # Backplane supplies the catalog revision from its actual Runtime request.
+  # Ordinary direct-provider function calls retain their existing compatibility
+  # parser; native declarations and replay always use the public protocol codec.
+  defp native_tool_transport?(context) do
+    calls =
+      for %{role: :assistant, content: blocks} <- context.messages,
+          is_list(blocks),
+          %{type: :tool_call} = call <- blocks,
+          do: call
+
+    Map.has_key?(context, :catalog_revision) or
+      Enum.any?((context[:tools] || []) ++ calls, fn tool ->
+        tool[:type] in [:custom, "custom"] or tool[:input_kind] == :custom or
+          not is_nil(tool[:output_schema]) or
+          (is_binary(tool[:name]) and String.contains?(tool.name, "::"))
+      end)
+  end
+
   defp build_inner_stream(
          model,
          body,
@@ -129,7 +157,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
          options,
          session_id,
          log_session_id,
-         hosted
+         hosted,
+         native_transport?
        ) do
     Elixir.Stream.resource(
       fn ->
@@ -148,12 +177,19 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
           try do
             {:ok, encoded_body} = Serialization.to_json(body)
 
-            Req.post!(base_url <> "/responses",
-              body: encoded_body,
-              headers: headers,
-              receive_timeout: options[:receive_timeout] || 120_000,
-              into: :self
-            )
+            req_opts =
+              [
+                body: encoded_body,
+                headers: headers,
+                receive_timeout: options[:receive_timeout] || 120_000,
+                retry: Keyword.get(options, :retry, :transient),
+                max_retries: Keyword.get(options, :max_retries, 3),
+                into: :self
+              ]
+              |> maybe_put_opt(options, :retry_delay)
+              |> maybe_put_opt(options, :retry_log_level)
+
+            Req.post!(base_url <> "/responses", req_opts)
           rescue
             e in [Req.TransportError, Finch.TransportError] ->
               reraise transport_error_message(e), __STACKTRACE__
@@ -161,8 +197,16 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
         {_initial_assistant_message(model),
          %{
-           framer: SSE.new(Hosted.sse_options(hosted)),
-           tool_codec: {Codec.stream_new(:openai_responses), Hosted.new(hosted)},
+           framer:
+             SSE.new(
+               Keyword.merge(
+                 [max_frame_bytes: 16 * 1024 * 1024, max_buffer_bytes: 32 * 1024 * 1024],
+                 Hosted.sse_options(hosted)
+               )
+             ),
+           tool_codec:
+             {if(native_transport?, do: Codec.stream_new(:openai_responses), else: :ordinary),
+              Hosted.new(hosted)},
            observer: Backplane.AiProtocol.OpenAIResponsesObserver.new(),
            error_body: ""
          }, :streaming, resp}
@@ -212,6 +256,13 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
       "Check your connection and try again."
   end
 
+  defp maybe_put_opt(opts, options, key) do
+    case Keyword.fetch(options, key) do
+      {:ok, val} -> Keyword.put(opts, key, val)
+      :error -> opts
+    end
+  end
+
   defp handle_async_message(resp, req_message, message, state) do
     case Req.parse_message(resp, req_message) do
       {:ok, chunks} ->
@@ -239,18 +290,10 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
         case SSE.feed(acc_state.framer, chunk) do
           {:ok, framer, frames} ->
-            events = decode_frames(frames)
-
             {processed_events, new_message, tool_codec} =
-              process_events(events, acc_message, acc_state.tool_codec)
+              process_events(decode_frames(frames), acc_message, acc_state.tool_codec)
 
-            status =
-              if Enum.any?(
-                   processed_events,
-                   &(match?({:done, _, _}, &1) or match?({:provider_error, _}, &1))
-                 ),
-                 do: :done,
-                 else: :streaming
+            status = if terminal_events?(processed_events), do: :done, else: :streaming
 
             observer =
               if status == :done,
@@ -258,76 +301,68 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
                 else: observer
 
             {acc_events ++ processed_events, new_message,
-             %{
-               acc_state
-               | framer: framer,
-                 observer: observer,
-                 tool_codec: tool_codec,
-                 error_body: acc_state.error_body
-             }, status}
+             %{acc_state | framer: framer, observer: observer, tool_codec: tool_codec}, status}
 
           {:error, _error, framer} ->
             error = ProviderError.malformed(:invalid_sse)
 
             {acc_events ++ [{:provider_error, error}], acc_message,
-             %{acc_state | framer: framer, observer: observer, error_body: acc_state.error_body},
-             :done}
+             %{acc_state | framer: framer, observer: observer}, :done}
         end
 
       :done, {acc_events, acc_message, acc_state, :done} ->
         {acc_events, acc_message, acc_state, :done}
 
       :done, {acc_events, acc_message, acc_state, _status} ->
+        observer = Backplane.AiProtocol.OpenAIResponsesObserver.finish(acc_state.observer, :eof)
+
         case SSE.finish(acc_state.framer) do
           {:ok, framer, frames} ->
-            events = decode_frames(frames)
-
             {processed_events, new_message, tool_codec} =
-              process_events(events, acc_message, acc_state.tool_codec)
+              process_events(decode_frames(frames), acc_message, acc_state.tool_codec)
 
-            if Enum.any?(
-                 processed_events,
-                 &(match?({:done, _, _}, &1) or match?({:provider_error, _}, &1))
-               ) do
-              {acc_events ++ processed_events, new_message,
-               %{
-                 acc_state
-                 | framer: framer,
-                   tool_codec: tool_codec,
-                   observer:
-                     Backplane.AiProtocol.OpenAIResponsesObserver.finish(acc_state.observer, :eof),
-                   error_body: acc_state.error_body
-               }, :done}
-            else
-              error = ProviderError.malformed(:truncated_stream)
+            state = %{acc_state | framer: framer, observer: observer, tool_codec: tool_codec}
 
-              {acc_events ++ processed_events ++ [{:provider_error, error}], new_message,
-               %{
-                 acc_state
-                 | framer: framer,
-                   tool_codec: tool_codec,
-                   observer:
-                     Backplane.AiProtocol.OpenAIResponsesObserver.finish(acc_state.observer, :eof),
-                   error_body: acc_state.error_body
-               }, :done}
+            cond do
+              terminal_events?(processed_events) ->
+                {acc_events ++ processed_events, new_message, state, :done}
+
+              can_recover_eof?(new_message, tool_codec) ->
+                {recovery_events, recovered_message, tool_codec} =
+                  complete_response(new_message, %{}, tool_codec)
+
+                {acc_events ++ processed_events ++ recovery_events, recovered_message,
+                 %{state | tool_codec: tool_codec}, :done}
+
+              true ->
+                error = ProviderError.malformed(:truncated_stream)
+
+                {acc_events ++ processed_events ++ [{:provider_error, error}], new_message, state,
+                 :done}
             end
 
           {:error, _error, framer} ->
-            error = ProviderError.malformed(:truncated_stream)
+            if can_recover_eof?(acc_message, acc_state.tool_codec) do
+              {recovery_events, recovered_message, tool_codec} =
+                complete_response(acc_message, %{}, acc_state.tool_codec)
 
-            {acc_events ++ [{:provider_error, error}], acc_message,
-             %{
-               acc_state
-               | framer: framer,
-                 observer: acc_state.observer,
-                 error_body: acc_state.error_body
-             }, :done}
+              {acc_events ++ recovery_events, recovered_message,
+               %{acc_state | framer: framer, observer: observer, tool_codec: tool_codec}, :done}
+            else
+              error = ProviderError.malformed(:truncated_stream)
+
+              {acc_events ++ [{:provider_error, error}], acc_message,
+               %{acc_state | framer: framer, observer: observer}, :done}
+            end
         end
 
       _chunk, acc ->
         acc
     end)
   end
+
+  defp terminal_events?(events),
+    do: Enum.any?(events, &(match?({:done, _, _}, &1) or match?({:provider_error, _}, &1)))
 
   defp handle_error_chunks(resp, chunks, message, state) do
     Enum.reduce(chunks, {[], message, state, :streaming}, fn
@@ -349,7 +384,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
         [:done]
 
       %{data: data} ->
-        case Serialization.from_json(data) do
+        case Serialization.from_json(data, max_encoded_bytes: 16 * 1024 * 1024) do
           {:ok, event} when is_map(event) -> [event]
           _ -> [{:provider_error, ProviderError.malformed(:invalid_event_json)}]
         end
@@ -742,7 +777,17 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   defp process_events(events, message, {codec, hosted}) do
     Enum.reduce_while(events, {[], message, {codec, hosted}}, fn event,
                                                                  {all, acc, {codec, hosted}} ->
-      {emitted, next, codec} = process_event(event, acc, codec)
+      event =
+        case event do
+          %{"type" => "response.done"} -> Map.put(event, "type", "response.completed")
+          other -> other
+        end
+
+      {emitted, next, codec} =
+        if event == :done and hosted.prepared.enabled,
+          do: {[], acc, codec},
+          else: process_event(event, acc, codec)
+
       {observed, next, hosted} = Hosted.observe(hosted, event, next)
 
       emitted =
@@ -761,8 +806,33 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     error in ProviderError -> {[{:provider_error, error}], message, {codec, hosted}}
   end
 
-  defp process_event(%{"type" => "response.created", "response" => response}, acc, codec),
-    do: {[], %{acc | response_id: response["id"]}, codec}
+  defp process_event(event, acc, :ordinary) do
+    {events, acc} = process_ordinary_events([event], acc)
+    {events, acc, :ordinary}
+  end
+
+  defp process_event(%{"type" => type, "response" => response}, acc, codec)
+       when type in ["response.created", "response.in_progress"],
+       do: {[], %{acc | response_id: acc.response_id || response["id"]}, codec}
+
+  defp process_event(%{"type" => "response.output_text.done", "text" => text}, acc, codec)
+       when is_binary(text) and text != "" do
+    {events, acc} =
+      if is_nil(text_content_index(acc.content)),
+        do: process_text_delta(acc, text),
+        else: {[], acc}
+
+    {events, acc, codec}
+  end
+
+  defp process_event(
+         %{"type" => "response.output_item.done", "item" => %{"type" => "message"} = item},
+         acc,
+         codec
+       ) do
+    {events, acc} = maybe_process_message_item_done(acc, item)
+    {events, acc, codec}
+  end
 
   defp process_event(%{"type" => "response.output_text.delta", "delta" => text}, acc, codec) do
     {events, acc} = process_text_delta(acc, text)
@@ -790,7 +860,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
        do: process_tool_frame(event, acc, codec)
 
   defp process_event(%{"type" => type, "response" => response}, acc, codec)
-       when type in ["response.completed", "response.incomplete"] do
+       when type in ["response.completed", "response.incomplete", "response.done"] do
     incomplete? = type == "response.incomplete" or response["status"] == "incomplete"
     output = response["output"]
 
@@ -812,15 +882,13 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     end
 
     response = if incomplete?, do: Map.put(response, "status", "incomplete"), else: response
-    {events, acc, codec} = finalize_response_tools(acc, codec, output)
+    complete_response(acc, response, codec)
+  end
 
-    acc = %{
-      acc
-      | usage: response_usage(response["usage"]),
-        stop_reason: response_stop_reason(response, acc)
-    }
-
-    {events ++ [{:done, acc.stop_reason, acc}], acc, codec}
+  defp process_event(:done, acc, codec) do
+    if is_nil(acc.stop_reason) and (acc.content != [] or not is_nil(acc.response_id)),
+      do: complete_response(acc, %{}, codec),
+      else: {[], acc, codec}
   end
 
   defp process_event(%{"type" => "response.failed", "response" => response}, _acc, _codec),
@@ -974,6 +1042,98 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     end)
   end
 
+  defp complete_response(acc, response, :ordinary) do
+    {events, acc} = ordinary_complete_response(acc, response)
+    {events, acc, :ordinary}
+  end
+
+  defp complete_response(acc, response, codec) do
+    {text_events, acc} = maybe_extract_response_output_text(acc, response)
+    {tool_events, acc, codec} = finalize_response_tools(acc, codec, response["output"])
+
+    usage =
+      case response do
+        %{"usage" => usage_map} when is_map(usage_map) -> response_usage(usage_map)
+        _ -> acc.usage
+      end
+
+    acc = %{
+      acc
+      | response_id: acc.response_id || response["id"],
+        usage: usage,
+        stop_reason: response_stop_reason(response, acc)
+    }
+
+    if Enum.any?(tool_events, &match?({:provider_error, _}, &1)) do
+      {text_events ++ tool_events, acc, codec}
+    else
+      {text_events ++ tool_events ++ [{:done, acc.stop_reason, acc}], acc, codec}
+    end
+  end
+
+  defp maybe_process_message_item_done(acc, %{"content" => content}) when is_list(content) do
+    if is_nil(text_content_index(acc.content)) do
+      text =
+        content
+        |> Enum.map(fn
+          %{"type" => type, "text" => part}
+          when type in ["output_text", "text"] and is_binary(part) ->
+            part
+
+          _ ->
+            ""
+        end)
+        |> Enum.join("")
+
+      if text != "", do: process_text_delta(acc, text), else: {[], acc}
+    else
+      {[], acc}
+    end
+  end
+
+  defp maybe_process_message_item_done(acc, _item), do: {[], acc}
+
+  defp maybe_extract_response_output_text(acc, %{"output" => items}) when is_list(items) do
+    if is_nil(text_content_index(acc.content)) do
+      Enum.reduce(items, {[], acc}, fn
+        %{"type" => "message"} = item, {events, current_acc} ->
+          {new_events, new_acc} = maybe_process_message_item_done(current_acc, item)
+          {events ++ new_events, new_acc}
+
+        _, state ->
+          state
+      end)
+    else
+      {[], acc}
+    end
+  end
+
+  defp maybe_extract_response_output_text(acc, _response), do: {[], acc}
+
+  # Hosted replay requires the actual terminal output; EOF cannot invent it.
+  defp can_recover_eof?(message, {_codec, %{prepared: %{enabled: false}}}),
+    do: can_recover_eof?(message)
+
+  defp can_recover_eof?(_message, _tool_codec), do: false
+
+  defp can_recover_eof?(%{content: content}) when is_list(content) and content != [] do
+    Enum.all?(content, fn
+      %{type: :tool_call} = block ->
+        not Map.has_key?(block, :partial_json) or Map.has_key?(block, :arguments)
+
+      %{type: :text, text: text} ->
+        is_binary(text) and text != ""
+
+      %{type: :thinking, thinking: thinking} ->
+        is_binary(thinking) and thinking != ""
+
+      _ ->
+        true
+    end)
+  end
+
+  defp can_recover_eof?(_message), do: false
+
   defp process_thinking_delta(acc, text) do
     index = Enum.find_index(acc.content, &(&1[:type] == :thinking)) || length(acc.content)
 
@@ -990,6 +1150,323 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     msg = %{acc | content: content}
     {[{:thinking_delta, index, text, msg}], msg}
   end
+
+  defp process_ordinary_events(events, message) do
+    Enum.map_reduce(events, message, fn event, acc ->
+      case event do
+        %{"type" => type, "response" => response}
+        when type in ["response.created", "response.in_progress"] ->
+          {[], %{acc | response_id: acc.response_id || response["id"]}}
+
+        %{"type" => "response.output_text.delta", "delta" => text} ->
+          process_text_delta(acc, text)
+
+        %{"type" => "response.output_text.done", "text" => text}
+        when is_binary(text) and text != "" ->
+          if is_nil(text_content_index(acc.content)),
+            do: process_text_delta(acc, text),
+            else: {[], acc}
+
+        %{"type" => "response.reasoning_text.delta", "delta" => text} ->
+          process_thinking_delta(acc, text)
+
+        %{"type" => "response.reasoning_summary_text.delta", "delta" => text} ->
+          process_thinking_delta(acc, text)
+
+        %{"type" => "response.output_item.added", "item" => %{"type" => "function_call"} = item} ->
+          ordinary_start_response_tool(acc, item)
+
+        %{
+          "type" => "response.function_call_arguments.delta",
+          "delta" => delta
+        } = event
+        when is_binary(delta) ->
+          ordinary_process_tool_delta(acc, event["item_id"], event["call_id"], delta)
+
+        %{
+          "type" => "response.function_call_arguments.done",
+          "arguments" => arguments
+        } = event ->
+          ordinary_update_tool_arguments(acc, event, arguments)
+
+        %{"type" => "response.output_item.done", "item" => %{"type" => "function_call"} = item} ->
+          ordinary_finalize_tool(acc, item)
+
+        %{"type" => "response.output_item.done", "item" => %{"type" => "message"} = item} ->
+          maybe_process_message_item_done(acc, item)
+
+        %{"type" => type, "response" => response}
+        when type in ["response.completed", "response.incomplete", "response.done"] ->
+          if is_nil(acc.stop_reason) do
+            ordinary_complete_response(acc, response)
+          else
+            {[], acc}
+          end
+
+        :done ->
+          if is_nil(acc.stop_reason) and (acc.content != [] or not is_nil(acc.response_id)) do
+            ordinary_complete_response(acc, %{})
+          else
+            {[], acc}
+          end
+
+        %{"type" => "response.failed", "response" => response} ->
+          raise provider_error_message(response["error"] || response)
+
+        %{"type" => "error"} = error ->
+          raise provider_error_message(error)
+
+        _ ->
+          {[], acc}
+      end
+    end)
+    |> then(fn {events, acc} -> {List.flatten(events), acc} end)
+  end
+
+  defp ordinary_complete_response(acc, response) do
+    {text_events, acc} = maybe_extract_response_output_text(acc, response)
+    {tool_events, acc} = ordinary_finalize_tools(acc, response)
+
+    usage =
+      case response do
+        %{"usage" => usage_map} when is_map(usage_map) -> response_usage(usage_map)
+        _ -> acc.usage
+      end
+
+    acc = %{
+      acc
+      | response_id: acc.response_id || response["id"],
+        usage: usage,
+        stop_reason: response_stop_reason(response, acc)
+    }
+
+    if Enum.any?(tool_events, &match?({:provider_error, _}, &1)) do
+      {text_events ++ tool_events, acc}
+    else
+      {text_events ++ tool_events ++ [{:done, acc.stop_reason, acc}], acc}
+    end
+  end
+
+  defp ordinary_start_response_tool(acc, item) do
+    item_id = ordinary_present_string(item["id"])
+    call_id = ordinary_present_string(item["call_id"])
+    name = ordinary_present_string(item["name"])
+    initial_args = if is_binary(item["arguments"]), do: item["arguments"], else: ""
+
+    case ordinary_tool_index(acc.content, item_id, call_id) do
+      nil ->
+        index = length(acc.content)
+
+        block = %{
+          type: :tool_call,
+          item_id: item_id,
+          id: call_id,
+          name: name,
+          partial_json: initial_args
+        }
+
+        new_acc = %{acc | content: acc.content ++ [block]}
+        {[{:toolcall_start, index, new_acc}], new_acc}
+
+      index ->
+        content =
+          update_content(acc.content, index, fn block ->
+            block
+            |> Map.put(:item_id, ordinary_present_string(block[:item_id]) || item_id)
+            |> Map.put(:id, ordinary_present_string(block[:id]) || call_id)
+            |> Map.put(:name, ordinary_present_string(block[:name]) || name)
+          end)
+
+        {[], %{acc | content: content}}
+    end
+  end
+
+  defp ordinary_process_tool_delta(acc, item_id, call_id, delta) do
+    item_id = ordinary_present_string(item_id)
+    call_id = ordinary_present_string(call_id)
+    index = ordinary_tool_index(acc.content, item_id, call_id) || length(acc.content)
+
+    content =
+      if index == length(acc.content),
+        do:
+          acc.content ++
+            [%{type: :tool_call, item_id: item_id, id: call_id, name: nil, partial_json: ""}],
+        else: acc.content
+
+    content =
+      update_content(content, index, fn block ->
+        Map.update(block, :partial_json, delta, &(&1 <> delta))
+      end)
+
+    msg = %{acc | content: content}
+    {[{:toolcall_delta, index, delta, msg}], msg}
+  end
+
+  defp ordinary_update_tool_arguments(acc, event, arguments) do
+    item_id = ordinary_present_string(event["item_id"])
+    call_id = ordinary_present_string(event["call_id"])
+    name = ordinary_present_string(event["name"])
+    index = ordinary_tool_index(acc.content, item_id, call_id) || length(acc.content)
+
+    content =
+      if index == length(acc.content),
+        do:
+          acc.content ++
+            [%{type: :tool_call, item_id: item_id, id: call_id, name: name, partial_json: ""}],
+        else: acc.content
+
+    block = Enum.at(content, index)
+
+    updated =
+      block
+      |> Map.put(:item_id, ordinary_present_string(block[:item_id]) || item_id)
+      |> Map.put(:id, ordinary_present_string(block[:id]) || call_id)
+      |> Map.put(:name, ordinary_present_string(block[:name]) || name)
+      |> ordinary_maybe_put_arguments(arguments)
+
+    content = List.replace_at(content, index, updated)
+
+    {[], %{acc | content: content}}
+  end
+
+  defp ordinary_maybe_put_arguments(block, arguments) when is_map(arguments),
+    do: Map.put(block, :arguments, arguments)
+
+  defp ordinary_maybe_put_arguments(block, arguments) when is_binary(arguments) do
+    case ordinary_present_string(arguments) do
+      nil -> block
+      present -> Map.put(block, :arguments, present)
+    end
+  end
+
+  defp ordinary_maybe_put_arguments(block, _arguments), do: block
+
+  defp ordinary_finalize_tool(acc, item) do
+    item_id = ordinary_present_string(item["id"])
+    call_id = ordinary_present_string(item["call_id"])
+    index = ordinary_tool_index(acc.content, item_id, call_id) || length(acc.content)
+    block = Enum.at(acc.content, index) || %{}
+
+    if block[:type] == :tool_call and not Map.has_key?(block, :partial_json) and
+         is_map(block[:arguments]) do
+      {[], acc}
+    else
+      arguments =
+        ordinary_present_arguments(item["arguments"]) ||
+          ordinary_present_arguments(block[:arguments]) ||
+          ordinary_present_arguments(block[:partial_json]) ||
+          "{}"
+
+      name = ordinary_present_string(item["name"]) || ordinary_present_string(block[:name])
+
+      call_id =
+        call_id || ordinary_present_string(block[:id]) || item_id ||
+          ordinary_present_string(block[:item_id])
+
+      with {:ok, arguments} <- ordinary_decode_arguments(arguments),
+           true <- is_binary(call_id) and call_id != "",
+           true <- is_binary(name) and name != "" do
+        call = %{type: :tool_call, id: call_id, name: name, arguments: arguments}
+
+        content =
+          if index == length(acc.content),
+            do: acc.content ++ [call],
+            else: List.replace_at(acc.content, index, call)
+
+        msg = %{acc | content: content}
+        {[{:toolcall_end, index, call, msg}], msg}
+      else
+        _ -> {[{:provider_error, ProviderError.malformed(:invalid_tool_call_arguments)}], acc}
+      end
+    end
+  end
+
+  defp ordinary_finalize_tools(acc, response) do
+    output_items =
+      case response do
+        %{"output" => items} when is_list(items) ->
+          Enum.filter(items, &match?(%{"type" => "function_call"}, &1))
+
+        _ ->
+          []
+      end
+
+    {output_events, acc} =
+      Enum.reduce(output_items, {[], acc}, fn item, {events, current_acc} ->
+        item_id = ordinary_present_string(item["id"])
+        call_id = ordinary_present_string(item["call_id"])
+
+        case ordinary_tool_index(current_acc.content, item_id, call_id) do
+          nil ->
+            {new_events, new_acc} = ordinary_finalize_tool(current_acc, item)
+            {events ++ new_events, new_acc}
+
+          index ->
+            block = Enum.at(current_acc.content, index)
+
+            if Map.has_key?(block, :partial_json) do
+              {new_events, new_acc} = ordinary_finalize_tool(current_acc, item)
+              {events ++ new_events, new_acc}
+            else
+              {events, current_acc}
+            end
+        end
+      end)
+
+    acc.content
+    |> Enum.reduce({output_events, acc}, fn block, {events, current_acc} ->
+      if block[:type] == :tool_call and Map.has_key?(block, :partial_json) do
+        {new_events, new_acc} =
+          ordinary_finalize_tool(current_acc, %{
+            "id" => block[:item_id],
+            "call_id" => block[:id],
+            "name" => block[:name],
+            "arguments" =>
+              ordinary_present_arguments(block[:arguments]) ||
+                ordinary_present_arguments(block[:partial_json])
+          })
+
+        {events ++ new_events, new_acc}
+      else
+        {events, current_acc}
+      end
+    end)
+  end
+
+  defp ordinary_tool_index(content, item_id, call_id) do
+    present_item_id = ordinary_present_string(item_id)
+    present_call_id = ordinary_present_string(call_id)
+
+    cond do
+      present_item_id != nil or present_call_id != nil ->
+        Enum.find_index(content, fn block ->
+          block[:type] == :tool_call and
+            ((present_item_id != nil and
+                (block[:item_id] == present_item_id or block[:id] == present_item_id)) or
+               (present_call_id != nil and block[:id] == present_call_id))
+        end)
+
+      true ->
+        content
+        |> Enum.with_index()
+        |> Enum.reverse()
+        |> Enum.find_value(fn {block, idx} ->
+          if block[:type] == :tool_call and Map.has_key?(block, :partial_json), do: idx
+        end)
+    end
+  end
+
+  defp ordinary_present_arguments(value) when is_map(value), do: value
+  defp ordinary_present_arguments(value) when is_binary(value), do: ordinary_present_string(value)
+  defp ordinary_present_arguments(_value), do: nil
+
+  defp ordinary_present_string(value) when is_binary(value) do
+    if String.trim(value) == "", do: nil, else: value
+  end
+
+  defp ordinary_present_string(_value), do: nil
+
+  defp ordinary_decode_arguments(arguments), do: ToolCallJson.decode_arguments(arguments)
 
   defp response_usage(usage),
     do: Sigma.Ai.ProviderUsage.from_wire(usage, :openai_responses)

@@ -164,6 +164,34 @@ function Metrics({ html }) {
   })
 }
 
+// Plain function (not a component) so Chat.Tool stays a direct child of the bubble.
+function toolBlock(tool) {
+  return h(Chat.Tool, { key: `tool:${tool.id}`, status: tool.status },
+    h(Chat.ToolHeader, null, tool.name, ": ", tool.statusLabel || tool.status),
+    h(Chat.ToolCall, null, h("pre", { className: "overflow-x-auto whitespace-pre-wrap text-xs" }, tool.input)),
+    tool.result != null && h(Chat.ToolResult, null,
+      tool.result && h("pre", { className: "overflow-x-auto whitespace-pre-wrap text-xs" }, tool.result),
+      ...(tool.images || []).map((src, index) => h("img", {
+        key: index, src, alt: `${tool.name} result ${index + 1}`, loading: "lazy",
+        className: "max-h-96 max-w-full rounded object-contain"
+      }))))
+}
+
+// Assistant messages render their ordered content blocks (text, tool calls) in
+// protocol order with stable keys. Payloads without `blocks` (user and other
+// roles) keep the plain content rendering.
+function renderBlocks(message) {
+  if (message.role === "assistant" && Array.isArray(message.blocks) && message.blocks.length) {
+    return message.blocks.map((block) => block.type === "tool"
+      ? toolBlock(block)
+      : h(Markdown, { key: `text:${block.id}`, markdown: block.text, className: "chat-bubble-content" }))
+  }
+  return [
+    ...(message.tools || []).map((tool) => toolBlock(tool)),
+    message.content && h(Markdown, { key: "content", markdown: message.content, className: "chat-bubble-content" })
+  ]
+}
+
 function Message({ message, bridge, targetId, timeline, active, connected, synchronizing, admission }) {
   const [notice, setNotice] = useState("")
   const metadata = message.metadata || {}
@@ -171,16 +199,7 @@ function Message({ message, bridge, targetId, timeline, active, connected, synch
     h(Chat.Header, null, message.author, " · ", h("time", { dateTime: new Date(metadata.timestamp).toISOString() }, new Date(metadata.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }))),
     h(Chat.Bubble, { streaming: message.status === "streaming", color: message.role === "user" ? "secondary" : undefined },
       metadata.reasoning && h(Chat.Reasoning, null, h("summary", null, "Reasoning"), metadata.reasoning),
-      ...(message.tools || []).map((tool) => h(Chat.Tool, { key: tool.id, status: tool.status },
-        h(Chat.ToolHeader, null, tool.name, ": ", tool.statusLabel || tool.status),
-        h(Chat.ToolCall, null, h("pre", { className: "overflow-x-auto whitespace-pre-wrap text-xs" }, tool.input)),
-        tool.result != null && h(Chat.ToolResult, null,
-          tool.result && h("pre", { className: "overflow-x-auto whitespace-pre-wrap text-xs" }, tool.result),
-          ...(tool.images || []).map((src, index) => h("img", {
-            key: index, src, alt: `${tool.name} result ${index + 1}`, loading: "lazy",
-            className: "max-h-96 max-w-full rounded object-contain"
-          }))))),
-      message.content && h(Markdown, { markdown: message.content, className: "chat-bubble-content" }),
+      ...renderBlocks(message),
       metadata.sources?.length > 0 && h("nav", { "aria-label": "Sources", className: "mt-2 text-sm" },
         h("span", null, "Sources"),
         h("ol", { className: "list-inside list-decimal" }, ...metadata.sources.map((source) =>

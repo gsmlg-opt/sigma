@@ -162,14 +162,49 @@ defmodule Sigma.Web.SessionObservability do
       <p class="font-mono text-sm">Next request estimate: {token_amount(value(@policy, :estimate))}</p>
       <p :if={value(@policy, :estimate_stale)} class="text-xs text-warning">estimate stale — current budget unknown</p>
       <p class="font-mono text-sm">Context window: {token_amount(value(@policy, :context_window))}</p>
-      <progress
+      <div
         :if={progress_available?(@policy)}
-        class="w-full accent-primary"
-        value={value(@policy, :estimate)}
-        max={value(@policy, :context_window)}
-        aria-label="Next request estimate of context window"
-      />
-      <p class="font-mono text-sm">Auto-compaction threshold: {token_amount(value(@policy, :threshold))}</p>
+        class="my-2 rounded-md border border-outline-variant bg-surface-container-low p-2"
+        data-context-progress
+      >
+        <div class="mb-1 flex items-center justify-between gap-2 font-mono text-xs">
+          <span class="text-on-surface">
+            {compact_token_label(current_context_tokens(@policy))} / {compact_token_label(value(@policy, :context_window))} tokens
+          </span>
+          <span class="text-on-surface-variant">{context_usage_percent_label(@policy)}</span>
+        </div>
+        <progress
+          class="sr-only"
+          value={current_context_tokens(@policy)}
+          max={value(@policy, :context_window)}
+          aria-label="Next request estimate of context window"
+        />
+        <div class="relative h-2.5 w-full overflow-visible rounded-full bg-surface-container-highest">
+          <div
+            class={["h-full rounded-full transition-all", progress_fill_class(@policy)]}
+            style={"width: #{progress_fill_percent(@policy)}%"}
+          />
+          <div
+            :if={compaction_threshold_percent(@policy)}
+            data-compaction-marker
+            class="absolute -top-1 -bottom-1 w-0.5 -translate-x-1/2 rounded-full bg-warning"
+            style={"left: #{compaction_threshold_percent(@policy)}%"}
+            title={"Auto-compaction threshold: #{compaction_threshold_percent_label(@policy)} (#{compact_token_label(compaction_threshold_tokens(@policy))} tokens)"}
+          />
+        </div>
+        <div
+          :if={compaction_threshold_percent(@policy)}
+          class="mt-1 flex items-center justify-between gap-1 text-[11px] text-on-surface-variant"
+        >
+          <span>0%</span>
+          <span class="flex items-center gap-1 font-mono text-warning">
+            <span class="inline-block h-2 w-0.5 rounded-full bg-warning" aria-hidden="true" />
+            Compaction {compaction_threshold_percent_label(@policy)} ({compact_token_label(compaction_threshold_tokens(@policy))})
+          </span>
+          <span>100%</span>
+        </div>
+      </div>
+      <p class="font-mono text-sm">Auto-compaction threshold: {token_amount(compaction_threshold_tokens(@policy))}</p>
       <p class="font-mono text-sm">Until compaction threshold: {remaining_label(@policy)}</p>
       <p :if={at_compaction_threshold?(@policy)} class="text-xs text-warning">Waiting for a safe checkpoint</p>
       <p class={overflow_class(@policy)}>Hard request budget: {hard_budget_label(@policy)}</p>
@@ -349,7 +384,7 @@ defmodule Sigma.Web.SessionObservability do
 
   defp metric_value(map, key), do: display(value(map, key), "unknown")
 
-  defp token_value(amount) when is_number(amount) and amount >= 1_000 do
+  defp compact_token_label(amount) when is_number(amount) and amount >= 1_000 do
     {divisor, unit} =
       cond do
         amount >= 1_000_000_000 -> {1_000_000_000, "B"}
@@ -367,7 +402,17 @@ defmodule Sigma.Web.SessionObservability do
       |> String.trim_trailing("0")
       |> String.trim_trailing(".")
 
-    assigns = %{label: label <> unit, exact: display(amount, "unknown") <> " tokens"}
+    label <> unit
+  end
+
+  defp compact_token_label(amount), do: display(amount, "unknown")
+
+  defp token_value(amount) when is_number(amount) and amount >= 1_000 do
+    assigns = %{
+      label: compact_token_label(amount),
+      exact: display(amount, "unknown") <> " tokens"
+    }
+
     ~H"<span title={@exact}>{@label}</span>"
   end
 
@@ -448,9 +493,105 @@ defmodule Sigma.Web.SessionObservability do
     end
   end
 
+  defp current_context_tokens(policy) do
+    case value(policy, :estimate) do
+      estimate when is_integer(estimate) and estimate >= 0 ->
+        estimate
+
+      _ ->
+        case value(policy, :last_measured) do
+          measured when is_integer(measured) and measured >= 0 -> measured
+          _ -> nil
+        end
+    end
+  end
+
   defp progress_available?(policy) do
-    is_integer(value(policy, :estimate)) and is_integer(value(policy, :context_window)) and
-      value(policy, :context_window) > 0 and value(policy, :estimate_stale) != true
+    is_integer(current_context_tokens(policy)) and is_integer(value(policy, :context_window)) and
+      value(policy, :context_window) > 0
+  end
+
+  defp progress_fill_percent(policy) do
+    current = current_context_tokens(policy) || 0
+    window = value(policy, :context_window) || 1
+    percent_number(min(max(current / window * 100, 0.0), 100.0))
+  end
+
+  defp context_usage_percent_label(policy) do
+    current = current_context_tokens(policy) || 0
+    window = value(policy, :context_window) || 1
+    percent_number(max(current / window * 100, 0.0)) <> "%"
+  end
+
+  defp compaction_threshold_tokens(policy) do
+    window = value(policy, :context_window)
+    threshold = value(policy, :threshold)
+    source = value(policy, :threshold_source)
+
+    cond do
+      source in [:session_ratio, :model_ratio, "session_ratio", "model_ratio"] and
+        is_integer(window) and window > 0 ->
+        floor(window * default_compaction_ratio())
+
+      is_integer(threshold) and threshold > 0 ->
+        threshold
+
+      is_integer(window) and window > 0 ->
+        floor(window * default_compaction_ratio())
+
+      true ->
+        nil
+    end
+  end
+
+  defp default_compaction_ratio do
+    if function_exported?(Sigma.Agent.ContextPolicy, :default_compaction_ratio, 0) do
+      Sigma.Agent.ContextPolicy.default_compaction_ratio()
+    else
+      0.9
+    end
+  end
+
+  defp compaction_threshold_percent(policy) do
+    with threshold when is_integer(threshold) and threshold > 0 <-
+           compaction_threshold_tokens(policy),
+         window when is_integer(window) and window > 0 <- value(policy, :context_window) do
+      percent_number(min(max(threshold / window * 100, 0.0), 100.0))
+    else
+      _ -> nil
+    end
+  end
+
+  defp compaction_threshold_percent_label(policy) do
+    case compaction_threshold_percent(policy) do
+      nil -> "90%"
+      percent -> percent <> "%"
+    end
+  end
+
+  defp progress_fill_class(policy) do
+    current = current_context_tokens(policy) || 0
+    window = value(policy, :context_window) || 0
+    threshold = compaction_threshold_tokens(policy)
+
+    cond do
+      hard_budget_warning?(policy) or (window > 0 and current >= window) ->
+        "bg-error"
+
+      is_integer(threshold) and current >= threshold ->
+        "bg-warning"
+
+      true ->
+        "bg-primary"
+    end
+  end
+
+  defp percent_number(value) when is_float(value) do
+    value
+    |> Float.round(1)
+    |> :erlang.float_to_binary(decimals: 1)
+    |> String.trim_trailing("0")
+    |> String.trim_trailing(".")
   end
 
   defp remaining_label(policy) do
@@ -490,7 +631,11 @@ defmodule Sigma.Web.SessionObservability do
     after_tokens = value(compaction, :after_tokens)
     finished_at = value(compaction, :finished_at)
 
-    assigns = %{before_tokens: before_tokens, after_tokens: after_tokens, finished_at: finished_at}
+    assigns = %{
+      before_tokens: before_tokens,
+      after_tokens: after_tokens,
+      finished_at: finished_at
+    }
 
     ~H"""
     last: {display(@finished_at, "time unknown")} · {token_value(@before_tokens)} -> {token_value(@after_tokens)}

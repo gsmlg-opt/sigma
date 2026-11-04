@@ -580,7 +580,8 @@ defmodule Sigma.Agent.Backplane.Engine do
       authority,
       execute(state, turn_id),
       contracts: contracts,
-      profiles: profiles
+      profiles: profiles,
+      mode: :quarantine
     )
   end
 

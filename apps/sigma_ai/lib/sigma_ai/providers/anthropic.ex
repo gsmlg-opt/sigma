@@ -1,7 +1,14 @@
 defmodule Sigma.Ai.Providers.Anthropic do
   @behaviour Sigma.Ai.Provider
 
-  alias Sigma.Ai.{ProviderAuth, ProviderCapabilities, ProviderError, ProviderRequest, Stream}
+  alias Sigma.Ai.{
+    ProviderAuth,
+    ProviderCapabilities,
+    ProviderError,
+    ProviderRequest,
+    Stream,
+    ToolCallJson
+  }
 
   @impl true
   def stream_normalized(%ProviderRequest{} = request),
@@ -119,12 +126,19 @@ defmodule Sigma.Ai.Providers.Anthropic do
       fn ->
         resp =
           try do
-            Req.post!(base_url <> "/v1/messages",
-              json: body,
-              headers: headers,
-              receive_timeout: options[:receive_timeout] || 120_000,
-              into: :self
-            )
+            req_opts =
+              [
+                json: body,
+                headers: headers,
+                receive_timeout: options[:receive_timeout] || 120_000,
+                retry: Keyword.get(options, :retry, :transient),
+                max_retries: Keyword.get(options, :max_retries, 3),
+                into: :self
+              ]
+              |> maybe_put_opt(options, :retry_delay)
+              |> maybe_put_opt(options, :retry_log_level)
+
+            Req.post!(base_url <> "/v1/messages", req_opts)
           rescue
             e in [Req.TransportError, Finch.TransportError] ->
               reraise transport_error_message(e), __STACKTRACE__
@@ -175,6 +189,13 @@ defmodule Sigma.Ai.Providers.Anthropic do
   defp transport_error_message(%{reason: reason}) do
     "Network error contacting the AI provider: #{inspect(reason)}. " <>
       "Check your connection and try again."
+  end
+
+  defp maybe_put_opt(opts, options, key) do
+    case Keyword.fetch(options, key) do
+      {:ok, val} -> Keyword.put(opts, key, val)
+      :error -> opts
+    end
   end
 
   defp handle_async_message(resp, req_message, message, buffer) do
@@ -564,7 +585,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
                 {{:thinking_end, idx, block.thinking, new_acc}, new_acc}
 
               :tool_call ->
-                case Jason.decode(block.partial_json) do
+                case ToolCallJson.decode_arguments(block.partial_json) do
                   {:ok, args} when is_map(args) ->
                     tool_call = %{
                       type: :tool_call,

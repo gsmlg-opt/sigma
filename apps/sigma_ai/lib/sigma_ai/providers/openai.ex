@@ -1,7 +1,14 @@
 defmodule Sigma.Ai.Providers.OpenAI do
   @behaviour Sigma.Ai.Provider
 
-  alias Sigma.Ai.{ProviderAuth, ProviderCapabilities, ProviderError, ProviderRequest, Stream}
+  alias Sigma.Ai.{
+    ProviderAuth,
+    ProviderCapabilities,
+    ProviderError,
+    ProviderRequest,
+    Stream,
+    ToolCallJson
+  }
 
   @impl true
   def stream_normalized(%ProviderRequest{} = request),
@@ -111,12 +118,19 @@ defmodule Sigma.Ai.Providers.OpenAI do
 
         resp =
           try do
-            Req.post!(base_url <> "/chat/completions",
-              json: body,
-              headers: headers,
-              receive_timeout: options[:receive_timeout] || 120_000,
-              into: :self
-            )
+            req_opts =
+              [
+                json: body,
+                headers: headers,
+                receive_timeout: options[:receive_timeout] || 120_000,
+                retry: Keyword.get(options, :retry, :transient),
+                max_retries: Keyword.get(options, :max_retries, 3),
+                into: :self
+              ]
+              |> maybe_put_opt(options, :retry_delay)
+              |> maybe_put_opt(options, :retry_log_level)
+
+            Req.post!(base_url <> "/chat/completions", req_opts)
           rescue
             e in [Req.TransportError, Finch.TransportError] ->
               reraise transport_error_message(e), __STACKTRACE__
@@ -169,6 +183,13 @@ defmodule Sigma.Ai.Providers.OpenAI do
       "Check your connection and try again."
   end
 
+  defp maybe_put_opt(opts, options, key) do
+    case Keyword.fetch(options, key) do
+      {:ok, val} -> Keyword.put(opts, key, val)
+      :error -> opts
+    end
+  end
+
   defp handle_async_message(resp, req_message, message, buffer) do
     case Req.parse_message(resp, req_message) do
       {:ok, chunks} ->
@@ -196,9 +217,10 @@ defmodule Sigma.Ai.Providers.OpenAI do
         {processed_events, new_message} = process_events(events, acc_message)
 
         status =
-          if Enum.any?(processed_events, &match?({:done, _, _}, &1)),
-            do: :done,
-            else: :streaming
+          if Enum.any?(processed_events, &match?({:done, _, _}, &1)) or
+               Enum.any?(processed_events, &match?({:provider_error, _}, &1)),
+             do: :done,
+             else: :streaming
 
         {acc_events ++ processed_events, new_message, new_buffer, status}
 
@@ -206,8 +228,30 @@ defmodule Sigma.Ai.Providers.OpenAI do
         {acc_events, acc_message, acc_buffer, :done}
 
       :done, {acc_events, acc_message, acc_buffer, _status} ->
-        error = ProviderError.malformed(:truncated_stream)
-        {acc_events ++ [{:provider_error, error}], acc_message, acc_buffer, :done}
+        {flushed_events, new_message, new_buffer} =
+          if String.trim(acc_buffer) == "" do
+            {[], acc_message, acc_buffer}
+          else
+            {events, rest} = Stream.decode(acc_buffer, "\n\n")
+            {processed, msg} = process_events(events, acc_message)
+            {processed, msg, rest}
+          end
+
+        cond do
+          Enum.any?(flushed_events, &match?({:done, _, _}, &1)) or
+              Enum.any?(flushed_events, &match?({:provider_error, _}, &1)) ->
+            {acc_events ++ flushed_events, new_message, new_buffer, :done}
+
+          not is_nil(new_message.stop_reason) ->
+            {done_events, done_message} = process_events([:done], new_message)
+            {acc_events ++ flushed_events ++ done_events, done_message, new_buffer, :done}
+
+          true ->
+            error = ProviderError.malformed(:truncated_stream)
+
+            {acc_events ++ flushed_events ++ [{:provider_error, error}], new_message, new_buffer,
+             :done}
+        end
 
       _chunk, acc ->
         acc
@@ -578,7 +622,7 @@ defmodule Sigma.Ai.Providers.OpenAI do
          %{type: :tool_call, partial_json: partial_json} = block,
          index
        ) do
-    case Jason.decode(partial_json || "") do
+    case ToolCallJson.decode_arguments(partial_json || "") do
       {:ok, args} when is_map(args) ->
         tool_call = %{
           type: :tool_call,

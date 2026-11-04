@@ -640,7 +640,7 @@ defmodule Sigma.Web.SessionLiveTest do
     assert has_element?(reopened, "#context-limit-select option[value='768000'][selected]")
     {:ok, {restarted, _}} = Sigma.Web.SessionManager.get_agent(session_id, repo_path: @workdir)
     assert Sigma.Agent.status(restarted).context_policy.context_limit == 768_000
-    assert Sigma.Agent.status(restarted).context_policy.threshold == 614_400
+    assert Sigma.Agent.status(restarted).context_policy.threshold == 691_200
   end
 
   for active? <- [false, true] do
@@ -2654,6 +2654,11 @@ defmodule Sigma.Web.SessionLiveTest do
 
     assert [cancelled_first, cancelled_last] = chat_snapshot(view).messages
 
+    for message <- [cancelled_first, cancelled_last] do
+      assert Enum.filter(message.blocks, &(&1.type == "tool")) ==
+               Enum.map(message.tools, &Map.put(&1, :type, "tool"))
+    end
+
     assert [%{result: nil, images: []}, %{status: "success"}, %{status: "error"}] =
              cancelled_first.tools
 
@@ -2754,8 +2759,9 @@ defmodule Sigma.Web.SessionLiveTest do
     send(view.pid, {:message_end, assistant})
     send(view.pid, {:message_end, result})
     url = "data:image/png;base64,#{@png_data}"
-    assert [%{id: "image-assistant", tools: [tool]}] = chat_snapshot(view).messages
+    assert [%{id: "image-assistant", tools: [tool]} = message] = chat_snapshot(view).messages
     assert %{result: "", images: [^url], status: "success"} = tool
+    assert message.blocks == [Map.put(tool, :type, "tool")]
 
     path = session_storage_path(session_id)
     File.mkdir_p!(Path.dirname(path))
@@ -2763,7 +2769,11 @@ defmodule Sigma.Web.SessionLiveTest do
     :ok = Log.persist_event(path, {:message_end, result})
     before_reload = File.read!(path)
     {:ok, reloaded, _html} = live_loaded(conn, session_path(session_id))
-    assert [%{id: "image-assistant", tools: [^tool]}] = chat_snapshot(reloaded).messages
+
+    assert [%{id: "image-assistant", tools: [^tool]} = restored] =
+             chat_snapshot(reloaded).messages
+
+    assert restored.blocks == message.blocks
     assert File.read!(path) == before_reload
   end
 
@@ -3998,13 +4008,8 @@ defmodule Sigma.Web.SessionLiveTest do
     end
 
     assert has_element?(view, "#session-context-details", "Context window: 256K tokens")
-    policy = Sigma.Agent.status(agent).context_policy
-
-    if policy.estimate_stale do
-      refute has_element?(view, "#session-context-details progress")
-    else
-      assert has_element?(view, "#session-context-details progress")
-    end
+    assert has_element?(view, "#session-context-details progress")
+    assert has_element?(view, "#session-context-details [data-compaction-marker]")
 
     estimate
   end

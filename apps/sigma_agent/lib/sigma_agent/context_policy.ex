@@ -7,10 +7,12 @@ defmodule Sigma.Agent.ContextPolicy do
   runtime and clients can use the same values and provenance.
   """
 
-  @default_threshold 80_000
-  @default_ratio 0.8
+  @default_threshold 90_000
+  @default_ratio 0.9
 
   def default_context_limit, do: 256_000
+
+  def default_compaction_ratio, do: @default_ratio
 
   def parse_context_limit(value) do
     case positive(value) do

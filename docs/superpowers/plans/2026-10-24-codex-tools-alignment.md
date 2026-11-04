@@ -1,7 +1,25 @@
 # Sigma 剩余 Codex tools 对齐
 
-用户已授权在 `main` 继续实现，不创建 worktree。当前工作未提交；不包含自动
-commit、push、发布、部署或替换正在使用的会话。本文是持久 Goal 的执行清单，
+2026-11-04交付整合远端`7a2e480`的九条提交，保留Provider JSON修复／EOF恢复／HTTP重试、
+有序工具展示、90% compaction及完整依赖更新。当前五个Backplane包锁定1.10.55，四个直接
+最低版本同步为1.10.55，HTTP为0.21.19；mix.lock完整保留远端图，不降级其他依赖。
+下文1.10.53生产包55项／完整42工具／三BEAM冷读是2026-10-30的历史验收，不能扩展为
+1.10.55生产包或真实模型验收。此次合并的源码功能验证单独记录，不改写旧证据。
+自动CI按用户排除安全／权限测试的范围跳过；未发布、部署或启动4580。
+
+合并源码的功能验收分别为seed43238的24项定点、seed43239的14文件85项、
+seed43241的4项Provider及seed43242的6项Usage，均零失败；location过滤排除项不计通过。
+seed43240曾暴露远端新用例沿用旧`usage.input`断言：现有契约保留已知的
+`input_tokens: 20`／`output: 5`／`total_tokens: 25`，未报告缓存时`input`与`cache_read`
+仍未知。断言按此契约迁移并增加标准化fact检查，未改生产用量逻辑、未伪造缓存零值。
+严格编译、22文件格式检查、JS语法、locked resolution、stdio helper及npm安装通过。
+`mix assets.build`在Tailwind阶段受本机GLIBC2.42阻塞：duskmoon_vize10.0.9的GNU NIF
+需要GLIBC2.43。上游[duskmoon-bundler#9](https://github.com/duskmoon-dev/duskmoon-bundler/issues/9)
+已明确这是有意的平台要求并以not planned关闭；不重复报缺陷、不降级或本地绕过。
+前端完整构建需在符合该基线的环境另行验收；本轮不能声称构建成功。
+
+用户已授权在 `main` 继续实现，不创建 worktree；2026-11-04又明确授权本轮commit与push。
+此次交付不包含发布、部署或替换正在使用的会话。本文保留持久 Goal 的执行清单，
 不是全量完成声明。具体架构与证据见 [协议说明](../../contracts/codex-tools.md)。
 
 本阶段允许范围内的工具接入与剩余生命周期验收已完成；保留明确的TODO、适用平台和
@@ -1353,7 +1371,7 @@ connected、console无warning/error；自有服务和页面已停止，4580/PID8
   保留#126／#131／#133及1.10.44客户端／生产包版本范围。
 
 未选择的V1 collaboration、test-only条目及兼容别名不自动扩大默认集合。
-当前正式五包为1.10.53；#147已正式发布、采用并通过原立即Stop完整回归，#148已解除。
+2026-10-30验收时正式五包为1.10.53；#147已正式发布、采用并通过原立即Stop完整回归，#148已解除。
 原#126／#131／#133／#134／#135、#139–#142、#144／#145及#146均有各自消费者结果。
 当前tool48＋Operations4＋Web3在最终独立解压包55项通过，独立BEAM冷读53文件全保持；
 实际Protocol／Chrome原取消续接、完整dump、正确基线冷恢复与新active reload验收完成。
