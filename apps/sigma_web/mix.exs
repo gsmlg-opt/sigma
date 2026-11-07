@@ -29,16 +29,16 @@ defmodule Sigma.Web.MixProject do
 
   defp deps do
     [
-      {:phoenix, "~> 1.8.16"},
-      {:phoenix_live_view, "~> 1.2.13"},
+      {:phoenix, "~> 1.8"},
+      {:phoenix_live_view, "~> 1.2"},
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_reload, "~> 1.5", only: :dev},
       {:jason, "~> 1.4"},
       {:gaoxy_http, "~> 0.12"},
       {:websock_adapter, "~> 0.12", hex: :gaoxy_websock_adapter, override: true},
       {:gettext, "~> 1.0"},
-      {:duskmoon_bundler, "~> 10.0.2"},
-      {:phoenix_duskmoon, "~> 10.0.10"},
+      {:duskmoon_bundler, "~> 10.0"},
+      {:phoenix_duskmoon, "~> 10.0"},
       {:sigma_agent, in_umbrella: true},
       {:sigma_session, in_umbrella: true},
       {:sigma_logs, in_umbrella: true},
