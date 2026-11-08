@@ -18,6 +18,10 @@ defmodule Sigma.Web.ThemeMount do
 
   Returns `{:cont, socket}` so the LiveView continues mounting.
   """
+  def on_mount(_action, _params, _session, socket) do
+    {:cont, assign(socket, :theme, Sigma.Session.ConfigManager.get_theme())}
+  end
+
   def on_mount(_params, _session, socket) do
     {:cont, assign(socket, :theme, Sigma.Session.ConfigManager.get_theme())}
   end

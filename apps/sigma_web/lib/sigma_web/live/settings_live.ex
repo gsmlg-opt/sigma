@@ -14,6 +14,7 @@ defmodule Sigma.Web.SettingsLive do
     {:ok,
      socket
      |> assign(:active_tab, :settings)
+     |> assign(:theme, ConfigManager.get_theme())
      |> assign(:settings_data, AsyncResult.loading())
      |> assign(:context_config, %{"system_prompt" => ""})
      |> assign(:mcp_form, nil)
@@ -155,7 +156,7 @@ defmodule Sigma.Web.SettingsLive do
 
           <%= case @live_action do %>
             <% :appearance -> %>
-              <.render_appearance />
+              <.render_appearance theme={@theme} />
             <% :providers -> %>
               <.settings_async_result :let={data} assign={@settings_data}>
                 <.render_providers
@@ -255,6 +256,9 @@ defmodule Sigma.Web.SettingsLive do
   end
 
   defp render_appearance(assigns) do
+    theme = assigns[:theme] || ConfigManager.get_theme()
+    assigns = assign(assigns, :current_theme, theme)
+
     ~H"""
     <div class="space-y-6">
       <div class="flex justify-between items-center text-on-surface">
@@ -279,9 +283,24 @@ defmodule Sigma.Web.SettingsLive do
           role="radiogroup"
           aria-label="Theme"
         >
-          <.dm_radio name="theme" value="default" label="Auto" />
-          <.dm_radio name="theme" value="sunshine" label="Sunshine" />
-          <.dm_radio name="theme" value="moonlight" label="Moonlight" />
+          <.dm_radio
+            name="theme"
+            value="default"
+            label="Auto"
+            checked={@current_theme in [nil, "", "default"]}
+          />
+          <.dm_radio
+            name="theme"
+            value="sunshine"
+            label="Sunshine"
+            checked={@current_theme == "sunshine"}
+          />
+          <.dm_radio
+            name="theme"
+            value="moonlight"
+            label="Moonlight"
+            checked={@current_theme == "moonlight"}
+          />
         </form>
       </.dm_card>
 
@@ -305,6 +324,25 @@ defmodule Sigma.Web.SettingsLive do
   end
 
   defp render_providers(assigns) do
+    providers =
+      case assigns[:providers] do
+        list when is_list(list) -> list
+        map when is_map(map) -> provider_rows(map)
+        _ -> []
+      end
+
+    credentials =
+      case assigns[:credentials] do
+        map when is_map(map) -> map
+        list when is_list(list) -> Map.new(list, fn row -> {row.id, row.credential} end)
+        _ -> %{}
+      end
+
+    assigns =
+      assigns
+      |> assign(:providers, providers)
+      |> assign(:credentials, credentials)
+
     ~H"""
     <div class="space-y-6">
       <div class="flex justify-between items-center text-on-surface">
@@ -487,6 +525,15 @@ defmodule Sigma.Web.SettingsLive do
   defp provider_reference_path(:skills), do: ~p"/settings/skills"
 
   defp render_credentials(assigns) do
+    credentials =
+      case assigns[:credentials] do
+        list when is_list(list) -> list
+        map when is_map(map) -> credential_rows(map)
+        _ -> []
+      end
+
+    assigns = assign(assigns, :credentials, credentials)
+
     ~H"""
     <div class="space-y-6">
       <div class="flex justify-between items-center text-on-surface">
@@ -747,7 +794,7 @@ defmodule Sigma.Web.SettingsLive do
   defp render_skills(assigns) do
     query = assigns[:query] || ""
     selected_skill_names = assigns[:selected_skill_names] || []
-    skills = assigns.result.skills
+    skills = get_in(assigns, [:result, :skills]) || []
     filtered_skills = filter_skills(skills, query)
     visible_skill_names = Enum.map(filtered_skills, & &1.name)
     selected_visible_skill_count = Enum.count(visible_skill_names, &(&1 in selected_skill_names))
@@ -1002,6 +1049,33 @@ defmodule Sigma.Web.SettingsLive do
   end
 
   defp render_mcp(assigns) do
+    servers =
+      case assigns[:servers] do
+        list when is_list(list) -> list
+        map when is_map(map) -> mcp_server_rows(map)
+        _ -> []
+      end
+
+    providers =
+      case assigns[:providers] do
+        map when is_map(map) -> map
+        list when is_list(list) -> Map.new(list, fn row -> {row.id, row.provider} end)
+        _ -> %{}
+      end
+
+    credentials =
+      case assigns[:credentials] do
+        map when is_map(map) -> map
+        list when is_list(list) -> Map.new(list, fn row -> {row.id, row.credential} end)
+        _ -> %{}
+      end
+
+    assigns =
+      assigns
+      |> assign(:servers, servers)
+      |> assign(:providers, providers)
+      |> assign(:credentials, credentials)
+
     ~H"""
     <div class="space-y-6">
       <div class="flex justify-between items-center text-on-surface">

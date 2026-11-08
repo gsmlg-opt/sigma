@@ -66,7 +66,7 @@ defmodule Sigma.Web.SettingsLiveTest do
         }
       })
 
-      html = render_async(view)
+      html = render_async(view, 500)
       assert html =~ "Backplane connection"
       assert html =~ "https://services.example"
       assert html =~ "https://llm.example/v1"
@@ -167,7 +167,7 @@ defmodule Sigma.Web.SettingsLiveTest do
 
       assert html =~ "Loading settings data"
 
-      html = render_async(view)
+      html = render_async(view, 500)
 
       assert html =~ ~s(id="credentials-table")
       assert html =~ "GitHub Token"
@@ -195,7 +195,7 @@ defmodule Sigma.Web.SettingsLiveTest do
         }
       })
 
-      html = render_async(view)
+      html = render_async(view, 500)
 
       assert html =~ "OpenAI Token"
       assert html =~ "********cret"
@@ -222,7 +222,7 @@ defmodule Sigma.Web.SettingsLiveTest do
         }
       })
 
-      html = render_async(view)
+      html = render_async(view, 500)
 
       assert html =~ "Anthropic Token"
       assert html =~ "********cret"
@@ -243,7 +243,7 @@ defmodule Sigma.Web.SettingsLiveTest do
       |> element("el-dm-button[phx-click='delete_credential'][phx-value-id='#{credential_id}']")
       |> render_click()
 
-      html = render_async(view)
+      html = render_async(view, 500)
 
       refute html =~ "Anthropic Token"
       refute Map.has_key?(Sigma.Session.ConfigManager.get_config()["credentials"], credential_id)
@@ -294,7 +294,7 @@ defmodule Sigma.Web.SettingsLiveTest do
 
       assert html =~ "Loading settings data"
 
-      html = render_async(view)
+      html = render_async(view, 500)
 
       assert html =~ "Skills"
       assert html =~ ~s(id="skills-table")
@@ -334,7 +334,7 @@ defmodule Sigma.Web.SettingsLiveTest do
       |> element("#skill-enabled-global-skill")
       |> render_click()
 
-      html = render_async(view)
+      html = render_async(view, 500)
 
       assert Sigma.Session.ConfigManager.disabled_global_skills() == ["global-skill"]
       assert_skill_enabled(html, "global-skill", false)
@@ -362,7 +362,7 @@ defmodule Sigma.Web.SettingsLiveTest do
       |> element("#skills-disable-selected")
       |> render_click()
 
-      html = render_async(view)
+      html = render_async(view, 500)
 
       assert Sigma.Session.ConfigManager.disabled_global_skills() == [
                "global-skill",
@@ -388,7 +388,7 @@ defmodule Sigma.Web.SettingsLiveTest do
       |> element("#skills-enable-selected")
       |> render_click()
 
-      html = render_async(view)
+      html = render_async(view, 500)
 
       assert Sigma.Session.ConfigManager.disabled_global_skills() == ["global-skill"]
       assert html =~ "other-skill"
@@ -406,7 +406,7 @@ defmodule Sigma.Web.SettingsLiveTest do
 
       assert html =~ "Loading settings data"
 
-      html = render_async(view)
+      html = render_async(view, 500)
 
       assert html =~ "MCP Servers"
       assert html =~ Sigma.Session.ConfigManager.mcp_file()
@@ -463,7 +463,7 @@ defmodule Sigma.Web.SettingsLiveTest do
 
       refute Map.has_key?(saved["mcpServers"]["github"], "headers")
 
-      html = render_async(view)
+      html = render_async(view, 500)
       assert html =~ ~s(id="mcp-servers-table")
       assert_settings_table(html, "mcp-servers-table")
       assert_icon_tooltip_action(html, "mcp-edit-server-github", "Edit")
@@ -565,6 +565,32 @@ defmodule Sigma.Web.SettingsLiveTest do
 
       saved = Sigma.Session.ConfigManager.mcp_file() |> File.read!() |> Jason.decode!()
       assert saved["mcpServers"] == %{}
+    end)
+  end
+
+  @tag :tmp_dir
+  test "switching between settings tabs via live_patch does not crash", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, _} = Sigma.Session.ConfigManager.add_credential("Test Key", "secret-test-key")
+
+      {:ok, view, _} = live(conn, "/settings/providers")
+      render_async(view, 500)
+
+      assert render_patch(view, ~p"/settings/credentials") =~ "Settings"
+      html = render_async(view, 500)
+      assert html =~ "Test Key"
+      assert html =~ "API Credentials"
+
+      assert render_patch(view, ~p"/settings/mcp") =~ "Settings"
+      html = render_async(view, 500)
+      assert html =~ "MCP Servers"
+
+      assert render_patch(view, ~p"/settings/providers") =~ "Settings"
+      html = render_async(view, 500)
+      assert html =~ "AI Providers"
     end)
   end
 
