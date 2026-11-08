@@ -740,8 +740,8 @@ defmodule Sigma.Agent.Backplane.CodexResources do
         {:error,
          Error.new(:validation, "Codex resources require a workspace and live host owner")}
 
-      :os.type() != {:unix, :linux} ->
-        {:error, Error.new(:unsupported_capability, "plain Codex commands require Linux")}
+      :os.type() not in [{:unix, :linux}, {:unix, :darwin}] ->
+        {:error, Error.new(:unsupported_capability, "plain Codex commands require Linux or macOS")}
 
       true ->
         :ok

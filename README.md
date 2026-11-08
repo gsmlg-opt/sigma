@@ -34,6 +34,7 @@ The original TypeScript `pi` project is [earendil-works/pi](https://github.com/e
 - Elixir `~> 1.18` (CI uses 1.18.4)
 - Erlang/OTP 28 (CI uses 28.5)
 - Rust (`rustc` / `cargo`) for the terminal helper in `native/sigma_terminal_helper`
+- A C compiler for Backplane's LocalCommand session helper (`mix backplane.command.build`, required on macOS)
 - Node.js or Bun for web assets (`mix assets.setup`)
 - API credentials for Anthropic or an OpenAI-compatible provider
 
@@ -44,7 +45,7 @@ mix setup
 mix phx.server
 ```
 
-`mix setup` runs `deps.get`, `assets.setup`, and `assets.build`. It does not modify installed dependency source. `mix sigma.run` is an alias for `mix phx.server`.
+`mix setup` runs `deps.get`, `backplane.command.build`, `assets.setup`, and `assets.build`. `backplane.command.build` compiles Backplane's packaged LocalCommand session helper into the dependency's `priv/bin` (required on macOS); it does not otherwise modify dependency source. `mix sigma.run` is an alias for `mix phx.server`.
 
 `mix sigma.rel-run` builds the frontend assets, overwrites the `sigma` release for the current Mix environment, and runs it in the foreground.
 

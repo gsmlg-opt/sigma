@@ -22,7 +22,8 @@ defmodule Sigma.MixProject do
 
   defp aliases do
     [
-      setup: ["deps.get", "assets.setup", "assets.build"],
+      # macOS LocalCommand requires Backplane's packaged session helper.
+      setup: ["deps.get", "backplane.command.build", "assets.setup", "assets.build"],
       "sigma.run": ["phx.server"],
       "sigma.rel-build": ["assets.build", &build_release/1],
       "sigma.rel-run": ["sigma.rel-build", &run_release/1],
@@ -56,6 +57,7 @@ defmodule Sigma.MixProject do
     case Mix.shell().cmd({helper_builder, ["release"]}, use_stdio: true) do
       0 ->
         Mix.Task.run("backplane.mcp.stdio.build")
+        Mix.Task.run("backplane.command.build")
 
         case Mix.shell().cmd({mix, ["release", "sigma", "--overwrite", "--force"]},
                env: env,

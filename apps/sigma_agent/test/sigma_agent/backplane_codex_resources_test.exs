@@ -49,8 +49,14 @@ defmodule Sigma.Agent.BackplaneCodexResourcesTest do
     assert is_integer(session_id)
     assert first_context.command.allowed_environment == %{}
 
-    assert {:error, %Error{class: :unsupported_capability}} =
-             Command.terminal(first_context.command)
+    # PTY support follows the host: Sigma's terminal helper on Linux or macOS.
+    if :os.type() in [{:unix, :linux}, {:unix, :darwin}] and
+         match?({:ok, %{real_pty: true}}, Sigma.Coding.Terminal.Native.capabilities()) do
+      assert {:ok, %{columns: 120, rows: 24}} = Command.terminal(first_context.command)
+    else
+      assert {:error, %Error{class: :unsupported_capability}} =
+               Command.terminal(first_context.command)
+    end
 
     patch = "*** Begin Patch\n*** Add File: result.txt\n+patched\n*** End Patch\n"
 

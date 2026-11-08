@@ -302,10 +302,10 @@ defmodule Sigma.Agent.Backplane.PlainCommand do
   defp start_command(state) do
     with {:ok, local} <- LocalCommand.start_link(state.local_options) do
       capabilities =
-        # TODO(upstream): gsmlg-opt/backplane#159 — enable {:unix, :darwin} once LocalCommand runs on macOS.
+        # PTYs use Sigma's own sigma-terminal-helper; Backplane's PTY backend is Linux-only.
         case {:os.type(), Native.capabilities(state.native)} do
-          {{:unix, :linux}, {:ok, %{real_pty: true}}} ->
-            %{pty: %{verified: true, platforms: [{:unix, :linux}], rows: 24, columns: 120}}
+          {{:unix, os} = platform, {:ok, %{real_pty: true}}} when os in [:linux, :darwin] ->
+            %{pty: %{verified: true, platforms: [platform], rows: 24, columns: 120}}
 
           _ ->
             %{}
