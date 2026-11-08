@@ -1457,7 +1457,6 @@ defmodule Sigma.Ai.Providers.OpenAITest do
     session_id = "openai_telemetry_#{System.unique_integer([:positive])}"
     handler_id = "openai-telemetry-test-#{System.unique_integer([:positive])}"
     {:ok, telemetry_events} = Agent.start(fn -> [] end)
-    Sigma.Logs.start_session(session_id)
 
     :telemetry.attach_many(
       handler_id,
@@ -1475,7 +1474,6 @@ defmodule Sigma.Ai.Providers.OpenAITest do
     on_exit(fn ->
       :telemetry.detach(handler_id)
       Agent.stop(telemetry_events)
-      Sigma.Logs.stop_session(session_id)
     end)
 
     sse = [

@@ -68,7 +68,8 @@ defmodule Sigma.Protocol.CodecTest do
              "async_interactions.pages.v1",
              "async_interactions.uploads.v1",
              "provider_hosted.v1",
-             "provider_hosted.pages.v1"
+             "provider_hosted.pages.v1",
+             "plugins.install.v1"
            ]
   end
 
