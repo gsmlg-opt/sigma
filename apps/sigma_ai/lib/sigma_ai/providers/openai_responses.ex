@@ -1,7 +1,7 @@
 defmodule Sigma.Ai.Providers.OpenAIResponses do
   @behaviour Sigma.Ai.Provider
 
-  alias Backplane.AiProtocol.{Codec, Request, Serialization, SSE}
+  alias Backplane.AiProtocol.{Codec, Serialization, SSE}
 
   alias Sigma.Ai.{
     ProviderAuth,
@@ -12,6 +12,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   }
 
   alias Sigma.Ai.Providers.OpenAIResponses.Hosted
+  alias Sigma.Ai.Providers.ProtocolRequest
 
   alias Sigma.Ai.{ResponsesRecovery, ResponsesCancellation}
 
@@ -149,20 +150,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   # Backplane supplies the catalog revision from its actual Runtime request.
   # Ordinary direct-provider function calls retain their existing compatibility
   # parser; native declarations and replay always use the public protocol codec.
-  defp native_tool_transport?(context) do
-    calls =
-      for %{role: :assistant, content: blocks} <- context.messages,
-          is_list(blocks),
-          %{type: :tool_call} = call <- blocks,
-          do: call
-
-    Map.has_key?(context, :catalog_revision) or
-      Enum.any?((context[:tools] || []) ++ calls, fn tool ->
-        tool[:type] in [:custom, "custom"] or tool[:input_kind] == :custom or
-          not is_nil(tool[:output_schema]) or
-          (is_binary(tool[:name]) and String.contains?(tool.name, "::"))
-      end)
-  end
+  defp native_tool_transport?(context), do: ProtocolRequest.native_tools?(context)
 
   defp build_inner_stream(
          model,
@@ -736,135 +724,18 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   # Validate the provider-neutral request before the provider-specific wire projection is sent.
-  # The protocol package deliberately does not own HTTP transport or provider credentials.
-  defp protocol_request(model, context) do
-    input =
-      [protocol_system_message(context[:system] || context[:system_prompt]) | context.messages]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.map(&protocol_message/1)
-
-    attrs = %{
-      model: model.id,
-      input: input,
-      tools: Enum.map(context[:tools] || [], &protocol_tool/1),
-      settings: %{}
-    }
-
-    Request.new(attrs)
-  end
-
-  defp protocol_system_message(system) do
-    case system_text(system) do
-      nil -> nil
-      text -> %{role: :system, content: [%{type: :text, text: text}]}
-    end
-  end
-
-  defp protocol_message(%{role: :user, content: content}),
-    do: %{role: :user, content: protocol_content(content)}
-
-  defp protocol_message(%{role: :system, content: content}),
-    do: %{role: :system, content: protocol_content(content)}
-
-  defp protocol_message(%{role: :assistant, content: content}),
-    do: %{role: :assistant, content: protocol_content(content)}
-
-  defp protocol_message(%{role: :tool_result, tool_call_id: id, content: content}) do
-    # A silent tool still has a result; the canonical protocol represents its
-    # empty output with no content blocks, while the wire output remains "".
-    blocks =
-      content
-      |> protocol_content()
-      |> Enum.reject(&match?(%{type: :text, text: ""}, &1))
-
-    %{role: :tool, tool_call_id: id, content: blocks}
-  end
-
-  defp protocol_message(_message), do: %{role: :invalid, content: []}
-
-  defp protocol_content(content) when is_binary(content),
-    do: [%{type: :text, text: content}]
-
-  defp protocol_content(content) when is_list(content),
-    do: Enum.map(content, &protocol_block/1)
-
-  defp protocol_content(_content), do: [%{type: :invalid}]
-
-  defp protocol_block(%{type: :text, text: text}),
-    do: %{type: :text, text: text}
-
-  defp protocol_block(%{type: :image, data: data, mime_type: mime} = image),
-    do: %{
-      type: :image,
-      data: maybe_put(%{"data" => data, "mime_type" => mime}, "detail", image[:detail])
-    }
-
-  defp protocol_block(%{type: :thinking, thinking: thinking}),
-    do: %{type: :reasoning, data: %{text: thinking}}
-
-  defp protocol_block(%{type: :tool_call, id: id, name: name, arguments: arguments} = call) do
-    raw_arguments =
-      case Map.get(call, :input_kind, :function) do
-        :custom -> {:custom, arguments}
-        :function -> {:structured, arguments}
-        _ -> :invalid
-      end
-
-    %{
-      type: :tool_call,
-      tool_call: %{id: id, name: name, raw_arguments: raw_arguments}
-    }
-  end
-
-  defp protocol_block(_block), do: %{type: :invalid}
-
-  defp protocol_tool(tool) do
-    %{
-      name: tool.name,
-      description: tool[:description],
-      input_kind:
-        if(tool[:type] in ["custom", :custom] or tool[:input_kind] == :custom,
-          do: :custom,
-          else: :function
-        ),
-      input_schema: tool[:parameters] || tool[:input_schema],
-      format: tool[:format],
-      extensions:
-        if(tool[:output_schema],
-          do: %{"openai_responses::output_schema" => tool.output_schema},
-          else: %{}
-        )
-    }
-  end
+  defp protocol_request(model, context),
+    do:
+      ProtocolRequest.build(model, context,
+        output_schema_extension: "openai_responses::output_schema"
+      )
 
   defp prepend_system_message(items, system) do
-    case system_text(system) do
+    case ProtocolRequest.system_text(system) do
       nil -> items
       text -> [%{role: "system", content: [%{type: "input_text", text: text}]} | items]
     end
   end
-
-  defp system_text(nil), do: nil
-  defp system_text(""), do: nil
-  defp system_text(text) when is_binary(text), do: text
-
-  defp system_text(blocks) when is_list(blocks) do
-    blocks
-    |> Enum.map(&system_block_text/1)
-    |> Enum.reject(&(&1 == ""))
-    |> Enum.join("\n\n")
-    |> case do
-      "" -> nil
-      text -> text
-    end
-  end
-
-  defp system_block_text(text) when is_binary(text), do: text
-
-  defp system_block_text(block) when is_map(block),
-    do: Map.get(block, :text) || Map.get(block, "text") || ""
-
-  defp system_block_text(_), do: ""
 
   @impl true
   def output_token_limit(model, options) do

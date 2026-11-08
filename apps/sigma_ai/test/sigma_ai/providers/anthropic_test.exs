@@ -459,6 +459,532 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
     end)
   end
 
+  describe "native (Codex) tool projection" do
+    @patch_tool %{
+      type: :custom,
+      name: "apply_patch",
+      description: "Apply a patch.",
+      format: %{"type" => "grammar", "syntax" => "lark", "definition" => "start: /.+/"}
+    }
+
+    @search_tool %{
+      name: "history::search_contents",
+      description: "Search history.",
+      parameters: %{
+        "type" => "object",
+        "properties" => %{"query" => %{"type" => "string"}},
+        "required" => ["query"]
+      },
+      output_schema: %{"type" => "object"}
+    }
+
+    @read_tool %{
+      name: "read_file",
+      description: "Read a file.",
+      parameters: %{"type" => "object", "properties" => %{"path" => %{"type" => "string"}}}
+    }
+
+    @empty_sse [
+      ~s(data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1,"output_tokens":0}}}\n\n),
+      ~s(data: {"type":"message_stop"}\n\n)
+    ]
+
+    test "projects custom and namespaced declarations into legal Anthropic functions" do
+      with_capture_server(@empty_sse, fn base_url, captured ->
+        Anthropic.stream(%{
+          model: %{id: "claude-test", api: "anthropic-messages", provider: "anthropic"},
+          context: %{
+            messages: [%{role: :user, content: "hi"}],
+            system_prompt: "system rules",
+            tools: [@patch_tool, @search_tool, @read_tool]
+          },
+          options: [
+            api_key: "test-key",
+            base_url: base_url,
+            receive_timeout: 1_000,
+            thinking_budget: 2_000
+          ]
+        })
+        |> Enum.to_list()
+
+        body = Agent.get(captured, & &1)
+        assert [patch, search, read] = body["tools"]
+
+        assert patch["name"] == "apply_patch"
+        assert String.starts_with?(patch["description"], "Apply a patch.")
+        assert patch["description"] =~ ~s("input_kind":"custom")
+        assert patch["description"] =~ "lark"
+
+        assert patch["input_schema"] == %{
+                 "type" => "object",
+                 "properties" => %{"input" => %{"type" => "string"}},
+                 "required" => ["input"],
+                 "additionalProperties" => false
+               }
+
+        assert search["name"] == wire_alias("history::search_contents")
+        assert search["name"] =~ ~r/\A[a-zA-Z0-9_-]{1,64}\z/
+        assert String.starts_with?(search["description"], "Search history.")
+        assert search["description"] =~ "codex::output_schema"
+        assert search["input_schema"] == @search_tool.parameters
+        refute Map.has_key?(search, "cache_control")
+
+        assert read["name"] == "read_file"
+        assert read["cache_control"] == %{"type" => "ephemeral"}
+
+        assert [%{"text" => "system rules", "cache_control" => %{"type" => "ephemeral"}}] =
+                 body["system"]
+
+        assert body["thinking"] == %{"type" => "enabled", "budget_tokens" => 2_000}
+        assert body["max_tokens"] == 4_096
+        assert body["messages"] == [%{"role" => "user", "content" => "hi"}]
+      end)
+    end
+
+    test "decodes streamed custom and namespaced calls to canonical identities" do
+      raw = "  *** Begin Patch\r\n+héllo ✓ wörld\n*** End Patch \n"
+      wrapper = Jason.encode!(%{"input" => raw})
+      {first, rest} = String.split_at(wrapper, 7)
+      alias_name = wire_alias("history::search_contents")
+
+      sse =
+        Enum.map(
+          [
+            %{
+              "type" => "message_start",
+              "message" => %{"id" => "msg_1", "usage" => %{"input_tokens" => 3}}
+            },
+            %{
+              "type" => "content_block_start",
+              "index" => 0,
+              "content_block" => %{"type" => "text", "text" => ""}
+            },
+            %{
+              "type" => "content_block_delta",
+              "index" => 0,
+              "delta" => %{"type" => "text_delta", "text" => "Patching."}
+            },
+            %{"type" => "content_block_stop", "index" => 0},
+            %{
+              "type" => "content_block_start",
+              "index" => 1,
+              "content_block" => %{
+                "type" => "tool_use",
+                "id" => "toolu_patch",
+                "name" => "apply_patch",
+                "input" => %{}
+              }
+            },
+            %{
+              "type" => "content_block_delta",
+              "index" => 1,
+              "delta" => %{"type" => "input_json_delta", "partial_json" => first}
+            },
+            %{
+              "type" => "content_block_delta",
+              "index" => 1,
+              "delta" => %{"type" => "input_json_delta", "partial_json" => rest}
+            },
+            %{"type" => "content_block_stop", "index" => 1},
+            %{
+              "type" => "content_block_start",
+              "index" => 2,
+              "content_block" => %{
+                "type" => "tool_use",
+                "id" => "toolu_search",
+                "name" => alias_name,
+                "input" => %{}
+              }
+            },
+            %{
+              "type" => "content_block_delta",
+              "index" => 2,
+              "delta" => %{"type" => "input_json_delta", "partial_json" => ~s({"query":"x"})}
+            },
+            %{"type" => "content_block_stop", "index" => 2},
+            %{
+              "type" => "message_delta",
+              "delta" => %{"stop_reason" => "tool_use"},
+              "usage" => %{"output_tokens" => 9}
+            },
+            %{"type" => "message_stop"}
+          ],
+          fn event -> "data: " <> Jason.encode!(event) <> "\n\n" end
+        )
+
+      with_capture_server(sse, fn base_url, _captured ->
+        events =
+          Anthropic.stream(%{
+            model: %{id: "claude-test", api: "anthropic-messages", provider: "anthropic"},
+            context: %{messages: [], tools: [@patch_tool, @search_tool]},
+            options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+          })
+          |> Enum.to_list()
+
+        assert [{:toolcall_start, 1, _}, {:toolcall_start, 2, _}] =
+                 Enum.filter(events, &match?({:toolcall_start, _, _}, &1))
+
+        assert {:toolcall_delta, 1, ^raw, _} =
+                 Enum.find(events, &match?({:toolcall_delta, 1, _, _}, &1))
+
+        assert [{:toolcall_end, 1, patch, _}, {:toolcall_end, 2, search, _}] =
+                 Enum.filter(events, &match?({:toolcall_end, _, _, _}, &1))
+
+        assert patch == %{
+                 type: :tool_call,
+                 id: "toolu_patch",
+                 name: "apply_patch",
+                 arguments: raw,
+                 input_kind: :custom
+               }
+
+        assert search == %{
+                 type: :tool_call,
+                 id: "toolu_search",
+                 name: "history::search_contents",
+                 arguments: %{"query" => "x"},
+                 input_kind: :function
+               }
+
+        assert {:done, :tool_use, message} = List.last(events)
+
+        assert [%{type: :text, text: "Patching."}, ^patch, ^search] = message.content
+        assert message.usage.output == 9
+        refute Enum.any?(events, &match?({:provider_error, _}, &1))
+      end)
+    end
+
+    test "replays custom and namespaced history with exact re-wrapped input" do
+      raw = " line one\r\nline ✓ two \n"
+      alias_name = wire_alias("history::search_contents")
+
+      messages = [
+        %{role: :user, content: "go"},
+        %{
+          role: :assistant,
+          content: [
+            %{type: :thinking, thinking: "plan", thinking_signature: "sig-1"},
+            %{
+              type: :tool_call,
+              id: "toolu_patch",
+              name: "apply_patch",
+              arguments: raw,
+              input_kind: :custom
+            },
+            %{
+              type: :tool_call,
+              id: "toolu_search",
+              name: "history::search_contents",
+              arguments: %{"query" => "x"},
+              input_kind: :function
+            }
+          ]
+        },
+        %{
+          role: :tool_result,
+          tool_call_id: "toolu_patch",
+          content: [%{type: :text, text: "applied"}],
+          is_error: false
+        },
+        %{
+          role: :tool_result,
+          tool_call_id: "toolu_search",
+          content: [%{type: :text, text: "found"}],
+          is_error: true
+        }
+      ]
+
+      with_capture_server(@empty_sse, fn base_url, captured ->
+        Anthropic.stream(%{
+          model: %{id: "claude-test", api: "anthropic-messages", provider: "anthropic"},
+          context: %{messages: messages, tools: [@patch_tool, @search_tool]},
+          options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+        })
+        |> Enum.to_list()
+
+        assert %{"messages" => [_user, assistant, results]} = Agent.get(captured, & &1)
+
+        assert assistant["content"] == [
+                 %{"type" => "thinking", "thinking" => "plan", "signature" => "sig-1"},
+                 %{
+                   "type" => "tool_use",
+                   "id" => "toolu_patch",
+                   "name" => "apply_patch",
+                   "input" => %{"input" => raw}
+                 },
+                 %{
+                   "type" => "tool_use",
+                   "id" => "toolu_search",
+                   "name" => alias_name,
+                   "input" => %{"query" => "x"}
+                 }
+               ]
+
+        assert results == %{
+                 "role" => "user",
+                 "content" => [
+                   %{
+                     "type" => "tool_result",
+                     "tool_use_id" => "toolu_patch",
+                     "content" => "applied",
+                     "is_error" => false
+                   },
+                   %{
+                     "type" => "tool_result",
+                     "tool_use_id" => "toolu_search",
+                     "content" => "found",
+                     "is_error" => true
+                   }
+                 ]
+               }
+      end)
+    end
+
+    test "native history alone selects the projection even without active declarations" do
+      messages = [
+        %{
+          role: :assistant,
+          content: [
+            %{
+              type: :tool_call,
+              id: "toolu_old",
+              name: "history::search_contents",
+              arguments: %{"query" => "x"}
+            }
+          ]
+        },
+        %{
+          role: :tool_result,
+          tool_call_id: "toolu_old",
+          content: [%{type: :text, text: "ok"}],
+          is_error: false
+        }
+      ]
+
+      with_capture_server(@empty_sse, fn base_url, captured ->
+        Anthropic.stream(%{
+          model: %{id: "claude-test", api: "anthropic-messages", provider: "anthropic"},
+          context: %{messages: messages, tools: []},
+          options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+        })
+        |> Enum.to_list()
+
+        assert %{"messages" => [assistant, _results], "tools" => []} = Agent.get(captured, & &1)
+
+        assert [%{"name" => name, "input" => %{"query" => "x"}}] = assistant["content"]
+        assert name == wire_alias("history::search_contents")
+      end)
+    end
+
+    test "an undeclared response alias fails explicitly instead of producing input" do
+      sse =
+        Enum.map(
+          [
+            %{"type" => "message_start", "message" => %{"id" => "msg_1"}},
+            %{
+              "type" => "content_block_start",
+              "index" => 0,
+              "content_block" => %{
+                "type" => "tool_use",
+                "id" => "toolu_x",
+                "name" => "bp_unknown"
+              }
+            }
+          ],
+          fn event -> "data: " <> Jason.encode!(event) <> "\n\n" end
+        )
+
+      with_capture_server(sse, fn base_url, _captured ->
+        error =
+          assert_raise ProviderError, fn ->
+            Anthropic.stream(%{
+              model: %{id: "claude-test", api: "anthropic-messages", provider: "anthropic"},
+              context: %{messages: [], tools: [@patch_tool]},
+              options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+            })
+            |> Enum.to_list()
+          end
+
+        assert error.kind == :malformed_stream
+        assert error.message =~ "projection"
+      end)
+    end
+
+    test "a malformed custom wrapper fails explicitly" do
+      sse =
+        Enum.map(
+          [
+            %{"type" => "message_start", "message" => %{"id" => "msg_1"}},
+            %{
+              "type" => "content_block_start",
+              "index" => 0,
+              "content_block" => %{
+                "type" => "tool_use",
+                "id" => "toolu_x",
+                "name" => "apply_patch",
+                "input" => %{}
+              }
+            },
+            %{
+              "type" => "content_block_delta",
+              "index" => 0,
+              "delta" => %{"type" => "input_json_delta", "partial_json" => ~s({"patch":"x"})}
+            },
+            %{"type" => "content_block_stop", "index" => 0}
+          ],
+          fn event -> "data: " <> Jason.encode!(event) <> "\n\n" end
+        )
+
+      with_capture_server(sse, fn base_url, _captured ->
+        error =
+          assert_raise ProviderError, fn ->
+            Anthropic.stream(%{
+              model: %{id: "claude-test", api: "anthropic-messages", provider: "anthropic"},
+              context: %{messages: [], tools: [@patch_tool]},
+              options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+            })
+            |> Enum.to_list()
+          end
+
+        assert error.kind == :malformed_stream
+      end)
+    end
+
+    test "hosted Responses history and hosted tools are still rejected before HTTP" do
+      model = %{id: "claude-test", api: "anthropic-messages", provider: "anthropic"}
+      options = [api_key: "test-key", base_url: "http://127.0.0.1:1"]
+
+      hosted_history = [
+        %{
+          role: :assistant,
+          content: [%{type: :text, text: "x"}],
+          metadata: %{"openai_responses_hosted" => %{}}
+        }
+      ]
+
+      for context <- [
+            %{messages: hosted_history, tools: [@patch_tool]},
+            %{messages: hosted_history, tools: []},
+            %{messages: [], tools: [@patch_tool, %{type: :web_search, name: "web_search"}]}
+          ] do
+        error =
+          assert_raise ProviderError, fn ->
+            Anthropic.stream(%{model: model, context: context, options: options})
+          end
+
+        assert error.kind == :invalid_request
+        assert error.message =~ "Anthropic does not support"
+      end
+    end
+
+    test "OpenAI Chat Completions still rejects native tools before HTTP" do
+      error =
+        assert_raise ProviderError, fn ->
+          Sigma.Ai.Providers.OpenAI.stream(%{
+            model: %{id: "gpt-test", api: "openai-completions", provider: "openai"},
+            context: %{messages: [], tools: [@patch_tool]},
+            options: [api_key: "test-key", base_url: "http://127.0.0.1:1"]
+          })
+        end
+
+      assert error.message =~ "does not support native custom tools"
+    end
+  end
+
+  test "ordinary JSON-function requests keep the hand-written body" do
+    messages = [
+      %{role: :user, content: "go"},
+      %{
+        role: :assistant,
+        content: [
+          %{type: :thinking, thinking: "plan", thinking_signature: "sig-1"},
+          %{type: :tool_call, id: "toolu_1", name: "read_file", arguments: %{"path" => "a"}}
+        ]
+      },
+      %{
+        role: :tool_result,
+        tool_call_id: "toolu_1",
+        content: [%{type: :text, text: "body"}],
+        is_error: false
+      }
+    ]
+
+    tools = [
+      %{name: "read_file", description: "Read.", parameters: %{"type" => "object"}},
+      %{name: "write_file", description: "Write.", parameters: %{"type" => "object"}}
+    ]
+
+    sse = [
+      ~s(data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1,"output_tokens":0}}}\n\n),
+      ~s(data: {"type":"message_stop"}\n\n)
+    ]
+
+    with_capture_server(sse, fn base_url, captured ->
+      Anthropic.stream(%{
+        model: %{id: "claude-test", api: "anthropic-messages", provider: "anthropic"},
+        context: %{messages: messages, system_prompt: "rules", tools: tools},
+        options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+      })
+      |> Enum.to_list()
+
+      assert Agent.get(captured, & &1) == %{
+               "model" => "claude-test",
+               "max_tokens" => 4096,
+               "stream" => true,
+               "system" => [
+                 %{
+                   "type" => "text",
+                   "text" => "rules",
+                   "cache_control" => %{"type" => "ephemeral", "ttl" => "1h"}
+                 }
+               ],
+               "messages" => [
+                 %{"role" => "user", "content" => "go"},
+                 %{
+                   "role" => "assistant",
+                   "content" => [
+                     %{"type" => "thinking", "thinking" => "plan", "signature" => "sig-1"},
+                     %{
+                       "type" => "tool_use",
+                       "id" => "toolu_1",
+                       "name" => "read_file",
+                       "input" => %{"path" => "a"}
+                     }
+                   ]
+                 },
+                 %{
+                   "role" => "user",
+                   "content" => [
+                     %{
+                       "type" => "tool_result",
+                       "tool_use_id" => "toolu_1",
+                       "content" => "body",
+                       "is_error" => false
+                     }
+                   ]
+                 }
+               ],
+               "tools" => [
+                 %{
+                   "name" => "read_file",
+                   "description" => "Read.",
+                   "input_schema" => %{"type" => "object"}
+                 },
+                 %{
+                   "name" => "write_file",
+                   "description" => "Write.",
+                   "input_schema" => %{"type" => "object"},
+                   "cache_control" => %{"type" => "ephemeral"}
+                 }
+               ]
+             }
+    end)
+  end
+
+  defp wire_alias(name) do
+    "bp_" <> binary_part(Base.encode16(:crypto.hash(:sha256, name), case: :lower), 0, 60)
+  end
+
   defp with_capture_server(chunks, fun) do
     {:ok, listen_socket} =
       :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])

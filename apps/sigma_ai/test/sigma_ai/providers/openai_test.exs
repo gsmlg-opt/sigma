@@ -797,7 +797,8 @@ defmodule Sigma.Ai.Providers.OpenAITest do
     end
   end
 
-  test "Chat and Anthropic reject native custom and namespaced declarations or replay before HTTP" do
+  # Anthropic native profiles use the explicit Backplane projection (anthropic_test.exs).
+  test "Chat Completions rejects native custom and namespaced declarations or replay before HTTP" do
     contexts = [
       %{
         messages: [],
@@ -827,10 +828,10 @@ defmodule Sigma.Ai.Providers.OpenAITest do
       }
     ]
 
-    for provider <- [OpenAI, Sigma.Ai.Providers.Anthropic], context <- contexts do
+    for context <- contexts do
       error =
         assert_raise ProviderError, fn ->
-          provider.stream(%{
+          OpenAI.stream(%{
             model: %{id: "test", api: "test", provider: "test"},
             context: context,
             options: [api_key: "test", base_url: "http://127.0.0.1:1"]

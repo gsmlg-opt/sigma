@@ -1,6 +1,9 @@
 defmodule Sigma.Ai.Providers.Anthropic do
   @behaviour Sigma.Ai.Provider
 
+  alias Backplane.AiProtocol.Codec
+  alias Sigma.Ai.Providers.{ProtocolRequest, ToolTransport}
+
   alias Sigma.Ai.{
     ProviderAuth,
     ProviderCapabilities,
@@ -30,7 +33,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
   def stream(params) do
     model = params.model
     context = params.context
-    Sigma.Ai.Providers.ToolTransport.require_json_functions!(context, "Anthropic")
+    projection = native_projection!(model, context)
     options = params.options
     Sigma.Ai.CreationRequest.reject_responses_recovery!(options)
     session_id = Map.get(params, :session_id)
@@ -46,14 +49,16 @@ defmodule Sigma.Ai.Providers.Anthropic do
     body =
       %{
         model: model.id,
-        messages: transform_messages(context.messages),
+        messages: transform_messages(context.messages, projection),
         max_tokens: output_token_limit(model, options),
         stream: true
       }
       |> maybe_put(:system, system)
 
     body =
-      if context[:tools], do: Map.put(body, :tools, transform_tools(context.tools)), else: body
+      if context[:tools],
+        do: Map.put(body, :tools, transform_tools(context.tools, projection)),
+        else: body
 
     {body, extra_betas} =
       case options[:thinking_budget] do
@@ -79,7 +84,8 @@ defmodule Sigma.Ai.Providers.Anthropic do
       ]
       |> List.flatten()
 
-    inner = build_inner_stream(model, body, headers, base_url, options)
+    codec = if projection, do: Codec.stream_new(:anthropic, projection.codec_options)
+    inner = build_inner_stream(model, body, headers, base_url, options, codec)
 
     Elixir.Stream.transform(
       inner,
@@ -122,7 +128,59 @@ defmodule Sigma.Ai.Providers.Anthropic do
     )
   end
 
-  defp build_inner_stream(model, body, headers, base_url, options) do
+  # Native (Codex) profiles: custom/freeform tools, namespaced names and output
+  # schemas use Backplane's explicit request-scoped Anthropic projection. The codec
+  # owns wire names and custom `input` wrapping; the host keeps its own message
+  # projection (thinking signatures, cache_control, grouped tool results) and only
+  # substitutes the codec's tool declarations and tool_use identities/inputs.
+  # Ordinary JSON-function requests keep the hand-written path unchanged.
+  defp native_projection!(model, context) do
+    if ProtocolRequest.native_tools?(context) do
+      ToolTransport.reject_hosted!(context, "Anthropic")
+
+      with {:ok, request} <-
+             ProtocolRequest.build(model, context,
+               output_schema_extension: "codex::output_schema",
+               reasoning: :text
+             ),
+           {:ok, %{body: body, codec_options: codec_options}} <-
+             Codec.Anthropic.prepare_request(request, stream: true) do
+        %{
+          tools: body["tools"] || [],
+          calls: projected_calls!(body["messages"] || []),
+          codec_options: codec_options
+        }
+      else
+        {:error, error} -> raise invalid_native_request(error.message)
+      end
+    else
+      ToolTransport.require_json_functions!(context, "Anthropic")
+      nil
+    end
+  end
+
+  defp projected_calls!(messages) do
+    for %{"content" => blocks} when is_list(blocks) <- messages,
+        %{"type" => "tool_use", "id" => id} = block <- blocks,
+        reduce: %{} do
+      calls ->
+        case Map.fetch(calls, id) do
+          :error -> Map.put(calls, id, block)
+          {:ok, ^block} -> calls
+          {:ok, _other} -> raise invalid_native_request("duplicate tool call id #{inspect(id)}")
+        end
+    end
+  end
+
+  defp invalid_native_request(message) do
+    %ProviderError{
+      kind: :invalid_request,
+      message: "Invalid Anthropic native tool request: #{message}",
+      retryable: false
+    }
+  end
+
+  defp build_inner_stream(model, body, headers, base_url, options, codec) do
     Elixir.Stream.resource(
       fn ->
         resp =
@@ -146,7 +204,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
               reraise Sigma.Ai.CreationRequest.submission_error(e), __STACKTRACE__
           end
 
-        {_initial_assistant_message(model), "", :streaming, resp}
+        {_initial_assistant_message(model), {"", codec}, :streaming, resp}
       end,
       fn
         {message, _buffer, :done, resp} ->
@@ -205,9 +263,10 @@ defmodule Sigma.Ai.Providers.Anthropic do
 
   defp handle_stream_chunks(chunks, message, buffer) do
     Enum.reduce(chunks, {[], message, buffer, :streaming}, fn
-      {:data, chunk}, {acc_events, acc_message, acc_buffer, _status} ->
-        {events, new_buffer} = Stream.decode(acc_buffer, chunk)
-        {processed_events, new_message} = process_events(events, acc_message)
+      {:data, chunk}, {acc_events, acc_message, {acc_buffer, codec}, _status} ->
+        {events, sse_buffer} = Stream.decode(acc_buffer, chunk)
+        {processed_events, new_message, codec} = process_stream_events(events, acc_message, codec)
+        new_buffer = {sse_buffer, codec}
 
         status =
           if Enum.any?(processed_events, &match?({:done, _, _}, &1)),
@@ -230,10 +289,10 @@ defmodule Sigma.Ai.Providers.Anthropic do
 
   defp handle_error_chunks(resp, chunks, message, buffer) do
     Enum.reduce(chunks, {[], message, buffer, :streaming}, fn
-      {:data, chunk}, {acc_events, acc_message, acc_buffer, _status} ->
-        {acc_events, acc_message, acc_buffer <> chunk, :streaming}
+      {:data, chunk}, {acc_events, acc_message, {acc_buffer, codec}, _status} ->
+        {acc_events, acc_message, {acc_buffer <> chunk, codec}, :streaming}
 
-      :done, {_acc_events, _acc_message, acc_buffer, _status} ->
+      :done, {_acc_events, _acc_message, {acc_buffer, _codec}, _status} ->
         raise http_provider_error(resp.status, acc_buffer, resp.headers)
 
       _chunk, acc ->
@@ -255,7 +314,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
     }
   end
 
-  defp transform_messages(messages) do
+  defp transform_messages(messages, projection) do
     {transformed_messages, pending_tool_results} =
       Enum.reduce(messages, {[], []}, fn
         %{role: :tool_result} = message, {acc, pending_tool_results} ->
@@ -263,7 +322,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
 
         message, {acc, pending_tool_results} ->
           acc = flush_tool_results(acc, pending_tool_results)
-          {[transform_message(message) | acc], []}
+          {[transform_message(message, projection) | acc], []}
       end)
 
     transformed_messages
@@ -271,12 +330,12 @@ defmodule Sigma.Ai.Providers.Anthropic do
     |> Enum.reverse()
   end
 
-  defp transform_message(%{role: :user, content: content}) do
+  defp transform_message(%{role: :user, content: content}, _projection) do
     %{role: "user", content: transform_user_content(content)}
   end
 
-  defp transform_message(%{role: :assistant, content: content}) do
-    %{role: "assistant", content: transform_content(content)}
+  defp transform_message(%{role: :assistant, content: content}, projection) do
+    %{role: "assistant", content: transform_content(content, projection)}
   end
 
   defp transform_user_content(content) when is_binary(content), do: content
@@ -331,7 +390,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
 
   defp transform_tool_result_content(content), do: content
 
-  defp transform_content(content) do
+  defp transform_content(content, projection) do
     Enum.map(content, fn
       %{type: :text, text: text} ->
         %{type: "text", text: text}
@@ -346,8 +405,17 @@ defmodule Sigma.Ai.Providers.Anthropic do
           %{type: "text", text: block.thinking}
         end
 
-      %{type: :tool_call} = tc ->
+      %{type: :tool_call} = tc when is_nil(projection) ->
         %{type: "tool_use", id: tc.id, name: tc.name, input: tc.arguments}
+
+      %{type: :tool_call} = tc ->
+        case Map.fetch(projection.calls, tc.id) do
+          {:ok, %{"name" => name, "input" => input}} ->
+            %{type: "tool_use", id: tc.id, name: name, input: input}
+
+          :error ->
+            raise invalid_native_request("tool call #{inspect(tc.id)} has no projection")
+        end
     end)
   end
 
@@ -439,9 +507,15 @@ defmodule Sigma.Ai.Providers.Anthropic do
 
   defp positive_integer(_value), do: nil
 
-  defp transform_tools([]), do: []
+  defp transform_tools(_tools, %{tools: []}), do: []
 
-  defp transform_tools(tools) do
+  defp transform_tools(_tools, %{tools: tools}) do
+    List.update_at(tools, -1, &Map.put(&1, "cache_control", %{"type" => "ephemeral"}))
+  end
+
+  defp transform_tools([], nil), do: []
+
+  defp transform_tools(tools, nil) do
     last_idx = length(tools) - 1
 
     tools
@@ -619,6 +693,110 @@ defmodule Sigma.Ai.Providers.Anthropic do
     end)
     |> then(fn {events, acc} -> {Enum.reject(events, &is_nil/1), acc} end)
   end
+
+  defp process_stream_events(events, message, nil) do
+    {events, message} = process_events(events, message)
+    {events, message, nil}
+  end
+
+  defp process_stream_events(events, message, codec) do
+    {events, {message, codec}} =
+      Enum.flat_map_reduce(events, {message, codec}, fn event, {acc, codec} ->
+        {events, acc, codec} = process_native_event(event, acc, codec)
+        {events, {acc, codec}}
+      end)
+
+    {events, message, codec}
+  end
+
+  # The public codec validates tool identity, alias reversal, custom `input`
+  # unwrapping, ordering and input bounds. Text, thinking, usage and terminal
+  # events stay host-owned so the native path emits the ordinary event contract.
+  defp process_native_event(%{"type" => "message_stop"} = event, acc, codec) do
+    {[], acc, codec} = process_tool_frame(event, acc, codec)
+    {events, acc} = process_events([event], acc)
+    {events, acc, codec}
+  end
+
+  defp process_native_event(event, acc, codec) do
+    if native_tool_frame?(event, acc) do
+      process_tool_frame(event, acc, codec)
+    else
+      {events, acc} = process_events([event], acc)
+      {events, acc, codec}
+    end
+  end
+
+  defp native_tool_frame?(
+         %{"type" => "content_block_start", "content_block" => %{"type" => "tool_use"}},
+         _acc
+       ),
+       do: true
+
+  defp native_tool_frame?(%{"type" => type, "index" => idx}, acc)
+       when type in ["content_block_delta", "content_block_stop"] and is_integer(idx),
+       do: match?(%{type: :tool_call}, Enum.at(acc.content, idx))
+
+  defp native_tool_frame?(_event, _acc), do: false
+
+  defp process_tool_frame(frame, acc, codec) do
+    bytes = "data: " <> Jason.encode!(frame) <> "\n\n"
+
+    case Codec.stream_feed(:anthropic, codec, bytes) do
+      {:ok, codec, observations} ->
+        {events, acc} = Enum.flat_map_reduce(observations, acc, &apply_tool_observation/2)
+        {events, acc, codec}
+
+      {:error, error, _codec} ->
+        raise ProviderError.malformed(error.message)
+    end
+  end
+
+  defp apply_tool_observation(%{type: :tool_call_start} = event, acc) do
+    kind = if event.extensions["anthropic::input_kind"] == "custom", do: :custom, else: :function
+
+    block = %{
+      type: :tool_call,
+      id: event.call_id,
+      name: event.name,
+      input_kind: kind,
+      partial_json: ""
+    }
+
+    acc = %{acc | content: List.insert_at(acc.content, event.index, block)}
+    {[{:toolcall_start, event.index, acc}], acc}
+  end
+
+  defp apply_tool_observation(%{type: :tool_call_delta} = event, acc) do
+    content =
+      update_content(acc.content, event.index, fn block ->
+        Map.update!(block, :partial_json, &(&1 <> event.arguments_delta))
+      end)
+
+    acc = %{acc | content: content}
+    {[{:toolcall_delta, event.index, event.arguments_delta, acc}], acc}
+  end
+
+  defp apply_tool_observation(%{type: :tool_call_done} = event, acc) do
+    {kind, arguments} =
+      case event.content do
+        %{tool_call: %{raw_arguments: {:custom, text}}} -> {:custom, text}
+        arguments when is_map(arguments) -> {:function, arguments}
+      end
+
+    tool = %{
+      type: :tool_call,
+      id: event.call_id,
+      name: event.name,
+      arguments: arguments,
+      input_kind: kind
+    }
+
+    acc = %{acc | content: List.replace_at(acc.content, event.index, tool)}
+    {[{:toolcall_end, event.index, tool, acc}], acc}
+  end
+
+  defp apply_tool_observation(_event, acc), do: {[], acc}
 
   defp update_content(content, idx, fun) do
     List.replace_at(content, idx, fun.(Enum.at(content, idx)))
