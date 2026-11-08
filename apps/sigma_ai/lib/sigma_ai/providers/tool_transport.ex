@@ -4,6 +4,7 @@ defmodule Sigma.Ai.Providers.ToolTransport do
   alias Sigma.Ai.ProviderError
 
   # These protocols have no lossless native custom/namespace representation.
+  # TODO(upstream): gsmlg-opt/backplane#160 — adopt the Anthropic projection once published.
   # Reject declarations and replay alike before constructing a network request.
   def require_json_functions!(context, protocol) do
     tools = context[:tools] || []
