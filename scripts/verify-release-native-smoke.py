@@ -232,7 +232,7 @@ def main():
     applications = list((release / "lib").glob("sigma_agent-*"))
     assert len(applications) == 1, "expected one packaged sigma_agent application"
     native = applications[0] / "priv/native"
-    helpers = [native / name for name in ("sigma-terminal-helper", "sigma-sandbox-launcher")]
+    helpers = [native / name for name in ("sigma-terminal-helper", "sigma-sandbox-launcher", "sigma-setsid")]
     for helper in helpers:
         mode = helper.lstat().st_mode
         assert stat.S_ISREG(mode) and mode & 0o111, f"missing executable artifact: {helper}"

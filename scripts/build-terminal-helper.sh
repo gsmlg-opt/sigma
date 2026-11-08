@@ -22,6 +22,6 @@ esac
 
 destination="${SIGMA_TERMINAL_HELPER_DESTINATION:-apps/sigma_agent/priv/native}"
 install -d "$destination"
-for binary in sigma-terminal-helper sigma-sandbox-launcher; do
+for binary in sigma-terminal-helper sigma-sandbox-launcher sigma-setsid; do
   install -m 0755 "$source_directory/$binary" "$destination/$binary"
 done

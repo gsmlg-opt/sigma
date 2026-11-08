@@ -125,13 +125,27 @@ defmodule Sigma.Coding.Hooks.RunnerShutdownFunctionalTest do
     do: directory |> Path.join(name) |> File.read!() |> String.to_integer()
 
   defp process_running?(pid) do
-    case File.read("/proc/#{pid}/stat") do
-      {:ok, stat} ->
-        [_, state] = Regex.run(~r/\A[0-9]+ \(.*\) ([A-Za-z]) /s, stat)
-        state not in ["Z", "X"]
+    case process_state(pid) do
+      nil -> false
+      state -> not String.starts_with?(state, ["Z", "X"])
+    end
+  end
 
-      {:error, :enoent} ->
-        false
+  defp process_state(pid) do
+    if File.dir?("/proc") do
+      case File.read("/proc/#{pid}/stat") do
+        {:ok, stat} ->
+          [_, state] = Regex.run(~r/\A[0-9]+ \(.*\) ([A-Za-z]) /s, stat)
+          state
+
+        {:error, :enoent} ->
+          nil
+      end
+    else
+      case System.cmd("/bin/ps", ["-o", "stat=", "-p", to_string(pid)]) do
+        {state, 0} -> String.trim(state)
+        _ -> nil
+      end
     end
   end
 

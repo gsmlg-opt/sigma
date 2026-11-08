@@ -11,8 +11,10 @@ defmodule Sigma.Coding.Hooks.Runner do
   queueing, using the handler's index in the complete specs list and its spec.
   A rejected factory prevents execution rather than falling back to the legacy callback.
 
-  Host adaptation: Unix subprocess ownership uses setsid process groups. Hosts
-  without setsid report an execution error instead of running an unowned command.
+  Host adaptation: Unix subprocess ownership uses setsid process groups. Linux
+  uses util-linux `setsid`; hosts without it (macOS) use the packaged
+  `sigma-setsid` helper. Hosts without either report an execution error instead
+  of running an unowned command.
   Output capture is bounded to 1 MB per stream; context uses Outcome's host limit.
   """
 
@@ -370,6 +372,10 @@ defmodule Sigma.Coding.Hooks.Runner do
           {{:result, {:ok, raw}}, :normal} when is_map(raw) ->
             {{:ok, raw}, {:ok, %{status: :confirmed, completion: :mcp_result}}}
 
+          {:timeout, _cause} ->
+            {{:error, "MCP hook timed out after #{handler.timeout_ms}ms."},
+             {:error, {:mcp_hook_cleanup_unconfirmed, result, cause}}}
+
           _ ->
             {{:error, "MCP hook failed: #{inspect(result)}"},
              {:error, {:mcp_hook_cleanup_unconfirmed, result, cause}}}
@@ -378,7 +384,7 @@ defmodule Sigma.Coding.Hooks.Runner do
   end
 
   defp run_command(handler, payload, ctx, owner_ref) do
-    with setsid when is_binary(setsid) <- System.find_executable("setsid"),
+    with setsid when is_binary(setsid) <- setsid_executable(),
          killer when is_binary(killer) <- System.find_executable("kill") do
       directory =
         Path.join(
@@ -613,9 +619,63 @@ defmodule Sigma.Coding.Hooks.Runner do
     end
   end
 
-  # Linux /proc proves absence of runnable managed processes; zombies no longer
-  # execute effects. Unsupported/unreadable observation remains unconfirmed.
+  defp setsid_executable do
+    System.find_executable("setsid") || Application.get_env(:sigma_coding, :setsid_path) ||
+      packaged_setsid()
+  end
+
+  defp packaged_setsid do
+    with path when is_list(path) <- :code.priv_dir(:sigma_agent),
+         helper = Path.join(List.to_string(path), "native/sigma-setsid"),
+         true <- File.regular?(helper) do
+      helper
+    else
+      _ -> nil
+    end
+  end
+
+  # Linux /proc (or `ps` on macOS) proves absence of runnable managed processes;
+  # zombies no longer execute effects. Unsupported/unreadable observation remains
+  # unconfirmed.
   defp active_processes(process_group, os_pid) do
+    case :os.type() do
+      {:unix, :darwin} -> active_processes_ps(process_group, os_pid)
+      _ -> active_processes_proc(process_group, os_pid)
+    end
+  end
+
+  defp active_processes_ps(process_group, os_pid) do
+    case System.cmd("/bin/ps", ["-A", "-o", "pid=,pgid=,stat="], stderr_to_stdout: true) do
+      {output, 0} ->
+        output
+        |> String.split("\n", trim: true)
+        |> Enum.reduce_while({:ok, []}, fn line, {:ok, active} ->
+          case String.split(line) do
+            [pid, group, state | _] ->
+              with {pid, ""} <- Integer.parse(pid),
+                   {group, ""} <- Integer.parse(group) do
+                live =
+                  not String.starts_with?(state, "Z") and
+                    (pid == os_pid or (is_integer(process_group) and group == process_group))
+
+                {:cont, {:ok, if(live, do: [pid | active], else: active)}}
+              else
+                _ -> {:halt, {:error, {:invalid_process_listing, line}}}
+              end
+
+            _ ->
+              {:halt, {:error, {:invalid_process_listing, line}}}
+          end
+        end)
+
+      {output, status} ->
+        {:error, {:process_listing_unavailable, status, output}}
+    end
+  rescue
+    error -> {:error, {:process_listing_unavailable, error}}
+  end
+
+  defp active_processes_proc(process_group, os_pid) do
     with {:ok, names} <- File.ls("/proc") do
       Enum.reduce_while(names, {:ok, []}, fn name, {:ok, active} ->
         case Integer.parse(name) do

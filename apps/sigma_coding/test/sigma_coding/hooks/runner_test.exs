@@ -163,12 +163,19 @@ defmodule Sigma.Coding.Hooks.RunnerTest do
       assert Task.Supervisor.children(ctx.hook_task_supervisor) == []
       pid = File.read!(Path.join(directory, "shell-pid"))
 
-      case File.read("/proc/#{pid}/stat") do
-        {:ok, stat} ->
-          assert String.split(stat, ") ", parts: 2) |> List.last() |> String.starts_with?("Z ")
+      if File.dir?("/proc") do
+        case File.read("/proc/#{pid}/stat") do
+          {:ok, stat} ->
+            assert String.split(stat, ") ", parts: 2) |> List.last() |> String.starts_with?("Z ")
 
-        {:error, :enoent} ->
-          :ok
+          {:error, :enoent} ->
+            :ok
+        end
+      else
+        case System.cmd("/bin/ps", ["-o", "stat=", "-p", String.trim(pid)]) do
+          {state, 0} -> assert String.starts_with?(String.trim(state), "Z")
+          _ -> :ok
+        end
       end
 
       File.write!(Path.join(directory, "release"), "ready")
