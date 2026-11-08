@@ -50,6 +50,10 @@ defmodule Sigma.Agent.Backplane.ChildIO do
   @doc "Closes native resources and async hooks and persists their independent confirmations."
   def retire(io), do: GenServer.call(io, :retire, :infinity)
 
+  # Provider credentials stay out of crash reports and :sys.get_status/1.
+  @impl true
+  def format_status(status), do: Sigma.Agent.CrashRedaction.format_status(status)
+
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)

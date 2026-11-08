@@ -5,6 +5,8 @@ defmodule Sigma.Agent.Application do
 
   @impl true
   def start(_type, _args) do
+    :ok = Sigma.Agent.CrashRedaction.install_log_filter()
+
     children = [
       {Registry, keys: :unique, name: Sigma.Agent.RepositoryRegistry},
       {Registry, keys: :unique, name: Sigma.Agent.ProtocolSubscriptionRegistry},
