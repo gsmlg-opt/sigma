@@ -59,6 +59,7 @@ defmodule Sigma.Agent do
     :turn_started_monotonic,
     :control_pid,
     :last_cancelled_turn_id,
+    :turn_error_reason,
     :policy,
     :backplane_store,
     :backplane_store_owned,
@@ -1286,7 +1287,7 @@ defmodule Sigma.Agent do
 
   def handle_cast({:notify_subscribers, event}, state) do
     notify_subscribers(state, event)
-    {:noreply, state}
+    {:noreply, record_turn_error(state, event)}
   end
 
   def handle_cast({:set_model, model}, state) do
@@ -2473,8 +2474,29 @@ defmodule Sigma.Agent do
 
   defp random_id(bytes), do: :crypto.strong_rand_bytes(bytes) |> Base.encode16(case: :lower)
 
+  # Turn tasks report errors through subscriber notifications before returning a
+  # bare failed outcome; keep the first one so the persisted turn metrics explain it.
+  defp record_turn_error(%{turn_error_reason: nil} = state, {:turn_error, reason}) do
+    if TurnState.active?(state.turn_state),
+      do: %{state | turn_error_reason: turn_error_summary(reason)},
+      else: state
+  end
+
+  defp record_turn_error(state, _event), do: state
+
+  defp turn_error_summary(reason) when is_exception(reason),
+    do: reason |> Exception.message() |> String.slice(0, 2_000)
+
+  defp turn_error_summary(reason),
+    do: reason |> inspect(limit: 50, printable_limit: 2_000) |> String.slice(0, 2_000)
+
   defp finish_turn(state, outcome, reason \\ nil, opts \\ []) do
     turn_id = state.turn_state.turn_id
+
+    reason =
+      if is_nil(reason) and outcome == :failed, do: state.turn_error_reason, else: reason
+
+    state = %{state | turn_error_reason: nil}
     turn_state = TurnState.transition(state.turn_state, outcome)
     state = %{state | turn_state: turn_state}
 
