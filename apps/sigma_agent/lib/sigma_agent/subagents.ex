@@ -721,11 +721,15 @@ defmodule Sigma.Agent.Subagents do
           {:noreply, reply_closes(state, result)}
 
         {{from, kind}, jobs} ->
+          Logger.error(
+            "[Sigma.Agent.Subagents] Control job #{inspect(kind)} crashed: #{inspect(reason)}"
+          )
+
           if from,
             do:
               GenServer.reply(
                 from,
-                failure(:execution_failure, "subagent control operation failed")
+                failure(:execution_failure, "subagent control operation failed", cause: reason)
               )
 
           state = %{state | jobs: jobs, preparing: false, error: :control_failed}
@@ -1017,7 +1021,10 @@ defmodule Sigma.Agent.Subagents do
     %{state | execution_close_waiters: []}
   end
 
-  defp prepare_generation(host, state, context), do: runtime_generation(host, state, context)
+  defp prepare_generation(host, state, context) do
+    Process.flag(:trap_exit, true)
+    runtime_generation(host, state, context)
+  end
 
   defp runtime_generation(host, %{generation_closed: true} = state, context) do
     with :ok <- retire_generation(state), do: new_generation(host, state, context)
@@ -2199,5 +2206,5 @@ defmodule Sigma.Agent.Subagents do
   defp qualify(state, id), do: Map.get(state.archive_aliases, id, state.generation <> ":" <> id)
   defp unique, do: Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
   defp now, do: System.system_time(:millisecond)
-  defp failure(class, message), do: {:error, Error.new(class, message)}
+  defp failure(class, message, opts \\ []), do: {:error, Error.new(class, message, opts)}
 end
