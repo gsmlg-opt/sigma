@@ -13,6 +13,78 @@
 @import "@duskmoon-dev/components/styles.css";
 @import "../../../../deps/phoenix_duskmoon/assets/css/element-theme-bridge.css" layer(components);
 
+/* WORKAROUND(upstream): duskmoon-dev/duskmoon-react#86
+   @duskmoon-dev/components/styles.css overrides .radio and .radio::before,
+   breaking phoenix_duskmoon's native input[type="radio"].radio elements.
+   Restore core styling specifically on input[type="radio"].radio. */
+input[type="radio"].radio {
+  --radio-size: 1.25rem;
+  --radio-color: var(--color-primary);
+  --radio-border-color: var(--color-outline);
+  color: var(--color-on-surface);
+
+  position: relative;
+  display: inline-grid;
+  place-content: center;
+  width: var(--radio-size);
+  height: var(--radio-size);
+  margin: 0;
+  cursor: pointer;
+  appearance: none;
+  background-color: transparent;
+  border: 2px solid var(--radio-border-color);
+  border-radius: 9999px;
+  transition: border-color 150ms ease-in-out;
+}
+
+input[type="radio"].radio::before {
+  content: "";
+  display: block;
+  width: 0.5em;
+  height: 0.5em;
+  border-radius: 9999px;
+  background-color: var(--radio-color);
+  transform: scale(0);
+  transition: transform 150ms ease-in-out;
+}
+
+input[type="radio"].radio:checked {
+  border-color: var(--radio-color);
+}
+
+input[type="radio"].radio:checked::before {
+  transform: scale(1);
+}
+
+input[type="radio"].radio:hover:not(:disabled):not(:checked) {
+  border-color: var(--color-on-surface);
+}
+
+input[type="radio"].radio:focus-visible {
+  outline: 2px solid var(--radio-color);
+  outline-offset: 2px;
+}
+
+input[type="radio"].radio-primary {
+  --radio-color: var(--color-primary);
+}
+
+input[type="radio"].radio-secondary {
+  --radio-color: var(--color-secondary);
+}
+
+input[type="radio"].radio-sm {
+  --radio-size: 1rem;
+}
+
+input[type="radio"].radio-md {
+  --radio-size: 1.25rem;
+}
+
+input[type="radio"].radio-lg {
+  --radio-size: 1.5rem;
+}
+
 @import "tailwindcss/utilities" layer(utilities);
 
 @source "../../lib/sigma_web.ex";
