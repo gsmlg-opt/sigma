@@ -102,6 +102,28 @@ defmodule Sigma.Agent.BackplaneRecoveryJournalFunctionalTest do
     assert :ok = Store.retire(store)
   end
 
+  # An attached but never-prompted run is cancelled before admission, so the
+  # journal's genesis entry is `cancel`, not `admit`; later entries must extend it.
+  test "a run cancelled before admission keeps an extendable journal", %{tmp_dir: dir} do
+    {:ok, store} = Store.open(path: dir)
+    run = run("idle-cancel")
+    assert {:ok, _} = RuntimeStore.store(Store, store, run, %{command: {:cancel, 10}})
+    assert {:ok, %{run: %{state: :cancelling}}} = Store.load(store, run.run_id)
+
+    assert {:ok, [%{"kind" => "cancel", "revision" => 1}]} =
+             Store.recovery_journal(store, run.run_id)
+
+    assert {:ok, %{revision: 2}} = Store.fence(store, run.run_id, 1, 1, 2)
+
+    assert {:ok,
+            [
+              %{"kind" => "cancel", "revision" => 1, "prior_revision" => 0},
+              %{"kind" => "fence", "revision" => 2, "prior_revision" => 1}
+            ]} = Store.recovery_journal(store, run.run_id)
+
+    assert :ok = Store.retire(store)
+  end
+
   test "failed snapshot persistence cannot acknowledge or append the proposed journal entry",
        %{tmp_dir: dir} do
     {:ok, fault} = Agent.start_link(fn -> false end)

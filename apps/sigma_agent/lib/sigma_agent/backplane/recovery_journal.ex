@@ -56,7 +56,9 @@ defmodule Sigma.Agent.Backplane.RecoveryJournal do
 
   defp prefix([], nil), do: :ok
 
-  defp prefix([%{"kind" => "admit", "revision" => 1} | _] = entries, record)
+  # The genesis entry is the command that created revision 1 from no snapshot:
+  # normally `admit`, but a run cancelled before admission starts with `cancel`.
+  defp prefix([%{"revision" => 1, "prior_revision" => 0} | _] = entries, record)
        when is_map(record) do
     case List.last(entries) do
       %{"revision" => revision, "incarnation" => incarnation}
