@@ -2,7 +2,6 @@ defmodule Sigma.Agent.Backplane.NativeTools do
   @moduledoc false
 
   alias Backplane.AgentRuntime.{Codex, Error}
-  alias Backplane.AgentRuntime.Codex.CodeMode
   alias Sigma.Agent.Backplane.ToolPostHooks
 
   @discovery_names ~w(tool_search)
@@ -16,7 +15,6 @@ defmodule Sigma.Agent.Backplane.NativeTools do
   @note_names ~w(notes::list_files_by_prefix notes::read_file notes::search_contents notes::append_to_file notes::write_file)
   @goal_names ~w(get_goal create_goal update_goal)
   @board_names ~w(collaboration::create_channel collaboration::get_channels collaboration::list_threads collaboration::search_posts collaboration::read_thread collaboration::read_post collaboration::subscribe collaboration::unsubscribe collaboration::post)
-  @code_mode_names ~w(exec wait)
   @names ~w(exec_command write_stdin apply_patch update_plan view_image clock::curr_time clock::sleep exec wait request_user_input get_context_remaining new_context)
 
   def names, do: @names
@@ -34,10 +32,9 @@ defmodule Sigma.Agent.Backplane.NativeTools do
   def archive_names, do: @history_names ++ @note_names
 
   def profile(context, authority, hook_context, opts \\ []) do
+    selected = Keyword.get(opts, :tools, @names)
     context = Map.put_new(context, :root?, true)
-
-    {selected, families} =
-      code_mode_family(Keyword.get(opts, :tools, @names), context, [:local, :interactive])
+    families = [:local, :interactive, :code_mode]
 
     with :ok <- validate_selection(selected, authority),
          {:ok, families} <- resource_family(selected, context, families),
@@ -51,17 +48,6 @@ defmodule Sigma.Agent.Backplane.NativeTools do
       |> resource_context(context)
       |> ToolPostHooks.decorate(hook_context)
     end
-  end
-
-  # WORKAROUND(upstream): gsmlg-opt/backplane#161 — Code Mode verifies its Deno
-  # lifecycle only on Linux. Where the public capability check is unsupported
-  # (macOS), omit the family and its exec/wait tools instead of failing every
-  # native turn. Remove once Code Mode reports :verified on macOS.
-  # TODO(upstream): gsmlg-opt/backplane#161
-  defp code_mode_family(selected, context, families) do
-    if CodeMode.lifecycle_capability(context) == :verified,
-      do: {selected, families ++ [:code_mode]},
-      else: {selected -- @code_mode_names, families}
   end
 
   defp extension_family(selected, context, families) do
