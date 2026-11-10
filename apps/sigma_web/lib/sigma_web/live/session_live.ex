@@ -1221,12 +1221,130 @@ defmodule Sigma.Web.SessionLive do
     }
   end
 
-  defp chat_messages(socket) do
-    Enum.map(
-      socket.assigns.chat_order,
-      &chat_message(socket, socket.assigns.display_messages[&1])
+  defp chat_messages(socket),
+    do: socket |> chat_groups() |> Enum.map(&chat_item(socket, &1))
+
+  # Chat items, as Codex shows a conversation: host hook feedback/context never
+  # renders as a user turn, and the model's consecutive messages within one turn
+  # render as one item. React-chat has no removal event, so an item is keyed by
+  # its first message id, which stays stable while the turn grows.
+  defp chat_groups(socket) do
+    messages = socket.assigns.display_messages
+
+    socket.assigns.chat_order
+    |> Enum.map(&Map.get(messages, &1))
+    |> Enum.reject(&(is_nil(&1) or hidden_chat_message?(&1)))
+    |> Enum.chunk_while(
+      [],
+      fn message, acc ->
+        case acc do
+          [] ->
+            {:cont, [message]}
+
+          [previous | _] ->
+            if same_turn_reply?(previous, message),
+              do: {:cont, [message | acc]},
+              else: {:cont, Enum.reverse(acc), [message]}
+        end
+      end,
+      fn
+        [] -> {:cont, []}
+        acc -> {:cont, Enum.reverse(acc), []}
+      end
     )
   end
+
+  defp same_turn_reply?(%{role: :assistant} = previous, %{role: :assistant} = message) do
+    turn_id = message_turn_id(message)
+    is_binary(turn_id) and turn_id == message_turn_id(previous)
+  end
+
+  defp same_turn_reply?(_previous, _message), do: false
+
+  @doc false
+  # Sigma persists hook output as user-role provider context. It is model input,
+  # not something the user said, so the chat does not render it as a turn.
+  def hidden_chat_message?(%{role: :user, metadata: %{host_feedback: _}}), do: true
+  def hidden_chat_message?(%{role: :user, metadata: %{"host_feedback" => _}}), do: true
+
+  def hidden_chat_message?(%{role: :user, content: content}),
+    do: content |> user_content() |> String.starts_with?("[Developer context from hook]\n")
+
+  def hidden_chat_message?(_message), do: false
+
+  @hook_context_marker "\n\n[Additional context from hook]\n"
+
+  # UserPromptSubmit hook output is appended to the prompt for the model; the
+  # chat shows what the user typed.
+  defp prompt_text(text) do
+    case :binary.match(text, @hook_context_marker) do
+      {index, _length} -> binary_part(text, 0, index)
+      :nomatch -> text
+    end
+  end
+
+  defp chat_item(socket, [message]) do
+    socket
+    |> chat_message(message)
+    |> Map.put(:messageIds, [message.id])
+    |> target_actions(message.id)
+  end
+
+  defp chat_item(socket, [first | _] = group) do
+    last = List.last(group)
+    payloads = Enum.map(group, &chat_message(socket, &1))
+    requests = Enum.flat_map(group, &request_metrics_for(&1, socket.assigns.session_metrics))
+
+    summary =
+      Enum.find_value(
+        group,
+        &turn_summary_for(
+          &1,
+          socket.assigns.session_metrics,
+          socket.assigns.turn_last_message_ids
+        )
+      )
+
+    footer =
+      [SessionObservability.requests_footer(%{__changed__: nil, requests: requests})] ++
+        if(summary,
+          do: [SessionObservability.turn_summary(%{__changed__: nil, summary: summary})],
+          else: []
+        )
+
+    last_payload = List.last(payloads)
+
+    %{
+      List.first(payloads)
+      | id: first.id,
+        content:
+          payloads
+          |> Enum.map(& &1.content)
+          |> Enum.reject(&(&1 in [nil, ""]))
+          |> Enum.join("\n\n"),
+        blocks: Enum.flat_map(payloads, & &1.blocks),
+        tools: Enum.flat_map(payloads, & &1.tools),
+        status:
+          if(Enum.any?(payloads, &(&1.status == "streaming")), do: "streaming", else: "complete"),
+        actions: last_payload.actions,
+        metadata: %{
+          last_payload.metadata
+          | timestamp: first.timestamp,
+            sources: payloads |> Enum.flat_map(& &1.metadata.sources) |> Enum.uniq(),
+            footerHtml:
+              footer |> Enum.map(&Phoenix.HTML.Safe.to_iodata/1) |> IO.iodata_to_binary()
+        }
+    }
+    |> Map.put(:messageIds, Enum.map(group, & &1.id))
+    |> target_actions(last.id)
+  end
+
+  # Grouped items act on their newest message; the client sends `messageId`.
+  defp target_actions(item, message_id),
+    do:
+      Map.update!(item, :actions, fn actions ->
+        Enum.map(actions, &Map.put(&1, :messageId, message_id))
+      end)
 
   defp chat_message(socket, message) do
     summary =
@@ -1295,22 +1413,23 @@ defmodule Sigma.Web.SessionLive do
           []
       end
 
+    content = user_content(message.content)
+
     %{
       id: message.id,
       role: message.role,
       author: message_author(message.role),
-      content: user_content(message.content),
+      content: if(message.role == :user, do: prompt_text(content), else: content),
       blocks: ordered_blocks,
       status:
         if(message.id == socket.assigns.streaming_message_id, do: "streaming", else: "complete"),
       tools: tools,
       actions: actions,
+      turnStatus: turn_status && to_string(turn_status),
       metadata: %{
         timestamp: message.timestamp,
         images: user_images(message.content),
         sources: Sigma.Web.HostedCitations.sources(message),
-        reasoning:
-          Enum.find_value(blocks, fn block -> if block.type == :thinking, do: block.thinking end),
         footerHtml: footer |> Enum.map(&Phoenix.HTML.Safe.to_iodata/1) |> IO.iodata_to_binary()
       }
     }
@@ -1320,16 +1439,107 @@ defmodule Sigma.Web.SessionLive do
     result = socket.assigns.tool_results[id]
     status = tool_call_status(socket.assigns.tool_results, id, turn_status)
 
+    text = if(result, do: elem(result, 0))
+    {output, exit_code} = tool_output(text)
+    {title, detail} = tool_summary(block.name, Map.get(block, :arguments))
+
     %{
       id: id,
       name: block.name,
       input: format_tool_call_args(block),
-      result: if(result, do: elem(result, 0)),
+      result: text,
       images: if(result, do: elem(result, 2), else: []),
       status: status,
-      statusLabel: if(status == "pending", do: "turn cancelled", else: status)
+      statusLabel: if(status == "pending", do: "turn cancelled", else: status),
+      # Codex-style one-line row: "Ran git status", plus parsed command output.
+      title: title,
+      detail: detail,
+      output: output,
+      exitCode: exit_code,
+      plan: tool_plan(block.name, Map.get(block, :arguments))
     }
   end
+
+  @doc false
+  def tool_summary("apply_patch", patch) when is_binary(patch), do: {"Edited", patch_paths(patch)}
+
+  def tool_summary(name, args) do
+    args = if is_map(args), do: args, else: %{}
+
+    case name do
+      "exec_command" ->
+        {"Ran", command_text(args["cmd"])}
+
+      "write_stdin" ->
+        session = args["session_id"]
+
+        if args["chars"] in [nil, ""],
+          do: {"Waited for session", to_string(session)},
+          else: {"Sent input to session", "#{session}: #{String.trim(args["chars"])}"}
+
+      "apply_patch" ->
+        {"Edited", patch_paths(args["input"] || args["patch"])}
+
+      "update_plan" ->
+        {"Updated plan", ""}
+
+      "view_image" ->
+        {"Viewed image", to_string(args["path"])}
+
+      "exec" ->
+        {"Ran JavaScript", ""}
+
+      "wait" ->
+        {"Waited for cell", to_string(args["cell_id"])}
+
+      "tool_search" ->
+        {"Searched tools", to_string(args["query"])}
+
+      "clock::sleep" ->
+        {"Waited",
+         args |> Map.drop(["reason"]) |> Enum.map_join(" ", fn {k, v} -> "#{k}=#{v}" end)}
+
+      "mcp__" <> rest ->
+        case String.split(rest, "__", parts: 2) do
+          [server, tool] -> {"Called", "#{server} · #{tool}"}
+          _ -> {"Called", rest}
+        end
+
+      _ ->
+        {name, ""}
+    end
+  end
+
+  defp command_text(cmd) when is_list(cmd), do: Enum.join(cmd, " ")
+  defp command_text(cmd) when is_binary(cmd), do: cmd
+  defp command_text(_cmd), do: ""
+
+  defp patch_paths(patch) when is_binary(patch) do
+    ~r/^\*\*\* (?:Add|Update|Delete) File: (.+)$/m
+    |> Regex.scan(patch, capture: :all_but_first)
+    |> Enum.map_join(", ", &hd/1)
+  end
+
+  defp patch_paths(_patch), do: ""
+
+  defp tool_plan("update_plan", %{"plan" => plan}) when is_list(plan) do
+    for %{"step" => step} = item <- plan, do: %{step: step, status: item["status"] || "pending"}
+  end
+
+  defp tool_plan(_name, _args), do: nil
+
+  # Native command results are JSON with `output` and `exit_code`.
+  defp tool_output(text) when is_binary(text) do
+    case Jason.decode(text) do
+      {:ok, %{"output" => output} = result} when is_binary(output) ->
+        {output, result["exit_code"]}
+
+      _ ->
+        {text, nil}
+    end
+  end
+
+  defp tool_output(_text), do: {nil, nil}
 
   defp ordered_blocks(socket, message, blocks, turn_status) do
     blocks
@@ -1337,6 +1547,9 @@ defmodule Sigma.Web.SessionLive do
     |> Enum.flat_map(fn
       {%{type: :text, text: text}, index} when is_binary(text) and text != "" ->
         [%{type: "text", id: "#{message.id}:text:#{index}", text: text}]
+
+      {%{type: :thinking, thinking: text}, index} when is_binary(text) and text != "" ->
+        [%{type: "reasoning", id: "#{message.id}:reasoning:#{index}", text: text}]
 
       {%{type: :tool_call} = block, _index} ->
         [socket |> tool_view(block, turn_status) |> Map.put(:type, "tool")]
@@ -1394,8 +1607,9 @@ defmodule Sigma.Web.SessionLive do
     if socket.assigns.chat_order == [] do
       push_chat_snapshot(socket)
     else
-      Enum.reduce(socket.assigns.chat_order, socket, fn id, socket ->
-        if MapSet.member?(pending, id) do
+      # A changed message re-sends its whole item, keyed by the item's first id.
+      Enum.reduce(chat_groups(socket), socket, fn [%{id: id} | _] = group, socket ->
+        if Enum.any?(group, &MapSet.member?(pending, &1.id)) do
           sequence = Map.get(socket.assigns.chat_sequences, id, 0) + 1
 
           socket
@@ -1406,7 +1620,7 @@ defmodule Sigma.Web.SessionLive do
             type: "chat.message",
             message_id: id,
             sequence: sequence,
-            message: chat_message(socket, socket.assigns.display_messages[id]),
+            message: chat_item(socket, group),
             runtime: chat_runtime(socket),
             admission: chat_admission(socket)
           })
@@ -1627,9 +1841,10 @@ defmodule Sigma.Web.SessionLive do
       turn_id = message_turn_id(message)
 
       last_by_turn =
-        if is_binary(turn_id) and message.role in [:user, :assistant],
-          do: Map.put(last_by_turn, turn_id, message.id),
-          else: last_by_turn
+        if is_binary(turn_id) and message.role in [:user, :assistant] and
+             not hidden_chat_message?(message),
+           do: Map.put(last_by_turn, turn_id, message.id),
+           else: last_by_turn
 
       {Map.put(by_id, message.id, message), last_by_turn}
     end)

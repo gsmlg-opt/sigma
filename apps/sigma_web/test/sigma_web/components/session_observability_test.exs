@@ -23,7 +23,7 @@ defmodule Sigma.Web.SessionObservabilityTest do
         )
 
       assert Floki.text(Floki.parse_document!(html)) =~ "input: #{label}"
-      assert html =~ "18,773ms"
+      assert html =~ "18.8s"
 
       if count >= 1_000 do
         assert [_] = Floki.find(Floki.parse_document!(html), "span[title]")

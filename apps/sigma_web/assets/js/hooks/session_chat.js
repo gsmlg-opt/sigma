@@ -111,7 +111,7 @@ function Composer(props) {
       attachments: files, onAttachmentsChange: changeFiles, renderAttachment: (file, context) => h(Attachment, { file, ...context }),
       accept: "image/png,image/jpeg,image/gif,image/webp", allowAttachmentOnly: true,
       generating: active, canSubmit, busy, disabled: !connected || synchronizing, error: error || notice || undefined,
-      completion, minRows: 1, maxRows: 6,
+      completion, minRows: 1, maxRows: 6, compact: true,
       textareaProps: {
         placeholder: "Ask ∑ anything…", "aria-label": "Message",
         onPaste: (event) => {
@@ -164,59 +164,116 @@ function Metrics({ html }) {
   })
 }
 
-// Plain function (not a component) so Chat.Tool stays a direct child of the bubble.
+const PREVIEW_LINES = 4
+const RESEND_HINT = "Starts a new turn with this message. Earlier file edits, commands, Git changes, and external requests remain."
+// Terminal colour/control sequences are display noise in the transcript.
+// eslint-disable-next-line no-control-regex
+const ANSI = /\u001b\[[0-9;?]*[A-Za-z]/g
+const pre = (key, text) => h("pre", { key, className: "sigma-tool-pre" }, text)
+
+// Codex-style tool row: one summary line ("Ran git status") with a short output
+// preview, and the full input/output inside the native Chat.Tool disclosure.
 function toolBlock(tool) {
-  return h(Chat.Tool, { key: `tool:${tool.id}`, status: tool.status },
-    h(Chat.ToolHeader, null, tool.name, ": ", tool.statusLabel || tool.status),
-    h(Chat.ToolCall, null, h("pre", { className: "overflow-x-auto whitespace-pre-wrap text-xs" }, tool.input)),
-    tool.result != null && h(Chat.ToolResult, null,
-      tool.result && h("pre", { className: "overflow-x-auto whitespace-pre-wrap text-xs" }, tool.result),
-      ...(tool.images || []).map((src, index) => h("img", {
-        key: index, src, alt: `${tool.name} result ${index + 1}`, loading: "lazy",
-        className: "max-h-96 max-w-full rounded object-contain"
-      }))))
+  const raw = tool.output ?? tool.result
+  const output = raw && raw.replace(ANSI, "")
+  const lines = output ? output.replace(/\s+$/, "").split("\n") : []
+  const exitFailed = tool.exitCode != null && tool.exitCode !== 0
+  const state = tool.status === "running" ? "running…"
+    : tool.status === "pending" ? tool.statusLabel
+      : tool.status === "error" ? "failed"
+        : exitFailed ? `exit ${tool.exitCode}` : null
+  return h(React.Fragment, { key: `tool:${tool.id}` },
+    h(Chat.Tool, { status: exitFailed ? "error" : tool.status, className: "sigma-tool" },
+      h(Chat.ToolHeader, null,
+        h("span", { className: "sigma-tool-title" }, tool.title || tool.name),
+        tool.detail && h("code", { className: "sigma-tool-detail" }, tool.detail),
+        state && h(Chat.ToolStatus, null, state)),
+      tool.input && h(Chat.ToolCall, null, pre("input", tool.input)),
+      (lines.length > 0 || tool.images?.length > 0) && h(Chat.ToolResult, null,
+        lines.length > 0 && pre("output", output),
+        ...(tool.images || []).map((src, index) => h("img", {
+          key: index, src, alt: `${tool.name} result ${index + 1}`, loading: "lazy",
+          className: "max-h-96 max-w-full rounded object-contain"
+        })))),
+    tool.plan && h("ol", { className: "sigma-plan" }, ...tool.plan.map((item, index) =>
+      h("li", { key: index, "data-status": item.status }, item.step))),
+    lines.length > 0 && !tool.plan && h("pre", { className: "sigma-tool-preview", "aria-hidden": true },
+      lines.slice(0, PREVIEW_LINES).join("\n") + (lines.length > PREVIEW_LINES ? `\n… +${lines.length - PREVIEW_LINES} lines` : "")))
 }
 
-// Assistant messages render their ordered content blocks (text, tool calls) in
-// protocol order with stable keys. Payloads without `blocks` (user and other
-// roles) keep the plain content rendering.
-function renderBlocks(message) {
-  if (message.role === "assistant" && Array.isArray(message.blocks) && message.blocks.length) {
-    return message.blocks.map((block) => block.type === "tool"
-      ? toolBlock(block)
-      : h(Markdown, { key: `text:${block.id}`, markdown: block.text, className: "chat-bubble-content" }))
-  }
-  return [
-    ...(message.tools || []).map((tool) => toolBlock(tool)),
-    message.content && h(Markdown, { key: "content", markdown: message.content, className: "chat-bubble-content" })
-  ]
+function renderBlock(block) {
+  if (block.type === "tool") return toolBlock(block)
+  if (block.type === "reasoning")
+    return h(Chat.Reasoning, { key: `reasoning:${block.id}` }, h("summary", null, "Thinking"), block.text)
+  return h(Markdown, { key: `text:${block.id}`, markdown: block.text, className: "chat-bubble-content" })
 }
 
-function Message({ message, bridge, targetId, timeline, active, connected, synchronizing, admission }) {
+// Work (thinking, tool calls and the narration between them) collapses into one
+// Chat.Work disclosure; the final answer stays outside it, as Codex shows a turn.
+function splitWork(blocks) {
+  let last = -1
+  blocks.forEach((block, index) => { if (block.type !== "text") last = index })
+  return { work: blocks.slice(0, last + 1), answer: blocks.slice(last + 1) }
+}
+
+function workSummary(work, running) {
+  const tools = work.filter((block) => block.type === "tool").length
+  if (running) return "Working…"
+  return tools ? `Worked · ${tools} tool call${tools === 1 ? "" : "s"}` : "Thought"
+}
+
+function Sources({ sources }) {
+  return sources?.length > 0 && h("nav", { "aria-label": "Sources", className: "mt-2 text-sm" },
+    h("span", null, "Sources"),
+    h("ol", { className: "list-inside list-decimal" }, ...sources.map((source) =>
+      h("li", { key: source.url }, h(Typography.Link, { href: source.url, target: "_blank", rel: "noopener noreferrer", className: "break-words" }, source.title)))))
+}
+
+function Actions({ message, bridge, active, connected, synchronizing, admission, setNotice }) {
+  const time = new Date(message.metadata?.timestamp)
+  return h(Chat.Actions, { hover: true, className: "sigma-message-actions" },
+    h("time", { dateTime: time.toISOString(), className: "sigma-message-time" }, time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })),
+    h(Button, { type: "button", appearance: "ghost", onClick: () => navigator.clipboard.writeText(message.content || "").then(() => setNotice("Copied")).catch(() => setNotice("Copy failed")) }, "Copy"),
+    ...(message.actions || []).map((action) => h(Button, {
+      key: action.id, id: action.domId, type: "button", appearance: "ghost",
+      title: action.id === "retry_message" ? RESEND_HINT : undefined,
+      disabled: !connected || synchronizing || admission.canSubmit === false || active,
+      onClick: () => bridge.send("action", { message_id: action.messageId || message.id, action: action.id }).catch((error) => setNotice(error.message))
+    }, action.label)))
+}
+
+function Message(props) {
+  const { message, targetId, timeline } = props
   const [notice, setNotice] = useState("")
   const metadata = message.metadata || {}
-  return h(Chat, { id: targetId, timeline, role: "article", placement: "start", className: "sigma-chat-with-actions mx-auto w-full max-w-4xl", "data-message-id": message.id },
-    h(Chat.Header, null, message.author, " · ", h("time", { dateTime: new Date(metadata.timestamp).toISOString() }, new Date(metadata.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }))),
-    h(Chat.Bubble, { streaming: message.status === "streaming", color: message.role === "user" ? "secondary" : undefined },
-      metadata.reasoning && h(Chat.Reasoning, null, h("summary", null, "Reasoning"), metadata.reasoning),
-      ...renderBlocks(message),
-      metadata.sources?.length > 0 && h("nav", { "aria-label": "Sources", className: "mt-2 text-sm" },
-        h("span", null, "Sources"),
-        h("ol", { className: "list-inside list-decimal" }, ...metadata.sources.map((source) =>
-          h("li", { key: source.url }, h(Typography.Link, { href: source.url, target: "_blank", rel: "noopener noreferrer", className: "break-words" }, source.title))))),
-      ...(metadata.images || []).map((src, index) => h("img", { key: index, src, alt: "Attached image", loading: "lazy", className: "max-h-96 max-w-full rounded object-contain" }))),
-    h(Chat.Footer, null,
-      metadata.footerHtml && h(Metrics, { html: metadata.footerHtml }),
-      h(Chat.Actions, null,
-        h(Button, { type: "button", appearance: "ghost", onClick: () => navigator.clipboard.writeText(message.content || "").then(() => setNotice("Copied")).catch(() => setNotice("Copy failed")) }, "Copy"),
-        ...(message.actions || []).map((action) => h(Button, {
-          key: action.id, id: action.domId, type: "button", appearance: "ghost",
-          disabled: !connected || synchronizing || admission.canSubmit === false || active,
-          onClick: () => bridge.send("action", { message_id: message.id, action: action.id }).catch((error) => setNotice(error.message))
-        }, action.label))),
-      message.role === "user" && h("details", { className: "text-xs text-on-surface-variant" },
-        h("summary", null, "What Resend does"), "Starts a new turn with this message. Earlier file edits, commands, Git changes, and external requests remain."),
-      h("span", { role: "status" }, notice)))
+  const images = (metadata.images || []).map((src, index) => h("img", { key: `image:${index}`, src, alt: "Attached image", loading: "lazy", className: "max-h-96 max-w-full rounded object-contain" }))
+  const footer = [
+    metadata.footerHtml && h(Metrics, { key: "metrics", html: metadata.footerHtml }),
+    h(Actions, { key: "actions", ...props, setNotice }),
+    h("span", { key: "notice", role: "status" }, notice)
+  ]
+
+  if (message.role === "user") {
+    return h(Chat, { id: targetId, placement: "end", role: "article", className: "sigma-chat-user mx-auto w-full max-w-4xl", "data-message-id": message.id },
+      h(Chat.Bubble, { color: "secondary", collapsible: true },
+        message.content && h(Markdown, { markdown: message.content, className: "chat-bubble-content" }), ...images),
+      h(Chat.Footer, null, ...footer))
+  }
+
+  const blocks = Array.isArray(message.blocks) && message.blocks.length ? message.blocks
+    : message.content ? [{ type: "text", id: "content", text: message.content }] : []
+  const { work, answer } = splitWork(blocks)
+  const running = message.status === "streaming" || message.turnStatus === "running" ||
+    work.some((block) => block.type === "tool" && block.status === "running")
+  return h(Chat.Agent, { id: targetId, timeline, role: "article", className: "sigma-chat-agent mx-auto w-full max-w-4xl", "data-message-id": message.id },
+    message.role !== "assistant" && h("div", { className: "sigma-message-role" }, message.author),
+    work.length > 0 && h(Chat.Work, { open: running },
+      h(Chat.WorkSummary, null, workSummary(work, running)),
+      h(Chat.WorkBody, null, ...work.map(renderBlock))),
+    answer.length > 0 && h(Chat.Content, { streaming: message.status === "streaming" }, ...answer.map(renderBlock)),
+    images.length > 0 && h("div", null, ...images),
+    h(Sources, { sources: metadata.sources }),
+    ...footer)
 }
 
 const chat = createDuskmoonReactChat({ Composer, renderMessage: Message })

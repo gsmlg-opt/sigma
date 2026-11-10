@@ -225,4 +225,120 @@ defmodule Sigma.Web.SessionLiveToolProjectionTest do
     assert live.chat_order == ["a1", "a2"]
     assert history_results == live.tool_results
   end
+
+  describe "Codex-style chat projection" do
+    defp turn(message, turn_id), do: %{message | metadata: %{turn_id: turn_id}}
+
+    test "hook feedback and hook context never render as user turns", %{conn: conn} do
+      {view, sid} = open_session(conn)
+
+      prompt =
+        turn(
+          %Message{
+            id: "u1",
+            role: :user,
+            content:
+              "sync with GitHub\n\n[Additional context from hook]\nSession status updated.",
+            timestamp: 900
+          },
+          "t1"
+        )
+
+      feedback = %Message{
+        id: "f1",
+        role: :user,
+        content: "[Host feedback] sigma.hooks / PreToolUse\nSession status updated.",
+        metadata: %{turn_id: "t1", host_feedback: %{"stage" => "PreToolUse"}},
+        timestamp: 950
+      }
+
+      context = %Message{
+        id: "hook_ctx_1",
+        role: :user,
+        content: "[Developer context from hook]\nSession status updated.",
+        timestamp: 960
+      }
+
+      for message <- [
+            prompt,
+            feedback,
+            context,
+            turn(assistant("a1", [%{type: :text, text: "done"}]), "t1")
+          ] do
+        send(view.pid, {:message_end, message})
+      end
+
+      messages = snapshot(view, sid).messages
+      assert Enum.map(messages, & &1.id) == ["u1", "a1"]
+      assert hd(messages).content == "sync with GitHub"
+    end
+
+    test "one turn's model messages render as one item acting on the newest message",
+         %{conn: conn} do
+      {view, sid} = open_session(conn)
+
+      first =
+        turn(
+          assistant("a1", [
+            %{type: :thinking, thinking: "check status"},
+            %{
+              type: :tool_call,
+              id: "c1",
+              name: "exec_command",
+              arguments: %{"cmd" => "git status"}
+            }
+          ]),
+          "t1"
+        )
+
+      send(view.pid, {:message_end, first})
+
+      deliver_result(view, %{
+        result("r1", "c1", ~s({"output":"clean\\n","exit_code":0}))
+        | tool_name: "exec_command"
+      })
+
+      send(
+        view.pid,
+        {:message_end, turn(assistant("a2", [%{type: :text, text: "All synced."}]), "t1")}
+      )
+
+      assert [item] = snapshot(view, sid).messages
+      assert item.id == "a1"
+      assert item.messageIds == ["a1", "a2"]
+
+      assert [
+               %{type: "reasoning", text: "check status"},
+               %{
+                 type: "tool",
+                 title: "Ran",
+                 detail: "git status",
+                 output: "clean\n",
+                 exitCode: 0
+               },
+               %{type: "text", text: "All synced."}
+             ] = item.blocks
+
+      assert Enum.all?(item.actions, &(&1.messageId == "a2"))
+    end
+  end
+
+  test "tool summaries name the action like Codex" do
+    alias Sigma.Web.SessionLive
+
+    assert SessionLive.tool_summary("exec_command", %{"cmd" => ["git", "pull"]}) ==
+             {"Ran", "git pull"}
+
+    assert SessionLive.tool_summary("write_stdin", %{"session_id" => 3, "chars" => ""}) ==
+             {"Waited for session", "3"}
+
+    assert SessionLive.tool_summary(
+             "apply_patch",
+             "*** Begin Patch\n*** Update File: lib/a.ex\n*** Add File: b.md\n"
+           ) ==
+             {"Edited", "lib/a.ex, b.md"}
+
+    assert SessionLive.tool_summary("mcp__github__list_issues", %{}) ==
+             {"Called", "github · list_issues"}
+  end
 end

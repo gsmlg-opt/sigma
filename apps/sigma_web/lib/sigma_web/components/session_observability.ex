@@ -1,6 +1,36 @@
 defmodule Sigma.Web.SessionObservability do
   use Sigma.Web, :html
 
+  attr(:requests, :list, required: true)
+
+  # A grouped turn lists its provider requests under one collapsed summary
+  # instead of one "Request details" row per model message.
+  def requests_footer(%{requests: []} = assigns), do: ~H""
+
+  def requests_footer(%{requests: [request]} = assigns) do
+    assigns = assign(assigns, :request, request)
+
+    ~H"""
+    <.message_metrics_footer metrics={@request} elapsed_ms={@request[:elapsed_ms]} status={@request[:status]} />
+    """
+  end
+
+  def requests_footer(assigns) do
+    ~H"""
+    <details class="sigma-message-metrics mt-2 font-mono text-[10px] text-on-surface-variant" id={(id = request_details_id(hd(@requests))) && "requests-" <> id}>
+      <summary class="w-fit cursor-pointer">{length(@requests)} requests</summary>
+      <div class="pl-2">
+        <.message_metrics_footer
+          :for={request <- @requests}
+          metrics={request}
+          elapsed_ms={request[:elapsed_ms]}
+          status={request[:status]}
+        />
+      </div>
+    </details>
+    """
+  end
+
   attr(:metrics, :map, required: true)
   attr(:elapsed_ms, :integer, default: nil)
   attr(:status, :atom, default: nil)
@@ -434,7 +464,17 @@ defmodule Sigma.Web.SessionObservability do
 
   defp display(value, _fallback), do: to_string(value)
   defp duration(nil), do: "unknown"
-  defp duration(ms) when is_integer(ms) and ms >= 0, do: "#{display(ms, "unknown")}ms"
+  defp duration(ms) when is_integer(ms) and ms >= 0 and ms < 1_000, do: "#{ms}ms"
+
+  defp duration(ms) when is_integer(ms) and ms >= 0 and ms < 60_000,
+    do: "#{:erlang.float_to_binary(ms / 1_000, decimals: 1)}s"
+
+  defp duration(ms) when is_integer(ms) and ms >= 0 do
+    seconds = div(ms, 1_000)
+    {hours, minutes, rest} = {div(seconds, 3_600), div(rem(seconds, 3_600), 60), rem(seconds, 60)}
+    if hours > 0, do: "#{hours}h #{minutes}m", else: "#{minutes}m #{rest}s"
+  end
+
   defp duration(_), do: "unknown"
   defp throughput(%{throughput: value}), do: throughput_value(value)
 

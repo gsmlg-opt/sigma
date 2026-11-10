@@ -3309,7 +3309,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
     assert_eventually(fn ->
       summary = chat_footer_html(view)
-      summary =~ "completed" and summary =~ "wall: 1,200ms"
+      summary =~ "completed" and summary =~ "wall: 1.2s"
     end)
 
     send(view.pid, {
@@ -3368,6 +3368,10 @@ defmodule Sigma.Web.SessionLiveTest do
       assert chat_footer_html(view, message_id) =~ "running"
     end
 
+    # One turn's model messages render as one chat item.
+    assert [%{id: "first_answer", messageIds: ["first_answer", "last_answer"]}] =
+             Enum.filter(chat_snapshot(view).messages, &(&1.role == :assistant))
+
     send(
       view.pid,
       {:metrics, :turn_finished,
@@ -3385,12 +3389,11 @@ defmodule Sigma.Web.SessionLiveTest do
     assert summary =~ "requests: 2"
     assert summary =~ "input: 30"
     assert summary =~ "output: 12"
-    assert chat_footer_html(view, "last_answer") =~ "sigma-turn-summary"
-    refute chat_footer_html(view, "first_answer") =~ "sigma-turn-summary"
-    assert chat_footer_html(view, "first_answer") =~ "sigma-message-metrics"
-    refute chat_footer_html(view, "first_answer") =~ "open="
-    assert chat_footer_html(view, "last_answer") =~ "sigma-message-metrics"
-    refute chat_footer_html(view, "last_answer") =~ "open="
+    footer = chat_footer_html(view, "last_answer")
+    assert length(String.split(footer, "sigma-turn-summary")) == 2
+    assert footer =~ "2 requests"
+    assert footer =~ "sigma-message-metrics"
+    refute footer =~ "open="
   end
 
   test "retains a tool-only summary on failure and cancellation without final answer text", %{
@@ -3961,7 +3964,7 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   defp chat_has_action?(view, id, action) do
-    case Enum.find(chat_snapshot(view).messages, &(&1.id == id)) do
+    case Enum.find(chat_snapshot(view).messages, &(id in &1.messageIds)) do
       nil -> false
       message -> Enum.any?(message.actions, &(&1.id == action))
     end
@@ -3969,7 +3972,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
   defp chat_footer_html(view, id \\ nil) do
     chat_snapshot(view).messages
-    |> Enum.filter(&(is_nil(id) or &1.id == id))
+    |> Enum.filter(&(is_nil(id) or id in &1.messageIds))
     |> Enum.map_join(& &1.metadata.footerHtml)
   end
 
