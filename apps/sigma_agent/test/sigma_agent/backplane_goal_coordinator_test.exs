@@ -13,9 +13,11 @@ defmodule Sigma.Agent.Backplane.GoalCoordinatorTest do
       do: {:ok, {:not_submitted, :test_host}}
   end
 
-  setup do
-    root =
-      Path.join(System.tmp_dir!(), "sigma-goal-coordinator-#{System.unique_integer([:positive])}")
+  # Project-local tmp_dir: GoalStore rejects symlinked roots such as macOS /var.
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp_dir} do
+    root = Path.join(tmp_dir, "sigma-goal-coordinator-#{System.unique_integer([:positive])}")
 
     File.mkdir_p!(root)
     goal_root = Path.join(root, ".goals")
