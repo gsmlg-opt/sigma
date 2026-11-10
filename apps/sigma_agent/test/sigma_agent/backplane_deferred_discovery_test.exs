@@ -217,6 +217,35 @@ defmodule Sigma.Agent.BackplaneDeferredDiscoveryTest do
     finish!(provider)
   end
 
+  # A single MCP tool with a schema dialect Runtime cannot validate (e.g. draft-07)
+  # must be quarantined, not fail the whole turn or hide the server's other tools.
+  test "an unsupported schema dialect quarantines only that MCP tool", c do
+    legacy =
+      put_in(
+        definition("legacy_lookup"),
+        ["inputSchema", "$schema"],
+        "http://json-schema.org/draft-07/schema#"
+      )
+
+    File.write!(c.inventory, Jason.encode!([definition("fetch_item"), legacy]))
+    agent = session!(c)
+    prompt!(agent)
+    {provider, initial} = provider!()
+    assert "tool_search" in names(initial)
+
+    {provider, found} =
+      call!(agent, provider, "tool_search", %{"query" => "encrypted credential"})
+
+    matches = Enum.map(result(agent)["tools"], & &1["name"])
+    assert @tool in matches
+    refute "mcp__vault__legacy_lookup" in matches
+    refute "mcp__vault__legacy_lookup" in names(found)
+
+    {provider, _} = call!(agent, provider, @tool, %{"key" => "still-works"})
+    assert inspect(last_result(agent).content) =~ "vault:still-works"
+    finish!(provider)
+  end
+
   test "inventories larger than fifty remain searchable without exposing the full catalog", c do
     definitions = [
       definition("fetch_item")

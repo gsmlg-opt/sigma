@@ -2,7 +2,9 @@ defmodule Sigma.Agent.Backplane.ToolCatalog do
   @moduledoc false
 
   alias Backplane.AgentRuntime.Codex.Contract
-  alias Backplane.AgentRuntime.{Error, ToolRegistry}
+  require Logger
+
+  alias Backplane.AgentRuntime.{Error, InputSchema, ToolRegistry}
   alias Backplane.AgentRuntime.ToolCatalog, as: RuntimeCatalog
   alias Sigma.Coding.Tool
 
@@ -34,6 +36,9 @@ defmodule Sigma.Agent.Backplane.ToolCatalog do
     end
   end
 
+  # Deferred candidates follow the eager catalog's `:quarantine` admission: a tool
+  # whose schema Runtime cannot validate (e.g. a draft-07 `$schema`) is left out
+  # of discovery instead of failing the turn. Every other contract error is fatal.
   def deferred_candidates(tools, execute) do
     Enum.reduce_while(tools, {:ok, []}, fn tool, {:ok, acc} ->
       attrs =
@@ -42,11 +47,28 @@ defmodule Sigma.Agent.Backplane.ToolCatalog do
         |> Map.put(:name, Tool.name(tool))
         |> Map.put(:source, %{kind: :mcp, server: tool.server_id})
 
-      case Contract.new(attrs) do
-        {:ok, contract} -> {:cont, {:ok, acc ++ [contract]}}
+      with :ok <- quarantine_schema(attrs),
+           {:ok, contract} <- Contract.new(attrs) do
+        {:cont, {:ok, acc ++ [contract]}}
+      else
+        :quarantined -> {:cont, {:ok, acc}}
         error -> {:halt, error}
       end
     end)
+  end
+
+  defp quarantine_schema(%{name: name, schema: schema}) do
+    case InputSchema.validate_schema(schema) do
+      {:error, %Error{class: :unsupported_capability} = error} ->
+        Logger.warning(
+          "MCP tool #{name} is unavailable: #{error.message} #{inspect(error.details)}"
+        )
+
+        :quarantined
+
+      _ ->
+        :ok
+    end
   end
 
   # Compose public Codex.profile/4 bundles without reconstructing contracts:
