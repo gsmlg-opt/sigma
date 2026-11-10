@@ -1132,6 +1132,15 @@ defmodule Sigma.Session.Metrics do
     }
   end
 
+  # Persisted reasons may be arbitrary terms (e.g. a decoded `{:badkey, key, map}`
+  # list carrying a whole runtime context); views need bounded text.
+  defp reason_text(nil), do: nil
+  defp reason_text(reason) when is_binary(reason), do: String.slice(reason, 0, 2_000)
+  defp reason_text(reason) when is_atom(reason), do: Atom.to_string(reason)
+
+  defp reason_text(reason),
+    do: reason |> inspect(limit: 10, printable_limit: 500) |> String.slice(0, 2_000)
+
   defp turn(attrs, default_status) do
     %{
       turn_id: attrs[:turn_id] || attrs["turn_id"],
@@ -1140,8 +1149,13 @@ defmodule Sigma.Session.Metrics do
       status: normalize_status(attrs[:status] || attrs["status"] || default_status),
       started_at: attrs[:started_at] || attrs["started_at"],
       finished_at: attrs[:finished_at] || attrs["finished_at"],
-      wall_time_ms: attrs[:wall_time_ms] || attrs["wall_time_ms"],
-      terminal_reason: attrs[:terminal_reason] || attrs["terminal_reason"],
+      # Sigma.Agent persists turn_finished as `wall_ms`/`reason`.
+      wall_time_ms:
+        attrs[:wall_time_ms] || attrs["wall_time_ms"] || attrs[:wall_ms] || attrs["wall_ms"],
+      terminal_reason:
+        reason_text(
+          attrs[:terminal_reason] || attrs["terminal_reason"] || attrs[:reason] || attrs["reason"]
+        ),
       source_message_id: attrs[:source_message_id] || attrs["source_message_id"],
       source_checkpoint_id: attrs[:source_checkpoint_id] || attrs["source_checkpoint_id"],
       retry_of_turn_id: attrs[:retry_of_turn_id] || attrs["retry_of_turn_id"],

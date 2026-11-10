@@ -2487,14 +2487,27 @@ defmodule Sigma.Agent do
   defp turn_error_summary(reason) when is_exception(reason),
     do: reason |> Exception.message() |> String.slice(0, 2_000)
 
+  defp turn_error_summary(%Backplane.AgentRuntime.Error{class: class, message: message} = error) do
+    details =
+      if error.details in [nil, %{}], do: "", else: " " <> inspect(error.details, limit: 20)
+
+    String.slice("#{class}: #{message}#{details}", 0, 2_000)
+  end
+
   defp turn_error_summary(reason),
     do: reason |> inspect(limit: 50, printable_limit: 2_000) |> String.slice(0, 2_000)
 
   defp finish_turn(state, outcome, reason \\ nil, opts \\ []) do
     turn_id = state.turn_state.turn_id
 
+    # Persisted and forwarded to Protocol clients: keep it bounded text, never a
+    # raw exit term carrying a whole runtime context.
     reason =
-      if is_nil(reason) and outcome == :failed, do: state.turn_error_reason, else: reason
+      cond do
+        is_nil(reason) and outcome == :failed -> state.turn_error_reason
+        is_nil(reason) or is_atom(reason) or is_binary(reason) -> reason
+        true -> turn_error_summary(reason)
+      end
 
     state = %{state | turn_error_reason: nil}
     turn_state = TurnState.transition(state.turn_state, outcome)

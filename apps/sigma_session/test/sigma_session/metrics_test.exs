@@ -591,6 +591,52 @@ defmodule Sigma.Session.MetricsTest do
            } = Metrics.snapshot(state).turns["turn-1"]
   end
 
+  # Sigma.Agent persists turn_finished as `reason`/`wall_ms`; the projection must
+  # surface them so a failed turn shows why it failed.
+  test "projects the agent's persisted turn_finished reason and wall time" do
+    state =
+      Metrics.new("s1")
+      |> Metrics.reduce(
+        {"turn_started",
+         %{"turn_id" => "turn-1", "session_id" => "s1", "started_at" => "2026-09-09T10:00:00Z"}}
+      )
+      |> Metrics.reduce(
+        {"turn_finished",
+         %{
+           "turn_id" => "turn-1",
+           "session_id" => "s1",
+           "revision" => 1,
+           "status" => "failed",
+           "reason" => "unsupported_capability: JSON Schema dialect is unsupported",
+           "finished_at" => "2026-09-09T10:00:03Z",
+           "wall_ms" => 2_816
+         }}
+      )
+
+    assert %{
+             status: :failed,
+             terminal_reason: "unsupported_capability: JSON Schema dialect is unsupported",
+             wall_time_ms: 2_816
+           } = Metrics.snapshot(state).turns["turn-1"]
+  end
+
+  test "a non-string persisted turn reason projects as bounded text" do
+    reason = ["badkey", "runtime", %{"context" => String.duplicate("x", 10_000)}]
+
+    state =
+      Metrics.new("s1")
+      |> Metrics.reduce({"turn_started", %{"turn_id" => "turn-1", "session_id" => "s1"}})
+      |> Metrics.reduce(
+        {"turn_finished",
+         %{"turn_id" => "turn-1", "session_id" => "s1", "status" => "failed", "reason" => reason}}
+      )
+
+    assert %{terminal_reason: text} = Metrics.snapshot(state).turns["turn-1"]
+    assert is_binary(text)
+    assert text =~ "badkey"
+    assert String.length(text) <= 2_000
+  end
+
   test "includes tool-only turns without inventing token usage" do
     state =
       Metrics.reduce(
