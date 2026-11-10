@@ -37,6 +37,20 @@ defmodule Sigma.Agent.Backplane.GoalRuns do
     end
   end
 
+  @doc """
+  Removes one indexed identity. Only `GoalRecovery.discard_unrecorded/2` calls
+  this, after the user explicitly accepts that the run's outcome is unknown.
+  """
+  def discard(root, thread_id, {run_id, incarnation} = key, opts \\ [])
+      when is_binary(run_id) and is_integer(incarnation) do
+    with :ok <- identity(root, thread_id),
+         {:ok, index} <- read(root, thread_id, opts) do
+      if Map.has_key?(index.runs, key),
+        do: write(root, thread_id, %{index | runs: Map.delete(index.runs, key)}, opts),
+        else: error(:not_found, "goal run identity is not indexed")
+    end
+  end
+
   defp read(root, thread_id, opts) do
     case fs(opts, :read, [path(root, thread_id)]) do
       {:ok, bytes} -> decode(bytes, thread_id)

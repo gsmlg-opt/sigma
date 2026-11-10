@@ -266,7 +266,7 @@ defmodule Sigma.Web.SessionLive do
              terminal_capability: terminal_capability
            }}
         else
-          {:error, reason} -> {:error, reason}
+          {:error, reason} -> {:error, goal_recovery_error(reason, storage_path)}
           reason -> {:error, reason}
         end
     end
@@ -372,6 +372,13 @@ defmodule Sigma.Web.SessionLive do
      |> push_navigate(to: ~p"/settings")}
   end
 
+  def handle_async(:session_load, {:ok, {:error, {:goal_recovery, path, runs}}}, socket) do
+    {:noreply,
+     socket
+     |> assign(:session_load, AsyncResult.failed(socket.assigns.session_load, :goal_recovery))
+     |> assign(:goal_recovery, %{path: path, runs: runs})}
+  end
+
   def handle_async(:session_load, {:ok, {:error, reason}}, socket) do
     {:noreply,
      socket
@@ -457,6 +464,8 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def render(assigns) do
+    assigns = assign_new(assigns, :goal_recovery, fn -> nil end)
+
     ~H"""
     <div id="session-panels" phx-hook="SessionPanels" class="sigma-session-shell relative flex h-[calc(100vh-64px)] overflow-hidden bg-surface text-on-surface font-sans">
       <aside id="session-navigation" data-session-panel="navigation" aria-label="Session navigation" class="sigma-session-sidebar hidden w-64 shrink-0 flex-col border-r border-outline-variant bg-surface-container-low text-on-surface md:flex">
@@ -702,6 +711,25 @@ defmodule Sigma.Web.SessionLive do
         />
 
         <footer class="sigma-session-composer border-t border-outline-variant bg-surface px-4 py-3 md:px-6">
+          <section
+            :if={@goal_recovery}
+            id="goal-recovery"
+            role="alert"
+            class="mx-auto mb-3 max-w-4xl rounded-lg border border-error bg-error-container p-4 text-sm text-on-error-container"
+          >
+            <h2 class="font-semibold">This session needs recovery before it can start</h2>
+            <p class="mt-1">
+              These turns were registered but never reached the Runtime store, usually because they failed
+              during preparation. Sigma cannot prove they ran nothing. Discarding them lets the session
+              start; anything they did (files, commands) stays as is and is not reconciled.
+            </p>
+            <ul class="mt-2 list-inside list-disc font-mono text-xs">
+              <li :for={run <- @goal_recovery.runs}>{run.run_id}</li>
+            </ul>
+            <.dm_btn id="discard-unrecorded-runs" type="button" variant="error" size="sm" class="mt-3" phx-click="discard_unrecorded_runs">
+              Discard and reload
+            </.dm_btn>
+          </section>
           <div class="relative mx-auto max-w-4xl">
             <div :if={not @session_ready and is_nil(@session_load.failed)} class="mb-3 flex items-center gap-3 text-sm text-on-surface-variant">
               <.dm_loading_spinner size="sm" />
@@ -2768,6 +2796,30 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
+  def handle_event(
+        "discard_unrecorded_runs",
+        _params,
+        %{assigns: %{goal_recovery: recovery}} = socket
+      )
+      when is_map(recovery) do
+    run_ids = Enum.map(recovery.runs, & &1.run_id)
+
+    case Sigma.Agent.Backplane.GoalRecovery.discard_unrecorded(recovery.path, run_ids) do
+      {:ok, _discarded} ->
+        {:noreply,
+         push_navigate(socket,
+           to:
+             "/repository/#{socket.assigns.encoded_repository}/sessions/#{URI.encode(socket.assigns.session_id, &URI.char_unreserved?/1)}"
+         )}
+
+      {:error, error} ->
+        {:noreply,
+         put_flash(socket, :error, "Could not discard runs: #{format_load_error(error)}")}
+    end
+  end
+
+  def handle_event("discard_unrecorded_runs", _params, socket), do: {:noreply, socket}
+
   def handle_event("continue_session", %{"msg-id" => msg_id}, socket) do
     cond do
       not session_ready?(socket) ->
@@ -4465,6 +4517,7 @@ defmodule Sigma.Web.SessionLive do
     |> assign(:current_model_value, nil)
     |> assign(:model_options, [])
     |> assign(:model_unavailable, false)
+    |> assign(:goal_recovery, nil)
     |> assign(:context_token_count, nil)
     |> assign(:context_window, nil)
     |> assign(:context_limit, Sigma.Agent.ContextPolicy.default_context_limit())
@@ -4671,6 +4724,15 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp session_ready?(socket), do: Map.get(socket.assigns, :session_ready, false)
+
+  # Startup failed: if the session's Goal index names runs the Runtime Store never
+  # recorded, offer the explicit, user-confirmed discard instead of a dead end.
+  defp goal_recovery_error(reason, storage_path) do
+    case Sigma.Agent.Backplane.GoalRecovery.unrecorded_runs(storage_path) do
+      {:ok, [_ | _] = runs} -> {:goal_recovery, storage_path, runs}
+      _ -> reason
+    end
+  end
 
   defp format_load_error(reason) when is_binary(reason), do: reason
   defp format_load_error(reason), do: inspect(reason)
