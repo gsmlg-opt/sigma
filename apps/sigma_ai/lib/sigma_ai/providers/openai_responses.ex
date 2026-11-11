@@ -188,16 +188,13 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
                 headers: headers,
                 receive_timeout: options[:receive_timeout] || 120_000,
                 retry: Sigma.Ai.CreationRequest.retry_policy(options),
-                redirect: false,
-                max_retries: Keyword.get(options, :max_retries, 3),
-                into: :self
+                max_retries: Keyword.get(options, :max_retries, 3)
               ]
               |> maybe_put_opt(options, :retry_delay)
-              |> maybe_put_opt(options, :retry_log_level)
 
-            Req.post!(base_url <> "/responses", req_opts)
+            Sigma.Ai.HTTP.post_stream!(base_url <> "/responses", req_opts)
           rescue
-            e in [Req.TransportError, Finch.TransportError, Req.HTTPError] ->
+            e in [Sigma.Ai.HTTP.TransportError] ->
               reraise Sigma.Ai.CreationRequest.submission_error(e), __STACKTRACE__
           end
 
@@ -232,7 +229,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
           receive do
             {:cancel, ^cancellation_ref} when not is_nil(cancellation_ref) ->
               ResponsesCancellation.request(state.cancellation)
-              Req.cancel_async_response(resp)
+              Sigma.Ai.HTTP.cancel(resp)
               error = ResponsesCancellation.local_error(state.cancellation, state.recovery)
               {[{:provider_error, error}], {message, state, :done, resp}}
 
@@ -243,7 +240,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
               {processed_events, {new_message, new_state, status, resp}}
           after
             options[:receive_timeout] || 120_000 ->
-              Req.cancel_async_response(resp)
+              Sigma.Ai.HTTP.cancel(resp)
 
               if state.recovery do
                 {[], {message, state, :interrupted, resp}}
@@ -255,7 +252,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
       fn
         {_message, state, _status, resp} ->
           ResponsesCancellation.release(state.cancellation)
-          Req.cancel_async_response(resp)
+          Sigma.Ai.HTTP.cancel(resp)
       end
     )
   end
@@ -268,7 +265,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   end
 
   defp handle_async_message(resp, req_message, message, state) do
-    case Req.parse_message(resp, req_message) do
+    case Sigma.Ai.HTTP.parse_message(resp, req_message) do
       {:ok, chunks} ->
         if resp.status >= 300 do
           handle_error_chunks(resp, chunks, message, state)
@@ -397,7 +394,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   end
 
   defp reconnect(message, state, resp, base_url, headers, options) do
-    Req.cancel_async_response(resp)
+    Sigma.Ai.HTTP.cancel(resp)
 
     case ResponsesRecovery.next_attempt(state.recovery) do
       {:error, error} ->
@@ -432,13 +429,11 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
                   max(1, recovery.deadline - System.monotonic_time(:millisecond))
                 )
 
-              case Req.get(url,
+              case Sigma.Ai.HTTP.stream(
+                     url: url,
                      headers: headers,
                      params: [stream: true, starting_after: recovery.cursor],
-                     retry: false,
-                     redirect: false,
-                     receive_timeout: timeout,
-                     into: :self
+                     receive_timeout: timeout
                    ) do
                 {:ok, resumed} ->
                   # Only transport framing is reset. Reducer, Codec, Hosted and output

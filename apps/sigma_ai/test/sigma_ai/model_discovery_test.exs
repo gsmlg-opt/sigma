@@ -3,14 +3,11 @@ defmodule Sigma.Ai.ModelDiscoveryTest do
 
   alias Sigma.Ai.ModelDiscovery
 
-  defmodule Adapter do
-    def run(request), do: Process.get(:discovery_adapter).(request)
-  end
+  # Hermetic Sigma.Ai.HTTP transport: receives the normalized request.
+  defp request_options(adapter), do: [transport: adapter]
 
-  defp request_options(adapter) do
-    Process.put(:discovery_adapter, adapter)
-    [adapter: Adapter]
-  end
+  defp header(request, name),
+    do: for({key, value} <- request.headers, String.downcase(key) == name, do: value)
 
   test "OpenAI discovery uses the saved connection and normalizes unique descriptors" do
     config = %{
@@ -22,13 +19,11 @@ defmodule Sigma.Ai.ModelDiscoveryTest do
     }
 
     adapter = fn request ->
-      assert URI.to_string(request.url) == "https://models.example/v1/models"
-      assert Req.Request.get_header(request, "x-token") == ["test-key"]
-      assert Req.Request.get_header(request, "authorization") == []
+      assert request.url == "https://models.example/v1/models"
+      assert header(request, "x-token") == ["test-key"]
+      assert header(request, "authorization") == []
 
-      {request,
-       Req.Response.new(
-         status: 200,
+      {:ok, %{status: 200,
          body: %{
            "data" => [
              %{"id" => " alpha ", "name" => "Alpha", "context_window" => 128_000},
@@ -37,8 +32,7 @@ defmodule Sigma.Ai.ModelDiscoveryTest do
              %{"id" => ""},
              %{"bad" => true}
            ]
-         }
-       )}
+         }}}
     end
 
     assert {:ok, [alpha, %{"id" => "beta", "name" => "beta"}]} =
@@ -55,12 +49,12 @@ defmodule Sigma.Ai.ModelDiscoveryTest do
     }
 
     adapter = fn request ->
-      assert request.url.path == "/v1/models"
-      assert Req.Request.get_header(request, "x-api-key") == ["secret"]
-      assert Req.Request.get_header(request, "anthropic-version") == ["2023-06-01"]
+      assert URI.parse(request.url).path == "/v1/models"
+      assert header(request, "x-api-key") == ["secret"]
+      assert header(request, "anthropic-version") == ["2023-06-01"]
 
       body =
-        case URI.decode_query(request.url.query || "") do
+        case URI.decode_query(URI.parse(request.url).query || "") do
           %{"after_id" => "a"} ->
             %{"data" => [%{"id" => "b", "display_name" => "Model B"}], "has_more" => false}
 
@@ -68,7 +62,7 @@ defmodule Sigma.Ai.ModelDiscoveryTest do
             %{"data" => [%{"id" => "a"}], "has_more" => true, "last_id" => "a"}
         end
 
-      {request, Req.Response.new(status: 200, body: body)}
+      {:ok, %{status: 200, body: body}}
     end
 
     assert {:ok, [%{"id" => "a", "name" => "a"}, %{"id" => "b", "name" => "Model B"}]} =
@@ -77,9 +71,9 @@ defmodule Sigma.Ai.ModelDiscoveryTest do
 
   test "keyless connections send no credential header and empty discovery succeeds" do
     adapter = fn request ->
-      assert Req.Request.get_header(request, "authorization") == []
-      assert Req.Request.get_header(request, "x-api-key") == []
-      {request, Req.Response.new(status: 200, body: %{"data" => []})}
+      assert header(request, "authorization") == []
+      assert header(request, "x-api-key") == []
+      {:ok, %{status: 200, body: %{"data" => []}}}
     end
 
     assert {:ok, []} = ModelDiscovery.discover(openai_config(), request_options(adapter))
@@ -93,30 +87,27 @@ defmodule Sigma.Ai.ModelDiscoveryTest do
           {503, :unavailable}
         ] do
       adapter = fn request ->
-        {request, Req.Response.new(status: status, body: %{"error" => "secret"})}
+        {:ok, %{status: status, body: %{"error" => "secret"}}}
       end
 
       assert {:error, ^error} = ModelDiscovery.discover(openai_config(), request_options(adapter))
     end
 
-    adapter = fn request -> {request, %Req.TransportError{reason: :timeout}} end
+    adapter = fn request -> {:error, :timeout} end
     assert {:error, :timeout} = ModelDiscovery.discover(openai_config(), request_options(adapter))
   end
 
   test "invalid payloads and incomplete pagination cannot masquerade as complete discovery" do
     for body <- [%{}, %{"data" => "bad"}, %{"data" => [%{"id" => "a"}], "has_more" => true}] do
-      adapter = fn request -> {request, Req.Response.new(status: 200, body: body)} end
+      adapter = fn request -> {:ok, %{status: 200, body: body}} end
 
       assert {:error, :invalid_response} =
                ModelDiscovery.discover(openai_config(), request_options(adapter))
     end
 
     adapter = fn request ->
-      {request,
-       Req.Response.new(
-         status: 200,
-         body: %{"data" => [%{"id" => "a"}], "has_more" => true, "last_id" => "a"}
-       )}
+      {:ok, %{status: 200,
+         body: %{"data" => [%{"id" => "a"}], "has_more" => true, "last_id" => "a"}}}
     end
 
     assert {:error, :invalid_response} =

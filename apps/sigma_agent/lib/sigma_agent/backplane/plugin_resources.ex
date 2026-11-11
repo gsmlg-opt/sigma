@@ -469,15 +469,13 @@ defmodule Sigma.Agent.Backplane.PluginResources do
   end
 
   defp transport(request) do
-    case Req.request(
+    case Sigma.Ai.HTTP.request(
            method: request.method,
            url: request.url,
            headers: request.headers,
            body: request.body,
-           decode_body: false,
-           receive_timeout: 30_000,
-           retry: false,
-           redirect: false
+           decode_json: false,
+           receive_timeout: 30_000
          ) do
       {:ok, response} -> {:ok, %{status: response.status, body: response.body}}
       {:error, _} = error -> error

@@ -233,11 +233,11 @@ defmodule Sigma.Ai.ResponsesCancellation do
   defp cancel_http(entry) do
     url = entry.url <> "/responses/" <> URI.encode(entry.id, &URI.char_unreserved?/1) <> "/cancel"
 
-    case Req.post(url,
+    case Sigma.Ai.HTTP.request(
+           method: :post,
+           url: url,
            headers: entry.headers,
            json: %{},
-           retry: false,
-           redirect: false,
            receive_timeout: entry.timeout
          ) do
       {:ok, %{status: status, body: %{"id" => id, "status" => result}}}

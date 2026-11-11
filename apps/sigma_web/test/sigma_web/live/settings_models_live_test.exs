@@ -76,12 +76,11 @@ defmodule Sigma.Web.SettingsModelsLiveTest do
     owner = self()
 
     Application.put_env(:sigma_web, :model_discovery_options,
-      plug: fn conn ->
+      transport: fn _request ->
         send(owner, :discovery_requested)
 
-        Req.Test.json(conn, %{
-          "data" => [%{"id" => "alpha"}, %{"id" => "beta"}, %{"id" => "gamma"}]
-        })
+        {:ok,
+         %{status: 200, body: %{"data" => [%{"id" => "alpha"}, %{"id" => "beta"}, %{"id" => "gamma"}]}}}
       end
     )
 
@@ -113,7 +112,7 @@ defmodule Sigma.Web.SettingsModelsLiveTest do
     {:ok, _} = Models.add(pid, [%{"id" => "kept"}])
 
     Application.put_env(:sigma_web, :model_discovery_options,
-      plug: fn conn -> Plug.Conn.send_resp(conn, 401, "secret-token") end
+      transport: fn _request -> {:ok, %{status: 401, body: "secret-token"}} end
     )
 
     {:ok, view, _} = live(conn, "/settings/models")
@@ -129,11 +128,11 @@ defmodule Sigma.Web.SettingsModelsLiveTest do
     owner = self()
 
     Application.put_env(:sigma_web, :model_discovery_options,
-      plug: fn conn ->
+      transport: fn _request ->
         send(owner, {:discovery_started, self()})
 
         receive do
-          :finish -> Req.Test.json(conn, %{"data" => [%{"id" => "stale"}]})
+          :finish -> {:ok, %{status: 200, body: %{"data" => [%{"id" => "stale"}]}}}
         end
       end
     )

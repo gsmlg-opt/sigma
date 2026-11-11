@@ -61,14 +61,12 @@ defmodule Sigma.Ai.ModelDiscovery do
       Keyword.merge(opts,
         url: url,
         headers: headers,
-        params: params,
-        retry: false,
-        redirect: false
+        params: params
       )
 
     options = Keyword.put_new(options, :receive_timeout, 15_000)
 
-    case Req.get(options) do
+    case Sigma.Ai.HTTP.request(options) do
       {:ok, %{status: 200, body: %{"data" => data} = body}} when is_list(data) ->
         models = models ++ Enum.flat_map(data, &descriptor/1)
 
@@ -104,7 +102,7 @@ defmodule Sigma.Ai.ModelDiscovery do
       {:ok, _response} ->
         {:error, :unavailable}
 
-      {:error, %Req.TransportError{reason: :timeout}} ->
+      {:error, %Sigma.Ai.HTTP.TransportError{reason: reason}} when reason in [:timeout, :read_idle_timeout, :connect_timeout] ->
         {:error, :timeout}
 
       {:error, _reason} ->

@@ -20,7 +20,7 @@ defmodule Sigma.Ai.CreationRequest do
     if Keyword.get(options, :retry) == false, do: false, else: &safe_retry?/2
   end
 
-  def safe_retry?(_request, %Req.TransportError{reason: reason})
+  def safe_retry?(_request, %Sigma.Ai.HTTP.TransportError{reason: reason})
       when reason in [:econnrefused, :nxdomain],
       do: true
 

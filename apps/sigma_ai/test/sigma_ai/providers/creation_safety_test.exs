@@ -9,16 +9,16 @@ defmodule Sigma.Ai.Providers.CreationSafetyTest do
       policy = CreationRequest.retry_policy(retry: option)
 
       for reason <- [:econnrefused, :nxdomain] do
-        assert policy.(nil, %Req.TransportError{reason: reason})
+        assert policy.(nil, %Sigma.Ai.HTTP.TransportError{reason: reason})
         assert CreationRequest.submission_error(%{reason: reason}).retryable
       end
 
       for reason <- [:timeout, :closed, :econnreset] do
-        refute policy.(nil, %Req.TransportError{reason: reason})
+        refute policy.(nil, %Sigma.Ai.HTTP.TransportError{reason: reason})
       end
 
       for status <- [408, 429, 500, 502, 503, 504] do
-        refute policy.(nil, %Req.Response{status: status})
+        refute policy.(nil, %{status: status})
       end
     end
 

@@ -191,16 +191,13 @@ defmodule Sigma.Ai.Providers.Anthropic do
                 headers: headers,
                 receive_timeout: options[:receive_timeout] || 120_000,
                 retry: Sigma.Ai.CreationRequest.retry_policy(options),
-                redirect: false,
-                max_retries: Keyword.get(options, :max_retries, 3),
-                into: :self
+                max_retries: Keyword.get(options, :max_retries, 3)
               ]
               |> maybe_put_opt(options, :retry_delay)
-              |> maybe_put_opt(options, :retry_log_level)
 
-            Req.post!(base_url <> "/v1/messages", req_opts)
+            Sigma.Ai.HTTP.post_stream!(base_url <> "/v1/messages", req_opts)
           rescue
-            e in [Req.TransportError, Finch.TransportError, Req.HTTPError] ->
+            e in [Sigma.Ai.HTTP.TransportError] ->
               reraise Sigma.Ai.CreationRequest.submission_error(e), __STACKTRACE__
           end
 
@@ -215,7 +212,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
 
           receive do
             {:cancel, ^cancellation_ref} when not is_nil(cancellation_ref) ->
-              Req.cancel_async_response(resp)
+              Sigma.Ai.HTTP.cancel(resp)
               error = ProviderError.from_reason(:cancelled)
               {[{:provider_error, error}], {message, buffer, :done, resp}}
 
@@ -226,12 +223,12 @@ defmodule Sigma.Ai.Providers.Anthropic do
               {processed_events, {new_message, new_buffer, status, resp}}
           after
             options[:receive_timeout] || 120_000 ->
-              Req.cancel_async_response(resp)
+              Sigma.Ai.HTTP.cancel(resp)
               raise Sigma.Ai.CreationRequest.interrupted(:timeout, message[:response_id])
           end
       end,
       fn
-        {_message, _buffer, :streaming, resp} -> Req.cancel_async_response(resp)
+        {_message, _buffer, :streaming, resp} -> Sigma.Ai.HTTP.cancel(resp)
         _ -> :ok
       end
     )
@@ -245,7 +242,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
   end
 
   defp handle_async_message(resp, req_message, message, buffer) do
-    case Req.parse_message(resp, req_message) do
+    case Sigma.Ai.HTTP.parse_message(resp, req_message) do
       {:ok, chunks} ->
         if resp.status >= 300 do
           handle_error_chunks(resp, chunks, message, buffer)
