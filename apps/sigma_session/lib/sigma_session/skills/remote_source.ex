@@ -29,6 +29,8 @@ defmodule Sigma.Session.Skills.RemoteSource do
         :cancelled?
       ])
 
+    client_opts = Keyword.put_new(client_opts, :transport, Sigma.Session.Skills.HTTPTransport)
+
     with {:ok, client} <- Client.new(client_opts),
          {:ok, source} <- Backplane.new(client) do
       agent_dir = Keyword.get(opts, :agent_dir, ConfigManager.agent_dir())
