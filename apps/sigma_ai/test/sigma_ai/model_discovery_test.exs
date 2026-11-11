@@ -86,26 +86,26 @@ defmodule Sigma.Ai.ModelDiscoveryTest do
           {404, :unsupported},
           {503, :unavailable}
         ] do
-      adapter = fn request ->
+      adapter = fn _request ->
         {:ok, %{status: status, body: %{"error" => "secret"}}}
       end
 
       assert {:error, ^error} = ModelDiscovery.discover(openai_config(), request_options(adapter))
     end
 
-    adapter = fn request -> {:error, :timeout} end
+    adapter = fn _request -> {:error, :timeout} end
     assert {:error, :timeout} = ModelDiscovery.discover(openai_config(), request_options(adapter))
   end
 
   test "invalid payloads and incomplete pagination cannot masquerade as complete discovery" do
     for body <- [%{}, %{"data" => "bad"}, %{"data" => [%{"id" => "a"}], "has_more" => true}] do
-      adapter = fn request -> {:ok, %{status: 200, body: body}} end
+      adapter = fn _request -> {:ok, %{status: 200, body: body}} end
 
       assert {:error, :invalid_response} =
                ModelDiscovery.discover(openai_config(), request_options(adapter))
     end
 
-    adapter = fn request ->
+    adapter = fn _request ->
       {:ok, %{status: 200,
          body: %{"data" => [%{"id" => "a"}], "has_more" => true, "last_id" => "a"}}}
     end

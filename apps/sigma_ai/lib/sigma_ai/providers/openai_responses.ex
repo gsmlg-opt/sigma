@@ -1062,11 +1062,6 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     end)
   end
 
-  defp complete_response(acc, response, :ordinary) do
-    {events, acc} = ordinary_complete_response(acc, response)
-    {events, acc, :ordinary}
-  end
-
   defp complete_response(acc, response, codec) do
     {text_events, acc} = maybe_extract_response_output_text(acc, response)
     {tool_events, acc, codec} = finalize_response_tools(acc, codec, response["output"])

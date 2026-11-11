@@ -194,11 +194,6 @@ defmodule Sigma.Agent.Backplane.ToolPostHooks do
 
       {:error, %Error{message: message}} ->
         warning("native PostToolUse context sink failed: #{message}; native result retained")
-
-      _ ->
-        warning(
-          "native PostToolUse context sink returned an invalid result; native result retained"
-        )
     end
   end
 
