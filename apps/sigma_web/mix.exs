@@ -36,6 +36,8 @@ defmodule Sigma.Web.MixProject do
       {:jason, "~> 1.4"},
       {:gaoxy_http, "~> 0.12"},
       {:websock_adapter, "~> 0.12", hex: :gaoxy_websock_adapter, override: true},
+      {:samgita_protocol, "~> 0.4.0"},
+      {:samgita_protocol_websocket, "~> 0.4.0"},
       {:gettext, "~> 1.0"},
       {:duskmoon_bundler, "~> 10.0"},
       {:phoenix_duskmoon, "~> 10.0"},
