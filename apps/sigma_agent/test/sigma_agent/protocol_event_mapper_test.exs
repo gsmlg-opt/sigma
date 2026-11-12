@@ -4,6 +4,27 @@ defmodule Sigma.Agent.ProtocolEventMapperTest do
   alias Sigma.Agent.ProtocolEventMapper
   alias Sigma.Protocol.{Codec, Envelope}
 
+  test "message.delta carries deltaKind per provider delta" do
+    msg = Sigma.Agent.Message.assistant("delta-message", %{content: [], timestamp: 1})
+
+    kinds =
+      for {delta, text} <- [
+            {{:text_delta, 0, "a", msg}, "a"},
+            {{:thinking_delta, 0, "b", msg}, "b"},
+            {{:toolcall_delta, 0, "c", msg}, "c"},
+            {"d", "d"}
+          ] do
+        {event, "turn"} = ProtocolEventMapper.map({:message_update, msg, delta}, "session", "turn")
+        assert event.payload["delta"] == text
+        event.payload["deltaKind"]
+      end
+
+    assert kinds == ["text", "thinking", "toolcall", "text"]
+
+    {event, "turn"} = ProtocolEventMapper.map({:message_update, msg, :other}, "session", "turn")
+    assert event.payload == %{"messageId" => "delta-message", "delta" => ""}
+  end
+
   test "native question tool calls retain complete options in message events" do
     arguments = %{
       "questions" => [

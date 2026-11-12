@@ -95,7 +95,10 @@ defmodule Sigma.Agent.ProtocolEventMapper do
     event(
       "message.delta",
       session_id,
-      %{"messageId" => message.id, "delta" => public_delta(delta)},
+      Map.merge(
+        %{"messageId" => message.id, "delta" => public_delta(delta)},
+        delta_kind(delta)
+      ),
       turn_id
     )
   end
@@ -600,6 +603,12 @@ defmodule Sigma.Agent.ProtocolEventMapper do
       {:error, _reason} -> {nil, turn_id}
     end
   end
+
+  defp delta_kind({:text_delta, _index, _delta, _message}), do: %{"deltaKind" => "text"}
+  defp delta_kind({:thinking_delta, _index, _delta, _message}), do: %{"deltaKind" => "thinking"}
+  defp delta_kind({:toolcall_delta, _index, _delta, _message}), do: %{"deltaKind" => "toolcall"}
+  defp delta_kind(delta) when is_binary(delta), do: %{"deltaKind" => "text"}
+  defp delta_kind(_delta), do: %{}
 
   defp public_delta({:text_delta, _index, delta, _message}), do: bounded_text(delta)
   defp public_delta({:thinking_delta, _index, delta, _message}), do: bounded_text(delta)

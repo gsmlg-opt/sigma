@@ -383,6 +383,13 @@ accepts the same options: `Sigma.Agent.prompt/3` and `steer/3` take
 `admission: :reject_if_busy` and `expected_turn_id:`, and `Sigma.Agent.cancel/2`
 takes `expected_turn_id:`.
 
+## Message deltas
+
+`message.delta` payloads are `{messageId, delta, deltaKind}`. `deltaKind` is
+`text`, `thinking` or `toolcall`; a bare string delta is `text`. Unrecognized
+provider deltas carry `delta: ""` and no `deltaKind`. The field is additive;
+clients that ignore it keep working.
+
 ## Direct Elixir API
 
 Build a command with `Sigma.Protocol.Envelope.command/4` and pass it to
