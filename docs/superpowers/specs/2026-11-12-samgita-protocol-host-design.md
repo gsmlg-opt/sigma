@@ -1,6 +1,6 @@
 # Sigma 作为 samgita_protocol host（子项目 1：会话面）
 
-- Status: Draft
+- Status: Implemented（2026-11-12；§4/§5.3/§5.5 已按实现更新）
 - Date: 2026-11-12
 - 上游参考：`../Samgita/apps/samgita_protocol`（0.4.0，wire schema 1.0）、
   `../Samgita/apps/samgita_protocol_websocket`、`../Samgita/docs/redesign/protocol-phase-2.md`、
@@ -94,11 +94,11 @@ Synapsis ──WS /app-server──▶ SamgitaProtocolWebSocket.Socket (每连�
 | `Sigma.Web.SamgitaHost.Handler` | 实现 `SamgitaProtocol.Handler`；`capabilities/0` 返回三组；`methods/0` 精确等于三组请求方法；`handle_request/4` 只做参数→Envelope 翻译与结果映射 |
 | `Sigma.Web.SamgitaHost.Translate` | 纯函数：Sigma Envelope 事件 → 原生通知 map；Sigma 错误 → `SamgitaProtocol.Error` |
 | `Sigma.Web.SamgitaHost.ThreadStream` | 每 thread 的 GenServer，`DynamicSupervisor` + `Registry` 管理；持有 Replay log 与挂接连接集合（监控 Socket pid） |
-| `Sigma.Web.SamgitaHost.Commands` | 每 thread 有界的 `command_id → {params_hash, result}` 表（放在 ThreadStream 状态里即可） |
+| `Sigma.Web.SamgitaHost.Commands` | 全局有界（1024 条，FIFO 淘汰）`command_id → {fingerprint, result}` 表，独立 GenServer；fingerprint = `{method, params}` |
 
 Socket 的 `handler_state` 用 principal 函数构造，在 Socket 进程内执行，因此 `self()` 即
 Socket pid，Handler 用它向 ThreadStream 挂接。Socket 进程退出由 ThreadStream 的 monitor
-清理；ThreadStream 在 Sigma 会话 runtime 结束且无挂接连接时退出。
+清理；ThreadStream 在会话 Agent 进程退出时停止（并卸订阅），无挂接连接且无运行 turn 时空闲超时退出。
 
 ## 5. 协议映射
 
@@ -137,9 +137,19 @@ Socket pid，Handler 用它向 ThreadStream 挂接。Socket 进程退出由 Thre
 
 - Replay 保留上限按 turn 设为较大值（`Replay.new/2` 允许 ≤10_000；具体值实施时定），
   分页仍是 128 条。
+- Replay 保留上限：每 turn 4096 条，每 thread 保留最近 8 个 turn 的 log。
 - `thread/read` / `thread/resume` 的 `thread` 快照携带 `active_stream: {stream_id, cursor}`
-  （无运行 turn 时为 null）。晚加入或重连的客户端先 `stream/resume(stream_id, 0)` 追上，
-  再接收实时通知；超出保留则得到 `replay_gap`，改用快照。
+  （无运行 turn 时为 null；`thread/read` 只对本连接已跟随的 thread 给出）。
+- **晚加入 / 重连（按实现）**：backlog 由 host 推送，不要求客户端 `stream/resume(…, 0)`。连接经
+  `thread/start` / `thread/resume` 挂接 ThreadStream 时，ThreadStream 在挂接调用内先把活跃 turn 的
+  保留 backlog（从 cursor 1 起）发给 Socket，再发实时通知；`active_stream.cursor` 是 backlog 末尾。
+  若该 turn 的 cursor 1 已不在保留窗内，本连接跳过这个 turn（`active_stream` 为 null），从下一个 turn
+  开始接收——上游 Client 对 `cursor > seen + 1` 判 `replay_gap`，不能从中途开始。
+- **订阅丢失毒化 turn**：订阅出现 `resync_required` 或 cursor 不连续时，受影响 turn 停止扇出、丢弃其
+  log 并不再是活跃 turn；之后对它 `stream/resume` 得 `replay_gap`，客户端改用 `thread/read` 快照。
+  已结束 turn 的迟到事件被丢弃。
+- Sigma 先发用户消息的 `item/started` / `item/completed` 再发 `turn/started`，因此 turn 流 cursor 1
+  通常是用户 item；loopback 测试证明上游 `SamgitaProtocolWebSocket.Client` 完整接受该流，无 `replay_gap`。
 
 | Sigma 事件 | 原生通知 |
 | --- | --- |
@@ -153,8 +163,9 @@ delta 合并进同一 `message.delta` 字符串（`protocol_event_mapper.ex:600-
 `message.delta` payload **增量添加** `deltaKind`（`text` / `thinking` / `toolcall`），现有
 Protocol V1 客户端忽略未知字段即可；host 只把 `text` 转为 `item/delta`。
 
-**能力组要求（我的决定，上游缺口）**：Handler 看不到协商结果，而 WS Socket 会以 1008 关闭发送
-未协商组通知的连接（`samgita_protocol_websocket/.../socket.ex:70-79`）。因此本 host 要求客户端
+**能力组要求（我的决定，上游缺口）**：Handler 看不到协商结果，而 WS Socket（0.4.0）会以 1008 关闭发送
+未协商组通知的连接（`samgita_protocol_websocket/.../socket.ex:70-79`）；0.4.1 起改为丢弃该通知，并在
+handler context 暴露 `"capabilities"`。因此本 host 要求客户端
 同时提供三组；只提供 `sessions.v1` 的客户端会在首个 `item/*` 时被断开。按
 `upstream-issue-routing` 已提 [gsmlg-opt/Samgita#1](https://github.com/gsmlg-opt/Samgita/issues/1)，分类为 `needed`；
 文档化的客户端要求就是临时约定，不在本地绕过，issue 解决后移除该要求。
@@ -170,8 +181,11 @@ Sigma `{:error, reason}` → `SamgitaProtocol.Error`：会话不存在 → `not_
 
 ### 5.5 幂等与持久性（我的决定）
 
-- 状态变更请求的 `command_id` 在 ThreadStream 内做有界内存去重：同 id 同参数 → 返回原结果；
-  同 id 不同参数 → `conflict`。`thread/start` 尚无 thread，用 host 级有界表。
+- 状态变更请求的 `command_id` 在全局有界内存表 `Commands`（1024 条，FIFO 淘汰）中去重，不按
+  ThreadStream 划分（`thread/start` 也走同一表）：同 id 同参数 → 返回原结果，不重复执行；同 id
+  不同参数或仍在执行 → `conflict`；执行失败或抛出的 id 被释放，可重试。
+- ThreadStream 在会话 Agent 退出时停止；之后 `thread/resume` 会起一个新的 ThreadStream（旧 turn 的
+  replay 随之丢失）。
 - Replay log 在内存、有界（保留条数待实现时取默认值并写入测试）。Sigma 重启后 stream 历史丢失，
   `stream/resume` 返回 `replay_gap`，客户端应改用 `thread/read` 拿快照——与恢复不变量一致
   （不重放 Provider 调用或工具效果，不伪造结果）。

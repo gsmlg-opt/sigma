@@ -2,7 +2,7 @@
 
 - Status: **Active**（S9 Phase 1 WO-5）
 - Date: 2026-09-04
-- Updated: 2026-09-09（Session UI Observability V2）
+- Updated: 2026-09-09（Session UI Observability V2）；2026-11-12（§8.1 samgita_protocol host）
 - Depends on: [protocol-v1.md](protocol-v1.md)、`Sigma.Agent.PublicRuntime`、`Sigma.Protocol.Envelope`
 - Related: [S9 Phase 1 plan](s9-phase1-plan.md) WO-5、[ADR 0002](../adr/0002-beam-extension-sdk.md)、[providers playbook](../features/providers.md)
 
@@ -215,8 +215,64 @@ Retry/Fork 使用 `operationId`（省略时取 command envelope ID）实现幂�
 | 直接 Elixir | `PublicRuntime.execute/2` | Synapsis 同节点 OTP 首选 |
 | JSON Lines | `Sigma.Agent.Stdio.run/3` | 每行一条编码命令；EOF 不断 turn |
 | WebSocket | `/agent/websocket` → `session:<id>` | `repository` + `token`（`SIGMA_PROTOCOL_TOKEN` ≥32B）；`command` / `event` 通道 |
+| samgita_protocol 1.0 | `GET /app-server` | 原生 thread/turn/item 协议，见 §8.1 |
 
 远程客户端：编码信封进运输层，逻辑仍等价于 PublicRuntime。同 BEAM 节点优先直接 Elixir，避免多余编解码。
+
+### 8.1 samgita_protocol host（`/app-server`）
+
+Sigma 在现有 Phoenix endpoint 上以 samgita_protocol 1.0 暴露会话面，供 Synapsis / Samgita
+像驱动 Codex app-server 一样驱动 Sigma。设计见
+[samgita-protocol-host-design](../superpowers/specs/2026-11-12-samgita-protocol-host-design.md)。
+实现：`Sigma.Web.SamgitaHost.{EndpointPlug, Handler, ThreadStream, Translate, Commands, ThreadId}`；
+所有请求仍只经 `PublicRuntime.execute/2`。
+
+**端点与认证**：`ws://127.0.0.1:4580/app-server`（路径精确匹配、query 为空），
+`Authorization: Bearer <SIGMA_PROTOCOL_TOKEN>`（与 `/agent` 同一 token，≥32B；未配置即 401）。
+在 endpoint 层于 `Plug.Static` / Router 之前挂载，不另起监听。
+
+**能力组**：`sessions.v1`、`streaming.v1`、`cancellation.v1`（不声明 `approvals.v1`，Sigma 保持 YOLO 默认）。
+**客户端必须在 `connection/initialize` 中同时提供这三组**：Socket 会丢弃（0.4.1 之前为 1008 断开）
+未协商组的通知，只提供 `sessions.v1` 的客户端收不到 `item/*`。该要求是
+[gsmlg-opt/Samgita#1](https://github.com/gsmlg-opt/Samgita/issues/1) 的临时约定；上游已向 handler 暴露
+协商组（samgita_protocol 0.4.1），host 按协商组过滤通知后即可移除。
+
+**thread_id**：`<base64url-无填充(已注册仓库绝对路径)>.<session_id>`，与路由 `:repository` 同一编码；
+UI / Protocol V1 创建的会话可直接拼出。解析失败、仓库未注册、会话 journal 不存在 → `not_found`。
+
+| 请求 | Sigma 命令 | 结果 |
+| --- | --- | --- |
+| `thread/start`（`metadata.repository` 必填，`title?`） | `session.create`（`cwd` = 仓库；其余 metadata + `title` 写入会话 metadata；`metadata.provider_id` / `model_id` 覆盖默认模型） | `thread_id`、`thread`；随后发非回放通知 `thread/started`；本连接开始跟随该 thread。未注册仓库 → `invalid_params` |
+| `thread/read` | `session.status` | `thread` = `{turn, runtime, message_count, active_stream}`；`active_stream` 只对本连接跟随的 thread 给出，否则 `null` |
+| `thread/resume` | `session.resume` + `session.status` | 同上；确保 ThreadStream 并跟随（推送活跃 turn 的 backlog） |
+| `turn/start` | `prompt.submit`，`admission: "reject_if_busy"`，input 文本以 `\n\n` 连接 | `turn_id`、`status: "running"`；已有运行 turn → `conflict` |
+| `turn/steer` | `prompt.steer`，`expectedTurnId` | 同上；turn 不符或无运行 turn → `conflict` |
+| `turn/interrupt` | `turn.cancel`，`expectedTurnId` | `cancelling` / `already_cancelling` → `requested`；同一 turn `already_cancelled` → `interrupted`；`no_active_turn` 或其他 turn 已取消 → `already_finished`；`turn_mismatch` → `conflict` |
+| `stream/resume` | 无（读本连接跟随 thread 的 Replay） | `{stream_id, cursor, events}`（≤128 条/页）；未知或已丢弃的流 → `replay_gap` |
+| `request/cancel` | 无 | Server 按连接串行处理，被引用请求必已结束：本连接最近 128 个已完成请求 id → `already_finished`，否则 `not_found` |
+
+| Sigma 事件 | 原生通知（`stream_id` = turn_id，cursor 从 1 起） |
+| --- | --- |
+| `turn.started` | `turn/started` |
+| `turn.completed` / `turn.failed` / `turn.cancelled` | `turn/completed`，`status` = `completed` / `failed` / `interrupted` |
+| `message.started` / `message.completed` | `item/started` / `item/completed`（`item.type = "message"`） |
+| `message.delta`（仅 `deltaKind: "text"`） | `item/delta` |
+| `tool.started` / `tool.completed` | `item/started` / `item/completed`（`item.type = "tool"`） |
+
+用户消息的 item 早于 `turn/started` 发出，因此 turn 流的 cursor 1 通常是用户 item。
+
+**晚加入与重连**：连接经 `thread/start` / `thread/resume` 跟随 thread 时，host 在挂接调用内先推送活跃
+turn 的保留 backlog（cursor 1 起），再推实时通知；`active_stream` 给出 backlog 末尾 cursor。若该 turn
+的 cursor 1 已不在保留窗内，本连接跳过该 turn，从下一个 turn 开始接收。订阅事件丢失（`resync_required`
+或订阅 cursor 不连续）会毒化受影响 turn：停止扇出、丢弃其 log（`stream/resume` → `replay_gap`），客户端改用
+`thread/read` 快照。
+
+**幂等与限制**：
+- 所有变更请求先按 `command_id` 进入全局有界内存表（1024 条，FIFO 淘汰）：同 id 同参数 → 返回原结果，
+  不重复执行；同 id 不同参数 → `conflict`；执行失败的 id 被释放，可重试。
+- Replay 只在内存：每 turn ≤4096 条，每 thread 保留最近 8 个 turn。Sigma 重启后 `command_id` 表与流历史
+  丢失，`stream/resume` 得 `replay_gap`；恢复不变量不变（不重放 Provider 调用或工具效果）。
+- ThreadStream 在会话 Agent 退出时停止；无挂接连接且无运行 turn 时空闲超时退出。连接断开不取消 turn。
 
 ---
 

@@ -16,6 +16,8 @@ defmodule Sigma.Web.Endpoint do
     websocket: [max_frame_size: 1024 * 1024],
     longpoll: false
 
+  plug Sigma.Web.SamgitaHost.EndpointPlug
+
   plug Plug.Static,
     at: "/",
     from: :sigma_web,
