@@ -7,6 +7,7 @@ defmodule Sigma.Web.Application do
     children = [
       %{id: Sigma.Session.ConfigEvents, start: {:pg, :start_link, [Sigma.Session.ConfigEvents]}},
       {Phoenix.PubSub, name: Sigma.Web.PubSub},
+      Sigma.Web.SamgitaHost.Commands,
       Sigma.Web.Endpoint
     ]
 
