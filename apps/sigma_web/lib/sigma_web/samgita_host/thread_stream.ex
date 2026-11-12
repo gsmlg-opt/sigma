@@ -12,8 +12,13 @@ defmodule Sigma.Web.SamgitaHost.ThreadStream do
   the same call, before any live notification. If that log no longer holds
   cursor 1 the socket skips the active turn and starts at the next one.
 
-  The stream exits (detaching its subscription) after `idle_timeout` with no
-  attached sockets and no running turn.
+  Events of a turn that already completed are dropped. When the subscription
+  reports or reveals event loss (a `resync_required` marker or a non-contiguous
+  subscription cursor), the affected turn is poisoned: it stops fanning out, its
+  log is discarded so `resume/3` answers `replay_gap`, and it is no longer active.
+
+  The stream exits (detaching its subscription) when the session agent exits,
+  or after `idle_timeout` with no attached sockets and no running turn.
   """
   use GenServer
 
@@ -29,6 +34,7 @@ defmodule Sigma.Web.SamgitaHost.ThreadStream do
   @supervisor Sigma.Web.SamgitaHost.ThreadStreams
   @replay_limit 4096
   @retained_turns 8
+  @closed_turns 32
   @idle_timeout 300_000
 
   @type active_stream :: nil | %{String.t() => String.t() | non_neg_integer()}
@@ -97,13 +103,17 @@ defmodule Sigma.Web.SamgitaHost.ThreadStream do
     with {:ok, scope} <- ThreadId.decode(thread_id),
          context = context(scope),
          {:ok, command} <- Envelope.command("subscription.attach", scope.session_id, %{}),
-         {:ok, %Envelope{payload: %{"subscriptionId" => subscription_id}}} <-
-           PublicRuntime.execute(command, context) do
+         {:ok, %Envelope{payload: %{"subscriptionId" => subscription_id} = ack}} <-
+           PublicRuntime.execute(command, context),
+         {:ok, agent_ref} <- monitor_agent(scope, context, subscription_id) do
       state = %{
         thread_id: thread_id,
         session_id: scope.session_id,
         context: context,
         subscription_id: subscription_id,
+        agent_ref: agent_ref,
+        next_cursor: next_cursor(ack["cursor"]),
+        closed: [],
         replay_limit: Keyword.get(opts, :replay_limit, @replay_limit),
         idle_timeout: Keyword.get(opts, :idle_timeout, @idle_timeout),
         idle_timer: nil,
@@ -143,7 +153,12 @@ defmodule Sigma.Web.SamgitaHost.ThreadStream do
 
   @impl true
   def handle_info({:sigma_protocol, id, %Envelope{} = event}, %{subscription_id: id} = state),
-    do: {:noreply, state |> publish(event) |> schedule_idle()}
+    do: {:noreply, state |> check_continuity(event) |> publish(event) |> schedule_idle()}
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{agent_ref: ref} = state) do
+    detach(state)
+    {:stop, :normal, state}
+  end
 
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
     {:noreply, schedule_idle(%{state | sockets: Map.delete(state.sockets, pid)})}
@@ -172,6 +187,18 @@ defmodule Sigma.Web.SamgitaHost.ThreadStream do
     )
   end
 
+  defp monitor_agent(scope, context, subscription_id) do
+    case Sigma.Agent.Runtime.lookup(scope.repo_path, scope.session_id, :agent) do
+      agent when is_pid(agent) ->
+        {:ok, Process.monitor(agent)}
+
+      nil ->
+        detach(%{session_id: scope.session_id, subscription_id: subscription_id, context: context})
+        {:error, :not_found}
+    end
+  end
+
+  # Best effort: the subscription also stops on its own once this process exits.
   defp detach(state) do
     {:ok, command} =
       Envelope.command("subscription.detach", state.session_id, %{
@@ -179,6 +206,64 @@ defmodule Sigma.Web.SamgitaHost.ThreadStream do
       })
 
     PublicRuntime.execute(command, state.context)
+  end
+
+  defp next_cursor(cursor) when is_integer(cursor), do: cursor + 1
+  defp next_cursor(_cursor), do: nil
+
+  # Every delivered subscription event carries a contiguous `payload["cursor"]`,
+  # including events Translate skips; a gap or a resync marker means events were dropped.
+  defp check_continuity(state, %Envelope{payload: payload} = event) do
+    cursor = payload["cursor"]
+
+    lost? =
+      resync_marker?(event) or
+        (is_integer(cursor) and is_integer(state.next_cursor) and cursor != state.next_cursor)
+
+    state = if is_integer(cursor), do: %{state | next_cursor: cursor + 1}, else: state
+
+    if lost? do
+      Logger.warning("samgita thread stream lost subscription events; poisoning the affected turn")
+
+      [state.active, event.turn_id]
+      |> Enum.filter(&is_binary/1)
+      |> Enum.uniq()
+      |> Enum.reduce(state, &poison(&2, &1))
+    else
+      state
+    end
+  end
+
+  defp resync_marker?(%Envelope{type: "session.error", error: %{code: "resync_required"}}),
+    do: true
+
+  defp resync_marker?(_event), do: false
+
+  defp poison(state, turn_id) do
+    if turn_id in state.closed do
+      state
+    else
+      state
+      |> close(turn_id)
+      |> Map.update!(:logs, &Map.delete(&1, turn_id))
+      |> Map.update!(:turns, &List.delete(&1, turn_id))
+    end
+  end
+
+  # Marks the turn terminated: later events for it are dropped and it is no longer active.
+  defp close(state, turn_id) do
+    sockets =
+      Map.new(state.sockets, fn
+        {socket, %{skip: ^turn_id} = attachment} -> {socket, %{attachment | skip: nil}}
+        entry -> entry
+      end)
+
+    %{
+      state
+      | closed: Enum.take([turn_id | List.delete(state.closed, turn_id)], @closed_turns),
+        active: if(state.active == turn_id, do: nil, else: state.active),
+        sockets: sockets
+    }
   end
 
   # Returns the turn id the socket must skip, or nil.
@@ -207,7 +292,13 @@ defmodule Sigma.Web.SamgitaHost.ThreadStream do
     end
   end
 
-  defp publish(state, event) do
+  defp publish(state, %Envelope{turn_id: turn_id} = event) when is_binary(turn_id) do
+    if turn_id in state.closed, do: state, else: publish_open(state, event)
+  end
+
+  defp publish(state, _event), do: state
+
+  defp publish_open(state, event) do
     case translate(event, state.thread_id) do
       {:ok, %{"correlation_id" => turn_id} = notification} ->
         append(state, turn_id, notification)
@@ -266,16 +357,7 @@ defmodule Sigma.Web.SamgitaHost.ThreadStream do
     end)
   end
 
-  defp track_active(state, turn_id, "turn/completed", _new?) do
-    sockets =
-      Map.new(state.sockets, fn
-        {socket, %{skip: ^turn_id} = attachment} -> {socket, %{attachment | skip: nil}}
-        entry -> entry
-      end)
-
-    active = if state.active == turn_id, do: nil, else: state.active
-    %{state | active: active, sockets: sockets}
-  end
+  defp track_active(state, turn_id, "turn/completed", _new?), do: close(state, turn_id)
 
   # A turn becomes active on `turn/started`, or on its first event when that arrives first.
   defp track_active(state, turn_id, method, new?) when method == "turn/started" or new?,

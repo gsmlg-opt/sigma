@@ -4,6 +4,7 @@ defmodule Sigma.Web.SamgitaHost.ThreadStreamTest do
   alias Sigma.Agent.PublicRuntime
   alias Sigma.Protocol.Envelope
   alias Sigma.Session.{ConfigManager, RepoManager}
+  alias Sigma.Web.ProtocolContext
   alias Sigma.Web.SamgitaHost.{ThreadId, ThreadStream}
 
   defmodule StreamProvider do
@@ -248,6 +249,158 @@ defmodule Sigma.Web.SamgitaHost.ThreadStreamTest do
     ref = Process.monitor(pid)
     assert_receive {:DOWN, ^ref, :process, ^pid, reason}, 1_000
     assert reason in [:normal, :noproc]
+  end
+
+  test "the stream stops when the session agent exits and a resumed session gets a fresh one",
+       context do
+    session_id = "stream-agent-exit"
+    thread_id = create_thread!(context, session_id, provider: StreamProvider)
+    assert {:ok, old} = ThreadStream.ensure(thread_id)
+    ref = Process.monitor(old)
+
+    session_supervisor = Sigma.Agent.Runtime.lookup(context.repo, session_id, :supervisor)
+    sessions_supervisor = Sigma.Agent.Runtime.lookup(context.repo, :sessions)
+    :ok = DynamicSupervisor.terminate_child(sessions_supervisor, session_supervisor)
+    assert_receive {:DOWN, ^ref, :process, ^old, :normal}, 1_000
+
+    assert {:ok, command} = Envelope.command("session.resume", session_id, %{})
+
+    scope = %{
+      workdir: context.repo,
+      sessions_dir: context.sessions_dir,
+      session_id: session_id,
+      subscriber: self()
+    }
+
+    assert {:ok, %{type: "session.snapshot"}} =
+             PublicRuntime.execute(command, ProtocolContext.build(scope, []))
+
+    assert {:ok, fresh} = ThreadStream.ensure(thread_id)
+    refute fresh == old
+    assert {:ok, _} = ThreadStream.attach(thread_id, self())
+    submit!(context, session_id, "after resume")
+    # The fresh stream delivers the next turn; its outcome depends on the resumed provider
+    # configuration (see the pre-existing SessionChannelTest resume failure), not on the stream.
+    messages = receive_turn()
+    assert Enum.map(messages, & &1["cursor"]) == Enum.to_list(1..length(messages))
+  end
+
+  @tag :capture_log
+  test "a subscription cursor gap poisons the active turn", context do
+    assert_loss_poisons_turn(context, "stream-gap-cursor", fn state, session_id, turn_id ->
+      Envelope.event(
+        "message.delta",
+        session_id,
+        %{
+          "cursor" => state.next_cursor + 3,
+          "deltaKind" => "text",
+          "messageId" => "msg_crafted",
+          "delta" => "x"
+        },
+        turn_id: turn_id
+      )
+    end)
+  end
+
+  @tag :capture_log
+  test "a resync marker poisons the active turn", context do
+    assert_loss_poisons_turn(context, "stream-resync", fn state, session_id, turn_id ->
+      Envelope.event(
+        "session.error",
+        session_id,
+        %{"cursor" => state.next_cursor, "snapshotRequired" => true},
+        turn_id: turn_id,
+        error: Sigma.Protocol.Error.new("resync_required", "Subscription state is incomplete.")
+      )
+    end)
+  end
+
+  test "events for an already terminated turn are dropped", context do
+    session_id = "stream-terminated"
+    thread_id = create_thread!(context, session_id, provider: StreamProvider)
+    assert {:ok, pid} = ThreadStream.ensure(thread_id)
+    assert {:ok, _} = ThreadStream.attach(thread_id, self())
+    submit!(context, session_id, "done")
+    messages = receive_turn()
+    turn_id = hd(messages)["stream_id"]
+
+    state = :sys.get_state(pid)
+
+    {:ok, late} =
+      Envelope.event(
+        "message.delta",
+        session_id,
+        %{
+          "cursor" => state.next_cursor,
+          "deltaKind" => "text",
+          "messageId" => "msg_late",
+          "delta" => "late"
+        },
+        turn_id: turn_id
+      )
+
+    send(pid, {:sigma_protocol, state.subscription_id, late})
+    assert {:ok, ^messages} = ThreadStream.resume(thread_id, turn_id, 0)
+    assert %{active: nil} = :sys.get_state(pid)
+    refute_received {:protocol_notification, _}
+  end
+
+  defp assert_loss_poisons_turn(context, session_id, craft) do
+    thread_id =
+      create_thread!(context, session_id,
+        provider: BlockingStreamProvider,
+        options: [test_pid: self()]
+      )
+
+    raw_attach!(context, session_id)
+    assert {:ok, pid} = ThreadStream.ensure(thread_id)
+    early = relay_socket(:early)
+    assert {:ok, _} = ThreadStream.attach(thread_id, early)
+
+    submit!(context, session_id, "first")
+    assert_receive {:stream_provider_waiting, provider}, 1_000
+    assert_receive {:early, %{"method" => "turn/started", "stream_id" => first_turn}}, 1_000
+
+    state = :sys.get_state(pid)
+    delivered = state.logs[first_turn].next_cursor - 1
+    {:ok, event} = craft.(state, session_id, first_turn)
+    send(pid, {:sigma_protocol, state.subscription_id, event})
+
+    assert {:error, %SamgitaProtocol.Error{code: "replay_gap"}} =
+             ThreadStream.resume(thread_id, first_turn, 0)
+
+    assert {:ok, %{active_stream: nil}} = ThreadStream.attach(thread_id, self())
+
+    send(provider, :release_stream_provider)
+    assert_receive {:sigma_protocol, _, %Envelope{type: "turn.completed"}}, 1_000
+
+    submit!(context, session_id, "second")
+    assert_receive {:stream_provider_waiting, provider}, 1_000
+    send(provider, :release_stream_provider)
+    messages = receive_turn()
+    assert [%{"cursor" => 1, "stream_id" => second_turn} | _] = messages
+    refute second_turn == first_turn
+    assert_receive {:early, %{"method" => "turn/completed", "stream_id" => ^second_turn}}, 1_000
+
+    refute_received {:protocol_notification, %{"stream_id" => ^first_turn}}
+    early_first = collect_early(first_turn, [])
+    assert Enum.all?(early_first, &(&1["cursor"] <= delivered))
+    refute Enum.any?(early_first, &(&1["method"] == "turn/completed"))
+  end
+
+  defp collect_early(turn_id, acc) do
+    receive do
+      {:early, %{"stream_id" => ^turn_id} = message} -> collect_early(turn_id, [message | acc])
+    after
+      0 -> acc
+    end
+  end
+
+  defp raw_attach!(context, session_id) do
+    assert {:ok, command} = Envelope.command("subscription.attach", session_id, %{})
+
+    assert {:ok, %{payload: %{"attached" => true}}} =
+             PublicRuntime.execute(command, runtime_context(context, subscriber: self()))
   end
 
   defp create_thread!(context, session_id, opts) do
