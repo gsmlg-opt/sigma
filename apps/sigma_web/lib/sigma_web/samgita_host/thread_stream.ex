@@ -24,7 +24,7 @@ defmodule Sigma.Web.SamgitaHost.ThreadStream do
 
   require Logger
 
-  alias SamgitaProtocol.{Error, Replay}
+  alias SamgitaProtocol.{Capabilities, Error, Replay}
   alias Sigma.Agent.PublicRuntime
   alias Sigma.Protocol.Envelope
   alias Sigma.Web.ProtocolContext
@@ -66,11 +66,23 @@ defmodule Sigma.Web.SamgitaHost.ThreadStream do
     end
   end
 
-  @doc "Attaches `socket_pid`; the active turn's backlog is sent before this returns."
-  @spec attach(String.t(), pid()) ::
+  @doc """
+  Attaches `socket_pid`; the active turn's backlog is sent before this returns.
+
+  `:capabilities` (the connection's negotiated groups, default: all) filters what
+  the socket receives: notifications of other groups are not sent, and without
+  `streaming.v1` notifications carry no `stream_id` / `cursor`, because the
+  dropped `item/*` cursors would read as gaps and replay is unavailable.
+  """
+  @spec attach(String.t(), pid(), keyword()) ::
           {:ok, %{active_stream: active_stream()}} | {:error, :not_found}
-  def attach(thread_id, socket_pid) when is_pid(socket_pid),
-    do: call(thread_id, {:attach, socket_pid}, {:error, :not_found})
+  def attach(thread_id, socket_pid, opts \\ []) when is_pid(socket_pid),
+    do:
+      call(
+        thread_id,
+        {:attach, socket_pid, Keyword.get(opts, :capabilities)},
+        {:error, :not_found}
+      )
 
   @doc "Notifications of `stream_id` after `cursor`; unknown threads or streams are a `replay_gap`."
   @spec resume(String.t(), String.t(), non_neg_integer()) :: {:ok, [map()]} | {:error, Error.t()}
@@ -130,13 +142,14 @@ defmodule Sigma.Web.SamgitaHost.ThreadStream do
   end
 
   @impl true
-  def handle_call({:attach, socket}, _from, state) do
+  def handle_call({:attach, socket, groups}, _from, state) do
     if Map.has_key?(state.sockets, socket) do
       {:reply, {:ok, %{active_stream: active_stream(state, socket)}}, state}
     else
       ref = Process.monitor(socket)
-      skip = deliver_backlog(state, socket)
-      state = put_in(state.sockets[socket], %{ref: ref, skip: skip})
+      attachment = %{ref: ref, skip: nil, groups: groups}
+      attachment = %{attachment | skip: deliver_backlog(state, socket, attachment)}
+      state = put_in(state.sockets[socket], attachment)
       {:reply, {:ok, %{active_stream: active_stream(state, socket)}}, schedule_idle(state)}
     end
   end
@@ -267,18 +280,36 @@ defmodule Sigma.Web.SamgitaHost.ThreadStream do
   end
 
   # Returns the turn id the socket must skip, or nil.
-  defp deliver_backlog(%{active: nil}, _socket), do: nil
+  defp deliver_backlog(%{active: nil}, _socket, _attachment), do: nil
 
-  defp deliver_backlog(%{active: turn_id} = state, socket) do
+  defp deliver_backlog(%{active: turn_id} = state, socket, attachment) do
     case state.logs[turn_id].events do
       [%{"cursor" => 1} | _] = events ->
-        Enum.each(events, &send(socket, {:protocol_notification, &1}))
+        Enum.each(events, &deliver(socket, attachment, &1))
         nil
 
-      _lost_first_cursor ->
-        turn_id
+      events ->
+        if streaming?(attachment) do
+          turn_id
+        else
+          Enum.each(events, &deliver(socket, attachment, &1))
+          nil
+        end
     end
   end
+
+  defp deliver(socket, %{groups: nil}, message),
+    do: send(socket, {:protocol_notification, message})
+
+  defp deliver(socket, %{groups: groups} = attachment, message) do
+    cond do
+      not Capabilities.supports?(groups, message["method"]) -> :ok
+      streaming?(attachment) -> send(socket, {:protocol_notification, message})
+      true -> send(socket, {:protocol_notification, Map.drop(message, ["stream_id", "cursor"])})
+    end
+  end
+
+  defp streaming?(%{groups: groups}), do: is_nil(groups) or "streaming.v1" in groups
 
   defp active_stream(%{active: nil}, _socket), do: nil
 
@@ -287,8 +318,9 @@ defmodule Sigma.Web.SamgitaHost.ThreadStream do
       %{skip: ^turn_id} ->
         nil
 
-      _following ->
-        %{"stream_id" => turn_id, "cursor" => state.logs[turn_id].next_cursor - 1}
+      attachment ->
+        if is_nil(attachment) or streaming?(attachment),
+          do: %{"stream_id" => turn_id, "cursor" => state.logs[turn_id].next_cursor - 1}
     end
   end
 
@@ -353,7 +385,7 @@ defmodule Sigma.Web.SamgitaHost.ThreadStream do
   defp fan_out(state, turn_id, message) do
     Enum.each(state.sockets, fn
       {_socket, %{skip: ^turn_id}} -> :ok
-      {socket, _attachment} -> send(socket, {:protocol_notification, message})
+      {socket, attachment} -> deliver(socket, attachment, message)
     end)
   end
 

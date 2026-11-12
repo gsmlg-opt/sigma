@@ -160,7 +160,8 @@ defmodule Sigma.Web.SamgitaHost.LoopbackTest do
              mutate(client, "thread/start", %{"metadata" => %{"repository" => "/not/registered"}})
 
     thread_id = start_thread!(client, context, "Loopback")
-    assert {:ok, %{session_id: _}} = ThreadId.decode(thread_id)
+    assert {:ok, %{session_id: session_id}} = ThreadId.decode(thread_id)
+    assert session_id =~ ~r/\A[0-9a-f]{32}\z/
 
     {:ok, %{"turn_id" => turn_id, "status" => "running"}} =
       mutate(client, "turn/start", %{
@@ -382,24 +383,8 @@ defmodule Sigma.Web.SamgitaHost.LoopbackTest do
   end
 
   test "thread/read works for a session created through Protocol V1 / UI", context do
-    session_id = "session_from_protocol_v1"
-
-    assert {:ok, command} =
-             Envelope.command("session.create", session_id, %{"cwd" => context.repo})
-
-    runtime_context = %{
-      repo_path: context.repo,
-      sessions_dir: context.sessions_dir,
-      session_opts: [
-        model: %{id: "mock-model", api: "mock", provider: "mock"},
-        provider: LoopProvider
-      ]
-    }
-
-    assert {:ok, %{type: "session.snapshot"}} = PublicRuntime.execute(command, runtime_context)
-
+    thread_id = create_protocol_session!(context, "session_from_protocol_v1")
     client = connect!(context)
-    thread_id = ThreadId.encode(context.repo, session_id)
 
     assert {:ok, %{"thread_id" => ^thread_id, "thread" => %{"turn" => %{"phase" => "idle"}}}} =
              Client.request(client, "thread/read", %{"thread_id" => thread_id})
@@ -420,16 +405,135 @@ defmodule Sigma.Web.SamgitaHost.LoopbackTest do
              mutate(client, "request/cancel", %{"request_id" => "req-unknown"})
   end
 
-  defp connect!(context) do
-    {:ok, client} = Client.connect(context.url, token: context.token, capabilities: @capabilities)
+  test "a sessions.v1-only client stays connected and receives turn notifications but no item notifications",
+       context do
+    client = connect!(context, ["sessions.v1"])
+    thread_id = start_thread!(client, context)
+    {:ok, %{"turn_id" => turn_id}} = start_turn(client, thread_id, "hello")
+
+    messages = receive_turn(client)
+    assert Enum.map(messages, & &1["method"]) == ["turn/started", "turn/completed"]
+    assert Enum.all?(messages, &(&1["params"]["turn_id"] == turn_id))
+    refute Enum.any?(messages, &Map.has_key?(&1, "stream_id"))
+
+    assert {:ok, %{"thread_id" => ^thread_id, "thread" => %{"active_stream" => nil}}} =
+             Client.request(client, "thread/read", %{"thread_id" => thread_id})
+
+    refute_receive {:samgita_protocol, ^client, {:notification, _}}, 200
+    refute_client_errors(client)
+  end
+
+  test "definite failures release their command_id", context do
+    client = connect!(context)
+    params = %{"thread_id" => ThreadId.encode(context.repo, "never-created")}
+
+    for _ <- 1..2 do
+      assert {:error, %Error{code: "not_found"}} =
+               Client.request(client, "thread/resume", params, command_id: "cmd-definite")
+    end
+  end
+
+  test "a resume whose stream cannot be followed keeps its command_id reserved", context do
+    thread_id = create_protocol_session!(context, "session_unfollowable")
+    blocker = block_stream!(thread_id, fn from -> GenServer.reply(from, {:error, :not_found}) end)
+    client = connect!(context)
+    params = %{"thread_id" => thread_id}
+
+    assert {:error, %Error{code: "not_found"}} =
+             Client.request(client, "thread/resume", params, command_id: "cmd-uncertain")
+
+    assert {:error, %Error{code: "conflict"}} =
+             Client.request(client, "thread/resume", params, command_id: "cmd-uncertain")
+
+    unblock_stream!(thread_id, blocker)
+
+    assert {:ok, %{"thread_id" => ^thread_id}} = mutate(client, "thread/resume", params)
+  end
+
+  test "an exit while following keeps its command_id reserved", context do
+    thread_id = create_protocol_session!(context, "session_follow_exit")
+    blocker = block_stream!(thread_id, fn _from -> exit(:follow_failed) end)
+    client = connect!(context)
+    params = %{"thread_id" => thread_id}
+
+    assert {:error, %Error{code: "handler_error"}} =
+             Client.request(client, "thread/resume", params, command_id: "cmd-exit")
+
+    assert {:error, %Error{code: "conflict"}} =
+             Client.request(client, "thread/resume", params, command_id: "cmd-exit")
+
+    unblock_stream!(thread_id, blocker)
+  end
+
+  defp connect!(context, capabilities \\ @capabilities) do
+    {:ok, client} = Client.connect(context.url, token: context.token, capabilities: capabilities)
 
     {:ok, _} =
       Client.request(client, "connection/initialize", %{
         "versions" => ["1.0"],
-        "capabilities" => @capabilities
+        "capabilities" => capabilities
       })
 
     client
+  end
+
+  defp create_protocol_session!(context, session_id) do
+    assert {:ok, command} =
+             Envelope.command("session.create", session_id, %{"cwd" => context.repo})
+
+    runtime_context = %{
+      repo_path: context.repo,
+      sessions_dir: context.sessions_dir,
+      session_opts: [
+        model: %{id: "mock-model", api: "mock", provider: "mock"},
+        provider: LoopProvider
+      ]
+    }
+
+    assert {:ok, %{type: "session.snapshot"}} = PublicRuntime.execute(command, runtime_context)
+    ThreadId.encode(context.repo, session_id)
+  end
+
+  # Occupies the thread's stream registration with a process that answers
+  # attach calls with `on_call`, so following the thread fails after resume.
+  defp block_stream!(thread_id, on_call) do
+    test_pid = self()
+
+    blocker =
+      spawn(fn ->
+        {:ok, _} = Registry.register(Sigma.Web.SamgitaHost.Registry, thread_id, nil)
+        send(test_pid, {:blocking, self()})
+        block(on_call)
+      end)
+
+    assert_receive {:blocking, ^blocker}, 1_000
+    blocker
+  end
+
+  defp block(on_call) do
+    receive do
+      {:"$gen_call", from, {:attach, _socket, _groups}} ->
+        on_call.(from)
+        block(on_call)
+    end
+  end
+
+  defp unblock_stream!(thread_id, blocker) do
+    ref = Process.monitor(blocker)
+    Process.exit(blocker, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^blocker, _}, 1_000
+    wait_unregistered(thread_id, 50)
+  end
+
+  defp wait_unregistered(thread_id, attempts) do
+    case Registry.lookup(Sigma.Web.SamgitaHost.Registry, thread_id) do
+      [] ->
+        :ok
+
+      _registered when attempts > 0 ->
+        Process.sleep(10)
+        wait_unregistered(thread_id, attempts - 1)
+    end
   end
 
   defp start_thread!(client, context, title \\ nil) do

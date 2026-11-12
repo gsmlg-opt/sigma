@@ -163,12 +163,11 @@ delta 合并进同一 `message.delta` 字符串（`protocol_event_mapper.ex:600-
 `message.delta` payload **增量添加** `deltaKind`（`text` / `thinking` / `toolcall`），现有
 Protocol V1 客户端忽略未知字段即可；host 只把 `text` 转为 `item/delta`。
 
-**能力组要求（我的决定，上游缺口）**：Handler 看不到协商结果，而 WS Socket（0.4.0）会以 1008 关闭发送
-未协商组通知的连接（`samgita_protocol_websocket/.../socket.ex:70-79`）；0.4.1 起改为丢弃该通知，并在
-handler context 暴露 `"capabilities"`。因此本 host 要求客户端
-同时提供三组；只提供 `sessions.v1` 的客户端会在首个 `item/*` 时被断开。按
-`upstream-issue-routing` 已提 [gsmlg-opt/Samgita#1](https://github.com/gsmlg-opt/Samgita/issues/1)，分类为 `needed`；
-文档化的客户端要求就是临时约定，不在本地绕过，issue 解决后移除该要求。
+**能力组过滤（按实现）**：0.4.0 时 Handler 看不到协商结果，而 WS Socket 会以 1008 关闭发送未协商组通知的
+连接。上游 [gsmlg-opt/Samgita#1](https://github.com/gsmlg-opt/Samgita/issues/1) 已修复并随锁定的 0.4.1 发布：
+Socket 丢弃未协商组通知，handler context 带 `"capabilities"`。host 据此在 ThreadStream 挂接时按连接的协商组
+过滤：不发未协商组的通知；未协商 `streaming.v1` 时 `turn/*` 去掉 `stream_id` / `cursor`（否则被丢弃的
+`item/*` cursor 会让上游 Client 判 `replay_gap`），`active_stream` 为 null。不再要求客户端同时提供三组。
 | 其他（metrics、subagents、questions、hosted 等） | 不转发 |
 
 `item` 对象只放有界显示投影；完整历史仍以 Sigma 的 JSONL 为准。
@@ -183,7 +182,11 @@ Sigma `{:error, reason}` → `SamgitaProtocol.Error`：会话不存在 → `not_
 
 - 状态变更请求的 `command_id` 在全局有界内存表 `Commands`（1024 条，FIFO 淘汰）中去重，不按
   ThreadStream 划分（`thread/start` 也走同一表）：同 id 同参数 → 返回原结果，不重复执行；同 id
-  不同参数或仍在执行 → `conflict`；执行失败或抛出的 id 被释放，可重试。
+  不同参数或仍在执行 → `conflict`。只有确定失败（执行前失败或 `PublicRuntime.execute/2` 返回错误）
+  释放 id；执行中/后的 raise/exit 和命令生效后的失败（如 create/resume 后无法跟随流）保持占用
+  （结果不确定），同 id 重试得 `conflict`。
+- `thread/start` 生成的 session id 为 `:crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)`，
+  与 Sigma 其他 session id 格式一致。
 - ThreadStream 在会话 Agent 退出时停止；之后 `thread/resume` 会起一个新的 ThreadStream（旧 turn 的
   replay 随之丢失）。
 - Replay log 在内存、有界（保留条数待实现时取默认值并写入测试）。Sigma 重启后 stream 历史丢失，

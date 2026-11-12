@@ -7,7 +7,7 @@ defmodule Sigma.Web.SamgitaHost.Handler do
   deduplicated by `command_id` in `Sigma.Web.SamgitaHost.Commands`. Threads
   this connection starts or resumes are followed through
   `Sigma.Web.SamgitaHost.ThreadStream`, which pushes their notifications to the
-  socket process.
+  socket process, filtered to the groups this connection negotiated.
 
   The state lives in the socket process, so `self()` is the socket pid.
   """
@@ -23,10 +23,6 @@ defmodule Sigma.Web.SamgitaHost.Handler do
   @completed_limit 128
   @thread_fields %{"messageCount" => "message_count", "runtime" => "runtime", "turn" => "turn"}
 
-  # TODO(upstream): gsmlg-opt/Samgita#1 — clients are required to offer all three
-  # groups. The socket drops notifications of a group the connection did not
-  # negotiate (closed with 1008 before samgita_protocol_websocket 0.4.1), so a
-  # sessions-only client would silently miss item streaming.
   @impl true
   def capabilities, do: ["sessions.v1", "streaming.v1", "cancellation.v1"]
 
@@ -41,6 +37,7 @@ defmodule Sigma.Web.SamgitaHost.Handler do
   @impl true
   def handle_request(method, params, context, state) do
     {reply, state} = dispatch(method, params, context, state)
+    reply = with {:uncertain, error} <- reply, do: {:error, error}
 
     state = %{
       state
@@ -55,20 +52,17 @@ defmodule Sigma.Web.SamgitaHost.Handler do
 
   defp dispatch(method, params, context, state) do
     if SamgitaProtocol.Schema.mutating?(method),
-      do: idempotent(method, params, context["command_id"], state),
-      else: run(method, params, state)
+      do: idempotent(method, params, context, state),
+      else: run(method, params, context, state)
   end
 
-  defp idempotent(method, params, command_id, state) do
+  # A command id is released only for a definite failure: one returned before or
+  # by `PublicRuntime.execute/2`. A raise or exit, or a failure after a command
+  # took effect (`:uncertain`), keeps it reserved, so a retry gets `conflict`.
+  defp idempotent(method, params, %{"command_id" => command_id} = context, state) do
     case Commands.reserve(command_id, {method, params}) do
       :new ->
-        try do
-          run(method, params, state)
-        catch
-          kind, reason ->
-            :ok = Commands.release(command_id)
-            :erlang.raise(kind, reason, __STACKTRACE__)
-        else
+        case run(method, params, context, state) do
           {{:ok, result}, _state} = done ->
             :ok = Commands.complete(command_id, result)
             done
@@ -76,6 +70,9 @@ defmodule Sigma.Web.SamgitaHost.Handler do
           {{:error, _error}, _state} = failed ->
             :ok = Commands.release(command_id)
             failed
+
+          {{:uncertain, _error}, _state} = uncertain ->
+            uncertain
         end
 
       {:done, result} ->
@@ -86,7 +83,7 @@ defmodule Sigma.Web.SamgitaHost.Handler do
     end
   end
 
-  defp run("thread/start", params, state) do
+  defp run("thread/start", params, context, state) do
     metadata = params["metadata"] || %{}
 
     with {:ok, repo_path} <- ThreadId.repository(metadata["repository"]),
@@ -98,7 +95,7 @@ defmodule Sigma.Web.SamgitaHost.Handler do
          },
          {:ok, snapshot} <- execute(scope, "session.create", create_payload(repo_path, params)),
          thread_id = ThreadId.encode(repo_path, session_id),
-         {:ok, active_stream} <- follow(thread_id) do
+         {:ok, active_stream} <- effected(follow(thread_id, context)) do
       send(self(), {:protocol_notification, Translate.thread_started(thread_id)})
 
       {{:ok, %{"thread_id" => thread_id, "thread" => thread(snapshot, active_stream)}},
@@ -108,21 +105,24 @@ defmodule Sigma.Web.SamgitaHost.Handler do
     end
   end
 
-  defp run("thread/read", %{"thread_id" => thread_id}, state) do
+  defp run("thread/read", %{"thread_id" => thread_id}, context, state) do
     with {:ok, scope} <- scope(thread_id),
          {:ok, status} <- execute(scope, "session.status", %{}) do
-      {{:ok, %{"thread_id" => thread_id, "thread" => thread(status, followed(state, thread_id))}},
-       state}
+      {{:ok,
+        %{
+          "thread_id" => thread_id,
+          "thread" => thread(status, followed(state, thread_id, context))
+        }}, state}
     else
       error -> {failure(error), state}
     end
   end
 
-  defp run("thread/resume", %{"thread_id" => thread_id}, state) do
+  defp run("thread/resume", %{"thread_id" => thread_id}, context, state) do
     with {:ok, scope} <- scope(thread_id),
          {:ok, _snapshot} <- execute(scope, "session.resume", %{}),
-         {:ok, active_stream} <- follow(thread_id),
-         {:ok, status} <- execute(scope, "session.status", %{}) do
+         {:ok, active_stream} <- effected(follow(thread_id, context)),
+         {:ok, status} <- effected(execute(scope, "session.status", %{})) do
       {{:ok, %{"thread_id" => thread_id, "thread" => thread(status, active_stream)}},
        follows(state, thread_id)}
     else
@@ -130,7 +130,7 @@ defmodule Sigma.Web.SamgitaHost.Handler do
     end
   end
 
-  defp run("turn/start", %{"thread_id" => thread_id, "input" => input}, state) do
+  defp run("turn/start", %{"thread_id" => thread_id, "input" => input}, _context, state) do
     payload = %{"content" => text(input), "admission" => "reject_if_busy"}
     {admit(thread_id, "prompt.submit", payload), state}
   end
@@ -138,13 +138,14 @@ defmodule Sigma.Web.SamgitaHost.Handler do
   defp run(
          "turn/steer",
          %{"thread_id" => thread_id, "turn_id" => turn_id, "input" => input},
+         _context,
          state
        ) do
     payload = %{"content" => text(input), "expectedTurnId" => turn_id}
     {admit(thread_id, "prompt.steer", payload), state}
   end
 
-  defp run("turn/interrupt", %{"thread_id" => thread_id, "turn_id" => turn_id}, state) do
+  defp run("turn/interrupt", %{"thread_id" => thread_id, "turn_id" => turn_id}, _context, state) do
     reply =
       with {:ok, scope} <- scope(thread_id),
            {:ok, status} <-
@@ -159,7 +160,7 @@ defmodule Sigma.Web.SamgitaHost.Handler do
     {reply, state}
   end
 
-  defp run("stream/resume", %{"stream_id" => stream_id, "cursor" => cursor}, state) do
+  defp run("stream/resume", %{"stream_id" => stream_id, "cursor" => cursor}, _context, state) do
     reply =
       Enum.reduce_while(state.threads, {:error, Error.new("replay_gap")}, fn thread_id, gap ->
         case ThreadStream.resume(thread_id, stream_id, cursor) do
@@ -171,7 +172,7 @@ defmodule Sigma.Web.SamgitaHost.Handler do
     {reply, state}
   end
 
-  defp run("request/cancel", %{"request_id" => request_id}, state) do
+  defp run("request/cancel", %{"request_id" => request_id}, _context, state) do
     reply =
       if request_id in state.completed,
         do: {:ok, %{"request_id" => request_id, "status" => "already_finished"}},
@@ -211,23 +212,31 @@ defmodule Sigma.Web.SamgitaHost.Handler do
     %{"stream_id" => stream_id, "cursor" => last, "events" => events}
   end
 
-  # Follows the thread's stream from this socket. Right after a stream exits,
-  # `ensure` may still return the dying process, so a lost attach is retried once.
-  defp follow(thread_id, retries \\ 1) do
+  # A failure after a command took effect leaves the request outcome uncertain.
+  defp effected({:error, reason}), do: {:uncertain, reason}
+  defp effected(result), do: result
+
+  # Follows the thread's stream from this socket, filtered to the negotiated
+  # groups. Right after a stream exits, `ensure` may still return the dying
+  # process, so a lost attach is retried once.
+  defp follow(thread_id, context, retries \\ 1) do
+    opts = [capabilities: context["capabilities"]]
+
     with {:ok, _pid} <- ThreadStream.ensure(thread_id),
-         {:ok, %{active_stream: active_stream}} <- ThreadStream.attach(thread_id, self()) do
+         {:ok, %{active_stream: active_stream}} <-
+           ThreadStream.attach(thread_id, self(), opts) do
       {:ok, active_stream}
     else
-      {:error, :not_found} when retries > 0 -> follow(thread_id, retries - 1)
+      {:error, :not_found} when retries > 0 -> follow(thread_id, context, retries - 1)
       {:error, :not_found} = error -> error
     end
   end
 
   # Only threads this connection follows report their active stream; attaching
   # again is idempotent for an already attached socket.
-  defp followed(state, thread_id) do
+  defp followed(state, thread_id, context) do
     with true <- MapSet.member?(state.threads, thread_id),
-         {:ok, active_stream} <- follow(thread_id) do
+         {:ok, active_stream} <- follow(thread_id, context) do
       active_stream
     else
       _ -> nil
@@ -298,8 +307,12 @@ defmodule Sigma.Web.SamgitaHost.Handler do
 
   defp text(input), do: Enum.map_join(input, "\n\n", & &1["text"])
 
-  defp session_id,
-    do: "session_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
+  defp session_id, do: :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+
+  defp failure({:uncertain, reason}) do
+    {:error, error} = failure({:error, reason})
+    {:uncertain, error}
+  end
 
   defp failure({:error, %Error{} = error}), do: {:error, error}
   defp failure({:error, reason}), do: {:error, Translate.error(reason)}

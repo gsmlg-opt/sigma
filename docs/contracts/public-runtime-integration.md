@@ -232,17 +232,17 @@ Sigma 在现有 Phoenix endpoint 上以 samgita_protocol 1.0 暴露会话面，�
 在 endpoint 层于 `Plug.Static` / Router 之前挂载，不另起监听。
 
 **能力组**：`sessions.v1`、`streaming.v1`、`cancellation.v1`（不声明 `approvals.v1`，Sigma 保持 YOLO 默认）。
-**客户端必须在 `connection/initialize` 中同时提供这三组**：Socket 会丢弃（0.4.1 之前为 1008 断开）
-未协商组的通知，只提供 `sessions.v1` 的客户端收不到 `item/*`。该要求是
-[gsmlg-opt/Samgita#1](https://github.com/gsmlg-opt/Samgita/issues/1) 的临时约定；上游已向 handler 暴露
-协商组（samgita_protocol 0.4.1），host 按协商组过滤通知后即可移除。
+客户端可只协商其中一部分：host 按连接协商到的组过滤通知（samgita_protocol 0.4.1 起 handler 可见协商组，
+见 [gsmlg-opt/Samgita#1](https://github.com/gsmlg-opt/Samgita/issues/1)）。未协商 `streaming.v1` 的连接
+收不到 `item/*`，`turn/started` / `turn/completed` 不带 `stream_id` / `cursor`（无回放；`active_stream` 为
+`null`），连接保持可用。
 
 **thread_id**：`<base64url-无填充(已注册仓库绝对路径)>.<session_id>`，与路由 `:repository` 同一编码；
 UI / Protocol V1 创建的会话可直接拼出。解析失败、仓库未注册、会话 journal 不存在 → `not_found`。
 
 | 请求 | Sigma 命令 | 结果 |
 | --- | --- | --- |
-| `thread/start`（`metadata.repository` 必填，`title?`） | `session.create`（`cwd` = 仓库；其余 metadata + `title` 写入会话 metadata；`metadata.provider_id` / `model_id` 覆盖默认模型） | `thread_id`、`thread`；随后发非回放通知 `thread/started`；本连接开始跟随该 thread。未注册仓库 → `invalid_params` |
+| `thread/start`（`metadata.repository` 必填，`title?`） | `session.create`（`cwd` = 仓库；其余 metadata + `title` 写入会话 metadata；`metadata.provider_id` / `model_id` 覆盖默认模型） | `thread_id`、`thread`；session id 为 32 位小写 hex；随后发非回放通知 `thread/started`；本连接开始跟随该 thread。未注册仓库 → `invalid_params` |
 | `thread/read` | `session.status` | `thread` = `{turn, runtime, message_count, active_stream}`；`active_stream` 只对本连接跟随的 thread 给出，否则 `null` |
 | `thread/resume` | `session.resume` + `session.status` | 同上；确保 ThreadStream 并跟随（推送活跃 turn 的 backlog） |
 | `turn/start` | `prompt.submit`，`admission: "reject_if_busy"`，input 文本以 `\n\n` 连接 | `turn_id`、`status: "running"`；已有运行 turn → `conflict` |
@@ -269,7 +269,10 @@ turn 的保留 backlog（cursor 1 起），再推实时通知；`active_stream` 
 
 **幂等与限制**：
 - 所有变更请求先按 `command_id` 进入全局有界内存表（1024 条，FIFO 淘汰）：同 id 同参数 → 返回原结果，
-  不重复执行；同 id 不同参数 → `conflict`；执行失败的 id 被释放，可重试。
+  不重复执行；同 id 不同参数或仍在执行 → `conflict`。只有确定失败（Sigma 命令执行前失败，或
+  `PublicRuntime.execute/2` 返回错误）才释放 id 以便重试；执行中/后的 raise 或 exit、命令已生效后的
+  失败（如 `session.create` 成功但无法跟随流）结果不确定，id 保持占用，同 id 重试得 `conflict`，
+  客户端应以 `thread/read` 核对后换新 `command_id`。
 - Replay 只在内存：每 turn ≤4096 条，每 thread 保留最近 8 个 turn。Sigma 重启后 `command_id` 表与流历史
   丢失，`stream/resume` 得 `replay_gap`；恢复不变量不变（不重放 Provider 调用或工具效果）。
 - ThreadStream 在会话 Agent 退出时停止；无挂接连接且无运行 turn 时空闲超时退出。连接断开不取消 turn。
