@@ -8,6 +8,8 @@ defmodule Sigma.Web.Application do
       %{id: Sigma.Session.ConfigEvents, start: {:pg, :start_link, [Sigma.Session.ConfigEvents]}},
       {Phoenix.PubSub, name: Sigma.Web.PubSub},
       Sigma.Web.SamgitaHost.Commands,
+      {Registry, keys: :unique, name: Sigma.Web.SamgitaHost.Registry},
+      {DynamicSupervisor, strategy: :one_for_one, name: Sigma.Web.SamgitaHost.ThreadStreams},
       Sigma.Web.Endpoint
     ]
 
