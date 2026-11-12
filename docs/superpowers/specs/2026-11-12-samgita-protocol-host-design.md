@@ -156,7 +156,7 @@ Protocol V1 客户端忽略未知字段即可；host 只把 `text` 转为 `item/
 **能力组要求（我的决定，上游缺口）**：Handler 看不到协商结果，而 WS Socket 会以 1008 关闭发送
 未协商组通知的连接（`samgita_protocol_websocket/.../socket.ex:70-79`）。因此本 host 要求客户端
 同时提供三组；只提供 `sessions.v1` 的客户端会在首个 `item/*` 时被断开。按
-`upstream-issue-routing` 向 Samgita 提 issue（让 Handler context 可见协商组），分类为 `needed`；
+`upstream-issue-routing` 已提 [gsmlg-opt/Samgita#1](https://github.com/gsmlg-opt/Samgita/issues/1)，分类为 `needed`；
 文档化的客户端要求就是临时约定，不在本地绕过，issue 解决后移除该要求。
 | 其他（metrics、subagents、questions、hosted 等） | 不转发 |
 
