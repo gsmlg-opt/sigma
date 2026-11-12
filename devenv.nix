@@ -6,9 +6,6 @@
   ...
 }: let
   pkgs-stable = import inputs.nixpkgs-stable {system = pkgs.stdenv.system;};
-  # DuskMoon's precompiled NIFs (duskmoon_vize >= 10.0.9) need glibc >= 2.43,
-  # so BEAM must come from a nixpkgs with a new enough glibc.
-  pkgs-unstable = import inputs.nixpkgs-unstable {system = pkgs.stdenv.system;};
 
   # The sigma process runs a release, so source/config edits need a rebuild
   # and restart. devenv's watcher only throttles for 100ms, so `sigma-reload`
@@ -37,7 +34,7 @@ in {
       cargo
       rustc
       stdenv.cc
-      pkgs-unstable.beam28Packages.elixir-ls
+      pkgs.beam28Packages.elixir-ls
     ]
     ++ lib.optionals stdenv.isLinux [
       bubblewrap
@@ -45,7 +42,9 @@ in {
     ];
 
   languages.elixir.enable = true;
-  languages.elixir.package = pkgs-unstable.beam28Packages.elixir;
+  # BEAM comes from devenv-nixpkgs (rolling): DuskMoon's precompiled NIFs
+  # (duskmoon_vize >= 10.0.9) need glibc >= 2.43; release-26.05 has 2.42.
+  languages.elixir.package = pkgs.beam28Packages.elixir;
 
   languages.javascript.enable = true;
   languages.javascript.pnpm.enable = true;

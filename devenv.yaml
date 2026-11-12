@@ -4,9 +4,6 @@ inputs:
     url: github:cachix/devenv-nixpkgs/rolling
   nixpkgs-stable:
     url: github:nixos/nixpkgs/release-26.05
-  # BEAM runs from unstable: DuskMoon's precompiled NIFs need glibc >= 2.43.
-  nixpkgs-unstable:
-    url: github:nixos/nixpkgs/nixos-unstable
 
 # If you're using non-OSS software, you can set allowUnfree to true.
 allowUnfree: true
