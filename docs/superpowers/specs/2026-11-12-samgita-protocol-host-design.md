@@ -112,7 +112,7 @@ Socket pid，Handler 用它向 ThreadStream 挂接。Socket 进程退出由 Thre
 | 原生请求 | Sigma 命令 | 结果 |
 | --- | --- | --- |
 | `thread/start`（`title?`, `metadata.repository`） | `session.create`（仓库见 §7；provider/model 走 `ProtocolSessionOptions.prepare_create/1` 默认值，`metadata.provider_id` / `metadata.model_id` 可覆盖） | `thread_id` = Sigma session id，`thread` = 精简快照；随后发 `thread/started` |
-| `thread/read`（`thread_id`） | `session.status` | `thread_id` + `thread`（有界快照：状态、turn 相位、最近消息投影） |
+| `thread/read`（`thread_id`） | `session.status`（`history.limit: 50`） | `thread_id` + `thread`（有界快照：状态、turn 相位、`messages` 最近 50 条对话消息 `{id, role, text, tools?}` 与 `messages_truncated`） |
 | `thread/resume`（`thread_id`） | `session.resume` | 同上；确保 ThreadStream 存在并挂接本连接 |
 | `turn/start`（`thread_id`, `input`） | `prompt.submit`（input 文本按顺序以 `\n\n` 连接） | `thread_id`, `turn_id`, `status: "running"`（来自 `prompt.admitted`） |
 | `turn/steer`（`thread_id`, `turn_id`, `input`） | `prompt.steer`；`turn_id` 与当前运行 turn 不符 → `conflict` | 同上 |

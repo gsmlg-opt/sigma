@@ -579,7 +579,18 @@ can issue `session.status` for the current snapshot and then
 `subscription.attach` to resume future event consumption.
 
 Reconnect snapshots retain the latest five bounded messages and report
-`messageCount` plus `messagesTruncated`. Ordinary message/tool events also carry
+`messageCount` plus `messagesTruncated`.
+
+`session.status` accepts an optional `history: {"limit": 1..200}` payload. The
+snapshot then also carries `history`, the newest conversational messages as
+`{id, role, text, tools?, truncated?}` (`role` is `user` or `assistant`; `text`
+joins text blocks, bounded to 8 KiB per message on a UTF-8 boundary with
+`truncated: true`; `tools` lists tool-call names; thinking, images and tool
+results are omitted), and `historyTruncated` when older messages were left out.
+Oldest entries are dropped until the envelope fits the 64 KiB codec bound; a
+trusted embedding host may supply its own byte budget through its runtime
+context. An invalid `history` value fails with `invalid_history_limit`. History
+is read from the persisted snapshot and never touches the running Agent. Ordinary message/tool events also carry
 bounded text projections: a JSON-shaped tool result can be a prefix rather than
 independently parseable JSON. Treat those event fields as display previews.
 Complete canonical history remains available through `session.dump`: its ACK

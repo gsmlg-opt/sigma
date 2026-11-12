@@ -299,6 +299,69 @@ defmodule Sigma.Agent.ProtocolEventMapper do
     end
   end
 
+  @history_text_bytes 8_192
+
+  @doc """
+  Projects the newest conversational messages for history display.
+
+  Only `user` and `assistant` messages are kept; each carries `id`, `role` and
+  plain `text` (text blocks joined, bounded to #{@history_text_bytes} bytes on a
+  UTF-8 boundary with `truncated: true`), plus `tools` (tool-call names) for
+  assistant turns. Thinking, images and tool results are omitted. Options:
+  `:limit` (newest entries kept) and `:max_bytes` (JSON budget; oldest entries
+  are dropped until it fits). Returns `{entries, truncated?}`.
+  """
+  def history(messages, opts) when is_list(messages) do
+    limit = Keyword.fetch!(opts, :limit)
+    entries = messages |> Enum.flat_map(&history_entry/1)
+    newest = Enum.take(entries, -limit)
+    fitted = fit_history(newest, Keyword.get(opts, :max_bytes))
+    {fitted, length(fitted) < length(entries)}
+  end
+
+  defp history_entry(%{role: role, id: id, content: content}) when role in [:user, :assistant] do
+    blocks = if is_binary(content), do: [%{type: :text, text: content}], else: List.wrap(content)
+
+    text =
+      blocks
+      |> Enum.flat_map(fn
+        %{type: :text, text: text} when is_binary(text) and text != "" -> [text]
+        _block -> []
+      end)
+      |> Enum.join("\n\n")
+
+    tools =
+      if role == :assistant,
+        do: for(%{type: :tool_call, name: name} when is_binary(name) <- blocks, do: name),
+        else: []
+
+    if text == "" and tools == [] do
+      []
+    else
+      [
+        %{"id" => to_string(id), "role" => Atom.to_string(role)}
+        |> put_history_text(text)
+        |> then(&if(tools == [], do: &1, else: Map.put(&1, "tools", tools)))
+      ]
+    end
+  end
+
+  defp history_entry(_message), do: []
+
+  defp put_history_text(entry, text) when byte_size(text) <= @history_text_bytes,
+    do: Map.put(entry, "text", text)
+
+  defp put_history_text(entry, text),
+    do: Map.merge(entry, %{"text" => utf8_prefix(text, @history_text_bytes), "truncated" => true})
+
+  defp fit_history(entries, nil), do: entries
+
+  defp fit_history(entries, max_bytes) do
+    if entries == [] or byte_size(Jason.encode!(entries)) <= max_bytes,
+      do: entries,
+      else: fit_history(tl(entries), max_bytes)
+  end
+
   def snapshot_payload(snapshot, session_id \\ nil, capabilities \\ []) do
     message_count = length(snapshot.messages)
     messages = snapshot.messages |> Enum.take(-5) |> Enum.map(&snapshot_message(&1, capabilities))

@@ -14,7 +14,9 @@ defmodule Sigma.Agent.ProtocolEventMapperTest do
             {{:toolcall_delta, 0, "c", msg}, "c"},
             {"d", "d"}
           ] do
-        {event, "turn"} = ProtocolEventMapper.map({:message_update, msg, delta}, "session", "turn")
+        {event, "turn"} =
+          ProtocolEventMapper.map({:message_update, msg, delta}, "session", "turn")
+
         assert event.payload["delta"] == text
         event.payload["deltaKind"]
       end
@@ -324,5 +326,65 @@ defmodule Sigma.Agent.ProtocolEventMapperTest do
     capable = ProtocolEventMapper.snapshot_payload(snapshot, "session", ["subagents.v1"])
     assert capable["subagents"]["counts"]["pending"] == 1
     refute inspect(capable) =~ "private-secret"
+  end
+
+  describe "history/2" do
+    alias Sigma.Agent.Message
+
+    test "projects user and assistant text with tool names, skipping other roles" do
+      messages = [
+        Message.user("u1", "hello"),
+        Message.assistant("a1", %{
+          content: [
+            %{type: :thinking, thinking: "private reasoning"},
+            %{type: :text, text: "Let me look."},
+            %{type: :tool_call, id: "call-1", name: "exec_command", arguments: %{"cmd" => "ls"}},
+            %{type: :text, text: "Done."}
+          ]
+        }),
+        Message.tool_result("t1", %{content: [%{type: :text, text: "file.txt"}]}),
+        Message.user("u2", [%{type: :text, text: "thanks"}, %{type: :image, data: "AAAA"}])
+      ]
+
+      assert {history, false} = ProtocolEventMapper.history(messages, limit: 50)
+
+      assert history == [
+               %{"id" => "u1", "role" => "user", "text" => "hello"},
+               %{
+                 "id" => "a1",
+                 "role" => "assistant",
+                 "text" => "Let me look.\n\nDone.",
+                 "tools" => ["exec_command"]
+               },
+               %{"id" => "u2", "role" => "user", "text" => "thanks"}
+             ]
+
+      refute inspect(history) =~ "private reasoning"
+      refute inspect(history) =~ "file.txt"
+    end
+
+    test "keeps the newest entries within the limit and reports truncation" do
+      messages = for i <- 1..60, do: Message.user("u#{i}", "m#{i}")
+
+      assert {history, true} = ProtocolEventMapper.history(messages, limit: 50)
+      assert length(history) == 50
+      assert hd(history)["id"] == "u11"
+      assert List.last(history)["id"] == "u60"
+    end
+
+    test "bounds per-message text on a UTF-8 boundary and fits the byte budget" do
+      long = String.duplicate("é", 10_000)
+      messages = for i <- 1..20, do: Message.user("u#{i}", long)
+
+      assert {history, true} = ProtocolEventMapper.history(messages, limit: 50, max_bytes: 40_000)
+      assert List.last(history)["id"] == "u20"
+      assert byte_size(Jason.encode!(history)) <= 40_000
+
+      for entry <- history do
+        assert entry["truncated"] == true
+        assert String.valid?(entry["text"])
+        assert byte_size(entry["text"]) <= 8_192
+      end
+    end
   end
 end

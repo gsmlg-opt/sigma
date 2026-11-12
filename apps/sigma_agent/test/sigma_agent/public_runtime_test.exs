@@ -215,6 +215,43 @@ defmodule Sigma.Agent.PublicRuntimeTest do
     end
   end
 
+  test "session.status returns bounded conversational history on request", context do
+    session_id = "history-turn"
+    runtime_context = create_session!(context, session_id, provider: ScriptedProvider)
+    sub = attach!(session_id, runtime_context)
+
+    assert {:ok, command} =
+             Envelope.command("prompt.submit", session_id, %{"content" => "hello"})
+
+    assert {:ok, _admission} = PublicRuntime.execute(command, runtime_context)
+    collect_until(sub, "turn.completed", [])
+
+    assert {:ok, plain} = Envelope.command("session.status", session_id)
+    assert {:ok, %{payload: payload}} = PublicRuntime.execute(plain, runtime_context)
+    refute Map.has_key?(payload, "history")
+
+    assert {:ok, status} =
+             Envelope.command("session.status", session_id, %{"history" => %{"limit" => 50}})
+
+    assert {:ok, event} = PublicRuntime.execute(status, runtime_context)
+
+    assert [
+             %{"role" => "user", "text" => "hello"},
+             %{"role" => "assistant", "text" => "headless response"}
+           ] = event.payload["history"]
+
+    assert event.payload["historyTruncated"] == false
+    assert {:ok, _encoded} = Codec.encode(event)
+
+    for bad <- [%{"limit" => 0}, %{"limit" => 201}, %{"limit" => "50"}, "50"] do
+      assert {:ok, invalid} =
+               Envelope.command("session.status", session_id, %{"history" => bad})
+
+      assert {:error, %{type: "session.error", error: %{code: "invalid_history_limit"}}} =
+               PublicRuntime.execute(invalid, runtime_context)
+    end
+  end
+
   test "subscription attach returns an atomic cursor-zero turn snapshot before updates",
        context do
     session_id = "atomic-attach"

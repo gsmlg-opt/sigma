@@ -22,6 +22,11 @@ defmodule Sigma.Web.SamgitaHost.Handler do
 
   @completed_limit 128
   @thread_fields %{"messageCount" => "message_count", "runtime" => "runtime", "turn" => "turn"}
+  # Newest conversational messages returned by thread/read and thread/resume.
+  @history_limit 50
+  # Byte budget for those messages, well inside the 1 MiB samgita_protocol frame.
+  @history_max_bytes 512 * 1024
+  @status_with_history %{"history" => %{"limit" => @history_limit}}
 
   @impl true
   def capabilities, do: ["sessions.v1", "streaming.v1", "cancellation.v1"]
@@ -125,7 +130,7 @@ defmodule Sigma.Web.SamgitaHost.Handler do
 
   defp run("thread/read", %{"thread_id" => thread_id}, context, state) do
     with {:ok, scope} <- scope(thread_id),
-         {:ok, status} <- execute(scope, "session.status", %{}) do
+         {:ok, status} <- execute(scope, "session.status", @status_with_history) do
       {{:ok,
         %{
           "thread_id" => thread_id,
@@ -140,7 +145,7 @@ defmodule Sigma.Web.SamgitaHost.Handler do
     with {:ok, scope} <- scope(thread_id),
          {:ok, _snapshot} <- execute(scope, "session.resume", %{}),
          {:ok, active_stream} <- effected(follow(thread_id, context)),
-         {:ok, status} <- effected(execute(scope, "session.status", %{})) do
+         {:ok, status} <- effected(execute(scope, "session.status", @status_with_history)) do
       {{:ok, %{"thread_id" => thread_id, "thread" => thread(status, active_stream)}},
        follows(state, thread_id)}
     else
@@ -278,7 +283,12 @@ defmodule Sigma.Web.SamgitaHost.Handler do
     payload
     |> Map.take(Map.keys(@thread_fields))
     |> Map.new(fn {key, value} -> {@thread_fields[key], value} end)
-    |> Map.put("active_stream", active_stream)
+    |> Map.merge(%{
+      "active_stream" => active_stream,
+      # thread/start has no history yet; read/resume carry the newest messages.
+      "messages" => Map.get(payload, "history", []),
+      "messages_truncated" => Map.get(payload, "historyTruncated", false)
+    })
   end
 
   defp scope(thread_id) do
@@ -311,6 +321,7 @@ defmodule Sigma.Web.SamgitaHost.Handler do
       interactive_approvals: false,
       initial_metadata: initial_metadata(command)
     )
+    |> Map.put(:history_max_bytes, @history_max_bytes)
   end
 
   defp initial_metadata(%Envelope{type: "session.create", payload: payload}),

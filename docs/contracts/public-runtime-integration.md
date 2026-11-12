@@ -243,8 +243,8 @@ UI / Protocol V1 创建的会话可直接拼出。解析失败、仓库未注册
 | 请求 | Sigma 命令 | 结果 |
 | --- | --- | --- |
 | `thread/start`（`metadata.repository` 必填，`title?`） | `session.create`（`cwd` = 仓库；其余 metadata + `title` 写入会话 metadata；`metadata.provider_id` / `model_id` 覆盖默认模型） | `thread_id`、`thread`；session id 为 32 位小写 hex；随后发非回放通知 `thread/started`；本连接开始跟随该 thread。未注册仓库 → `invalid_params` |
-| `thread/read` | `session.status` | `thread` = `{turn, runtime, message_count, active_stream}`；`active_stream` 只对本连接跟随的 thread 给出，否则 `null` |
-| `thread/resume` | `session.resume` + `session.status` | 同上；确保 ThreadStream 并跟随（推送活跃 turn 的 backlog） |
+| `thread/read` | `session.status`（`history.limit: 50`，host 字节预算 512 KiB） | `thread` = `{turn, runtime, message_count, active_stream, messages, messages_truncated}`；`active_stream` 只对本连接跟随的 thread 给出，否则 `null`；`messages` 为最近 50 条对话消息 `{id, role: user\|assistant, text, tools?, truncated?}`（`text` 为文本块拼接，单条 ≤ 8 KiB；`tools` 为工具调用名；不含 thinking、图片与工具结果），更早消息被省略时 `messages_truncated: true`；`thread/start` 返回 `messages: []` |
+| `thread/resume` | `session.resume` + `session.status`（同上 history） | 同上（含 `messages`）；确保 ThreadStream 并跟随（推送活跃 turn 的 backlog） |
 | `turn/start` | `prompt.submit`，`admission: "reject_if_busy"`，input 文本以 `\n\n` 连接；执行前重新跟随本连接已跟随的 thread | `turn_id`、`status: "running"`；已有运行 turn → `conflict`（`turn_active`）；会话未运行 → `conflict`（`session_not_running`，先 `thread/resume`） |
 | `turn/steer` | `prompt.steer`，`expectedTurnId`；同样先重新跟随 | 同上；turn 不符或无运行 turn → `conflict`（`turn_mismatch`） |
 | `turn/interrupt` | `turn.cancel`，`expectedTurnId` | `cancelling` / `already_cancelling` → `requested`；同一 turn `already_cancelled` → `interrupted`；`no_active_turn` 或其他 turn 已取消 → `already_finished`；`turn_mismatch` → `conflict` |

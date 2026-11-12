@@ -201,6 +201,25 @@ defmodule Sigma.Web.SamgitaHost.LoopbackTest do
              Client.request(client, "thread/read", %{"thread_id" => thread_id})
 
     assert %{"turn" => %{"phase" => _}, "active_stream" => nil} = thread
+
+    assert %{
+             "messages" => [
+               %{"role" => "user", "text" => "hello\n\nthere", "id" => user_id},
+               %{"role" => "assistant", "text" => "loop response", "id" => assistant_id}
+             ],
+             "messages_truncated" => false
+           } = thread
+
+    assert is_binary(user_id) and is_binary(assistant_id)
+
+    reader = connect!(context)
+
+    assert {:ok, %{"thread" => %{"messages" => resumed, "messages_truncated" => false}}} =
+             Client.request(reader, "thread/resume", %{"thread_id" => thread_id},
+               command_id: "cmd-resume-history"
+             )
+
+    assert resumed == thread["messages"]
     refute_client_errors(client)
   end
 

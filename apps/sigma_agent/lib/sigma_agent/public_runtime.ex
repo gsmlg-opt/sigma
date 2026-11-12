@@ -13,6 +13,7 @@ defmodule Sigma.Agent.PublicRuntime do
 
   alias Sigma.Protocol.{
     AsyncInteractionPages,
+    Codec,
     Envelope,
     HostedResultPages,
     PluginInstallations,
@@ -145,9 +146,11 @@ defmodule Sigma.Agent.PublicRuntime do
 
   defp dispatch(%Envelope{type: "session.status"} = command, context) do
     with :ok <- validate_capabilities(command),
+         {:ok, history_limit} <- history_limit(command.payload),
          {:ok, repo_path, sessions_dir} <- paths(command, context),
-         {:ok, storage_path} <- session_path(sessions_dir, command.session_id) do
-      status_snapshot(command, context, repo_path, storage_path)
+         {:ok, storage_path} <- session_path(sessions_dir, command.session_id),
+         {:ok, event} <- status_snapshot(command, context, repo_path, storage_path) do
+      with_history(event, history_limit, command, context, repo_path, storage_path)
     end
   end
 
@@ -1197,6 +1200,60 @@ defmodule Sigma.Agent.PublicRuntime do
             requested_capabilities(command)
           )
         end
+    end
+  end
+
+  @max_history_limit 200
+  # Leaves room for the rest of the snapshot inside the 64 KiB Protocol V1 envelope.
+  @default_history_bytes 32_768
+
+  defp history_limit(payload) do
+    case Map.fetch(payload, "history") do
+      :error ->
+        {:ok, nil}
+
+      {:ok, %{"limit" => limit}} when is_integer(limit) and limit in 1..@max_history_limit ->
+        {:ok, limit}
+
+      {:ok, _invalid} ->
+        {:error, :invalid_history_limit}
+    end
+  end
+
+  defp with_history(event, nil, _command, _context, _repo_path, _storage_path), do: {:ok, event}
+
+  # History is a read-only projection of the persisted snapshot; it never
+  # touches the running Agent or replays anything.
+  defp with_history(event, limit, command, context, repo_path, storage_path) do
+    with {:ok, snapshot} <- Runtime.session_snapshot(repo_path, command.session_id, storage_path) do
+      max_bytes = context[:history_max_bytes] || @default_history_bytes
+
+      {history, truncated?} =
+        ProtocolEventMapper.history(snapshot.messages, limit: limit, max_bytes: max_bytes)
+
+      payload =
+        Map.merge(event.payload, %{"history" => history, "historyTruncated" => truncated?})
+
+      fit_history_event(%{event | payload: payload}, context[:history_max_bytes])
+    end
+  end
+
+  # A trusted host that supplies its own byte budget (e.g. a transport with a
+  # larger frame) is not held to the Protocol V1 codec bound.
+  defp fit_history_event(event, max_bytes) when is_integer(max_bytes), do: {:ok, event}
+
+  defp fit_history_event(%Envelope{payload: %{"history" => history}} = event, nil) do
+    case Codec.encode(event) do
+      {:ok, _encoded} ->
+        {:ok, event}
+
+      {:error, _reason} when history != [] ->
+        dropped = Enum.drop(history, max(div(length(history), 2), 1))
+        payload = Map.merge(event.payload, %{"history" => dropped, "historyTruncated" => true})
+        fit_history_event(%{event | payload: payload}, nil)
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
