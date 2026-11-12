@@ -6,7 +6,7 @@ defmodule Sigma.Web.SessionChannel do
   alias Sigma.Agent.{ProtocolSubscription, PublicRuntime}
   alias Sigma.Protocol.{Codec, Envelope, Error}
   alias Sigma.Session.SessionFiles
-  alias Sigma.Session.{SkillExpander, SkillInvocationStore}
+  alias Sigma.Web.ProtocolContext
 
   @impl true
   def join("session:" <> session_id, _payload, socket) do
@@ -61,49 +61,19 @@ defmodule Sigma.Web.SessionChannel do
   end
 
   defp execute_command(command, socket) do
-    context = %{
-      repo_path: socket.assigns.workdir,
-      sessions_dir: socket.assigns.sessions_dir,
-      subscriber: self(),
-      interactive_approvals: true,
-      session_opts: protocol_session_opts(socket),
-      session_id: socket.assigns.session_id,
-      skill_invocation_store: %{
-        find: fn session_id, request_key ->
-          SkillInvocationStore.find(socket.assigns.sessions_dir, session_id, request_key)
-        end,
-        list: fn session_id ->
-          SkillInvocationStore.list(socket.assigns.sessions_dir, session_id)
-        end,
-        reserve: fn session_id, record ->
-          SkillInvocationStore.reserve(socket.assigns.sessions_dir, session_id, record)
-        end,
-        update: fn session_id, invocation_id, changes ->
-          SkillInvocationStore.update(
-            socket.assigns.sessions_dir,
-            session_id,
-            invocation_id,
-            changes
-          )
-        end
-      },
-      skill_expander: &SkillExpander.expand/2
-    }
-
-    context = Map.merge(context, Sigma.Agent.SkillInvocationService.callbacks(context))
-
     result =
-      case prepare_command(command, socket) do
+      case ProtocolContext.prepare(command, socket.assigns.workdir) do
         {:ok, prepared} ->
           context =
-            if prepared.type == "session.create",
-              do:
-                Map.put(
-                  context,
-                  :session_opts,
-                  protocol_session_opts(socket, prepared.payload["metadata"])
-                ),
-              else: context
+            ProtocolContext.build(
+              %{
+                workdir: socket.assigns.workdir,
+                sessions_dir: socket.assigns.sessions_dir,
+                session_id: socket.assigns.session_id,
+                subscriber: self()
+              },
+              initial_metadata: initial_metadata(prepared)
+            )
 
           PublicRuntime.execute(prepared, context)
 
@@ -114,51 +84,10 @@ defmodule Sigma.Web.SessionChannel do
     {result, track_subscription(socket, command, result)}
   end
 
-  defp prepare_command(%Envelope{type: "session.create"} = command, _socket) do
-    with {:ok, payload} <- Sigma.Web.ProtocolSessionOptions.prepare_create(command.payload),
-         do: {:ok, %{command | payload: payload}}
-  end
+  defp initial_metadata(%Envelope{type: "session.create", payload: payload}),
+    do: payload["metadata"]
 
-  defp prepare_command(%Envelope{type: type} = command, socket)
-       when type in [
-              "prompt.submit",
-              "prompt.steer",
-              "prompt.follow_up",
-              "skill.invoke",
-              "session.retry"
-            ] do
-    case Sigma.Agent.Runtime.lookup(socket.assigns.workdir, command.session_id, :agent) do
-      nil ->
-        {:ok, command}
-
-      agent ->
-        with :ok <- Sigma.Web.ProtocolSessionOptions.validate_agent_model(agent),
-             do: {:ok, command}
-    end
-  end
-
-  defp prepare_command(command, _socket), do: {:ok, command}
-
-  defp protocol_session_opts(socket, initial_metadata \\ nil) do
-    case Application.get_env(:sigma_web, :protocol_session_opts) do
-      opts when is_list(opts) ->
-        opts
-
-      resolver when is_function(resolver, 1) ->
-        resolver
-
-      _opts ->
-        fn snapshot ->
-          Sigma.Web.ProtocolSessionOptions.resolve(
-            snapshot,
-            socket.assigns.workdir,
-            socket.assigns.sessions_dir,
-            socket.assigns.session_id,
-            initial_metadata
-          )
-        end
-    end
-  end
+  defp initial_metadata(%Envelope{}), do: nil
 
   defp track_subscription(
          socket,
