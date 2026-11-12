@@ -258,6 +258,10 @@ defmodule Sigma.Agent.ProtocolEventMapper do
   end
 
   defp public_error_details({_reason, details}) when is_map(details), do: public_value(details)
+
+  defp public_error_details({:prompt_rejected, reason}) when is_atom(reason),
+    do: %{"reason" => Atom.to_string(reason)}
+
   defp public_error_details(_reason), do: %{}
 
   def public_message(message, capabilities \\ []) do

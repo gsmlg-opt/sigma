@@ -376,7 +376,9 @@ Omitting them keeps the default behaviour.
   `no_active_turn`); a strict cancel never closes detached child executions.
 
 `expectedTurnId` must be a non-empty string (`invalid_expected_turn_id`). Prompt
-rejections surface as `session.error` with code `prompt_rejected`. The Elixir API
+rejections surface as `session.error` with code `prompt_rejected` and
+`details.reason` naming the rejection (`turn_active`, `turn_mismatch`,
+`session_busy`, `empty_prompt`, ...). The Elixir API
 accepts the same options: `Sigma.Agent.prompt/3` and `steer/3` take
 `admission: :reject_if_busy` and `expected_turn_id:`, and `Sigma.Agent.cancel/2`
 takes `expected_turn_id:`.

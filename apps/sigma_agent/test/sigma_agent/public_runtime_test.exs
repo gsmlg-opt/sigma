@@ -899,7 +899,11 @@ defmodule Sigma.Agent.PublicRuntimeTest do
       {runtime_context, provider, _turn_id} = start_blocking_turn!(context, session_id)
       agent = Sigma.Agent.Runtime.lookup(context.repo, session_id, :agent)
 
-      assert {:error, %Envelope{type: "session.error", error: %{code: "prompt_rejected"}}} =
+      assert {:error,
+              %Envelope{
+                type: "session.error",
+                error: %{code: "prompt_rejected", details: %{"reason" => "turn_active"}}
+              }} =
                execute!(
                  "prompt.submit",
                  session_id,
@@ -949,7 +953,10 @@ defmodule Sigma.Agent.PublicRuntimeTest do
       {runtime_context, provider, _turn_id} = start_blocking_turn!(context, session_id)
       agent = Sigma.Agent.Runtime.lookup(context.repo, session_id, :agent)
 
-      assert {:error, %Envelope{error: %{code: "prompt_rejected"}}} =
+      assert {:error,
+              %Envelope{
+                error: %{code: "prompt_rejected", details: %{"reason" => "turn_mismatch"}}
+              }} =
                execute!(
                  "prompt.steer",
                  session_id,
@@ -980,7 +987,10 @@ defmodule Sigma.Agent.PublicRuntimeTest do
       assert {:ok, %{payload: %{"turn" => %{"phase" => phase}}}} =
                execute!("session.status", session_id, %{}, runtime_context)
 
-      assert {:error, %Envelope{error: %{code: "prompt_rejected"}}} =
+      assert {:error,
+              %Envelope{
+                error: %{code: "prompt_rejected", details: %{"reason" => "turn_mismatch"}}
+              }} =
                execute!(
                  "prompt.steer",
                  session_id,
