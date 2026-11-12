@@ -676,7 +676,9 @@ defmodule Sigma.Agent.PublicRuntime do
   defp admit_prompt(command, context, mode) do
     with {:ok, agent} <- running_agent(command, context) do
       with content when is_binary(content) or is_list(content) <- command.payload["content"],
-           result <- call_prompt(agent, mode, content, prompt_opts(context, agent)),
+           {:ok, strict_opts} <- strict_prompt_opts(mode, command.payload),
+           result <-
+             call_prompt(agent, mode, content, prompt_opts(context, agent) ++ strict_opts),
            {:ok, status, info} <- admission_payload(result),
            {:ok, event} <-
              Envelope.event(
@@ -690,6 +692,10 @@ defmodule Sigma.Agent.PublicRuntime do
         nil ->
           release_prompt_resources(context)
           {:error, :missing_prompt_content}
+
+        {:error, reason} = error when reason in [:invalid_admission, :invalid_expected_turn_id] ->
+          release_prompt_resources(context)
+          error
 
         {:error, _reason} = error ->
           error
@@ -712,6 +718,14 @@ defmodule Sigma.Agent.PublicRuntime do
   end
 
   defp cancel_session(agent, command, context) do
+    case expected_turn_id(command.payload) do
+      {:ok, nil} -> cancel_session_and_children(agent, command, context)
+      {:ok, turn_id} -> Sigma.Agent.cancel(agent, expected_turn_id: turn_id)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp cancel_session_and_children(agent, command, context) do
     case Sigma.Agent.cancel(agent) do
       {:error, :no_active_turn} ->
         cancel_detached_children(command, context)
@@ -761,6 +775,32 @@ defmodule Sigma.Agent.PublicRuntime do
       nil -> {:error, :no_active_turn}
       {:error, _} = error -> error
       _ -> {:error, :subagent_cleanup_unconfirmed}
+    end
+  end
+
+  defp strict_prompt_opts(:submit, payload) do
+    case Map.get(payload, "admission") do
+      nil -> {:ok, []}
+      "reject_if_busy" -> {:ok, [admission: :reject_if_busy]}
+      _admission -> {:error, :invalid_admission}
+    end
+  end
+
+  defp strict_prompt_opts(:steer, payload) do
+    case expected_turn_id(payload) do
+      {:ok, nil} -> {:ok, []}
+      {:ok, turn_id} -> {:ok, [expected_turn_id: turn_id]}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp strict_prompt_opts(:follow_up, _payload), do: {:ok, []}
+
+  defp expected_turn_id(payload) do
+    case Map.get(payload, "expectedTurnId") do
+      nil -> {:ok, nil}
+      turn_id when is_binary(turn_id) and turn_id != "" -> {:ok, turn_id}
+      _turn_id -> {:error, :invalid_expected_turn_id}
     end
   end
 

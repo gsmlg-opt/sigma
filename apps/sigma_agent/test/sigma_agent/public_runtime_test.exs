@@ -893,6 +893,180 @@ defmodule Sigma.Agent.PublicRuntimeTest do
     assert duplicate == retry
   end
 
+  describe "strict turn options" do
+    test "prompt.submit with admission reject_if_busy rejects while a turn runs", context do
+      session_id = "strict-reject-if-busy"
+      {runtime_context, provider, _turn_id} = start_blocking_turn!(context, session_id)
+      agent = Sigma.Agent.Runtime.lookup(context.repo, session_id, :agent)
+
+      assert {:error, %Envelope{type: "session.error", error: %{code: "prompt_rejected"}}} =
+               execute!(
+                 "prompt.submit",
+                 session_id,
+                 %{"content" => "again", "admission" => "reject_if_busy"},
+                 runtime_context
+               )
+
+      assert {:rejected, :turn_active} =
+               Sigma.Agent.prompt(agent, "again", admission: :reject_if_busy)
+
+      assert %{follow_up_queue_count: 0, steering_queue_count: 0} = Sigma.Agent.status(agent)
+
+      send(provider, :release_headless_provider)
+      assert :ok = await_phase(context.repo, session_id, :completed, 5_000)
+      refute_receive {:headless_provider_waiting, _provider}, 200
+      assert %{phase: :completed, follow_up_queue_count: 0} = Sigma.Agent.status(agent)
+    end
+
+    test "prompt.submit with an unknown admission is invalid", context do
+      session_id = "strict-invalid-admission"
+      runtime_context = create_session!(context, session_id, provider: ScriptedProvider)
+
+      assert {:error, %Envelope{error: %{code: "invalid_admission"}}} =
+               execute!(
+                 "prompt.submit",
+                 session_id,
+                 %{"content" => "hello", "admission" => "queue"},
+                 runtime_context
+               )
+    end
+
+    test "prompt.submit without admission still queues a follow-up", context do
+      session_id = "strict-default-follow-up"
+      {runtime_context, provider, _turn_id} = start_blocking_turn!(context, session_id)
+
+      assert {:ok, %{type: "prompt.admitted", payload: %{"status" => "queued_as_follow_up"}}} =
+               execute!("prompt.submit", session_id, %{"content" => "again"}, runtime_context)
+
+      send(provider, :release_headless_provider)
+      assert_receive {:headless_provider_waiting, follow_up_provider}, 5_000
+      send(follow_up_provider, :release_headless_provider)
+      assert :ok = await_phase(context.repo, session_id, :completed, 5_000)
+    end
+
+    test "prompt.steer with mismatched expectedTurnId is rejected", context do
+      session_id = "strict-steer-mismatch"
+      {runtime_context, provider, _turn_id} = start_blocking_turn!(context, session_id)
+      agent = Sigma.Agent.Runtime.lookup(context.repo, session_id, :agent)
+
+      assert {:error, %Envelope{error: %{code: "prompt_rejected"}}} =
+               execute!(
+                 "prompt.steer",
+                 session_id,
+                 %{"content" => "steer", "expectedTurnId" => "other"},
+                 runtime_context
+               )
+
+      assert {:rejected, :turn_mismatch} =
+               Sigma.Agent.steer(agent, "steer", expected_turn_id: "other")
+
+      assert %{steering_queue_count: 0, follow_up_queue_count: 0} = Sigma.Agent.status(agent)
+
+      send(provider, :release_headless_provider)
+      assert :ok = await_phase(context.repo, session_id, :completed, 5_000)
+    end
+
+    test "prompt.steer with expectedTurnId and no active turn does not start a turn", context do
+      session_id = "strict-steer-idle"
+
+      runtime_context =
+        create_session!(context, session_id,
+          provider: BlockingProvider,
+          options: [test_pid: self()]
+        )
+
+      agent = Sigma.Agent.Runtime.lookup(context.repo, session_id, :agent)
+
+      assert {:ok, %{payload: %{"turn" => %{"phase" => phase}}}} =
+               execute!("session.status", session_id, %{}, runtime_context)
+
+      assert {:error, %Envelope{error: %{code: "prompt_rejected"}}} =
+               execute!(
+                 "prompt.steer",
+                 session_id,
+                 %{"content" => "steer", "expectedTurnId" => "turn_missing"},
+                 runtime_context
+               )
+
+      assert {:rejected, :turn_mismatch} =
+               Sigma.Agent.steer(agent, "steer", expected_turn_id: "turn_missing")
+
+      refute_receive {:headless_provider_waiting, _provider}, 200
+
+      assert {:ok, %{payload: %{"turn" => %{"phase" => ^phase}}}} =
+               execute!("session.status", session_id, %{}, runtime_context)
+    end
+
+    test "prompt.steer with matching expectedTurnId steers", context do
+      session_id = "strict-steer-match"
+      {runtime_context, provider, turn_id} = start_blocking_turn!(context, session_id)
+
+      assert {:ok,
+              %{
+                type: "prompt.admitted",
+                payload: %{"status" => "queued_as_steering", "turnId" => ^turn_id}
+              }} =
+               execute!(
+                 "prompt.steer",
+                 session_id,
+                 %{"content" => "steer", "expectedTurnId" => turn_id},
+                 runtime_context
+               )
+
+      send(provider, :release_headless_provider)
+      assert_receive {:headless_provider_waiting, steered_provider}, 5_000
+      send(steered_provider, :release_headless_provider)
+      assert :ok = await_phase(context.repo, session_id, :completed, 5_000)
+    end
+
+    test "turn.cancel with mismatched expectedTurnId leaves the turn running", context do
+      session_id = "strict-cancel-mismatch"
+      {runtime_context, _provider, turn_id} = start_blocking_turn!(context, session_id)
+
+      assert {:error, %Envelope{error: %{code: "turn_mismatch"}}} =
+               execute!(
+                 "turn.cancel",
+                 session_id,
+                 %{"expectedTurnId" => "other"},
+                 runtime_context
+               )
+
+      assert {:ok, %{payload: %{"turn" => %{"phase" => "streaming_provider"}}}} =
+               execute!("session.status", session_id, %{}, runtime_context)
+
+      assert {:ok,
+              %{
+                type: "session.snapshot",
+                payload: %{"cancellation" => %{"status" => "cancelling", "turnId" => ^turn_id}}
+              }} =
+               execute!(
+                 "turn.cancel",
+                 session_id,
+                 %{"expectedTurnId" => turn_id},
+                 runtime_context
+               )
+    end
+  end
+
+  defp start_blocking_turn!(context, session_id) do
+    runtime_context =
+      create_session!(context, session_id,
+        provider: BlockingProvider,
+        options: [test_pid: self()]
+      )
+
+    assert {:ok, %{payload: %{"status" => "accepted", "turnId" => turn_id}}} =
+             execute!("prompt.submit", session_id, %{"content" => "wait"}, runtime_context)
+
+    assert_receive {:headless_provider_waiting, provider}, 1_000
+    {runtime_context, provider, turn_id}
+  end
+
+  defp execute!(type, session_id, payload, runtime_context) do
+    assert {:ok, command} = Envelope.command(type, session_id, payload)
+    PublicRuntime.execute(command, runtime_context)
+  end
+
   defp create_session!(context, session_id, session_opts) do
     runtime_context = %{
       repo_path: context.repo,

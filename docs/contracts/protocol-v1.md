@@ -357,6 +357,30 @@ receipts are separate, and installed skills become visible at the next native
 binding. Automatic plugin MCP ownership and native completion results remain
 separate alignment work. See [the tools contract](codex-tools.md#plugin-catalogs-and-durable-requests).
 
+## Strict turn admission and cancellation
+
+These optional payload fields make a busy or mismatched turn an explicit
+rejection instead of queueing or cancelling another turn (mirroring Codex
+app-server `TurnSteerParams.expectedTurnId` / `TurnInterruptParams.turnId`).
+Omitting them keeps the default behaviour.
+
+- `prompt.submit` `"admission": "reject_if_busy"`: when a turn is running the
+  prompt is rejected with `{:prompt_rejected, :turn_active}` and nothing is
+  queued. Any other `admission` value fails with `invalid_admission`.
+- `prompt.steer` `"expectedTurnId"`: with no running turn, or a running turn under
+  a different id, the prompt is rejected with `{:prompt_rejected, :turn_mismatch}`;
+  no turn starts and nothing is queued.
+- `turn.cancel` `"expectedTurnId"`: when a turn is running under a different id the
+  command fails with `turn_mismatch` and the turn keeps running. Otherwise the
+  results are unchanged (`cancelling`, `already_cancelling`, `already_cancelled`,
+  `no_active_turn`); a strict cancel never closes detached child executions.
+
+`expectedTurnId` must be a non-empty string (`invalid_expected_turn_id`). Prompt
+rejections surface as `session.error` with code `prompt_rejected`. The Elixir API
+accepts the same options: `Sigma.Agent.prompt/3` and `steer/3` take
+`admission: :reject_if_busy` and `expected_turn_id:`, and `Sigma.Agent.cancel/2`
+takes `expected_turn_id:`.
+
 ## Direct Elixir API
 
 Build a command with `Sigma.Protocol.Envelope.command/4` and pass it to

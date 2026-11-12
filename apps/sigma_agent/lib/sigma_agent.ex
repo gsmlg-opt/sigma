@@ -298,9 +298,15 @@ defmodule Sigma.Agent do
     GenServer.call(pid, {:answer_mcp_elicitation, elicitation_id, reply})
   end
 
-  def cancel(pid) do
-    GenServer.call(pid, :cancel)
-  end
+  @doc """
+  Cancels the active turn.
+
+  `expected_turn_id:` makes the cancel strict: when a turn is running under a
+  different id the call returns `{:error, :turn_mismatch}` and leaves it running.
+  """
+  def cancel(pid, opts \\ [])
+  def cancel(pid, []), do: GenServer.call(pid, :cancel)
+  def cancel(pid, opts), do: GenServer.call(pid, {:cancel, opts})
 
   def cancel_prompt(pid, turn_id) when is_binary(turn_id) do
     GenServer.call(pid, {:cancel_prompt, turn_id})
@@ -1024,8 +1030,17 @@ defmodule Sigma.Agent do
   end
 
   @impl true
-  def handle_call(:cancel, _from, state) do
+  def handle_call(:cancel, from, state), do: handle_call({:cancel, []}, from, state)
+
+  def handle_call({:cancel, opts}, _from, state) do
+    expected_turn_id = Keyword.get(opts, :expected_turn_id)
+    running_turn_id = running_turn_id(state)
+
     cond do
+      is_binary(expected_turn_id) and not is_nil(running_turn_id) and
+          running_turn_id != expected_turn_id ->
+        {:reply, {:error, :turn_mismatch}, state}
+
       state.pending_host_prompt ->
         turn_id = state.pending_host_prompt.item.turn_id
         {:reply, {:cancelling, turn_id}, cancel_host_prompt(state)}
@@ -2107,6 +2122,8 @@ defmodule Sigma.Agent do
   end
 
   defp admit_prompt(state, content, opts, requested_mode) do
+    expected_turn_id = Keyword.get(opts, :expected_turn_id)
+
     case new_prompt_item(content, opts) do
       {:error, reason} ->
         release_resources(Keyword.get(opts, :prepared_resources, []))
@@ -2118,6 +2135,9 @@ defmodule Sigma.Agent do
         emit(state, {:prompt_rejected, :session_busy})
         {{:rejected, :session_busy}, state}
 
+      {:ok, _item} when is_nil(state.current_turn_task) and is_binary(expected_turn_id) ->
+        reject_prompt(state, opts, :turn_mismatch)
+
       {:ok, item} when is_nil(state.current_turn_task) ->
         state = state |> fence_goal_admission(:superseded) |> start_turn(item)
         info = prompt_info(item, item.turn_id)
@@ -2126,18 +2146,39 @@ defmodule Sigma.Agent do
         {{:accepted, info}, state}
 
       {:ok, item} ->
-        state = fence_goal_admission(state, :superseded)
         mode = admission_mode(requested_mode, opts)
-        item = if mode == :steering, do: %{item | turn_id: state.turn_state.turn_id}, else: item
-        state = if mode == :steering, do: attach_turn_resources(state, item), else: state
-        queue = PromptQueue.enqueue(state.prompt_queue, mode, item)
-        result = if mode == :steering, do: :queued_as_steering, else: :queued_as_follow_up
-        info = prompt_info(item, item.turn_id)
-        state = %{state | prompt_queue: queue}
-        emit(state, {:prompt_admitted, result, info})
-        emit_prompt_telemetry(state, result)
-        {{result, info}, state}
+
+        cond do
+          Keyword.get(opts, :admission) == :reject_if_busy ->
+            reject_prompt(state, opts, :turn_active)
+
+          mode == :steering and is_binary(expected_turn_id) and
+              expected_turn_id != state.turn_state.turn_id ->
+            reject_prompt(state, opts, :turn_mismatch)
+
+          true ->
+            enqueue_prompt(state, item, mode)
+        end
     end
+  end
+
+  defp reject_prompt(state, opts, reason) do
+    release_resources(Keyword.get(opts, :prepared_resources, []))
+    emit(state, {:prompt_rejected, reason})
+    {{:rejected, reason}, state}
+  end
+
+  defp enqueue_prompt(state, item, mode) do
+    state = fence_goal_admission(state, :superseded)
+    item = if mode == :steering, do: %{item | turn_id: state.turn_state.turn_id}, else: item
+    state = if mode == :steering, do: attach_turn_resources(state, item), else: state
+    queue = PromptQueue.enqueue(state.prompt_queue, mode, item)
+    result = if mode == :steering, do: :queued_as_steering, else: :queued_as_follow_up
+    info = prompt_info(item, item.turn_id)
+    state = %{state | prompt_queue: queue}
+    emit(state, {:prompt_admitted, result, info})
+    emit_prompt_telemetry(state, result)
+    {{result, info}, state}
   end
 
   defp new_prompt_item(content, opts) when is_binary(content) or is_list(content) do
@@ -2341,6 +2382,22 @@ defmodule Sigma.Agent do
     case Keyword.get(opts, :admission, :follow_up) do
       :steering -> :steering
       _mode -> :follow_up
+    end
+  end
+
+  defp running_turn_id(state) do
+    cond do
+      state.pending_host_prompt ->
+        state.pending_host_prompt.item.turn_id
+
+      match?(%{status: :reserved}, state.goal_admission) and is_nil(state.current_turn_task) ->
+        state.goal_admission.item.turn_id
+
+      not is_nil(state.current_turn_task) ->
+        state.turn_state.turn_id
+
+      true ->
+        nil
     end
   end
 
