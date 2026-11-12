@@ -61,9 +61,16 @@ in {
       mix sigma.rel-build
       exec _build/dev/sigma_rel/rel/sigma/bin/sigma start
     '';
-    after = ["sigma:reload-init"];
+    after = ["sigma:reload-init" "sigma:mix-tools"];
     watch.paths = [reloadTrigger];
   };
+
+  # devenv keeps MIX_HOME per project ($DEVENV_STATE/mix), so install Hex and
+  # Rebar there non-interactively before the release build needs them.
+  tasks."sigma:mix-tools".exec = ''
+    mix local.hex --force --if-missing
+    mix local.rebar --force --if-missing
+  '';
 
   tasks."sigma:reload-init".exec = ''
     mkdir -p ${reloadState}
