@@ -78,6 +78,7 @@ Full design boundaries and historical, version-scoped acceptance evidence live i
 /settings/skills                      -> Sigma.Web.SettingsLive
 /settings/plugins                     -> Sigma.Web.SettingsLive
 /settings/system_prompt               -> Sigma.Web.SettingsLive
+/app-server                           -> samgita_protocol 1.0 host (WebSocket, Bearer SIGMA_PROTOCOL_TOKEN)
 ```
 
 The `:repository` param is a Base64 URL-encoded absolute path with no padding.

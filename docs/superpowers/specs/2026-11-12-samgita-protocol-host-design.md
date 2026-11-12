@@ -135,9 +135,8 @@ Socket pid，Handler 用它向 ThreadStream 挂接。Socket 进程退出由 Thre
 （`samgita_protocol/lib/samgita_protocol/client.ex:429-430`），thread 级单流在第一个 turn 内
 就会越过保留窗，晚加入的连接再也无法接收。
 
-- Replay 保留上限按 turn 设为较大值（`Replay.new/2` 允许 ≤10_000；具体值实施时定），
+- Replay 保留上限：每 turn 4096 条（`Replay.new/2` 允许 ≤10_000），每 thread 保留最近 8 个 turn 的 log；
   分页仍是 128 条。
-- Replay 保留上限：每 turn 4096 条，每 thread 保留最近 8 个 turn 的 log。
 - `thread/read` / `thread/resume` 的 `thread` 快照携带 `active_stream: {stream_id, cursor}`
   （无运行 turn 时为 null；`thread/read` 只对本连接已跟随的 thread 给出）。
 - **晚加入 / 重连（按实现）**：backlog 由 host 推送，不要求客户端 `stream/resume(…, 0)`。连接经
@@ -157,6 +156,7 @@ Socket pid，Handler 用它向 ThreadStream 挂接。Socket 进程退出由 Thre
 | `turn.completed` / `turn.failed` / `turn.cancelled` | `turn/completed`，`status` = completed / failed / interrupted |
 | `message.started` / `message.delta` / `message.completed` | `item/started` / `item/delta` / `item/completed`，`item.type = "message"`，`item_id` = Sigma message id；只转发正文文本 delta（见下） |
 | `tool.started` / `tool.completed` | `item/started` / `item/completed`，`item.type = "tool"`，含工具名与有界结果预览；`tool.update` 不转发（无字符串 delta） |
+| 其他（metrics、subagents、questions、hosted 等） | 不转发 |
 
 **delta 分类（我的决定）**：`Sigma.Agent.ProtocolEventMapper` 目前把正文、thinking、工具参数
 delta 合并进同一 `message.delta` 字符串（`protocol_event_mapper.ex:600-603`）。在 Sigma 侧为
@@ -168,15 +168,29 @@ Protocol V1 客户端忽略未知字段即可；host 只把 `text` 转为 `item/
 Socket 丢弃未协商组通知，handler context 带 `"capabilities"`。host 据此在 ThreadStream 挂接时按连接的协商组
 过滤：不发未协商组的通知；未协商 `streaming.v1` 时 `turn/*` 去掉 `stream_id` / `cursor`（否则被丢弃的
 `item/*` cursor 会让上游 Client 判 `replay_gap`），`active_stream` 为 null。不再要求客户端同时提供三组。
-| 其他（metrics、subagents、questions、hosted 等） | 不转发 |
+
+**重新跟随（按实现）**：会话 Agent 退出时 ThreadStream 停止，已跟随的连接不再收通知。为此：
+`turn/start` / `turn/steer` 在执行前对本连接已跟随的 thread 重新 `ensure` + `attach`（已挂接时幂等），
+会话在别处（UI、另一连接的 `thread/resume`）重启后本连接的新 turn 照常流式下发；会话仍停止时请求以
+`conflict`（`details.reason = "session_not_running"`）拒绝，客户端应先 `thread/resume`。按 `command_id`
+重放的 `thread/start` / `thread/resume`（典型是重连后的重试）同样让新连接跟随该 thread，`thread/start`
+重放时也向新连接发送 `thread/started`。
 
 `item` 对象只放有界显示投影；完整历史仍以 Sigma 的 JSONL 为准。
 
 ### 5.4 错误映射
 
-Sigma `{:error, reason}` → `SamgitaProtocol.Error`：会话不存在 → `not_found`；
-已有运行 turn / turn 不匹配 → `conflict`（前提见 §7 第 2 项）；模型不可用等配置问题 → `invalid_params`；
-其余 → `handler_error`（`message` 不插值输入或密钥）。
+Sigma `{:error, reason}` → `SamgitaProtocol.Error`：会话不存在 → `not_found`；模型不可用等配置问题 →
+`invalid_params`；其余 → `handler_error`（`message` 不插值输入或密钥）。`conflict` 一律带固定集合的
+`details.reason`（从不含请求内容）：
+
+| reason | 来源 |
+| --- | --- |
+| `turn_active` | `turn/start` 时已有运行 turn（`prompt_rejected`，前提见 §7 第 2 项） |
+| `turn_mismatch` | `turn/steer` / `turn/interrupt` 的 `turn_id` 与运行 turn 不符 |
+| `session_busy` | 会话正在执行会话级操作（如 compaction、宿主 prompt 检查） |
+| `session_not_running` | 会话 Agent 未运行；先 `thread/resume` |
+| `command_id_conflict` | 同 `command_id` 不同参数，或仍在执行 / 结果不确定 |
 
 ### 5.5 幂等与持久性（我的决定）
 
@@ -184,12 +198,13 @@ Sigma `{:error, reason}` → `SamgitaProtocol.Error`：会话不存在 → `not_
   ThreadStream 划分（`thread/start` 也走同一表）：同 id 同参数 → 返回原结果，不重复执行；同 id
   不同参数或仍在执行 → `conflict`。只有确定失败（执行前失败或 `PublicRuntime.execute/2` 返回错误）
   释放 id；执行中/后的 raise/exit 和命令生效后的失败（如 create/resume 后无法跟随流）保持占用
-  （结果不确定），同 id 重试得 `conflict`。
+  （结果不确定），同 id 重试得 `conflict`。该保证只在 1024 条窗口内成立：条目被 FIFO 淘汰后，同 id
+  会被当作新命令再次执行。
 - `thread/start` 生成的 session id 为 `:crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)`，
   与 Sigma 其他 session id 格式一致。
 - ThreadStream 在会话 Agent 退出时停止；之后 `thread/resume` 会起一个新的 ThreadStream（旧 turn 的
   replay 随之丢失）。
-- Replay log 在内存、有界（保留条数待实现时取默认值并写入测试）。Sigma 重启后 stream 历史丢失，
+- Replay log 在内存、有界（见 §5.3 保留上限）。Sigma 重启后 stream 历史丢失，
   `stream/resume` 返回 `replay_gap`，客户端应改用 `thread/read` 拿快照——与恢复不变量一致
   （不重放 Provider 调用或工具效果，不伪造结果）。
 - 断线：正在跑的 turn 不因连接断开而取消（与 stdio / Channel 适配器一致）。

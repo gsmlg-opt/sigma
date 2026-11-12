@@ -76,12 +76,30 @@ defmodule Sigma.Web.SamgitaHost.Handler do
         end
 
       {:done, result} ->
-        {{:ok, result}, state}
+        replay(method, result, context, state)
 
       :conflict ->
-        {{:error, Error.new("conflict")}, state}
+        {{:error, Error.new("conflict", %{"reason" => "command_id_conflict"})}, state}
     end
   end
+
+  # A replayed thread/start or thread/resume (typically a retry after a
+  # reconnect) leaves this connection following the thread like the original.
+  defp replay(method, %{"thread_id" => thread_id} = result, context, state)
+       when method in ["thread/start", "thread/resume"] do
+    case follow(thread_id, context) do
+      {:ok, _active_stream} ->
+        if method == "thread/start",
+          do: send(self(), {:protocol_notification, Translate.thread_started(thread_id)})
+
+        {{:ok, result}, follows(state, thread_id)}
+
+      error ->
+        {failure(error), state}
+    end
+  end
+
+  defp replay(_method, result, _context, state), do: {{:ok, result}, state}
 
   defp run("thread/start", params, context, state) do
     metadata = params["metadata"] || %{}
@@ -130,7 +148,8 @@ defmodule Sigma.Web.SamgitaHost.Handler do
     end
   end
 
-  defp run("turn/start", %{"thread_id" => thread_id, "input" => input}, _context, state) do
+  defp run("turn/start", %{"thread_id" => thread_id, "input" => input}, context, state) do
+    refollow(state, thread_id, context)
     payload = %{"content" => text(input), "admission" => "reject_if_busy"}
     {admit(thread_id, "prompt.submit", payload), state}
   end
@@ -138,9 +157,10 @@ defmodule Sigma.Web.SamgitaHost.Handler do
   defp run(
          "turn/steer",
          %{"thread_id" => thread_id, "turn_id" => turn_id, "input" => input},
-         _context,
+         context,
          state
        ) do
+    refollow(state, thread_id, context)
     payload = %{"content" => text(input), "expectedTurnId" => turn_id}
     {admit(thread_id, "prompt.steer", payload), state}
   end
@@ -241,6 +261,15 @@ defmodule Sigma.Web.SamgitaHost.Handler do
     else
       _ -> nil
     end
+  end
+
+  # The stream stops when the session agent exits; re-attaching before a turn is
+  # admitted lets a session restarted elsewhere stream to this connection again.
+  # When the session is still stopped this fails and the turn is rejected with
+  # `session_not_running`.
+  defp refollow(state, thread_id, context) do
+    if MapSet.member?(state.threads, thread_id), do: follow(thread_id, context)
+    :ok
   end
 
   defp follows(state, thread_id), do: %{state | threads: MapSet.put(state.threads, thread_id)}

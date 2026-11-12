@@ -245,8 +245,8 @@ UI / Protocol V1 创建的会话可直接拼出。解析失败、仓库未注册
 | `thread/start`（`metadata.repository` 必填，`title?`） | `session.create`（`cwd` = 仓库；其余 metadata + `title` 写入会话 metadata；`metadata.provider_id` / `model_id` 覆盖默认模型） | `thread_id`、`thread`；session id 为 32 位小写 hex；随后发非回放通知 `thread/started`；本连接开始跟随该 thread。未注册仓库 → `invalid_params` |
 | `thread/read` | `session.status` | `thread` = `{turn, runtime, message_count, active_stream}`；`active_stream` 只对本连接跟随的 thread 给出，否则 `null` |
 | `thread/resume` | `session.resume` + `session.status` | 同上；确保 ThreadStream 并跟随（推送活跃 turn 的 backlog） |
-| `turn/start` | `prompt.submit`，`admission: "reject_if_busy"`，input 文本以 `\n\n` 连接 | `turn_id`、`status: "running"`；已有运行 turn → `conflict` |
-| `turn/steer` | `prompt.steer`，`expectedTurnId` | 同上；turn 不符或无运行 turn → `conflict` |
+| `turn/start` | `prompt.submit`，`admission: "reject_if_busy"`，input 文本以 `\n\n` 连接；执行前重新跟随本连接已跟随的 thread | `turn_id`、`status: "running"`；已有运行 turn → `conflict`（`turn_active`）；会话未运行 → `conflict`（`session_not_running`，先 `thread/resume`） |
+| `turn/steer` | `prompt.steer`，`expectedTurnId`；同样先重新跟随 | 同上；turn 不符或无运行 turn → `conflict`（`turn_mismatch`） |
 | `turn/interrupt` | `turn.cancel`，`expectedTurnId` | `cancelling` / `already_cancelling` → `requested`；同一 turn `already_cancelled` → `interrupted`；`no_active_turn` 或其他 turn 已取消 → `already_finished`；`turn_mismatch` → `conflict` |
 | `stream/resume` | 无（读本连接跟随 thread 的 Replay） | `{stream_id, cursor, events}`（≤128 条/页）；未知或已丢弃的流 → `replay_gap` |
 | `request/cancel` | 无 | Server 按连接串行处理，被引用请求必已结束：本连接最近 128 个已完成请求 id → `already_finished`，否则 `not_found` |
@@ -261,6 +261,13 @@ UI / Protocol V1 创建的会话可直接拼出。解析失败、仓库未注册
 
 用户消息的 item 早于 `turn/started` 发出，因此 turn 流的 cursor 1 通常是用户 item。
 
+**conflict 原因**：`conflict` 一律带 `details.reason`，取值固定：`turn_active`、`turn_mismatch`、
+`session_busy`、`session_not_running`、`command_id_conflict`。
+
+**重新跟随**：会话 Agent 退出时 ThreadStream 停止；`turn/start` / `turn/steer` 执行前会对本连接已跟随的
+thread 重新挂接，因此会话在别处重启后新 turn 照常下发。按 `command_id` 重放的 `thread/start` /
+`thread/resume` 也让当前连接跟随该 thread（`thread/start` 重放会再发一次 `thread/started`）。
+
 **晚加入与重连**：连接经 `thread/start` / `thread/resume` 跟随 thread 时，host 在挂接调用内先推送活跃
 turn 的保留 backlog（cursor 1 起），再推实时通知；`active_stream` 给出 backlog 末尾 cursor。若该 turn
 的 cursor 1 已不在保留窗内，本连接跳过该 turn，从下一个 turn 开始接收。订阅事件丢失（`resync_required`
@@ -272,7 +279,8 @@ turn 的保留 backlog（cursor 1 起），再推实时通知；`active_stream` 
   不重复执行；同 id 不同参数或仍在执行 → `conflict`。只有确定失败（Sigma 命令执行前失败，或
   `PublicRuntime.execute/2` 返回错误）才释放 id 以便重试；执行中/后的 raise 或 exit、命令已生效后的
   失败（如 `session.create` 成功但无法跟随流）结果不确定，id 保持占用，同 id 重试得 `conflict`，
-  客户端应以 `thread/read` 核对后换新 `command_id`。
+  客户端应以 `thread/read` 核对后换新 `command_id`。这一保留只在 1024 条窗口内成立：条目被淘汰后同 id
+  会作为新命令执行。
 - Replay 只在内存：每 turn ≤4096 条，每 thread 保留最近 8 个 turn。Sigma 重启后 `command_id` 表与流历史
   丢失，`stream/resume` 得 `replay_gap`；恢复不变量不变（不重放 Provider 调用或工具效果）。
 - ThreadStream 在会话 Agent 退出时停止；无挂接连接且无运行 turn 时空闲超时退出。连接断开不取消 turn。

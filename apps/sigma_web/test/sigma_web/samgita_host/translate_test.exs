@@ -92,11 +92,15 @@ defmodule Sigma.Web.SamgitaHost.TranslateTest do
 
   test "error mapping" do
     code = &Translate.error(&1).code
+    assert Translate.error({:prompt_rejected, :turn_active}).details == %{"reason" => "turn_active"}
     assert code.(:not_found) == "not_found"
     assert code.(:session_not_found) == "not_found"
     assert code.({:prompt_rejected, :turn_active}) == "conflict"
     assert code.({:prompt_rejected, :turn_mismatch}) == "conflict"
     assert code.(:turn_mismatch) == "conflict"
+    assert code.({:prompt_rejected, :session_busy}) == "conflict"
+    assert code.(:session_busy) == "conflict"
+    assert code.(:session_not_running) == "conflict"
     assert code.(:model_unavailable) == "invalid_params"
     assert code.(:invalid_admission) == "invalid_params"
     assert code.(:invalid_params) == "invalid_params"
@@ -114,6 +118,20 @@ defmodule Sigma.Web.SamgitaHost.TranslateTest do
     assert Translate.error(env.("prompt_rejected", %{"reason" => "x"})).code == "handler_error"
     assert Translate.error(env.("turn_mismatch", %{})).code == "conflict"
     assert Translate.error(env.("session_not_found", %{})).code == "not_found"
+
+    for {c, d, reason} <- [
+          {"prompt_rejected", %{"reason" => "turn_active"}, "turn_active"},
+          {"prompt_rejected", %{"reason" => "turn_mismatch"}, "turn_mismatch"},
+          {"prompt_rejected", %{"reason" => "session_busy"}, "session_busy"},
+          {"turn_mismatch", %{}, "turn_mismatch"},
+          {"session_busy", %{}, "session_busy"},
+          {"session_not_running", %{"input" => "secret"}, "session_not_running"}
+        ] do
+      assert %{code: "conflict", details: %{"reason" => ^reason} = details} =
+               Translate.error(env.(c, d))
+
+      assert map_size(details) == 1
+    end
     assert Translate.error(env.("invalid_params", %{"secret" => "s"})).details == %{}
   end
 end

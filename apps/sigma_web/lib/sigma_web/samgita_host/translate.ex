@@ -9,6 +9,9 @@ defmodule Sigma.Web.SamgitaHost.Translate do
   alias Sigma.Protocol.{Envelope, Error}
   alias SamgitaProtocol.Error, as: HostError
 
+  @rejection_conflicts ["turn_active", "turn_mismatch", "session_busy"]
+  @code_conflicts ["turn_mismatch", "session_busy", "session_not_running"]
+
   @turn_status %{
     "turn.completed" => "completed",
     "turn.failed" => "failed",
@@ -30,14 +33,19 @@ defmodule Sigma.Web.SamgitaHost.Translate do
   def thread_started(thread_id),
     do: build(thread_id, "thread/started", %{"thread_id" => thread_id})
 
+  @doc """
+  Maps a Sigma failure to a `SamgitaProtocol.Error`. Every `conflict` carries
+  `details.reason` from a fixed set (`turn_active`, `turn_mismatch`,
+  `session_busy`, `session_not_running`), never request content.
+  """
   @spec error(term()) :: HostError.t()
   def error(%Envelope{error: %Error{} = error}), do: error(error)
 
   def error(%Error{code: "prompt_rejected", details: %{"reason" => reason}})
-      when reason in ["turn_active", "turn_mismatch"],
-      do: HostError.new("conflict")
+      when reason in @rejection_conflicts,
+      do: conflict(reason)
 
-  def error(%Error{code: code}) when code in ["turn_mismatch"], do: HostError.new("conflict")
+  def error(%Error{code: code}) when code in @code_conflicts, do: conflict(code)
 
   def error(%Error{code: code}) when code in ["not_found", "session_not_found"],
     do: HostError.new("not_found")
@@ -49,15 +57,24 @@ defmodule Sigma.Web.SamgitaHost.Translate do
 
   def error(reason) when reason in [:not_found, :session_not_found], do: HostError.new("not_found")
 
-  def error({:prompt_rejected, reason}) when reason in [:turn_active, :turn_mismatch],
-    do: HostError.new("conflict")
-
-  def error(:turn_mismatch), do: HostError.new("conflict")
+  def error({:prompt_rejected, reason}) when is_atom(reason) do
+    if Atom.to_string(reason) in @rejection_conflicts,
+      do: conflict(Atom.to_string(reason)),
+      else: HostError.new("handler_error")
+  end
 
   def error(reason) when reason in [:model_unavailable, :invalid_admission, :invalid_params],
     do: HostError.new("invalid_params")
 
+  def error(reason) when is_atom(reason) and reason not in [nil, true, false] do
+    if Atom.to_string(reason) in @code_conflicts,
+      do: conflict(Atom.to_string(reason)),
+      else: HostError.new("handler_error")
+  end
+
   def error(_reason), do: HostError.new("handler_error")
+
+  defp conflict(reason), do: HostError.new("conflict", %{"reason" => reason})
 
   defp map_event("turn.started", _payload, ids), do: {"turn/started", ids}
 

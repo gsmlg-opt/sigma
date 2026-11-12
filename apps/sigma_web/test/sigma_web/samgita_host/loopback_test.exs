@@ -465,6 +465,62 @@ defmodule Sigma.Web.SamgitaHost.LoopbackTest do
     unblock_stream!(thread_id, blocker)
   end
 
+  test "a thread/start replayed on a new connection follows the thread there", context do
+    params = %{"metadata" => %{"repository" => context.repo}}
+    first = connect!(context)
+
+    assert {:ok, %{"thread_id" => thread_id} = result} =
+             Client.request(first, "thread/start", params, command_id: "cmd-start-replay")
+
+    # A fresh connection stands in for the client's reconnect.
+    second = connect!(context)
+
+    assert {:ok, ^result} =
+             Client.request(second, "thread/start", params, command_id: "cmd-start-replay")
+
+    assert %{"method" => "thread/started", "params" => %{"thread_id" => ^thread_id}} =
+             receive_notification(second)
+
+    {:ok, %{"turn_id" => turn_id}} = start_turn(second, thread_id, "after replay")
+
+    assert %{"method" => "turn/completed", "params" => %{"turn_id" => ^turn_id}} =
+             List.last(receive_turn(second))
+
+    refute_client_errors(second)
+  end
+
+  test "a followed thread streams again after its session restarts elsewhere", context do
+    first = connect!(context)
+    thread_id = start_thread!(first, context)
+    [{stream, _}] = Registry.lookup(Sigma.Web.SamgitaHost.Registry, thread_id)
+    stream_ref = Process.monitor(stream)
+    stop_session!(context, thread_id)
+    assert_receive {:DOWN, ^stream_ref, :process, ^stream, _}, 2_000
+
+    assert {:error, %Error{code: "conflict", details: %{"reason" => "session_not_running"}}} =
+             start_turn(first, thread_id, "while stopped")
+
+    second = connect!(context)
+    assert {:ok, _} = mutate(second, "thread/resume", %{"thread_id" => thread_id})
+
+    {:ok, %{"turn_id" => turn_id}} = start_turn(first, thread_id, "after restart")
+    messages = receive_turn(first)
+    assert Enum.all?(messages, &(&1["stream_id"] == turn_id))
+    # The status depends on the resumed provider configuration (see the pre-existing
+    # SessionChannelTest resume failure), not on this host.
+    assert %{"method" => "turn/completed", "params" => %{"turn_id" => ^turn_id}} =
+             List.last(messages)
+
+    refute_client_errors(first)
+  end
+
+  defp stop_session!(context, thread_id) do
+    {:ok, %{session_id: session_id}} = ThreadId.decode(thread_id)
+    session_supervisor = Sigma.Agent.Runtime.lookup(context.repo, session_id, :supervisor)
+    sessions_supervisor = Sigma.Agent.Runtime.lookup(context.repo, :sessions)
+    :ok = DynamicSupervisor.terminate_child(sessions_supervisor, session_supervisor)
+  end
+
   defp connect!(context, capabilities \\ @capabilities) do
     {:ok, client} = Client.connect(context.url, token: context.token, capabilities: capabilities)
 
