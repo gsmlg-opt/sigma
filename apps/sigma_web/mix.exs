@@ -35,7 +35,7 @@ defmodule Sigma.Web.MixProject do
       {:phoenix_live_reload, "~> 1.5", only: :dev},
       {:jason, "~> 1.4"},
       {:gaoxy_http, "~> 0.12"},
-      {:websock_adapter, "~> 0.12", hex: :gaoxy_websock_adapter, override: true},
+      {:websock_adapter, "~> 0.15.2", hex: :gaoxy_websock_adapter, override: true},
       {:samgita_protocol, "~> 0.4.1"},
       {:samgita_protocol_websocket, "~> 0.4.1"},
       {:gettext, "~> 1.0"},

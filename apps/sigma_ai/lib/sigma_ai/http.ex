@@ -160,7 +160,6 @@ defmodule Sigma.Ai.HTTP do
         method: request.method |> to_string() |> String.upcase(),
         headers: request.headers,
         http_version: :http1,
-        tls_backend: :ex_ssl,
         error_mode: :structured,
         redirect: :manual,
         decode_body: true,
