@@ -76,8 +76,8 @@ defmodule Sigma.Web.ReleaseWorkflowTest do
     email_config =
       ~S|git config user.email "41898282+github-actions[bot]@users.noreply.github.com"|
 
-    assert length(:binary.matches(source, name_config)) == 2
-    assert length(:binary.matches(source, email_config)) == 2
+    assert length(:binary.matches(source, name_config)) == 1
+    assert length(:binary.matches(source, email_config)) == 1
 
     assert [{identity_offset, _length} | _rest] =
              source |> :binary.matches(name_config) |> Enum.reverse()
@@ -91,5 +91,33 @@ defmodule Sigma.Web.ReleaseWorkflowTest do
 
     assert length(Regex.scan(~r/hashFiles\([^\n]*'package-lock\.json'/, source)) == 2
     refute source =~ "'npm.lock'"
+  end
+
+  test "publishes the precommitted main source without creating or updating branches" do
+    source = File.read!(@workflow_path)
+
+    assert source =~ ~S|if [[ "$branch" != main ]]|
+    assert source =~ ~S|if [[ "$remote_sha" != "$SOURCE_SHA" ]]|
+    assert source =~ ~S|git push origin "refs/tags/v${VERSION}:refs/tags/v${VERSION}"|
+    assert source =~ ~S|Commit version ${VERSION} on main before dispatching a release.|
+    refute source =~ "release-candidate"
+    refute source =~ "candidate_ref"
+    refute source =~ "git commit"
+    refute source =~ "perl -0pi"
+    refute source =~ "git push --atomic"
+    refute source =~ ":refs/heads/"
+  end
+
+  test "qualifies terminal functionality without running excluded suites" do
+    source = File.read!(@workflow_path)
+
+    assert source =~ "bun test apps/sigma_web/assets/js/hooks/session_terminals_test.js"
+    assert source =~ "apps/sigma_agent/test/sigma_agent/terminals/native_stream_integration_test.exs"
+    assert source =~ "apps/sigma_web/test/sigma_web/session/terminal_binding_test.exs"
+    assert source =~ "--test native --test pty_output"
+    refute source =~ ~r/run: mix test\s*\n/
+    refute source =~ ~r/cargo test[^\n]*Cargo\.toml\s*\n/
+    refute source =~ "setup-ci-bubblewrap.sh"
+    refute source =~ "verify-release-native-smoke.py"
   end
 end

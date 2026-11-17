@@ -113,6 +113,7 @@ function createInstance(host) {
     canonicalSize: null,
     renderedSequence: 0,
     receivedSequence: 0,
+    snapshotEpoch: 0,
     recoveryId: null,
     frameQueue: [],
     rendering: false,
@@ -451,12 +452,34 @@ export const SessionTerminals = {
     instance.renderedSequence ||= 0
     instance.receivedSequence ||= 0
     if (options.reset) {
+      instance.snapshotEpoch = (instance.snapshotEpoch || 0) + 1
       instance.frameQueue = []
       instance.renderedSequence = 0
       instance.receivedSequence = 0
     }
     const sequence = integer(frame.sequence)
-    if (!Number.isInteger(sequence) || (!options.reset && sequence <= instance.receivedSequence)) return
+    if (!Number.isInteger(sequence)) return
+    const delivery = instance.delivery
+    const sameDelivery = !options.reset &&
+      delivery?.attachmentId === frame.attachment_id && delivery?.recoveryId === frame.recovery_id
+    instance.delivery = {
+      attachmentId: frame.attachment_id,
+      recoveryId: frame.recovery_id,
+      sequence: sameDelivery ? Math.max(delivery.sequence, sequence) : sequence
+    }
+    if (!options.reset && sequence <= instance.receivedSequence) {
+      // Recovery may replay bytes already rendered before its new acknowledgement arrived.
+      if (sequence <= instance.renderedSequence) {
+        this.pushEvent("terminal_rendered", {
+          terminal_id: frame.terminal_id,
+          generation: frame.generation,
+          ...instance.fence,
+          recovery_id: instance.recoveryId,
+          sequence
+        })
+      }
+      return
+    }
     if (!options.reset && instance.receivedSequence > 0 && sequence > instance.receivedSequence + 1) {
       this.pushEvent("terminal_resync_request", {
         ...instance.fence,
@@ -477,8 +500,7 @@ export const SessionTerminals = {
     const { frame, options } = queued
     const data = frame.data_base64 ? decodeTerminalBytes(frame.data_base64) : frame.data
     const validData = typeof data === "string" || data instanceof Uint8Array
-    const fence = { ...instance.fence }
-    const recoveryId = frame.recovery_id || instance.recoveryId
+    const snapshotEpoch = instance.snapshotEpoch || 0
 
     const visible = this.presentation.panelOpen && !instance.panel?.hidden
     if (!visible) {
@@ -493,8 +515,7 @@ export const SessionTerminals = {
     const rendered = () => afterPaint(() => {
       instance.rendering = false
       const current = !instance.disposed &&
-        instance.fence?.attachment_id === fence.attachment_id &&
-        instance.recoveryId === recoveryId
+        (instance.snapshotEpoch || 0) === snapshotEpoch
       if (!current) {
         instance.frameQueue = instance.frameQueue.filter(({ frame: pending }) =>
           (!pending.attachment_id || pending.attachment_id === instance.fence?.attachment_id) &&
@@ -509,13 +530,18 @@ export const SessionTerminals = {
         this.persistPresentation()
         this.applyPresentation()
       }
-      this.pushEvent("terminal_rendered", {
-        terminal_id: frame.terminal_id,
-        generation: frame.generation,
-        ...fence,
-        recovery_id: recoveryId,
-        sequence: frame.sequence
-      })
+      // Reattachment can retain the same ordered bytes; acknowledge only its actual delivery.
+      const delivery = instance.delivery
+      if (delivery?.attachmentId === instance.fence?.attachment_id &&
+          delivery?.recoveryId === instance.recoveryId && frame.sequence <= delivery.sequence) {
+        this.pushEvent("terminal_rendered", {
+          terminal_id: frame.terminal_id,
+          generation: frame.generation,
+          ...instance.fence,
+          recovery_id: instance.recoveryId,
+          sequence: frame.sequence
+        })
+      }
       SessionTerminals.drainFrames.call(this, instance)
     })
 

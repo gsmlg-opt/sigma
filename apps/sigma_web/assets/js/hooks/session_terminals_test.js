@@ -491,6 +491,135 @@ describe("session terminal authority and rendering", () => {
     expect(order).toEqual([["resize", 90, 31], ["reset"], ["write"]])
   })
 
+  test("finishes queued output under a new same-attachment recovery without duplicating bytes", () => {
+    const callbacks = []
+    const writes = []
+    const events = []
+    const instance = fencedInstance({
+      panel: { hidden: false },
+      renderedSequence: 119,
+      receivedSequence: 119,
+      terminal: { write: (data, callback) => { writes.push(data); callbacks.push(callback) } }
+    })
+    const context = {
+      instances: new Map([[terminalKey("terminal-1", 1), instance]]),
+      presentation: presentation(),
+      persistPresentation() {},
+      applyPresentation() {},
+      pushEvent: (event, payload) => events.push([event, payload])
+    }
+
+    SessionTerminals.write.call(context, serverFrame({ sequence: 120, data: "first\n" }))
+    SessionTerminals.write.call(context, serverFrame({ sequence: 121, data: "second\n" }))
+    // A LiveView patch switches recovery while xterm is still rendering the old delivery.
+    instance.recoveryId = "recovery-2"
+    instance.resynced = false
+    SessionTerminals.write.call(context, serverFrame({ sequence: 120, recovery_id: "recovery-2", data: "first\n" }))
+    SessionTerminals.write.call(context, serverFrame({ sequence: 121, recovery_id: "recovery-2", data: "second\n" }))
+
+    callbacks.shift()()
+    expect(writes).toEqual(["first\n", "second\n"])
+    callbacks.shift()()
+    expect(instance.renderedSequence).toBe(121)
+    expect(instance.frameQueue).toEqual([])
+    expect(events).toEqual([120, 121].map(sequence => ["terminal_rendered", expect.objectContaining({
+      attachment_id: "attachment-1", recovery_id: "recovery-2", sequence
+    })]))
+
+    SessionTerminals.setResynced.call(context, serverFrame({ recovery_id: "recovery-2", resynced: true }))
+    expect(instance.resynced).toBe(true)
+  })
+
+  test("acknowledges already rendered replay after recovery changes without rendering it twice", () => {
+    const events = []
+    const writes = []
+    const instance = fencedInstance({
+      panel: { hidden: false },
+      terminal: { write: (data, callback) => { writes.push(data); callback() } }
+    })
+    const context = {
+      instances: new Map([[terminalKey("terminal-1", 1), instance]]),
+      presentation: presentation(),
+      persistPresentation() {},
+      applyPresentation() {},
+      pushEvent: (event, payload) => events.push([event, payload])
+    }
+
+    SessionTerminals.write.call(context, serverFrame({ sequence: 1, data: "once\n" }))
+    instance.recoveryId = "recovery-2"
+    SessionTerminals.write.call(context, serverFrame({ sequence: 1, recovery_id: "recovery-2", data: "once\n" }))
+
+    expect(writes).toEqual(["once\n"])
+    expect(events).toEqual([
+      ["terminal_rendered", expect.objectContaining({ recovery_id: "recovery-1", sequence: 1 })],
+      ["terminal_rendered", expect.objectContaining({ recovery_id: "recovery-2", sequence: 1 })]
+    ])
+  })
+
+  test("replays overlapping output to a new attachment without losing or duplicating queued bytes", () => {
+    const callbacks = []
+    const writes = []
+    const events = []
+    const instance = fencedInstance({
+      panel: { hidden: false },
+      terminal: { write: (data, callback) => { writes.push(data); callbacks.push(callback) } }
+    })
+    const context = {
+      instances: new Map([[terminalKey("terminal-1", 1), instance]]),
+      presentation: presentation(),
+      persistPresentation() {},
+      applyPresentation() {},
+      pushEvent: (event, payload) => events.push([event, payload])
+    }
+
+    SessionTerminals.write.call(context, serverFrame({ sequence: 1, data: "first\n" }))
+    SessionTerminals.write.call(context, serverFrame({ sequence: 2, data: "second\n" }))
+    instance.fence = { attachment_id: "attachment-2", control_epoch: 2 }
+    instance.recoveryId = "recovery-2"
+    SessionTerminals.write.call(context, serverFrame({ sequence: 1, attachment_id: "attachment-2", recovery_id: "recovery-2", data: "first\n" }))
+    // Completing an old write must not acknowledge bytes not yet delivered to this attachment.
+    callbacks.shift()()
+    expect(writes).toEqual(["first\n", "second\n"])
+    callbacks.shift()()
+    expect(events).toEqual([["terminal_rendered", expect.objectContaining({ attachment_id: "attachment-2", sequence: 1 })]])
+    SessionTerminals.write.call(context, serverFrame({ sequence: 2, attachment_id: "attachment-2", recovery_id: "recovery-2", data: "second\n" }))
+
+    expect(writes).toEqual(["first\n", "second\n"])
+    expect(instance.renderedSequence).toBe(2)
+    expect(events).toEqual([1, 2].map(sequence => ["terminal_rendered", expect.objectContaining({
+      attachment_id: "attachment-2", recovery_id: "recovery-2", sequence
+    })]))
+  })
+
+  test("a replacement snapshot supersedes an in-flight write in the same attachment", () => {
+    const callbacks = []
+    const events = []
+    const writes = []
+    const instance = fencedInstance({
+      panel: { hidden: false },
+      terminal: {
+        reset: () => writes.push("reset"),
+        write: (data, callback) => { writes.push(data); callbacks.push(callback) }
+      }
+    })
+    const context = {
+      instances: new Map([[terminalKey("terminal-1", 1), instance]]),
+      presentation: presentation(),
+      persistPresentation() {},
+      applyPresentation() {},
+      pushEvent: (event, payload) => events.push([event, payload])
+    }
+
+    SessionTerminals.write.call(context, serverFrame({ sequence: 12, data: "old" }))
+    SessionTerminals.write.call(context, serverFrame({ sequence: 8, data: "snapshot" }), { reset: true })
+    callbacks.shift()()
+    expect(events).toEqual([])
+    expect(writes).toEqual(["old", "reset", "snapshot"])
+    callbacks.shift()()
+    expect(instance.renderedSequence).toBe(8)
+    expect(events).toEqual([["terminal_rendered", expect.objectContaining({ sequence: 8 })]])
+  })
+
   test("deduplicates a frame queued during rendering", () => {
     const callbacks = []
     const writes = []
