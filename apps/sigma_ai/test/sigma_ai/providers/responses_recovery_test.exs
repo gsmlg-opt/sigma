@@ -25,15 +25,13 @@ defmodule Sigma.Ai.Providers.ResponsesRecoveryTest do
     end
   end
 
-  test "other adapters reject recovery rather than silently ignoring the option" do
-    for provider <- [Sigma.Ai.Providers.OpenAI, Sigma.Ai.Providers.Anthropic] do
-      assert_raise ProviderError, fn ->
-        provider.stream(%{
-          model: %{id: "test", api: "test", provider: "test"},
-          context: %{messages: [], tools: []},
-          options: recovery_options()
-        })
-      end
+  test "Anthropic rejects Responses recovery options" do
+    assert_raise ProviderError, fn ->
+      Sigma.Ai.Providers.Anthropic.stream(%{
+        model: %{id: "test", api: "test", provider: "test"},
+        context: %{messages: [], tools: []},
+        options: recovery_options()
+      })
     end
   end
 

@@ -3,9 +3,8 @@ defmodule Sigma.Ai.Providers.ToolTransport do
 
   alias Sigma.Ai.ProviderError
 
-  # Chat Completions has no lossless native custom/namespace representation, and
-  # Anthropic's ordinary path is plain JSON functions; Anthropic native profiles use
-  # the explicit Backplane projection instead (see Sigma.Ai.Providers.Anthropic).
+  # Anthropic's ordinary path takes JSON functions. Native profiles use the
+  # Backplane projection in Sigma.Ai.Providers.Anthropic.
   # Reject declarations and replay alike before constructing a network request.
   def require_json_functions!(context, protocol) do
     tools = context[:tools] || []

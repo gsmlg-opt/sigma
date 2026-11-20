@@ -2,7 +2,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesHostedTest do
   use ExUnit.Case, async: true
 
   alias Sigma.Ai.{Provider, ProviderError, ProviderRequest}
-  alias Sigma.Ai.Providers.{Anthropic, OpenAI, OpenAIResponses}
+  alias Sigma.Ai.Providers.{Anthropic, OpenAIResponses}
   alias Sigma.Ai.Providers.OpenAIResponses.Hosted
 
   @model %{id: "hosted-model", api: "openai", provider: "configured-provider"}
@@ -26,13 +26,11 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesHostedTest do
     assert_preflight_error(OpenAIResponses, [%{type: "file_search"}], hosted_web_search: @enabled)
   end
 
-  test "other transports reject hosted declarations and hosted replay before HTTP" do
-    for provider <- [OpenAI, Anthropic] do
-      assert_preflight_error(provider, [@declaration], hosted_web_search: @enabled)
+  test "Anthropic rejects hosted declarations and hosted replay before HTTP" do
+    assert_preflight_error(Anthropic, [@declaration], hosted_web_search: @enabled)
 
-      message = %{role: :assistant, content: [], metadata: %{"openai_responses_hosted" => %{}}}
-      assert_preflight_error(provider, [], [], [message])
-    end
+    message = %{role: :assistant, content: [], metadata: %{"openai_responses_hosted" => %{}}}
+    assert_preflight_error(Anthropic, [], [], [message])
   end
 
   test "streams real hosted observations and preserves actions, citations and native order" do

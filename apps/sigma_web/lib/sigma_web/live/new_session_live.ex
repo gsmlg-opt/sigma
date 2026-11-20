@@ -419,7 +419,7 @@ defmodule Sigma.Web.NewSessionLive do
 
   defp model_options(system_config, active_provider_id) do
     system_config
-    |> Models.list()
+    |> Models.available()
     |> Enum.sort_by(fn model ->
       {model.provider_id != active_provider_id, model.provider_name, model.provider_id}
     end)
@@ -435,7 +435,7 @@ defmodule Sigma.Web.NewSessionLive do
     model_id = system_config["default_model_id"]
 
     if Enum.any?(
-         Models.list(system_config),
+         Models.available(system_config),
          &(&1.provider_id == active_provider_id and &1.model_id == model_id)
        ) do
       model_option_value(active_provider_id, model_id)

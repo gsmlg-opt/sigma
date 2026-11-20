@@ -4,7 +4,7 @@ defmodule Sigma.Agent.BackplaneHostedToolsTest do
   alias Backplane.AgentRuntime.Codex
   alias Sigma.Agent.Backplane.{CodexResources, HostedTools, NativeTools, ToolCatalog}
   alias Sigma.Agent.{Message, MessageTransformer}
-  alias Sigma.Ai.Providers.{Anthropic, OpenAI, OpenAIResponses}
+  alias Sigma.Ai.Providers.{Anthropic, OpenAIResponses}
 
   @model %{id: "hosted", provider: "configured", api: "configured"}
   @enabled %{supported: true, enabled: true, mode: :cached}
@@ -17,10 +17,8 @@ defmodule Sigma.Agent.BackplaneHostedToolsTest do
                HostedTools.configuration(OpenAIResponses, @model, hosted_web_search: config)
     end
 
-    for provider <- [Anthropic, OpenAI] do
-      assert {:error, %{class: :unsupported_capability}} =
-               HostedTools.configuration(provider, @model, hosted_web_search: @enabled)
-    end
+    assert {:error, %{class: :unsupported_capability}} =
+             HostedTools.configuration(Anthropic, @model, hosted_web_search: @enabled)
 
     assert {:error, %{class: :validation}} =
              HostedTools.configuration(OpenAIResponses, @model,

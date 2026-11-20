@@ -137,7 +137,7 @@ defmodule Sigma.Session.ConfigManagerTest do
         "providers" => %{
           "openai" => %{
             "name" => "OpenAI",
-            "api" => "openai-completions",
+            "api" => "openai-responses",
             "models" => [
               %{"id" => "fast"},
               %{"id" => "smart", "contextWindow" => 1_000_000},
@@ -240,7 +240,7 @@ defmodule Sigma.Session.ConfigManagerTest do
         "providers" => %{
           "openai" => %{
             "name" => "OpenAI",
-            "api" => "openai-completions",
+            "api" => "openai-responses",
             "models" => [%{"id" => "fast"}]
           },
           "anthropic" => %{
@@ -292,7 +292,7 @@ defmodule Sigma.Session.ConfigManagerTest do
         "providers" => %{
           "openai" => %{
             "name" => "OpenAI",
-            "api" => "openai-completions",
+            "api" => "openai-responses",
             "authType" => "custom_header",
             "authHeaderName" => "X-API-Key",
             "models" => [%{"id" => "smart"}]
@@ -329,7 +329,7 @@ defmodule Sigma.Session.ConfigManagerTest do
   @tag :tmp_dir
   test "all OpenAI API names default to Bearer authentication when loading and saving" do
     File.mkdir_p!(ConfigManager.agent_dir())
-    apis = ["openai", "openai-completions", "openai-responses"]
+    apis = ["openai", "openai-responses"]
 
     File.write!(
       Path.join(ConfigManager.agent_dir(), "models.json"),

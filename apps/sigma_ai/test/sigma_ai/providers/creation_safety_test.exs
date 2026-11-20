@@ -2,7 +2,7 @@ defmodule Sigma.Ai.Providers.CreationSafetyTest do
   use ExUnit.Case, async: true
 
   alias Sigma.Ai.{CreationRequest, ProviderError}
-  alias Sigma.Ai.Providers.{Anthropic, OpenAI, OpenAIResponses}
+  alias Sigma.Ai.Providers.{Anthropic, OpenAIResponses}
 
   test "only proven pre-submission failures can be retried, regardless of caller policy" do
     for option <- [:transient, fn _, _ -> true end] do
@@ -25,7 +25,7 @@ defmodule Sigma.Ai.Providers.CreationSafetyTest do
     assert CreationRequest.retry_policy(retry: false) == false
   end
 
-  for provider <- [Anthropic, OpenAI, OpenAIResponses] do
+  for provider <- [Anthropic, OpenAIResponses] do
     @provider provider
     test "#{provider} does not resubmit after the upstream reads the POST and drops headers" do
       with_server(fn _socket -> :ok end, fn url ->

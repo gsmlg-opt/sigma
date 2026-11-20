@@ -55,15 +55,16 @@ defmodule Sigma.Web.ModelsSettingsComponent do
           <p class="text-sm break-all">{row.provider_name} / <code>{row.model_id}</code></p>
           <p class="text-sm text-on-surface-variant mt-2">Context budget: {row.default_context_limit || "Session fallback"}</p>
           <p :if={row.metadata["contextWindow"]} class="text-sm text-on-surface-variant">Context window: {row.metadata["contextWindow"]}</p>
-          <p :if={@default_pair == {row.provider_id, row.model_id}} class="text-success text-sm">Global default</p>
+          <p :if={!Models.available_provider?(@providers[row.provider_id])} class="text-on-surface-variant text-sm">Unavailable for sessions</p>
+          <p :if={Models.available_provider?(@providers[row.provider_id]) and @default_pair == {row.provider_id, row.model_id}} class="text-success text-sm">Global default</p>
           <div class="mt-4 flex flex-wrap gap-2">
-            <.dm_btn id={row_id("default", row)} phx-click="default_model" phx-value-provider={row.provider_id} phx-value-model={row.model_id} phx-target={@myself} phx-hook="WebComponentHook" variant="outline" size="sm">Set global default</.dm_btn>
+            <.dm_btn :if={Models.available_provider?(@providers[row.provider_id])} id={row_id("default", row)} phx-click="default_model" phx-value-provider={row.provider_id} phx-value-model={row.model_id} phx-target={@myself} phx-hook="WebComponentHook" variant="outline" size="sm">Set global default</.dm_btn>
             <.dm_btn id={row_id("edit", row)} phx-click="edit_model" phx-value-provider={row.provider_id} phx-value-model={row.model_id} phx-target={@myself} phx-hook="WebComponentHook" variant="outline" size="sm">Edit</.dm_btn>
             <.dm_btn id={row_id("remove", row)} phx-click="confirm_remove_model" phx-value-provider={row.provider_id} phx-value-model={row.model_id} phx-target={@myself} phx-hook="WebComponentHook" variant="error" size="sm">Remove</.dm_btn>
           </div>
         </.dm_card>
       </div>
-      <div :if={@provider_id != ""} class="space-y-5 rounded-xl border border-outline-variant p-4">
+      <div :if={Models.available_provider?(@providers[@provider_id])} class="space-y-5 rounded-xl border border-outline-variant p-4">
         <h3 class="text-lg font-bold">Add models</h3>
         <form id="model-manual-form" phx-submit="add_manual_model" phx-target={@myself} class="grid gap-3 md:grid-cols-3">
           <.dm_input name="model[id]" value={@manual["id"] || ""} label="Model ID" required />

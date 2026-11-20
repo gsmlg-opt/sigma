@@ -86,7 +86,6 @@ defmodule Sigma.Session.ConfigManager do
           api_type =
             case p["api"] do
               "anthropic-messages" -> "anthropic"
-              "openai-completions" -> "openai-completions"
               "openai-responses" -> "openai"
               _ -> p["api"] || "anthropic"
             end
@@ -390,6 +389,7 @@ defmodule Sigma.Session.ConfigManager do
     end)
   end
 
+  # Preserve the stored connection's implicit bearer auth for MCP and Skills.
   defp default_auth_type(api) when api in ["openai", "openai-completions", "openai-responses"],
     do: "bearer"
 

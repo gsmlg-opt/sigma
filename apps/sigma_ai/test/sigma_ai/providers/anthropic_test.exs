@@ -876,19 +876,6 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
         assert error.message =~ "Anthropic does not support"
       end
     end
-
-    test "OpenAI Chat Completions still rejects native tools before HTTP" do
-      error =
-        assert_raise ProviderError, fn ->
-          Sigma.Ai.Providers.OpenAI.stream(%{
-            model: %{id: "gpt-test", api: "openai-completions", provider: "openai"},
-            context: %{messages: [], tools: [@patch_tool]},
-            options: [api_key: "test-key", base_url: "http://127.0.0.1:1"]
-          })
-        end
-
-      assert error.message =~ "does not support native custom tools"
-    end
   end
 
   test "ordinary JSON-function requests keep the hand-written body" do

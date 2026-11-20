@@ -1587,6 +1587,12 @@ defmodule Sigma.Web.SettingsLive do
          |> reload_current_settings_data()
          |> put_flash(:info, provider_saved_message(form))}
 
+      {:error, :unsupported_provider_api} ->
+        {:noreply,
+         socket
+         |> assign(:provider_form, form)
+         |> put_flash(:error, "Choose Anthropic or OpenAI Responses.")}
+
       {:error, _} ->
         {:noreply,
          socket
@@ -2106,8 +2112,7 @@ defmodule Sigma.Web.SettingsLive do
   defp provider_api_options do
     [
       {"anthropic", "Anthropic"},
-      {"openai", "OpenAI Responses"},
-      {"openai-completions", "OpenAI Chat Completions"}
+      {"openai", "OpenAI Responses"}
     ]
   end
 
@@ -2122,7 +2127,6 @@ defmodule Sigma.Web.SettingsLive do
   defp format_api_type("anthropic"), do: "Anthropic"
   defp format_api_type("openai"), do: "OpenAI Responses"
   defp format_api_type("openai-responses"), do: "OpenAI Responses"
-  defp format_api_type("openai-completions"), do: "OpenAI Chat Completions"
   defp format_api_type(value), do: blank_fallback(value, "-")
 
   defp credential_name(_credentials, id) when id in [nil, ""], do: "No Key Selected"
@@ -2192,6 +2196,10 @@ defmodule Sigma.Web.SettingsLive do
          do: ConfigManager.add_provider(provider_form_updates(form))
   end
 
+  defp validate_provider_form(%{"api_type" => api_type})
+       when api_type not in ["anthropic", "openai"],
+       do: {:error, :unsupported_provider_api}
+
   defp validate_provider_form(%{"kind" => "backplane"} = form) do
     origin = String.trim(form["service_origin"] || "")
     uri = URI.parse(origin)
@@ -2220,10 +2228,8 @@ defmodule Sigma.Web.SettingsLive do
     }
   end
 
-  defp normalize_provider_api_type("openai"), do: "openai"
   defp normalize_provider_api_type("openai-responses"), do: "openai"
-  defp normalize_provider_api_type("openai-completions"), do: "openai-completions"
-  defp normalize_provider_api_type(_api_type), do: "anthropic"
+  defp normalize_provider_api_type(api_type), do: api_type
 
   defp normalize_provider_form(form) do
     api_type = normalize_provider_api_type(form["api_type"])
@@ -2239,7 +2245,7 @@ defmodule Sigma.Web.SettingsLive do
   end
 
   defp default_auth_type(api_type)
-       when api_type in ["openai", "openai-responses", "openai-completions"],
+       when api_type in ["openai", "openai-responses"],
        do: "bearer"
 
   defp default_auth_type(_api_type), do: "x-api-key"

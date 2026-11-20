@@ -55,6 +55,15 @@ defmodule Sigma.Web.SettingsLiveTest do
       html = render(view)
       refute html =~ "Current Model"
       refute html =~ "provider[model]"
+      refute html =~ "openai-completions"
+
+      html =
+        render_submit(view, "save_provider", %{
+          "provider" => %{"name" => "Retired transport", "api_type" => "openai-completions"}
+        })
+
+      assert html =~ "Choose Anthropic or OpenAI Responses."
+      assert Sigma.Session.ConfigManager.get_config()["providers"] == %{}
 
       render_submit(view, "save_provider", %{
         "provider" => %{

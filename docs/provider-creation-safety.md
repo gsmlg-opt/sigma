@@ -1,6 +1,6 @@
 # Provider creation and interrupted streams
 
-OpenAI Responses, Chat Completions and Anthropic Messages create remote work with
+OpenAI Responses and Anthropic Messages create remote work with
 POST requests. A timeout, connection reset, HTTP 408 or gateway error does not
 prove that this work was never accepted. Retrying that POST can create another
 generation, with additional cost and different tool calls.
@@ -66,7 +66,7 @@ OpenAI's background streaming GET contract:
 
 The capability is an operator assertion about this endpoint, not automatic
 capability discovery. Unknown declarations, missing explicit `background: true`,
-and use on Chat Completions/Anthropic fail before HTTP. Codex OAuth and arbitrary
+and use on Anthropic fail before HTTP. Codex OAuth and arbitrary
 compatible endpoints must not be opted in without verifying the contract. The
 creation response must confirm `background: true` and an ID before recovery is
 possible. Default requests do not gain a background field; `store: false` remains

@@ -4,7 +4,7 @@ defmodule Sigma.Ai.ModelDiscovery do
   alias Sigma.Ai.ProviderAuth
 
   @max_pages 20
-  @openai_apis ["openai", "openai-responses", "openai-completions"]
+  @openai_apis ["openai", "openai-responses"]
 
   def discover(config, opts \\ []) do
     api = config["api_type"] || "anthropic"
@@ -102,7 +102,8 @@ defmodule Sigma.Ai.ModelDiscovery do
       {:ok, _response} ->
         {:error, :unavailable}
 
-      {:error, %Sigma.Ai.HTTP.TransportError{reason: reason}} when reason in [:timeout, :read_idle_timeout, :connect_timeout] ->
+      {:error, %Sigma.Ai.HTTP.TransportError{reason: reason}}
+      when reason in [:timeout, :read_idle_timeout, :connect_timeout] ->
         {:error, :timeout}
 
       {:error, _reason} ->

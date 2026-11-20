@@ -6,7 +6,7 @@
 - Related: [S9 Phase 1 plan](../contracts/s9-phase1-plan.md) WO-4、[ADR 0002 Extension SDK](../adr/0002-beam-extension-sdk.md)、[build-api-session-context](../contracts/build-api-session-context.md)
 
 > 如何在 **Normalized Provider** 合约上接新模型端点，或贡献 first-class 适配器。  
-> **默认路径：复用 `Sigma.Ai.Providers.OpenAI`（OpenAI-compatible chat completions）。**  
+> **默认路径：配置现有的 OpenAI Responses 或 Anthropic Messages 适配器。**
 > **不要**向 Agent / LiveView 暴露未规范化的裸 SSE / 厂商事件元组。
 
 ---
@@ -53,10 +53,8 @@ Skills 页通过 `settings.json.skillSources` 保存稳定来源 ID 和 `provide
 ```text
 新模型 / 网关
     │
-    ├─ 暴露 OpenAI Chat Completions SSE？
-    │     └─ YES → 只改 ~/.pi/agent/models.json + auth
-    │              （api: openai-completions，baseUrl，model id，authType）
-    │              使用现有 Sigma.Ai.Providers.OpenAI — 不要新模块
+    ├─ 暴露 OpenAI Responses SSE？
+    │     └─ YES → api: openai-responses + Sigma.Ai.Providers.OpenAIResponses
     │
     ├─ 暴露 Anthropic Messages SSE？
     │     └─ YES → api: anthropic-messages + Sigma.Ai.Providers.Anthropic
@@ -67,7 +65,7 @@ Skills 页通过 `settings.json.skillSources` 保存稳定来源 ID 和 `provide
              强制 fake transport + 归一化事件测试
 ```
 
-Phase 1 **禁止**同时新增多个厂商适配器；多数「新模型」应走 OpenAI-compat。
+Phase 1 **禁止**同时新增多个厂商适配器。
 
 ---
 
@@ -94,13 +92,13 @@ Phase 1 **禁止**同时新增多个厂商适配器；多数「新模型」应�
 
 ---
 
-## 3. OpenAI-compatible 配置面（首选）
+## 3. OpenAI Responses 配置
 
-现有 OpenAI 适配器已验证的配置：
+OpenAI Responses 适配器配置：
 
 | 选项 | 来源 | 说明 |
 | --- | --- | --- |
-| `base_url` | `models.json` → `baseUrl`，或 `OPENAI_BASE_URL` | 须含 `/v1` 前缀风格；请求发往 `{base_url}/chat/completions` |
+| `base_url` | `models.json` → `baseUrl`，或 `OPENAI_BASE_URL` | 须含 `/v1` 前缀风格；请求发往 `{base_url}/responses` |
 | `api_key` | `auth.json` 解析后的 `resolved_key`，或 `OPENAI_API_KEY` / `OPENROUTER_API_KEY` | 空白则 **不发** Authorization（keyless 网关） |
 | `auth_type` | `authType`：`bearer`（默认 openai）/ `x-api-key` / `custom_header` | 见 `ProviderAuth` |
 | `auth_header_name` | `authHeaderName` | 仅 `custom_header` 时使用 |
@@ -108,59 +106,28 @@ Phase 1 **禁止**同时新增多个厂商适配器；多数「新模型」应�
 | `cancellation_ref` | 运行时 options | 协作取消；见 §6 |
 | `receive_timeout` | options | 默认 120s |
 
-### 3.1 `~/.pi/agent/models.json` 示例（compat 网关）
+### 3.1 `~/.pi/agent/models.json` 示例
 
 ```json
 {
   "providers": {
-    "openrouter": {
-      "name": "OpenRouter",
-      "api": "openai-completions",
-      "baseUrl": "https://openrouter.ai/api/v1",
+    "responses-gateway": {
+      "name": "Responses Gateway",
+      "api": "openai-responses",
+      "baseUrl": "https://gateway.example/v1",
       "authType": "bearer",
-      "credential_id": "openrouter",
-      "models": [
-        {
-          "id": "anthropic/claude-sonnet-4",
-          "name": "Claude Sonnet 4",
-          "contextWindow": 200000,
-          "maxTokens": 8192
-        }
-      ]
-    },
-    "local-vllm": {
-      "name": "Local vLLM",
-      "api": "openai-completions",
-      "baseUrl": "http://127.0.0.1:8000/v1",
-      "authType": "bearer",
-      "credential_id": "local-vllm",
+      "credential_id": "responses-gateway",
       "models": [{ "id": "my-model", "name": "My Model" }]
-    },
-    "keyless-gateway": {
-      "name": "Keyless Gateway",
-      "api": "openai-completions",
-      "baseUrl": "http://gateway.local/v1",
-      "authType": "bearer",
-      "credential_id": "keyless-gateway",
-      "models": [{ "id": "default", "name": "Default" }]
     }
   }
 }
 ```
 
-对应 `auth.json`（keyless 可省略或放空 key；空白密钥不会发出畸形 `Bearer ` header）：
+在 `auth.json` 中以相同的 `credential_id` 保存凭据。keyless 网关可省略凭据或使用空 key。
 
-```json
-{
-  "openrouter": { "type": "api_key", "key": "sk-or-...", "name": "OpenRouter" },
-  "local-vllm": { "type": "api_key", "key": "unused-or-real", "name": "vLLM" },
-  "keyless-gateway": { "type": "api_key", "key": "", "name": "Keyless" }
-}
-```
+`settings.json` 中的 `defaultProvider` 和 `defaultModel` 保存默认选择。Providers 和 Models 设置页写回同一 pi 文件格式。
 
-`settings.json` 里用 `defaultProvider` / `defaultModel` 选中上述 id。Providers 和 Models 设置页写回同一 pi 文件格式。
-
-**映射：** `api: "openai-completions"` → 运行时 `api_type: "openai-completions"` → `Sigma.Ai.Providers.OpenAI`；`api: "openai-responses"` → `api_type: "openai"` → `Sigma.Ai.Providers.OpenAIResponses`。
+旧 Chat Completions 连接仍可在 Settings 中编辑或删除，其模型不可用于会话。
 
 ---
 
@@ -265,7 +232,7 @@ Legacy 元组映射见 `Provider.normalize_legacy_event/1`（`:start`、`:text_d
 
 仅当 **全部** 满足：
 
-1. 线协议与 OpenAI chat completions **且** Anthropic messages 均不兼容（已用真实或录制流量确认）。
+1. 线协议与 OpenAI Responses **且** Anthropic Messages 均不兼容（已用真实或录制流量确认）。
 2. 差异无法用 base URL / auth header / model id / 网关改写消化。
 3. 能用 **fake transport / 录制 SSE fixture** 做确定性测试（禁止 flaky 真网）。
 4. 同一 PR **只**加这一个适配器；不改 agent turn loop / LiveView 选型大改。
@@ -278,13 +245,13 @@ Legacy 元组映射见 `Provider.normalize_legacy_event/1`（`:start`、`:text_d
 4. Settings UI 的 `api_type` 白名单（若需产品可选）。
 5. 测试：归一化序列 + fake SSE + cancel + 错误分类（对齐 OpenAI/Anthropic 测试模式）。
 
-Phase 1 默认 **不**新增适配器：OpenAI-compat 配置面已覆盖常见网关。
+Phase 1 优先配置现有适配器。
 
 ---
 
 ## 6. Fixture / 测试清单（贡献者验收）
 
-对照 `provider_contract_test.exs` 与 `providers/openai_test.exs` / `anthropic_test.exs`：
+对照 `provider_contract_test.exs` 与 `providers/creation_safety_test.exs` / `anthropic_test.exs`：
 
 | # | 场景 | 期望 |
 | --- | --- | --- |
@@ -307,7 +274,7 @@ Phase 1 默认 **不**新增适配器：OpenAI-compat 配置面已覆盖常见�
 
 ```bash
 mix test apps/sigma_ai/test/sigma_ai/provider_contract_test.exs
-mix test apps/sigma_ai/test/sigma_ai/providers/openai_test.exs
+mix test apps/sigma_ai/test/sigma_ai/providers/creation_safety_test.exs
 mix test apps/sigma_ai/test/sigma_ai/providers/anthropic_test.exs
 mix test apps/sigma_ai/test/sigma_ai/provider_auth_test.exs
 ```
@@ -329,7 +296,7 @@ mix test apps/sigma_ai/test/sigma_ai/provider_auth_test.exs
 | 路径 | 用途 |
 | --- | --- |
 | `apps/sigma_ai/lib/sigma_ai/provider.ex` | 公共 seam + legacy 归一化 + cancel bridge |
-| `apps/sigma_ai/lib/sigma_ai/providers/openai.ex` | OpenAI-compat 参考实现 |
+| `apps/sigma_ai/lib/sigma_ai/providers/openai_responses.ex` | OpenAI Responses 参考实现 |
 | `apps/sigma_ai/lib/sigma_ai/providers/anthropic.ex` | Anthropic Messages 参考实现 |
 | `apps/sigma_ai/lib/sigma_ai/provider_auth.ex` | Auth header 策略 |
 | `apps/sigma_web/lib/sigma_web/protocol_session_options.ex` | `api_type` → 模块 + options 注入 |

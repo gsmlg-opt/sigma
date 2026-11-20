@@ -136,7 +136,7 @@ defmodule Sigma.Ai.ProviderUsage do
   def normalize(_), do: nil
 
   @doc "Extracts wire facts while retaining pi's legacy exclusive input display field."
-  def from_wire(usage, protocol) when protocol in [:openai_responses, :openai, :anthropic] do
+  def from_wire(usage, protocol) when protocol in [:openai_responses, :anthropic] do
     usage = if is_map(usage), do: usage, else: %{}
 
     {input, output, read, write, reasoning} =
@@ -149,11 +149,6 @@ defmodule Sigma.Ai.ProviderUsage do
            counter(
              detail(usage, ["output_tokens_details", "output_token_details"], "reasoning_tokens")
            )}
-
-        :openai ->
-          {counter(usage["prompt_tokens"]), counter(usage["completion_tokens"]),
-           counter(detail(usage, ["prompt_tokens_details"], "cached_tokens")), nil,
-           counter(detail(usage, ["completion_tokens_details"], "reasoning_tokens"))}
 
         :anthropic ->
           {counter(usage["input_tokens"]), counter(usage["output_tokens"]),

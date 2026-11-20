@@ -721,20 +721,6 @@ defmodule Sigma.Agent.BackplaneNativeProductionTest do
     end
   end
 
-  test "an incompatible real Provider refuses native tools before HTTP", ctx do
-    agent =
-      session!(ctx.dir,
-        provider: Sigma.Ai.Providers.OpenAI,
-        options: [base_url: "http://127.0.0.1:1", api_key: "test"]
-      )
-
-    prompt!(agent, "unsupported")
-    assert_receive {:turn_error, error}, 5_000
-    assert error.message =~ "does not support native custom tools"
-    assert_receive {:agent_end, _}, 5_000
-    assert Sigma.Agent.status(agent).phase == :failed
-  end
-
   defp session!(dir, opts \\ []) do
     defaults = [
       cwd: dir,

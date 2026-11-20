@@ -59,7 +59,7 @@ defmodule Sigma.Ai.ProviderUsageTest do
   end
 
   test "absent counters remain unknown while reported zero remains known" do
-    for protocol <- [:openai_responses, :openai, :anthropic] do
+    for protocol <- [:openai_responses, :anthropic] do
       usage = ProviderUsage.normalize(ProviderUsage.from_wire(%{}, protocol))
       assert is_nil(usage.input_tokens)
       assert is_nil(usage.output_tokens)
@@ -82,24 +82,6 @@ defmodule Sigma.Ai.ProviderUsageTest do
     assert usage.input_tokens == 0
     assert usage.cache_read_tokens == 0
     assert usage.output_tokens == 0
-  end
-
-  test "Chat Completions cached prompt detail is an inclusive subset" do
-    usage =
-      ProviderUsage.from_wire(
-        %{
-          "prompt_tokens" => 30,
-          "completion_tokens" => 4,
-          "prompt_tokens_details" => %{"cached_tokens" => 20},
-          "completion_tokens_details" => %{"reasoning_tokens" => 3}
-        },
-        :openai
-      )
-      |> ProviderUsage.normalize()
-
-    assert usage.input_tokens == 30
-    assert usage.cache_read_tokens == 20
-    assert usage.reasoning_tokens == 3
   end
 
   test "normalization rejects malformed counters without inventing nonnegative values" do

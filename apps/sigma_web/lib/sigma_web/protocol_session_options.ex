@@ -35,7 +35,7 @@ defmodule Sigma.Web.ProtocolSessionOptions do
 
     with %{} = model <-
            Enum.find(
-             Models.list(config),
+             Models.available(config),
              &(&1.provider_id == provider_id and &1.model_id == model_id)
            ),
          {:ok, _} <- Models.resolve(provider_id, model_id),
@@ -125,12 +125,9 @@ defmodule Sigma.Web.ProtocolSessionOptions do
   defp provider_module(%{"api_type" => "openai-responses"}),
     do: {:ok, Sigma.Ai.Providers.OpenAIResponses}
 
-  defp provider_module(%{"api_type" => "openai-completions"}),
-    do: {:ok, Sigma.Ai.Providers.OpenAI}
-
   defp provider_module(_config) do
     case Application.get_env(:sigma_web, :mock_provider_module) do
-      provider when is_atom(provider) -> {:ok, provider}
+      provider when is_atom(provider) and not is_nil(provider) -> {:ok, provider}
       _provider -> {:error, :unknown_provider}
     end
   end
@@ -148,7 +145,7 @@ defmodule Sigma.Web.ProtocolSessionOptions do
   end
 
   defp default_auth_type(api_type)
-       when api_type in ["openai", "openai-responses", "openai-completions"],
+       when api_type in ["openai", "openai-responses"],
        do: "bearer"
 
   defp default_auth_type(_api_type), do: "x-api-key"

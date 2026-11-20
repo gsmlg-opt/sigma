@@ -2125,7 +2125,7 @@ defmodule Sigma.Web.SessionLive do
 
   defp model_options(system_config, active_provider_id) do
     system_config
-    |> Models.list()
+    |> Models.available()
     |> Enum.sort_by(fn model ->
       {model.provider_id != active_provider_id, model.provider_name, model.provider_id}
     end)
@@ -4881,7 +4881,6 @@ defmodule Sigma.Web.SessionLive do
         "anthropic" -> Sigma.Ai.Providers.Anthropic
         "openai" -> Sigma.Ai.Providers.OpenAIResponses
         "openai-responses" -> Sigma.Ai.Providers.OpenAIResponses
-        "openai-completions" -> Sigma.Ai.Providers.OpenAI
         _ -> Application.get_env(:sigma_web, :mock_provider_module)
       end
 
@@ -4911,7 +4910,7 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp default_auth_type(api_type)
-       when api_type in ["openai", "openai-responses", "openai-completions"],
+       when api_type in ["openai", "openai-responses"],
        do: "bearer"
 
   defp default_auth_type(_api_type), do: "x-api-key"

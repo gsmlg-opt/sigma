@@ -75,6 +75,32 @@ defmodule Sigma.Session.ModelsTest do
     assert saved["extra"]
   end
 
+  test "a saved Chat Completions model is unavailable for sessions and can be removed" do
+    path = Path.join(ConfigManager.agent_dir(), "models.json")
+    config = path |> File.read!() |> Jason.decode!()
+
+    config =
+      put_in(config, ["providers", "retired"], %{
+        "api" => "openai-completions",
+        "models" => [%{"id" => "old-model"}]
+      })
+
+    File.write!(path, Jason.encode!(config))
+
+    assert {:error, :model_unavailable} = Models.resolve("retired", "old-model")
+    assert {:error, :model_unavailable} = Models.set_default("retired", "old-model")
+    assert {:error, :provider_unavailable} = Models.add("retired", [%{"id" => "new-model"}])
+
+    assert Enum.map(Models.available(ConfigManager.get_config()), & &1.model_id) == [
+             "legacy",
+             "known"
+           ]
+
+    assert Enum.any?(Models.list(), &(&1.provider_id == "retired"))
+    assert {:ok, _} = Models.remove("retired", "old-model")
+    assert {:ok, _} = ConfigManager.delete_provider("retired")
+  end
+
   test "positive strict budgets and IDs are validated without side effects" do
     for value <- [0, -1, "1x", "1.5", 1.5] do
       assert {:error, :invalid_context_limit} =

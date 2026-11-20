@@ -27,25 +27,41 @@ defmodule Sigma.Session.Models do
     end)
   end
 
+  @doc "Configured models eligible for a session."
+  def available(config) do
+    config
+    |> Map.update(
+      "providers",
+      %{},
+      &Map.filter(&1, fn {_id, provider} -> available_provider?(provider) end)
+    )
+    |> list()
+  end
+
   def resolve(provider_id, model_id) do
     config = ConfigManager.get_config()
 
-    if Enum.any?(list(config), &(&1.provider_id == provider_id and &1.model_id == model_id)) do
-      provider = config["providers"][provider_id]
+    with %{} = provider <- get_in(config, ["providers", provider_id]),
+         true <- available_provider?(provider),
+         {:ok, _} <- fetch_model(provider, model_id) do
       key = get_in(config, ["credentials", provider["credential_id"], "key"]) || ""
       {:ok, provider |> Map.put("model", model_id) |> Map.put("resolved_key", key)}
     else
-      {:error, :model_unavailable}
+      _ -> {:error, :model_unavailable}
     end
   end
 
   def add(provider_id, descriptors) when is_list(descriptors) do
     ConfigManager.transaction(fn ->
       with {:ok, provider} <- provider(provider_id),
+           true <- available_provider?(provider),
            {:ok, added} <- normalize_descriptors(descriptors) do
         existing = provider["models"] || []
         merged = Enum.uniq_by(existing ++ added, &descriptor(&1)["id"])
         ConfigManager.put_provider_models(provider_id, merged)
+      else
+        false -> {:error, :provider_unavailable}
+        {:error, _} = error -> error
       end
     end)
   end
@@ -53,15 +69,9 @@ defmodule Sigma.Session.Models do
   def update(provider_id, model_id, updates) when is_map(updates) do
     ConfigManager.transaction(fn ->
       with {:ok, provider} <- provider(provider_id),
-           {:ok, _} <- resolve(provider_id, model_id),
+           {:ok, model} <- fetch_model(provider, model_id),
            {:ok, [updated]} <-
-             normalize_descriptors([
-               Map.merge(
-                 Enum.find(provider["models"], &(descriptor(&1)["id"] == model_id))
-                 |> descriptor(),
-                 stringify(updates)
-               )
-             ]) do
+             normalize_descriptors([Map.merge(descriptor(model), stringify(updates))]) do
         if updated["id"] == model_id do
           models =
             Enum.map(provider["models"], fn model ->
@@ -79,7 +89,7 @@ defmodule Sigma.Session.Models do
   def remove(provider_id, model_id) do
     ConfigManager.transaction(fn ->
       with {:ok, provider} <- provider(provider_id),
-           {:ok, _} <- resolve(provider_id, model_id) do
+           {:ok, _} <- fetch_model(provider, model_id) do
         config = ConfigManager.get_config()
         models = Enum.reject(provider["models"], &(descriptor(&1)["id"] == model_id))
 
@@ -106,6 +116,20 @@ defmodule Sigma.Session.Models do
       provider -> {:ok, provider}
     end
   end
+
+  @doc false
+  # Saved connections stay editable and can still be referenced by MCP and Skills.
+  def available_provider?(%{"api_type" => "openai-completions"}), do: false
+  def available_provider?(provider), do: is_map(provider)
+
+  defp fetch_model(provider, model_id) when is_binary(model_id) and model_id != "" do
+    case Enum.find(provider["models"] || [], &(descriptor(&1)["id"] == model_id)) do
+      nil -> {:error, :model_unavailable}
+      model -> {:ok, model}
+    end
+  end
+
+  defp fetch_model(_provider, _model_id), do: {:error, :model_unavailable}
 
   defp normalize_descriptors(descriptors) do
     Enum.reduce_while(descriptors, {:ok, []}, fn value, {:ok, result} ->

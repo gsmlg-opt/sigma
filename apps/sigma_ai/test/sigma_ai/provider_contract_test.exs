@@ -11,7 +11,7 @@ defmodule Sigma.Ai.ProviderContractTest do
     ProviderUsage
   }
 
-  alias Sigma.Ai.Providers.{Anthropic, OpenAI}
+  alias Sigma.Ai.Providers.{Anthropic, OpenAIResponses}
 
   defmodule AnthropicFixtureProvider do
     @behaviour Provider
@@ -290,7 +290,7 @@ defmodule Sigma.Ai.ProviderContractTest do
   end
 
   test "Anthropic and OpenAI adapters cooperatively cancel their live transports" do
-    for provider <- [Anthropic, OpenAI] do
+    for provider <- [Anthropic, OpenAIResponses] do
       with_hanging_sse_server(fn base_url, server_pid ->
         cancellation_ref = make_ref()
 
@@ -357,7 +357,7 @@ defmodule Sigma.Ai.ProviderContractTest do
   end
 
   defp provider_id(Anthropic), do: "anthropic"
-  defp provider_id(OpenAI), do: "openai"
+  defp provider_id(OpenAIResponses), do: "openai"
 
   defp with_hanging_sse_server(fun) do
     parent = self()
