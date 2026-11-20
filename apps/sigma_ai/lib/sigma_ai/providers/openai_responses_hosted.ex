@@ -1,6 +1,8 @@
 defmodule Sigma.Ai.Providers.OpenAIResponses.Hosted do
   @moduledoc false
 
+  alias Backplane.AiProtocol.Request
+  alias Backplane.AiProtocol.Codec.OpenAIResponses, as: ResponsesCodec
   alias Sigma.Ai.{ProviderError, ProviderEvent}
 
   @key "openai_responses_hosted"
@@ -107,6 +109,9 @@ defmodule Sigma.Ai.Providers.OpenAIResponses.Hosted do
     prepared
   end
 
+  def with_codec_options(prepared, codec_options),
+    do: Map.put(prepared, :codec_options, codec_options)
+
   def new(prepared),
     do: %{prepared: prepared, items: %{}, statuses: %{}, annotations: %{}, bytes: 0}
 
@@ -119,7 +124,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses.Hosted do
 
       {:ok, envelope} ->
         unless message[:role] == :assistant and is_map(envelope) and
-                 Enum.sort(Map.keys(envelope)) == ~w(items origin response_id version),
+                 Enum.sort(Map.keys(Map.delete(envelope, "codex_history_notes"))) ==
+                   ~w(items origin response_id version),
                do: invalid!(:hosted_history)
 
         unless envelope["version"] == 1 and envelope["origin"] == prepared.origin and
@@ -145,7 +151,9 @@ defmodule Sigma.Ai.Providers.OpenAIResponses.Hosted do
         items = Enum.map(entries, & &1["item"])
         validate_items!(items, :request)
 
-        unless signature!(items, :request) == canonical_signature(message),
+        codec_options = replay_codec_options!(envelope, message)
+
+        unless signature!(items, :request) == canonical_signature(message, codec_options),
           do: invalid!(:hosted_history_content)
 
         items
@@ -303,7 +311,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses.Hosted do
       end)
 
       {text, calls} = signature!(items, :stream)
-      {streamed, actual_calls} = canonical_signature(message)
+      codec_options = Map.get(state.prepared, :codec_options, [])
+      {streamed, actual_calls} = canonical_signature(message, codec_options)
 
       unless calls == actual_calls and String.starts_with?(text, streamed),
         do: malformed!(:hosted_output_content_conflict)
@@ -322,6 +331,11 @@ defmodule Sigma.Ai.Providers.OpenAIResponses.Hosted do
         "response_id" => response["id"] || message[:response_id],
         "items" => entries
       }
+
+      envelope =
+        if codec_options[:history_notes] == :local,
+          do: Map.put(envelope, "codex_history_notes", "local"),
+          else: envelope
 
       bounded!(envelope, :stream)
       metadata = Map.put(Map.get(message, :metadata, %{}), @key, envelope)
@@ -587,14 +601,45 @@ defmodule Sigma.Ai.Providers.OpenAIResponses.Hosted do
     {text, calls}
   end
 
-  defp canonical_signature(message) do
+  # Persist the projection mode with raw native items so cold reads can check
+  # their wire identities against the canonical host calls through the public codec.
+  defp replay_codec_options!(envelope, message) do
+    case Map.fetch(envelope, "codex_history_notes") do
+      :error ->
+        []
+
+      {:ok, "local"} ->
+        content = message[:content] || []
+        unless is_list(content), do: invalid!(:hosted_history_content)
+
+        tools =
+          for %{type: :tool_call, name: name} <- content,
+              uniq: true,
+              do: %{name: name}
+
+        with {:ok, request} <- Request.new(%{model: "replay", input: [], tools: tools}),
+             {:ok, codec_options} <-
+               ResponsesCodec.codex_tool_options(request, history_notes: :local) do
+          codec_options
+        else
+          _ -> invalid!(:hosted_history_content)
+        end
+
+      _ ->
+        invalid!(:hosted_history_content)
+    end
+  end
+
+  defp canonical_signature(message, codec_options) do
     content = message[:content] || []
     unless is_list(content), do: invalid!(:hosted_history_content)
     text = for %{type: :text, text: text} <- content, into: "", do: text
 
     calls =
       for %{type: :tool_call} = call <- content,
-          do: {call.id, call.name, Map.get(call, :input_kind, :function), call.arguments}
+          do:
+            {call.id, ResponsesCodec.wire_tool_name(call.name, codec_options),
+             Map.get(call, :input_kind, :function), call.arguments}
 
     {text, calls}
   end

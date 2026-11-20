@@ -727,9 +727,10 @@ defmodule Sigma.Agent.Backplane.ChildIO do
     host = %{
       model: config.model,
       provider: config.provider,
+      native_tools: config[:native_tools] == true,
       provider_options:
-        Keyword.put(
-          Map.get(config, :provider_options, []),
+        Map.get(config, :provider_options, [])
+        |> Keyword.put(
           :cancellation_ref,
           Sigma.Ai.ManagedCancellation.key(
             state.identity.child_session_id,

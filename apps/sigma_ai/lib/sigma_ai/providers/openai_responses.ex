@@ -2,6 +2,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   @behaviour Sigma.Ai.Provider
 
   alias Backplane.AiProtocol.{Codec, Serialization, SSE}
+  alias Backplane.AiProtocol.Codec.OpenAIResponses, as: ResponsesCodec
 
   alias Sigma.Ai.{
     ProviderAuth,
@@ -58,10 +59,11 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     hosted = Hosted.prepare!(model, context, options, base_url)
     native_transport? = native_tool_transport?(context) or hosted.enabled
 
-    image_outputs =
+    {image_outputs, codec_options} =
       case protocol_request(model, Map.put(context, :tools, hosted.local_tools)) do
         {:ok, request} ->
-          protocol_image_outputs!(request)
+          codec_options = codex_tool_options!(request, context)
+          {protocol_image_outputs!(request), codec_options}
 
         {:error, error} ->
           raise ProviderError,
@@ -70,11 +72,13 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
             retryable: false
       end
 
+    hosted = Hosted.with_codec_options(hosted, codec_options)
+
     body = %{
       model: model.id,
       input:
         context.messages
-        |> transform_messages(hosted, image_outputs)
+        |> transform_messages(hosted, image_outputs, codec_options)
         |> prepend_system_message(context[:system] || context[:system_prompt]),
       stream: true,
       store: false
@@ -94,7 +98,12 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     # Add tools if present
     body =
       if context[:tools],
-        do: Map.put(body, :tools, transform_tools(hosted.local_tools) ++ hosted.hosted_tools),
+        do:
+          Map.put(
+            body,
+            :tools,
+            transform_tools(hosted.local_tools, codec_options) ++ hosted.hosted_tools
+          ),
         else: body
 
     headers =
@@ -114,7 +123,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
         session_id,
         log_session_id,
         hosted,
-        native_transport?
+        native_transport?,
+        codec_options
       )
 
     Elixir.Stream.transform(
@@ -152,6 +162,23 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   # parser; native declarations and replay always use the public protocol codec.
   defp native_tool_transport?(context), do: ProtocolRequest.native_tools?(context)
 
+  defp codex_tool_options!(request, context) do
+    if context[:native_tools] == true do
+      case ResponsesCodec.codex_tool_options(request, history_notes: :local) do
+        {:ok, codec_options} ->
+          codec_options
+
+        {:error, error} ->
+          raise ProviderError,
+            kind: :invalid_request,
+            message: "Invalid Codex tool projection: #{error.message}",
+            retryable: false
+      end
+    else
+      []
+    end
+  end
+
   defp build_inner_stream(
          model,
          body,
@@ -161,7 +188,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
          session_id,
          log_session_id,
          hosted,
-         native_transport?
+         native_transport?,
+         codec_options
        ) do
     Elixir.Stream.resource(
       fn ->
@@ -208,8 +236,11 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
                )
              ),
            tool_codec:
-             {if(native_transport?, do: Codec.stream_new(:openai_responses), else: :ordinary),
-              Hosted.new(hosted)},
+             {if(native_transport?,
+                do: Codec.stream_new(:openai_responses, codec_options),
+                else: :ordinary
+              ), Hosted.new(hosted)},
+           codec_options: codec_options,
            observer: Backplane.AiProtocol.OpenAIResponsesObserver.new(),
            error_body: "",
            cancellation: cancellation,
@@ -379,7 +410,10 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
         {:apply, checkpoint} ->
           ResponsesCancellation.observe(state.cancellation, event)
-          {events, message, codec} = process_events([event], message, state.tool_codec)
+
+          {events, message, codec} =
+            process_events([event], message, state.tool_codec, state.codec_options)
+
           state = %{state | tool_codec: codec}
 
           state =
@@ -514,7 +548,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     }
   end
 
-  defp transform_messages(messages, hosted, image_outputs) do
+  defp transform_messages(messages, hosted, image_outputs, codec_options) do
     kinds =
       for %{role: :assistant, content: blocks} <- messages,
           is_list(blocks),
@@ -527,7 +561,10 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
         [%{role: to_string(role), content: transform_responses_content(content, "input_text")}]
 
       %{role: :assistant, content: content} = message ->
-        Hosted.replay_items!(message, hosted) || transform_assistant_responses_items(content)
+        case Hosted.replay_items!(message, hosted) do
+          nil -> transform_assistant_responses_items(content, codec_options)
+          items -> Enum.map(items, &wire_replay_item(&1, message, codec_options))
+        end
 
       %{role: :tool_result, tool_call_id: id, content: content} ->
         type =
@@ -555,6 +592,18 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     end)
   end
 
+  defp wire_replay_item(%{"type" => type} = item, message, codec_options)
+       when type in ["function_call", "custom_tool_call"] do
+    call = Enum.find(message.content, &(&1[:type] == :tool_call and &1[:id] == item["call_id"]))
+    identity = native_identity(call.name, codec_options)
+
+    item
+    |> Map.drop(["name", "namespace"])
+    |> Map.merge(Map.new(identity, fn {key, value} -> {Atom.to_string(key), value} end))
+  end
+
+  defp wire_replay_item(item, _message, _codec_options), do: item
+
   defp transform_responses_content(content, _text_type) when is_binary(content),
     do: [%{type: "input_text", text: content}]
 
@@ -574,13 +623,13 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
   defp transform_responses_content(content, _text_type), do: content
 
-  defp transform_assistant_responses_items(content) when is_list(content) do
+  defp transform_assistant_responses_items(content, codec_options) when is_list(content) do
     Enum.flat_map(content, fn
       %{type: :text, text: text} ->
         [%{type: "message", role: "assistant", content: [%{type: "output_text", text: text}]}]
 
       %{type: :tool_call, id: id, name: name, arguments: arguments} = call ->
-        item = native_identity(name) |> Map.put(:call_id, id)
+        item = native_identity(name, codec_options) |> Map.put(:call_id, id)
 
         item =
           if call[:input_kind] == :custom,
@@ -594,7 +643,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     end)
   end
 
-  defp transform_assistant_responses_items(content),
+  defp transform_assistant_responses_items(content, _codec_options),
     do: [%{type: "message", role: "assistant", content: [%{type: "output_text", text: content}]}]
 
   defp transform_tool_result_content(content) when is_list(content) do
@@ -658,10 +707,10 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     end
   end
 
-  defp transform_tools(tools) do
+  defp transform_tools(tools, codec_options) do
     declarations =
       Enum.map(tools, fn tool ->
-        identity = native_identity(tool.name)
+        identity = native_identity(tool.name, codec_options)
         custom? = tool[:type] in ["custom", :custom] or tool[:input_kind] == :custom
 
         declaration = %{
@@ -707,8 +756,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     |> elem(0)
   end
 
-  defp native_identity(name) do
-    case String.split(name, "::") do
+  defp native_identity(name, codec_options) do
+    case String.split(ResponsesCodec.wire_tool_name(name, codec_options), "::") do
       [name] -> %{name: name}
       [namespace, name] -> %{namespace: namespace, name: name}
     end
@@ -801,11 +850,11 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
   defp normalize_terminal_event!(event), do: event
 
-  defp process_events(events, message, {codec, hosted}) do
+  defp process_events(events, message, {codec, hosted}, codec_options) do
     Enum.reduce_while(events, {[], message, {codec, hosted}}, fn event,
                                                                  {all, acc, {codec, hosted}} ->
       event = normalize_terminal_event!(event)
-      {emitted, next, codec} = process_event(event, acc, codec)
+      {emitted, next, codec} = process_event(event, acc, codec, codec_options)
 
       {observed, next, hosted} = Hosted.observe(hosted, event, next)
 
@@ -824,6 +873,15 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   rescue
     error in ProviderError -> {[{:provider_error, error}], message, {codec, hosted}}
   end
+
+  defp process_event(event, acc, :ordinary, _codec_options),
+    do: process_event(event, acc, :ordinary)
+
+  defp process_event(%{"type" => type} = event, acc, codec, codec_options)
+       when type in ["response.completed", "response.incomplete", "response.done"],
+       do: process_terminal_event(event, acc, codec, codec_options)
+
+  defp process_event(event, acc, codec, _codec_options), do: process_event(event, acc, codec)
 
   # Common failure handling must precede both ordinary and native codec paths.
   defp process_event(:done, acc, codec),
@@ -894,8 +952,14 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
               kind in ["function_call", "custom_tool_call"],
        do: process_tool_frame(event, acc, codec)
 
-  defp process_event(%{"type" => type, "response" => response}, acc, codec)
-       when type in ["response.completed", "response.incomplete", "response.done"] do
+  defp process_event(_event, acc, codec), do: {[], acc, codec}
+
+  defp process_terminal_event(
+         %{"type" => type, "response" => response},
+         acc,
+         codec,
+         codec_options
+       ) do
     incomplete? = type == "response.incomplete" or response["status"] == "incomplete"
     output = response["output"]
 
@@ -917,10 +981,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     end
 
     response = if incomplete?, do: Map.put(response, "status", "incomplete"), else: response
-    complete_response(acc, response, codec)
+    complete_response(acc, response, codec, codec_options)
   end
-
-  defp process_event(_event, acc, codec), do: {[], acc, codec}
 
   # Let the public protocol codec validate tool identity, input kind, completion
   # status, ordering, accumulated bytes and duplicates. Text/reasoning stay host-owned.
@@ -995,13 +1057,13 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     {[{:toolcall_end, index, tool, acc}], acc}
   end
 
-  defp finalize_response_tools(acc, codec, output) do
+  defp finalize_response_tools(acc, codec, output, codec_options) do
     items =
       if is_list(output) do
         Enum.filter(output, &(&1["type"] in ["function_call", "custom_tool_call"]))
       else
         for %{type: :tool_call, partial_json: input} = call <- acc.content,
-            do: response_tool_item(call, input)
+            do: response_tool_item(call, input, codec_options)
       end
 
     {events, acc, codec} =
@@ -1037,9 +1099,10 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     {events, acc, codec}
   end
 
-  defp response_tool_item(call, input) do
+  defp response_tool_item(call, input, codec_options) do
     identity =
-      native_identity(call.name) |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
+      native_identity(call.name, codec_options)
+      |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
 
     {type, key} =
       if call.input_kind == :custom,
@@ -1062,9 +1125,11 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     end)
   end
 
-  defp complete_response(acc, response, codec) do
+  defp complete_response(acc, response, codec, codec_options) do
     {text_events, acc} = maybe_extract_response_output_text(acc, response)
-    {tool_events, acc, codec} = finalize_response_tools(acc, codec, response["output"])
+
+    {tool_events, acc, codec} =
+      finalize_response_tools(acc, codec, response["output"], codec_options)
 
     usage =
       case response do

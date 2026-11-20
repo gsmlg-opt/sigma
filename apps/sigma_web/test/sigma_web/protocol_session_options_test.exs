@@ -50,6 +50,42 @@ defmodule Sigma.Web.ProtocolSessionOptionsTest do
   end
 
   @tag :tmp_dir
+  test "saved remote archive options do not override local History and Notes", %{tmp_dir: tmp} do
+    with_config(tmp, fn ->
+      agent_dir = Path.join(tmp, "agent")
+      path = Path.join(agent_dir, "models.json")
+      config = Jason.decode!(File.read!(path))
+
+      provider =
+        Map.merge(config["providers"]["p"], %{
+          "kind" => "backplane",
+          "baseUrl" => "https://gateway.example/v1/providers/openai-codex",
+          "codexHistoryNotes" => true
+        })
+
+      File.write!(path, Jason.encode!(put_in(config, ["providers", "p"], provider)))
+
+      File.write!(
+        Path.join(agent_dir, "auth.json"),
+        Jason.encode!(%{"p" => %{"type" => "api_key", "key" => "fixture-token"}})
+      )
+
+      settings = Path.join(agent_dir, "settings.json")
+      current_settings = Jason.decode!(File.read!(settings))
+
+      File.write!(
+        settings,
+        Jason.encode!(Map.put(current_settings, "remoteHistoryNotesProvider", "p"))
+      )
+
+      snapshot = %{cwd: tmp, mcp_server_ids: [], provider_id: "p", model_id: "kept"}
+      opts = ProtocolSessionOptions.resolve(snapshot, tmp, tmp, "archive")
+      assert opts[:native_tools]
+      refute Keyword.has_key?(opts[:options], :codex_history_notes)
+    end)
+  end
+
+  @tag :tmp_dir
   test "new protocol sessions validate model membership and freeze the resolved default budget",
        %{tmp_dir: tmp} do
     with_config(tmp, fn ->

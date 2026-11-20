@@ -324,6 +324,7 @@ defmodule Sigma.Agent.BackplaneResponsesImageFunctionalTest do
         8_000 -> flunk("image Provider did not start for #{session}")
       end
 
+    assert params.context.native_tools == true
     id = params.session_id
 
     receive do

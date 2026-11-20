@@ -63,6 +63,7 @@ defmodule Sigma.Agent.Backplane.Provider do
       |> Map.put(:runtime_context_window, window)
       |> Map.put(:tools, request.tools)
       |> Map.put(:catalog_revision, request.catalog_revision)
+      |> Map.put(:native_tools, host[:native_tools] == true)
 
     case host.context_error.(context) do
       nil -> provider_stream(host, owner, request, context)

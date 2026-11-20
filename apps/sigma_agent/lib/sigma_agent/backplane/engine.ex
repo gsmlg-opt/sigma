@@ -345,6 +345,7 @@ defmodule Sigma.Agent.Backplane.Engine do
     host = %{
       model: state.model,
       provider: state.provider,
+      native_tools: state.native_tools,
       provider_options: state.provider_options,
       session_id: state.session_id,
       log_session_id: state.log_session_id,

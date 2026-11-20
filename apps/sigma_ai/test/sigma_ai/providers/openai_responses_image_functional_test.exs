@@ -2,6 +2,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesImageFunctionalTest do
   use ExUnit.Case, async: true
 
   alias Sigma.Ai.Providers.OpenAIResponses
+  alias Sigma.Ai.Providers.OpenAIResponses.Hosted
 
   @moduletag :responses_image_functional
   @png "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR9sAAAAASUVORK5CYII="
@@ -77,6 +78,170 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesImageFunctionalTest do
     end)
   end
 
+  test "native Codex projection preserves local schemas and canonical streamed calls with hosted replay" do
+    schema = %{
+      "type" => "object",
+      "properties" => %{
+        "query" => %{"type" => "string"},
+        "limit" => %{"type" => "integer", "minimum" => 1}
+      },
+      "required" => ["query"],
+      "additionalProperties" => false
+    }
+
+    tools = [
+      %{name: "collaboration::get_channels", parameters: %{"type" => "object"}},
+      %{name: "history::search_contents", parameters: schema},
+      %{name: "notes::list_files_by_prefix", parameters: %{"type" => "object"}},
+      %{type: "web_search", external_web_access: false}
+    ]
+
+    item = %{
+      "type" => "function_call",
+      "id" => "board-item",
+      "call_id" => "board-call",
+      "namespace" => "agent_message_board",
+      "name" => "get_channels",
+      "arguments" => "{}",
+      "status" => "completed"
+    }
+
+    reasoning = %{
+      "type" => "reasoning",
+      "id" => "retained-reasoning",
+      "summary" => [],
+      "encrypted_content" => "opaque-fixture"
+    }
+
+    response = %{
+      "type" => "response.completed",
+      "response" => %{
+        "id" => "board-response",
+        "status" => "completed",
+        "output" => [reasoning, item]
+      }
+    }
+
+    with_server(
+      fn url, capture ->
+        options = [
+          api_key: "projection-fixture",
+          base_url: url,
+          receive_timeout: 2_000,
+          hosted_web_search: %{supported: true, enabled: true, mode: :cached}
+        ]
+
+        events =
+          OpenAIResponses.stream(%{
+            model: @model,
+            context: %{
+              catalog_revision: "native-fixture",
+              native_tools: true,
+              messages: [
+                %{
+                  role: :assistant,
+                  content: [
+                    %{
+                      type: :tool_call,
+                      id: "previous-search",
+                      name: "history::search_contents",
+                      arguments: %{"query" => "query-fixture"}
+                    }
+                  ]
+                },
+                %{role: :tool_result, tool_call_id: "previous-search", content: "[]"}
+              ],
+              tools: tools
+            },
+            options: options
+          })
+          |> Enum.to_list()
+
+        refute Enum.any?(events, &match?({:provider_error, _}, &1))
+        assert {:done, :tool_use, message} = List.last(events)
+        assert [%{name: "collaboration::get_channels"}] = message.content
+        wire = Agent.get(capture, & &1)
+        assert Enum.any?(wire["tools"], &(&1["name"] == "agent_message_board"))
+        refute Map.has_key?(wire, "client_metadata")
+        assert Enum.any?(wire["tools"], &(&1["name"] == "local_notes"))
+
+        assert [%{"namespace" => "local_history"}, %{"type" => "function_call_output"}] =
+                 wire["input"]
+
+        history = Enum.find(wire["tools"], &(&1["name"] == "local_history"))
+        [history_tool] = history["tools"]
+
+        assert history_tool["parameters"] == schema
+
+        envelope = message.metadata["openai_responses_hosted"]
+        assert Enum.map(envelope["items"], & &1["item"]) == [reasoning, item]
+        assert envelope["codex_history_notes"] == "local"
+        message = %{message | metadata: Jason.decode!(Jason.encode!(message.metadata))}
+        assert Hosted.project_metadata(message) == {:ok, envelope}
+
+        replay =
+          OpenAIResponses.stream(%{
+            model: @model,
+            context: %{
+              catalog_revision: "next-native-fixture",
+              native_tools: true,
+              messages: [
+                message,
+                %{role: :tool_result, tool_call_id: "board-call", content: "[]"}
+              ],
+              tools: []
+            },
+            options: options
+          })
+          |> Enum.to_list()
+
+        refute Enum.any?(replay, &match?({:provider_error, _}, &1))
+
+        assert [^reasoning, ^item, %{"type" => "function_call_output"}] =
+                 Agent.get(capture, & &1["input"])
+      end,
+      [response]
+    )
+  end
+
+  test "ordinary Runtime tools retain their provider identity despite a catalog revision" do
+    with_server(fn url, capture ->
+      events =
+        OpenAIResponses.stream(%{
+          model: @model,
+          context: %{
+            catalog_revision: "ordinary-runtime-fixture",
+            native_tools: false,
+            messages: [],
+            tools: [
+              %{name: "collaboration::get_channels", parameters: %{"type" => "object"}},
+              %{
+                name: "history::search_contents",
+                parameters: %{
+                  "type" => "object",
+                  "properties" => %{"query" => %{"type" => "string"}}
+                }
+              }
+            ]
+          },
+          options: [api_key: "ordinary-fixture", base_url: url, receive_timeout: 2_000]
+        })
+        |> Enum.to_list()
+
+      assert Enum.any?(events, &match?({:done, :stop, _}, &1))
+
+      assert [%{"name" => "collaboration"}, %{"name" => "history", "tools" => [search]}] =
+               Agent.get(capture, & &1["tools"])
+
+      assert search["parameters"] == %{
+               "type" => "object",
+               "properties" => %{"query" => %{"type" => "string"}}
+             }
+
+      refute Map.has_key?(Agent.get(capture, & &1), "client_metadata")
+    end)
+  end
+
   defp assert_finished!(url, messages) do
     events =
       OpenAIResponses.stream(%{
@@ -90,11 +255,11 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesImageFunctionalTest do
     refute Enum.any?(events, &match?({:provider_error, _}, &1))
   end
 
-  defp with_server(fun) do
+  defp with_server(fun, events \\ []) do
     {:ok, listener} = :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
     {:ok, port} = :inet.port(listener)
     {:ok, capture} = Agent.start_link(fn -> nil end)
-    task = Task.async(fn -> serve(listener, capture) end)
+    task = Task.async(fn -> serve(listener, capture, events) end)
 
     try do
       fun.("http://127.0.0.1:#{port}", capture)
@@ -105,7 +270,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesImageFunctionalTest do
     end
   end
 
-  defp serve(listener, capture) do
+  defp serve(listener, capture, events) do
     case :gen_tcp.accept(listener) do
       {:ok, socket} ->
         try do
@@ -118,7 +283,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesImageFunctionalTest do
             "response" => %{"id" => "image-response", "status" => "completed", "output" => []}
           }
 
-          response = "data: " <> Jason.encode!(terminal) <> "\n\n"
+          frames = if events == [], do: [terminal], else: events
+          response = Enum.map_join(frames, &("data: " <> Jason.encode!(&1) <> "\n\n"))
 
           :ok =
             :gen_tcp.send(socket, [
@@ -130,7 +296,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesImageFunctionalTest do
           :gen_tcp.close(socket)
         end
 
-        serve(listener, capture)
+        serve(listener, capture, events)
 
       {:error, :closed} ->
         :ok
