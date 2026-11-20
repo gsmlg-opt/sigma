@@ -90,6 +90,7 @@ defmodule Sigma.Agent do
     goal_instruction_pending: false,
     context_excluded_message_ids: MapSet.new(),
     context_reconciliation_required: false,
+    backplane_compacted_message_ids: MapSet.new(),
     messages: [],
     subscribers: [],
     current_turn_resources: [],
@@ -3242,7 +3243,7 @@ defmodule Sigma.Agent do
 
   defp run_compact(state, opts) do
     active_messages = __backplane_context_messages__(state)
-    {to_summarize, to_keep} = find_compact_boundary(active_messages, 20)
+    {to_summarize, to_keep} = find_compact_boundary(state, active_messages, opts)
 
     case to_summarize do
       [] ->
@@ -3276,7 +3277,7 @@ defmodule Sigma.Agent do
         summary_result =
           case Outcome.control(pre_outcome) do
             {:halt, reason} -> {:error, {:hook_stopped, reason}, nil}
-            _ -> generate_summary(state, to_summarize)
+            _ -> generate_summary(state, to_summarize, opts)
           end
 
         case summary_result do
@@ -3301,7 +3302,16 @@ defmodule Sigma.Agent do
                 &MapSet.member?(state.context_excluded_message_ids, &1.id)
               )
 
-            new_state = %{state | messages: excluded ++ [summary_msg | to_keep]}
+            new_state = %{
+              state
+              | messages: excluded ++ [summary_msg | to_keep],
+                backplane_compacted_message_ids:
+                  MapSet.union(
+                    state.backplane_compacted_message_ids,
+                    MapSet.new(to_summarize, & &1.id)
+                  )
+            }
+
             emit(new_state, {:compact, summary_msg, first_kept_id})
 
             emit(
@@ -3315,7 +3325,7 @@ defmodule Sigma.Agent do
                  source_leaf_id: source_leaf_id,
                  first_kept_id: first_kept_id,
                  summary_id: summary_msg.id,
-                 request_ids: [request_id],
+                 request_ids: List.wrap(request_id),
                  before_tokens: before_tokens,
                  after_tokens: compaction_token_estimate([summary_msg | to_keep]),
                  before_source:
@@ -3407,7 +3417,7 @@ defmodule Sigma.Agent do
          status: :failed,
          trigger: trigger,
          source_leaf_id: source_leaf_id,
-         request_ids: [request_id],
+         request_ids: List.wrap(request_id),
          started_at: started_at,
          finished_at: DateTime.utc_now() |> DateTime.to_iso8601(),
          failure_reason: inspect(reason)
@@ -3440,27 +3450,66 @@ defmodule Sigma.Agent do
   end
 
   defp compaction_token_estimate(messages) do
-    messages
-    |> Enum.map(&inspect/1)
-    |> Enum.join("\n")
-    |> byte_size()
-    |> Kernel.+(3)
-    |> div(4)
-    |> max(1)
+    ContextPolicy.snapshot(messages: messages).next_request_estimated_input_tokens
   end
 
-  # Split messages so to_keep starts at the first user message at or after
-  # the (total - keep_count) boundary. This ensures the compaction summary
-  # (which becomes an assistant message in convert_to_llm) is followed by a
-  # user message, producing a valid alternating sequence for all providers.
-  defp find_compact_boundary(messages, keep_count) do
-    split_at = max(0, length(messages) - keep_count)
-    {prefix, suffix} = Enum.split(messages, split_at)
-    {leading, rest} = Enum.split_while(suffix, fn msg -> msg.role != :user end)
-    {prefix ++ leading, rest}
+  defp find_compact_boundary(state, messages, opts) do
+    policy = current_context_policy(state)
+    message_count = length(messages)
+
+    keep_budget =
+      Keyword.get(
+        opts,
+        :keep_budget,
+        div((policy.context_window || 100_000) - policy.output_reserve, 2)
+      )
+
+    {boundaries, pending} =
+      messages
+      |> Enum.with_index()
+      |> Enum.reduce({[], MapSet.new()}, fn {message, index}, {boundaries, pending} ->
+        boundaries =
+          if index > 0 and MapSet.size(pending) == 0 and message.role != :tool_result,
+            do: [index | boundaries],
+            else: boundaries
+
+        pending =
+          case message do
+            %{role: :assistant, content: content} when is_list(content) ->
+              Enum.reduce(content, pending, fn
+                %{type: :tool_call, id: id}, calls -> MapSet.put(calls, id)
+                _block, calls -> calls
+              end)
+
+            %{role: :tool_result, tool_call_id: id} ->
+              MapSet.delete(pending, id)
+
+            _ ->
+              pending
+          end
+
+        {boundaries, pending}
+      end)
+
+    boundaries =
+      if message_count > 1 and MapSet.size(pending) == 0 and
+           List.last(messages).role != :user,
+         do: [message_count | boundaries],
+         else: boundaries
+
+    boundary =
+      boundaries
+      |> Enum.reverse()
+      |> Enum.filter(&(&1 >= message_count - 20))
+      |> Enum.find(fn index ->
+        kept = Enum.drop(messages, index)
+        length(kept) <= 20 and compaction_token_estimate(kept) <= keep_budget
+      end)
+
+    if boundary, do: Enum.split(messages, boundary), else: {[], messages}
   end
 
-  defp generate_summary(state, messages) do
+  defp generate_summary(state, messages, opts) do
     transcript =
       messages
       |> Enum.reject(fn m -> m.role in [:status, :notification] end)
@@ -3494,8 +3543,79 @@ defmodule Sigma.Agent do
         "#{label}: #{text}"
       end)
 
+    window = current_context_policy(state).context_window || 100_000
+
+    output_limit =
+      Provider.output_token_limit(state.provider, state.model, state.provider_options)
+
+    output_limit = min(output_limit || 1024, min(1024, max(1, div(window, 8))))
+    output_limit = min(output_limit, Keyword.get(opts, :summary_output_limit, output_limit))
+    summarize_transcript(state, transcript, "", [], window, output_limit)
+  end
+
+  defp summarize_transcript(state, "", summary, request_ids, _window, _output_limit) do
+    if summary_cancelled?(state),
+      do: {:error, ProviderError.from_reason(:cancelled), request_ids},
+      else: {:ok, summary, request_ids}
+  end
+
+  defp summarize_transcript(state, transcript, summary, request_ids, window, output_limit) do
+    overhead = ContextPolicy.snapshot(messages: [summary_message("", summary)])
+    available = window - output_limit - overhead.next_request_estimated_input_tokens - 32
+
+    cond do
+      summary_cancelled?(state) ->
+        {:error, ProviderError.from_reason(:cancelled), request_ids}
+
+      available > 0 ->
+        {chunk, rest} = split_summary_chunk(transcript, available * 4)
+
+        case request_summary(state, summary_message(chunk, summary), output_limit) do
+          {:ok, result, request_id} when byte_size(result) > 0 ->
+            summarize_transcript(
+              state,
+              rest,
+              result,
+              request_ids ++ [request_id],
+              window,
+              output_limit
+            )
+
+          {:ok, _empty, request_id} ->
+            {:error, :empty_summary, request_ids ++ [request_id]}
+
+          {:error, reason, request_id} ->
+            {:error, reason, request_ids ++ [request_id]}
+        end
+
+      true ->
+        {:error, ProviderError.from_exception("context token limit exceeded during compaction"),
+         request_ids}
+    end
+  end
+
+  defp summary_cancelled?(%{control_pid: control, turn_state: %{turn_id: turn_id}})
+       when is_pid(control) and is_binary(turn_id),
+       do: GenServer.call(control, {:cancelled?, turn_id}, :infinity)
+
+  defp summary_cancelled?(_state), do: false
+
+  defp split_summary_chunk(text, size) when byte_size(text) <= size, do: {text, ""}
+
+  defp split_summary_chunk(text, size) do
+    <<chunk::binary-size(size), rest::binary>> = text
+    if String.valid?(chunk), do: {chunk, rest}, else: split_summary_chunk(text, size - 1)
+  end
+
+  defp summary_message(transcript, previous_summary) do
     prompt = """
     Create a detailed summary of the following coding session transcript. Preserve all important information: files read and their key content, files edited and what changed, commands run and their output, decisions made and why, and the current state of any work in progress.
+
+    Incorporate the previous summary into the updated summary. Preserve the user's current task and all unfinished work so execution can continue from this summary.
+
+    <previous_summary>
+    #{previous_summary}
+    </previous_summary>
 
     <transcript>
     #{transcript}
@@ -3504,6 +3624,10 @@ defmodule Sigma.Agent do
     Reply with the summary only.
     """
 
+    %{role: :user, content: [%{type: :text, text: prompt}]}
+  end
+
+  defp request_summary(state, message, output_limit) do
     params = %{
       model: state.model,
       session_id: state.session_id,
@@ -3511,11 +3635,11 @@ defmodule Sigma.Agent do
       turn_id: state.turn_state.turn_id,
       purpose: :compaction,
       context: %{
-        messages: [%{role: :user, content: [%{type: :text, text: prompt}]}],
+        messages: [message],
         system_prompt: nil,
         tools: []
       },
-      options: state.provider_options
+      options: Keyword.put(state.provider_options, :max_tokens, output_limit)
     }
 
     request =
@@ -4309,6 +4433,76 @@ defmodule Sigma.Agent do
 
   @doc false
   def __backplane_context_error__(state, context), do: context_budget_error(state, context)
+
+  @doc false
+  def __backplane_prepare_context__(state, tools, window, environment, request_messages) do
+    build = fn current ->
+      messages = projected_request_messages(current, request_messages)
+
+      __backplane_build_context__(current, messages, tools, window)
+      |> ContextBuilder.with_execution_environment(environment)
+    end
+
+    context = build.(state)
+
+    snapshot =
+      ContextPolicy.snapshot(system: context.system, messages: context.messages, tools: tools)
+
+    policy =
+      context_policy(
+        snapshot,
+        state.provider,
+        state.model,
+        state.provider_options,
+        state.context_limit
+      )
+
+    overhead =
+      (snapshot.estimate_components[:system] || 0) +
+        (snapshot.estimate_components[:tools] || 0)
+
+    input_budget =
+      min(
+        policy.threshold,
+        (policy.context_window || 100_000) - policy.output_reserve
+      )
+
+    retention_budget = max(0, div(input_budget - overhead, 2))
+
+    if retention_budget > 0 and
+         (snapshot.next_request_estimated_input_tokens >= policy.threshold or
+            policy.overflow in [:overflow, :hard_overflow]) do
+      case run_compact(state,
+             trigger: :auto,
+             keep_budget: retention_budget,
+             summary_output_limit: min(1024, retention_budget)
+           ) do
+        {state, {:ok, _}} -> {state, {:ok, build.(state)}}
+        {state, {:error, :nothing_to_compact}} -> {state, {:ok, context}}
+        {state, {:error, reason}} -> {state, {:error, ProviderError.from_exception(reason)}}
+      end
+    else
+      {state, {:ok, context}}
+    end
+  end
+
+  defp projected_request_messages(state, request_messages) do
+    selected = __backplane_context_messages__(state)
+    by_id = Map.new(selected, &{&1.id, &1})
+    requested_ids = MapSet.new(request_messages, & &1.id)
+
+    summaries =
+      Enum.filter(selected, fn message ->
+        message.role == :compaction_summary and not MapSet.member?(requested_ids, message.id)
+      end)
+
+    retained =
+      request_messages
+      |> Enum.filter(&Map.has_key?(by_id, &1.id))
+      |> Enum.map(&Map.fetch!(by_id, &1.id))
+
+    summaries ++ retained
+  end
 
   @doc false
   def __backplane_hook_context__(state, turn_id), do: hook_ctx(state, turn_id)

@@ -110,9 +110,30 @@ defmodule Sigma.Agent.ContextBuilder do
   @spec build_messages([map()], SessionContext.t()) :: [map()]
   def build_messages(messages, %SessionContext{} = session_context) do
     messages
+    |> summary_continuation()
     |> MessageTransformer.transform_context(transforms: context_transforms(session_context))
     |> MessageTransformer.convert_to_llm()
     |> MessageTransformer.complete_tool_results()
+  end
+
+  defp summary_continuation(messages) do
+    # A complete compaction can retain no original user message. Project its
+    # task summary as the continuation input and inject the session rules there.
+    if Enum.any?(messages, &(&1.role == :user)) do
+      messages
+    else
+      Enum.map(messages, fn
+        %{role: :compaction_summary} = summary ->
+          %{
+            summary
+            | role: :user,
+              content: "[Summary of earlier conversation]\n\n#{summary.content}"
+          }
+
+        message ->
+          message
+      end)
+    end
   end
 
   @doc """

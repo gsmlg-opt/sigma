@@ -652,8 +652,8 @@ defmodule Sigma.Session.Journal do
   defp applicable_compaction(node, position, analysis) do
     with {:ok, summary} <- EntryDecoder.compaction(node.entry),
          target_position when is_integer(target_position) <-
-           compaction_target_position(node.entry, analysis),
-         true <- target_position < position do
+           compaction_target_position(node.entry, analysis, position),
+         true <- target_position < position or complete_compaction?(node.entry) do
       {:ok, summary, target_position}
     else
       {:error, reason} -> {:error, reason}
@@ -661,15 +661,24 @@ defmodule Sigma.Session.Journal do
     end
   end
 
-  defp compaction_target_position(entry, analysis) do
+  defp compaction_target_position(entry, analysis, position) do
     case entry["firstKeptEntryId"] do
       nil ->
-        legacy_target_position(entry["firstKeptId"], analysis)
+        # An explicit null retains only the summary and later entries. Older
+        # entries can still supply the legacy firstKeptId alias.
+        if complete_compaction?(entry),
+          do: position,
+          else: legacy_target_position(entry["firstKeptId"], analysis)
 
       target_id ->
         entry_target_position(target_id, analysis)
     end
   end
+
+  defp complete_compaction?(entry),
+    do:
+      Map.has_key?(entry, "firstKeptEntryId") and is_nil(entry["firstKeptEntryId"]) and
+        is_nil(entry["firstKeptId"])
 
   defp entry_target_position(target_id, analysis) when is_binary(target_id),
     do: Map.get(analysis.entry_positions, target_id)

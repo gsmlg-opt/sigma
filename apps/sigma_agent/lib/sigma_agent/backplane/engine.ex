@@ -357,12 +357,7 @@ defmodule Sigma.Agent.Backplane.Engine do
       native_tool_names: native_names(state, collaboration.native_context[:plugin_tools] || []),
       context_window: fn -> ContextControls.request(self_owner, :window, turn_id) end,
       build_context: fn messages, window, tools ->
-        messages = canonical_user_messages(self_owner, turn_id, messages)
-
-        Sigma.Agent.__backplane_build_context__(state, messages, tools, window)
-        |> ContextBuilder.with_execution_environment(
-          CodexResources.environment(collaboration.native_context)
-        )
+        prepare_context(self_owner, turn_id, messages, window, tools)
       end,
       context_error: &Sigma.Agent.__backplane_context_error__(state, &1),
       stop_hook: &Sigma.Agent.__backplane_stop_hook__(state, turn_id, &1, &2)
@@ -642,18 +637,27 @@ defmodule Sigma.Agent.Backplane.Engine do
         send(worker, {:backplane_context_control, ref, nil})
         loop(state, conversation, turn_id, users, forwarded, assistant, native_context)
 
-      {:backplane_canonical_users, worker, ref, ^turn_id, messages} ->
+      {:backplane_prepare_context, worker, ref, ^turn_id, messages, window, tools} ->
         messages =
           Enum.map(messages, fn
-            %{role: :user, id: id} = message -> Map.get(users, id, message)
-            message -> message
+            %{role: :user, id: id} = message ->
+              Map.get(users, id, message)
+
+            %{role: :tool_result, tool_call_id: call} = message ->
+              if message.id == "msg_tool_res_#{call}",
+                do: %{message | id: "msg_tool_res_#{turn_id}_#{call}"},
+                else: message
+
+            message ->
+              message
           end)
 
-        send(worker, {:backplane_canonical_users, ref, {:ok, messages}})
+        pending = {:context, worker, ref, turn_id, messages, window, tools, native_context}
+        state = %{state | backplane_pending_request: pending}
         loop(state, conversation, turn_id, users, forwarded, assistant, native_context)
 
-      {:backplane_canonical_users, worker, ref, _stale_run, _messages} ->
-        send(worker, {:backplane_canonical_users, ref, {:error, :stale_run}})
+      {:backplane_prepare_context, worker, ref, _stale_run, _messages, _window, _tools} ->
+        send(worker, {:backplane_prepared_context, ref, {:error, :stale_run}})
         loop(state, conversation, turn_id, users, forwarded, assistant, native_context)
 
       {:backplane_collaboration_messages, messages} ->
@@ -736,6 +740,40 @@ defmodule Sigma.Agent.Backplane.Engine do
   defp ready_pending_request(%{backplane_pending_request: nil} = state), do: state
 
   defp ready_pending_request(
+         %{
+           backplane_pending_request:
+             {:context, worker, ref, turn_id, messages, window, tools, native_context}
+         } = state
+       ) do
+    cancelled? = GenServer.call(state.control_pid, {:cancelled?, turn_id}, :infinity)
+
+    cond do
+      cancelled? ->
+        send(worker, {:backplane_prepared_context, ref, {:error, :cancelled}})
+        %{state | backplane_pending_request: nil}
+
+      context_messages_ready?(state, messages, window) ->
+        {state, result} =
+          Sigma.Agent.__backplane_prepare_context__(
+            state,
+            tools,
+            window,
+            CodexResources.environment(native_context),
+            messages
+          )
+
+        cancelled? = GenServer.call(state.control_pid, {:cancelled?, turn_id}, :infinity)
+        result = if cancelled?, do: {:error, :cancelled}, else: result
+        Sigma.Agent.__backplane_acknowledge__(state)
+        send(worker, {:backplane_prepared_context, ref, result})
+        %{state | backplane_pending_request: nil}
+
+      true ->
+        state
+    end
+  end
+
+  defp ready_pending_request(
          %{backplane_pending_request: {worker, ref, request, context}} = state
        ) do
     window = Map.get(context, :runtime_context_window)
@@ -771,13 +809,23 @@ defmodule Sigma.Agent.Backplane.Engine do
     end
   end
 
+  defp context_messages_ready?(state, messages, window) do
+    window_ready? = is_nil(window) or window.window == 1 or state.context_window == window
+
+    recorded =
+      MapSet.union(MapSet.new(state.messages, & &1.id), state.backplane_compacted_message_ids)
+
+    window_ready? and
+      Enum.all?(messages, &MapSet.member?(recorded, &1.id))
+  end
+
   defp remaining_context(state, status, turn_id, native_context) do
     with %{run_id: ^turn_id} = window <- ContextControls.window(status, turn_id),
          true <- status.catalog_revision == state.backplane_catalog_revision do
       context =
         Sigma.Agent.__backplane_build_context__(
           state,
-          Sigma.Agent.Backplane.Provider.normalize_messages(status.messages),
+          Sigma.Agent.__backplane_context_messages__(state),
           state.backplane_catalog_tools,
           window
         )
@@ -889,17 +937,17 @@ defmodule Sigma.Agent.Backplane.Engine do
 
   # Conversation admits content and supplies its own message ID. Restore only
   # users recorded under that exact admission ID, including async reply metadata.
-  defp canonical_user_messages(owner, turn_id, messages) do
+  defp prepare_context(owner, turn_id, messages, window, tools) do
     monitor = Process.monitor(owner)
     ref = make_ref()
-    send(owner, {:backplane_canonical_users, self(), ref, turn_id, messages})
+    send(owner, {:backplane_prepare_context, self(), ref, turn_id, messages, window, tools})
 
     try do
       receive do
-        {:backplane_canonical_users, ^ref, {:ok, canonical}} ->
-          canonical
+        {:backplane_prepared_context, ^ref, {:ok, context}} ->
+          context
 
-        {:backplane_canonical_users, ^ref, {:error, reason}} ->
+        {:backplane_prepared_context, ^ref, {:error, reason}} ->
           raise Sigma.Ai.ProviderError.from_exception(reason)
 
         {:DOWN, ^monitor, :process, ^owner, reason} ->

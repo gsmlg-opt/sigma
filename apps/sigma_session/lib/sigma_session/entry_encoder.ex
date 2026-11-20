@@ -41,7 +41,8 @@ defmodule Sigma.Session.EntryEncoder do
   end
 
   def encode({:compact, %{content: summary}, first_kept_id}, parent_id, _header?)
-      when is_binary(summary) and is_binary(first_kept_id) and first_kept_id != "" do
+      when is_binary(summary) and
+             (is_nil(first_kept_id) or (is_binary(first_kept_id) and first_kept_id != "")) do
     {:ok,
      entry("compaction", parent_id, %{
        "summary" => summary,

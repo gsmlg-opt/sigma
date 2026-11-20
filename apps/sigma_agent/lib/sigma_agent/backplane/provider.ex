@@ -69,6 +69,8 @@ defmodule Sigma.Agent.Backplane.Provider do
       nil -> provider_stream(host, owner, request, context)
       error -> [%{type: :response_failed, error: error}]
     end
+  rescue
+    error in Sigma.Ai.ProviderError -> [%{type: :response_failed, error: error}]
   end
 
   defp provider_stream(host, owner, runtime_request, context) do
