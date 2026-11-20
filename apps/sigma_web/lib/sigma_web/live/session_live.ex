@@ -230,6 +230,7 @@ defmodule Sigma.Web.SessionLive do
            %{
              active_provider_id: provider_id,
              agent: agent,
+             turn_id: agent_status.turn_id,
              context_snapshot: context_snapshot,
              current_request_id: agent_status.current_request_id,
              context_token_count: context_display_tokens(context_snapshot),
@@ -333,6 +334,7 @@ defmodule Sigma.Web.SessionLive do
       |> assign(:pending_mcp_elicitations, session_data.pending_mcp_elicitations)
       |> assign(:sessions, session_data.sessions)
       |> assign(:session_ready, true)
+      |> assign(:turn_id, session_data.turn_id)
       |> assign(:turn_in_flight, active_runtime_phase?(session_data.runtime_status))
       |> assign(:tool_call_to_msg, session_data.tool_call_to_msg)
       |> assign(:tool_results, session_data.tool_results)
@@ -1237,6 +1239,7 @@ defmodule Sigma.Web.SessionLive do
   defp chat_runtime(socket) do
     %{
       active: socket.assigns.turn_in_flight,
+      turnId: if(socket.assigns.turn_in_flight, do: socket.assigns.turn_id),
       phase: socket.assigns.runtime_status,
       label: runtime_phase_label(socket.assigns.runtime_status)
     }
@@ -2319,11 +2322,13 @@ defmodule Sigma.Web.SessionLive do
     |> Enum.find("", &(&1 != ""))
   end
 
-  defp submit_prompt(socket, %{content: content, prepared_resources: resources}) do
-    submit_prompt(socket, content, prepared_resources: resources)
+  defp submit_prompt(socket, prompt, delivery \\ {"prompt.submit", %{}})
+
+  defp submit_prompt(socket, %{content: content, prepared_resources: resources}, delivery) do
+    submit_prompt(socket, content, delivery, prepared_resources: resources)
   end
 
-  defp submit_prompt(socket, prompt), do: submit_prompt(socket, prompt, [])
+  defp submit_prompt(socket, prompt, delivery), do: submit_prompt(socket, prompt, delivery, [])
 
   defp interactive_prompt_context(socket) do
     agent = socket.assigns.agent
@@ -2338,12 +2343,14 @@ defmodule Sigma.Web.SessionLive do
     }
   end
 
-  defp submit_prompt(socket, prompt, prompt_opts) do
+  defp submit_prompt(socket, prompt, {type, payload}, prompt_opts) do
     with :ok <- Sigma.Web.ProtocolSessionOptions.validate_agent_model(socket.assigns.agent),
          {:ok, command} <-
-           Sigma.Protocol.Envelope.command("prompt.submit", socket.assigns.session_id, %{
-             "content" => prompt
-           }),
+           Sigma.Protocol.Envelope.command(
+             type,
+             socket.assigns.session_id,
+             Map.put(payload, "content", prompt)
+           ),
          {:ok, %{payload: payload}} <-
            Sigma.Agent.PublicRuntime.execute(
              command,
@@ -2351,8 +2358,14 @@ defmodule Sigma.Web.SessionLive do
            ) do
       protocol_admission(payload)
     else
-      {:error, %{error: error}} -> {:rejected, error.code}
-      {:error, reason} -> {:rejected, reason}
+      {:error, %{error: %{code: "prompt_rejected", details: %{"reason" => "turn_mismatch"}}}} ->
+        {:rejected, :turn_mismatch}
+
+      {:error, %{error: error}} ->
+        {:rejected, error.code}
+
+      {:error, reason} ->
+        {:rejected, reason}
     end
   end
 
@@ -2449,11 +2462,12 @@ defmodule Sigma.Web.SessionLive do
 
   def handle_event("chat.send", params, socket) do
     if chat_scope?(socket, params) and is_binary(params["text"]) do
-      case handle_event(
-             "send_prompt",
-             %{"value" => params["text"], "images" => Map.get(params, "images", [])},
-             socket
-           ) do
+      prompt =
+        params
+        |> Map.take(["images", "intent", "target_turn_id"])
+        |> Map.put("value", params["text"])
+
+      case handle_event("send_prompt", prompt, socket) do
         {:reply, %{status: status}, socket}
         when status in ["accepted", "queued_as_steering", "queued_as_follow_up"] ->
           {:reply, %{status: "ok", admission: status, request_id: params["request_id"]},
@@ -2778,15 +2792,17 @@ defmodule Sigma.Web.SessionLive do
         {:reply, %{status: "rejected"}, put_flash(socket, :info, "Session is still loading.")}
 
       true ->
-        case ImageAttachments.normalize(prompt, Map.get(params, "images", [])) do
-          {:ok, :empty} ->
-            {:reply, %{status: "accepted"}, socket}
+        with {:ok, delivery} <- composer_delivery(params),
+             {:ok, content} <- ImageAttachments.normalize(prompt, Map.get(params, "images", [])),
+             {:accepted, status, socket} <- handle_prompt(content, socket, delivery) do
+          {:reply, %{status: status}, socket}
+        else
+          {:rejected, socket} ->
+            {:reply, %{status: "rejected"}, socket}
 
-          {:ok, content} ->
-            case handle_prompt(content, socket) do
-              {:accepted, status, socket} -> {:reply, %{status: status}, socket}
-              {:rejected, socket} -> {:reply, %{status: "rejected"}, socket}
-            end
+          {:error, :invalid_delivery} ->
+            {:reply, %{status: "rejected"},
+             put_flash(socket, :error, "Choose how to send this message again.")}
 
           {:error, reason} ->
             {:reply, %{status: "rejected"},
@@ -3369,7 +3385,18 @@ defmodule Sigma.Web.SessionLive do
     end
   end
 
-  defp handle_prompt(cmd, socket) when cmd in ["/reload-tools", "/reload_tools"] do
+  defp composer_delivery(%{"intent" => "steer", "target_turn_id" => id})
+       when is_binary(id) and id != "",
+       do: {:ok, {"prompt.steer", %{"expectedTurnId" => id}}}
+
+  defp composer_delivery(%{"intent" => "follow_up"}), do: {:ok, {"prompt.follow_up", %{}}}
+  defp composer_delivery(%{"intent" => "send"}), do: {:ok, {"prompt.submit", %{}}}
+  defp composer_delivery(%{"intent" => _}), do: {:error, :invalid_delivery}
+  defp composer_delivery(_params), do: {:ok, {"prompt.submit", %{}}}
+
+  defp handle_prompt(:empty, socket, _delivery), do: {:accepted, "accepted", socket}
+
+  defp handle_prompt(cmd, socket, _delivery) when cmd in ["/reload-tools", "/reload_tools"] do
     case Sigma.Agent.reload_mcp_tools(socket.assigns.agent) do
       {:ok, count} ->
         {:accepted, "accepted",
@@ -3380,14 +3407,14 @@ defmodule Sigma.Web.SessionLive do
     end
   end
 
-  defp handle_prompt(content, socket) when is_list(content) do
-    prompt_admission(socket, submit_prompt(socket, content))
+  defp handle_prompt(content, socket, delivery) when is_list(content) do
+    prompt_admission(socket, submit_prompt(socket, content, delivery))
   end
 
-  defp handle_prompt(prompt, socket) do
+  defp handle_prompt(prompt, socket, delivery) do
     case SkillExpander.expand(prompt, cwd: socket.assigns.effective_cwd) do
       :not_command ->
-        prompt_admission(socket, submit_prompt(socket, prompt))
+        prompt_admission(socket, submit_prompt(socket, prompt, delivery))
 
       {:ok, expanded_prompt} ->
         prompt_admission(socket, submit_prompt(socket, expanded_prompt))
@@ -3397,8 +3424,9 @@ defmodule Sigma.Web.SessionLive do
     end
   end
 
-  defp prompt_admission(socket, {:accepted, _info}) do
-    {:accepted, "accepted", socket |> assign(:turn_in_flight, true) |> refresh_continue_button()}
+  defp prompt_admission(socket, {:accepted, %{turn_id: id}}) do
+    {:accepted, "accepted",
+     socket |> assign(turn_in_flight: true, turn_id: id) |> refresh_continue_button()}
   end
 
   defp prompt_admission(socket, {:queued_as_steering, _info}) do
@@ -3417,6 +3445,15 @@ defmodule Sigma.Web.SessionLive do
 
   defp prompt_admission(socket, {:rejected, :model_unavailable}) do
     {:rejected, put_flash(socket, :error, "Choose a configured model before sending a message.")}
+  end
+
+  defp prompt_admission(socket, {:rejected, :turn_mismatch}) do
+    {:rejected,
+     put_flash(
+       socket,
+       :error,
+       "That turn is no longer active. Review your draft and send it again."
+     )}
   end
 
   defp prompt_admission(socket, {:rejected, reason}) do
@@ -3677,6 +3714,7 @@ defmodule Sigma.Web.SessionLive do
 
     metrics_state = Sigma.Session.Metrics.reduce(metrics_state, {fact, attrs})
     runtime_status = metrics_runtime_status(fact, attrs, socket)
+    socket = if fact == :turn_started, do: assign(socket, :turn_id, attrs.turn_id), else: socket
 
     socket =
       socket
@@ -4489,6 +4527,7 @@ defmodule Sigma.Web.SessionLive do
     |> assign(:agent, nil)
     |> assign(:agent_ref, nil)
     |> assign(:turn_in_flight, false)
+    |> assign(:turn_id, nil)
     |> assign(:streaming_message_id, nil)
     |> assign(:tool_results, %{})
     |> assign(:display_messages, %{})
@@ -4617,6 +4656,7 @@ defmodule Sigma.Web.SessionLive do
 
     assign(socket,
       runtime_status: status.phase,
+      turn_id: status[:turn_id],
       turn_in_flight: active_runtime_phase?(status.phase),
       context_snapshot: context_snapshot,
       current_request_id: status[:current_request_id],

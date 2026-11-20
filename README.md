@@ -114,9 +114,10 @@ Direct provider calls can also read environment fallbacks, but the LiveView flow
 4. Prompt the agent; tool calls stream back through LiveView and may request approval depending on policy.
 5. Fork a session when you want a new branch of the same conversation history.
 
-Prompt admission remains available while a turn is active. Additional prompts
-receive an explicit queued follow-up result instead of being silently dropped;
-steering is consumed only at a provider or tool safe boundary. Cancelling a turn
+During an active turn, send a message in the Web composer to steer the agent at
+its next provider or tool boundary. Select **Queue for next turn** to send a
+follow-up after the current turn finishes. If the displayed turn has already
+ended, the composer retains the rejected correction as a draft. Cancelling a turn
 cooperatively reaches provider transports and interruptible tools without
 terminating the session Agent.
 

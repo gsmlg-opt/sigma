@@ -10,6 +10,7 @@ import { filterSkillCandidates, insertSkillCandidate, searchableRemoteSources } 
 
 const h = React.createElement
 const attachmentDrafts = new Map()
+const deliveryLabels = { send: "Send", steer: "Steer current turn", follow_up: "Queue for next turn" }
 const attachmentErrors = { slash_command: "Images cannot be combined with slash commands.", too_many: "Attach no more than four images.", too_large: "Each image must be at most 5 MiB; total at most 10 MiB.", unsupported_type: "Attach PNG, JPEG, GIF or WebP images." }
 
 function Attachment({ file, remove, disabled }) {
@@ -32,6 +33,12 @@ function Composer(props) {
   const [files, setFiles] = useState([])
   const [remote, setRemote] = useState([])
   const [error, setError] = useState("")
+  const [queuedTurn, setQueuedTurn] = useState(null)
+  const turnId = active ? props.runtime.turnId : null
+  const slashCommand = value.trimStart().startsWith("/")
+  const followUp = Boolean(turnId && queuedTurn === turnId)
+  const intent = active && !slashCommand ? (followUp ? "follow_up" : "steer") : "send"
+  const sendLabel = slashCommand ? "Run command" : deliveryLabels[intent]
   const { submit, busy, notice } = useChatSubmission(props)
   useEffect(() => {
     if (key) {
@@ -105,15 +112,21 @@ function Composer(props) {
   const host = document.getElementById("chat-input-area")
   if (!host) return null
   return createPortal(h(React.Fragment, null,
-    active && h(Chat.Status, { role: "status" }, h(Chat.StatusItem, null, props.runtime.label)),
+    active && h(Chat.Status, null,
+      h(Chat.StatusItem, { role: "status" }, props.runtime.label),
+      turnId && !slashCommand && h(Button, {
+        type: "button", size: "sm", appearance: "ghost", disabled: busy || !connected || synchronizing,
+        "aria-pressed": followUp, onClick: () => setQueuedTurn(followUp ? null : turnId)
+      }, "Queue for next turn")),
     h(Chat.Composer, {
       id: "prompt-input", value, onValueChange: changeValue,
       attachments: files, onAttachmentsChange: changeFiles, renderAttachment: (file, context) => h(Attachment, { file, ...context }),
       accept: "image/png,image/jpeg,image/gif,image/webp", allowAttachmentOnly: true,
-      generating: active, canSubmit, busy, disabled: !connected || synchronizing, error: error || notice || undefined,
+      generating: active, canSubmit: canSubmit && (!active || Boolean(turnId)), sendLabel, busy,
+      disabled: !connected || synchronizing, error: error || notice || undefined,
       completion, minRows: 1, maxRows: 6, compact: true,
       textareaProps: {
-        placeholder: "Ask ∑ anything…", "aria-label": "Message",
+        placeholder: active ? sendLabel : "Ask ∑ anything…", "aria-label": "Message",
         onPaste: (event) => {
           const images = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"))
           if (images.length) { event.preventDefault(); addFiles(images) }
@@ -139,7 +152,8 @@ function Composer(props) {
         }
         const result = await encodeImageFiles(files)
         if (!result.ok) { setError("Could not read the attached images."); return false }
-        try { await submit({ text: value, images: result.images }); return true }
+        const delivery = intent === "steer" ? { intent, target_turn_id: turnId } : { intent }
+        try { await submit({ text: value, images: result.images, ...delivery }); return true }
         catch { return false }
       },
       children: (!connected || synchronizing) && h("span", { role: "status" }, "Draft preserved")

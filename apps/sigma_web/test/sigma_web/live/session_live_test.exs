@@ -722,7 +722,8 @@ defmodule Sigma.Web.SessionLiveTest do
     assert has_element?(view, "#messages[phx-hook='SigmaReactChat'][phx-update='ignore']")
   end
 
-  test "React chat maps follow-up admission without changing runtime semantics", %{conn: conn} do
+  test "React chat steers the displayed turn and queues an explicit follow-up", %{conn: conn} do
+    write_selectable_provider_configs()
     session_id = unique_session_id("react-follow-up")
     Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
     Application.put_env(:sigma_web, :blocking_provider_pid, self())
@@ -733,18 +734,39 @@ defmodule Sigma.Web.SessionLiveTest do
       params = %{"id" => "messages", "conversation_id" => session_id, "text" => "first"}
       render_hook(view, "chat.send", Map.put(params, "request_id", "react-first"))
       assert_reply(view, %{status: "ok", admission: "accepted"})
-      assert_receive {:web_provider_waiting, first, "first"}, 1_000
+      assert_receive {:web_provider_waiting, first, "first"}, 5_000
+      %{runtime: %{active: true, turnId: turn_id}} = chat_snapshot(view)
+      assert is_binary(turn_id)
+
+      correction = Map.merge(params, %{"text" => "correct course", "intent" => "steer"})
+      render_hook(view, "chat.send", correction)
+      assert_reply(view, %{status: "error"})
+      render_hook(view, "chat.send", Map.put(correction, "target_turn_id", "stale-turn"))
+      assert_reply(view, %{status: "error", message: "That turn is no longer active." <> _})
+      render_hook(view, "chat.send", Map.put(correction, "target_turn_id", turn_id))
+      assert_reply(view, %{status: "ok", admission: "queued_as_steering"})
 
       render_hook(
         view,
         "chat.send",
-        Map.merge(params, %{"text" => "second", "request_id" => "react-second"})
+        Map.merge(params, %{
+          "text" => "second",
+          "intent" => "follow_up",
+          "request_id" => "react-second"
+        })
       )
 
       assert_reply(view, %{status: "ok", admission: "queued_as_follow_up"})
       send(first, :release_web_provider)
-      assert_receive {:web_provider_waiting, second, "second"}, 1_000
+      assert_receive {:prompt_consumed, :steering, %{turn_id: ^turn_id}}, 5_000
+      assert_receive {:web_provider_waiting, steered, "correct course"}, 5_000
+      send(steered, :release_web_provider)
+      assert_receive {:turn_completed, ^turn_id}, 5_000
+      assert_receive {:web_provider_waiting, second, "second"}, 5_000
+      next_turn_id = chat_snapshot(view).runtime.turnId
+      assert is_binary(next_turn_id) and next_turn_id != turn_id
       send(second, :release_web_provider)
+      assert_receive {:turn_completed, ^next_turn_id}, 5_000
     end)
   end
 
