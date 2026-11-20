@@ -19,11 +19,10 @@ sessions load this policy, and managed children inherit the root policy.
 Current work excludes security and permission development and tests; existing
 adapters remain. Verification covers tool functionality, results, history and lifecycle.
 
-The user deferred `web::run`, `image_gen::imagegen`, selecting an actual plugin
-registry, remote encrypted History and `notes.thread_hint` on 2026-10-27. All five
-remain TODOs and are excluded from this phase's
-completion gates. Existing configured plugin support and its functional/lifecycle
-acceptance remain in scope.
+The user deferred `web::run`, `image_gen::imagegen`, and selecting an actual plugin
+registry. These remain TODOs outside this phase's completion gates. History and
+Notes use local Sigma storage. Remote Codex archives and `notes.thread_hint` are
+outside the project scope.
 
 The 2026-10-30 acceptance used the five official Backplane **1.10.53** packages,
 source `012b7a750dcee5cfa48118d9c3eb87e03e411e22`. Four direct dependency minima
@@ -149,12 +148,10 @@ pending effects/outbox; 12 selected durable/effect/snapshot files retain exact
 bytes, ns mtime and inode. This does not establish Writer-backed or managed-child
 online recovery.
 
-The complete Writer-backed profile receives HTTP 400 from this service because
-`history.search_contents.query` must declare encrypted arguments. This is a
-recorded compatibility boundary involving the deferred encrypted History work;
-its implementation remains outside this phase. Production tools, plaintext
-History behavior and global Provider defaults are unchanged. The full-profile
-online gate remains unverified, separately from clock startup gap #147. All owned live processes
+The historical Writer-backed profile received HTTP 400 from this service because
+`history.search_contents.query` required encrypted arguments on that wire namespace.
+The current Responses projection uses `local_history` and `local_notes` for Sigma's
+plaintext tools. The historical online result is separate from clock startup gap #147. All owned live processes
 are joined and the existing 4580 service is unchanged. Evidence:
 `/tmp/sigma-live-provider51-nk_kvunj`, especially `writerless/online-acceptance.json`,
 `writerless/cold-read-acceptance.json` and `attempt2/probe.json`.
@@ -356,14 +353,9 @@ Session closure leaves it available; rename/adopt move the subtree, delete
 removes it, and forks start independent stores. Same-directory temporary-file
 sync and atomic rename do not provide directory fsync or cross-node exclusion.
 History/Notes are `DirectModelOnly`: the real Deno `ALL_TOOLS` catalog excludes
-all nine, while Skills and Memory remain callable there. Encrypted remote
-history envelopes and `notes.thread_hint` are not implemented. The user deferred
-both on 2026-10-27 as TODOs outside this phase's completion gates. In pinned Codex,
-the latter is a backend-provided full-context contribution in the independent
-developer `token_budget.context_window` message, alongside window UUIDs. It is
-neither another Notes tool nor a repeated incremental summary. Sigma needs an
-actual `alpha/notes/v2/thread_hint` backend and the full-context projection contract;
-the test fixture does not define a local production summarizer.
+all nine, while Skills and Memory remain callable there. History and Notes use
+Sigma's local data. Remote archive transport, encrypted archive replay, and
+`notes.thread_hint` are outside the project scope.
 
 Root sessions with a transcript Writer now also admit Goal3: `get_goal`,
 `create_goal` and `update_goal`. The actual Writer header, Runtime Store and
@@ -681,9 +673,9 @@ parent continuation pass. With 1.10.50
 full-retirement assertions also pass. LifetimeEvidence preserves the exact public
 resource_scope_retirement from the authoritative Store for public reconciliation.
 
-The native profile requires OpenAI Responses transport. Chat Completions and
-Anthropic reject incompatible custom, namespace or output-schema contracts before
-HTTP. They do not silently rewrite the native contract when switching models.
+The native profile uses OpenAI Responses or Anthropic Messages. Anthropic uses
+Backplane's request-scoped projection for custom and namespaced tools.
+Provider-hosted Responses history requires OpenAI Responses.
 
 ## Optional plugin tools
 
@@ -1219,8 +1211,8 @@ Remaining work includes additional command platforms/environment types,
 archived-child discovery beyond its original inventory, abrupt loss before a durable
 export stage and missing lifetime facts. The board raw argument envelope retains
 its existing boundary. Current work excludes safety/permission/sandbox development
-and tests. The external web/image services, actual registry selection, remote
-encrypted History and notes.thread_hint remain the five user-deferred TODOs.
+and tests. The external web/image services and actual registry selection remain
+user-deferred TODOs.
 See the [alignment checklist](../superpowers/plans/2026-10-24-codex-tools-alignment.md).
 
 The public #117 archive consumer uses LifetimeRecovery's immutable evidence,

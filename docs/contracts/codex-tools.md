@@ -170,16 +170,28 @@ selected files retain content, ns mtime and inode, with no Provider/MCP replay.
 This writerless capture does not prove durable Writer/managed-child recovery or
 online execution of all 42 default tools.
 
-The corrected full Writer-backed profile remains rejected before model/tool
+The historical Writer-backed 1.10.51 probe was rejected before model/tool
 execution: HTTP 400 `invalid_request_error`, requiring `encrypted: true` on
 `history.search_contents.query`. The current public local-History contract uses
-plaintext queries. The remote encrypted History feature remains user-deferred;
-do not falsely annotate plaintext, rename/drop production tools or silently
-select another service. Preserve both original full-profile failures. This
+plaintext queries. Both original full-profile failures remain in the historical
+evidence. This
 service-compatibility limitation is separate from the now-resolved clock startup gap #147 and from the prior
 controlled-Provider Writer/child/client/package acceptance. Evidence is under
 `/tmp/sigma-live-provider51-nk_kvunj`; global configuration bytes/mtime/inode and
 the original 4580 service remain unchanged.
+
+### History and Notes scope
+
+On 2026-11-20 the user scoped History and Notes to Sigma's local implementation.
+History reads the session journal and Notes use the root session's local Notes
+store. Remote Codex archives, ingestion, encrypted archive result replay, and
+`notes.thread_hint` are outside the project scope and acceptance criteria.
+
+The Responses codec presents local tools as `local_history` and `local_notes`
+while keeping their canonical names for execution and journal records. The
+Backplane contracts and proxy routes tracked in [#174](https://github.com/gsmlg-opt/backplane/issues/174)
+and [#177](https://github.com/gsmlg-opt/backplane/issues/177) are upstream capability history.
+
 
 Issues #90–#105, #107 and #109–#114 have published fixes; admission, real host
 implementation and consumer acceptance remain separate. This batch adopts #109
@@ -195,9 +207,8 @@ development and tests. Existing adapters remain; functional verification covers
 execution, results, history and lifecycle. Older approval/isolation evidence below
 is historical and is not a claim that those checks ran in this batch.
 
-On 2026-10-27, the user deferred `web::run`, `image_gen::imagegen`, selecting
-an actual plugin registry, remote encrypted History and `notes.thread_hint`. They remain
-explicit TODOs and are excluded from this phase's completion gates. Existing
+The user-deferred `web::run`, `image_gen::imagegen`, and actual plugin registry
+selection remain TODOs outside the current completion gates. Existing
 configured plugin APIs and their outstanding functional/lifecycle acceptance
 retain their scope; no default registry or service endpoint is selected.
 
@@ -592,10 +603,9 @@ OpenAI Responses supports native function and custom declarations, namespace
 groups, grammar formats, output schemas, call replay and typed tool outputs.
 Sigma validates requests and calls through the public AI protocol and delegates
 tool frame parsing to its public Responses stream codec. Existing host HTTP,
-reasoning and response-terminal handling remain in Sigma. Chat Completions and
-Anthropic reject native custom/namespace/output-schema requests before HTTP,
-including incompatible replay history; they do not silently change the tool
-contract when the user switches providers.
+reasoning and response-terminal handling remain in Sigma. Anthropic Messages uses
+Backplane's request-scoped projection for native custom tools, namespaces and
+output schemas. Anthropic rejects provider-hosted Responses history before HTTP.
 
 Malformed, truncated or conflicting tool frames fail the provider response.
 The adopted codec rejects explicitly unfinished tool items at frame and
@@ -1847,7 +1857,7 @@ with role/window/tool filters and persisted-order or reversed-order results.
 Read results retain image attachments in canonical structured metadata, and the
 Provider emits them as separate image blocks beside the text JSON. JSONL and
 subsequent reconstruction preserve both representations without replaying the
-read. Encrypted remote history envelopes are not implemented.
+read.
 
 ### Shared virtual Notes
 
@@ -1886,24 +1896,8 @@ it through the existing Store filesystem; this does not include directory fsync
 or cross-node exclusion. Failed write acknowledgements preserve their actual
 storage reason and remain uncertain without automatic retry. The local JSON
 result shape is Sigma-defined because the pinned remote backend does not specify
-a canonical Notes output schema. `notes.thread_hint` and remote encrypted History
-are not implemented. The user deferred both on 2026-10-27 as TODOs outside this
-phase's completion gates; the existing local History4/Notes5 retain their scope.
-
-In pinned Codex `46fdd5ef39735f4159cdcf0ec5e85c10521494e5`, `notes.thread_hint` is a
-full-context contribution, not a sixth Notes tool or an input field. The HistoryNotes extension
-calls its actual backend at `alpha/notes/v2/thread_hint` with the real session ID
-and agent path. It accepts a nonempty `text` of at most 4,000 UTF-8 bytes; missing,
-failed, oversized or empty results contribute no hint. The session projects the
-fragment as `notes.thread_hint` in its independent developer
-`token_budget.context_window` message alongside first/current/previous window
-UUIDs, rather than reinjecting it in ordinary incremental context. Its tests'
-recent-note fixture does not define a local summary algorithm. Sigma has neither
-that actual backend nor this full-window contribution path. The public
-ConversationAdapter host context callback is a possible future projection boundary;
-the absence of a dedicated ExtensionRuntime hook alone is not a confirmed
-Backplane blocker. Any future implementation requires backend selection and the
-full-context contract before functional acceptance.
+a canonical Notes output schema. History4 and Notes5 use Sigma-local
+storage. Remote archive services and `notes.thread_hint` are outside the project scope.
 
 ### Exposure and functional evidence
 
@@ -3065,10 +3059,9 @@ the remaining behavior and platform acceptance. Dynamic permission development/t
 by the current scope. Skills, context controls, Plan projection, all four Memory
 tools and all nine History/Notes tools are integrated. Unsupported/unconfigured capability is not advertised
 as completed from inventory names or the transitive plugin dependency.
-The external `web::run`/`image_gen::imagegen` backends, actual plugin-registry
-selection, remote encrypted History and `notes.thread_hint` remain user-deferred
-TODOs, outside this phase's completion gates. Local History4/Notes5 and configured
-plugin lifecycle work retain their scope.
+The external `web::run`/`image_gen::imagegen` backends and actual plugin registry
+selection remain TODOs outside this phase's completion gates. Local History4/Notes5
+and configured plugin lifecycle work retain their scope.
 
 `wait_for_environment` now binds the selected local workspace lifecycle to actual
 command-runtime startup. CodexResources creates an environment ID for its resource

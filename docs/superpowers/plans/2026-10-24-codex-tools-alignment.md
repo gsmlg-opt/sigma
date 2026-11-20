@@ -32,7 +32,7 @@ seed43240曾暴露远端新用例沿用旧`usage.input`断言：现有契约保�
 实际Protocol／Chrome完成原取消续接、准确dump、停止态无重放冷恢复及活动turn重载。
 同一1.10.53包另完成完整42工具与三独立BEAM执行／冷读／显式续接；
 此前1.10.51部分真实在线、1.10.52 Events／Goal等证据保留原版本。
-完整Writer目录仍有encrypted History服务兼容边界，属于用户暂缓的remote History事项。
+这一基线的完整 Writer 目录仍有 encrypted History 线协议兼容边界。
 默认42工具、无Writer19、配置MCP与可选Plugins／V2集合均未为在线服务删改。
 
 当前执行约定：默认使用 YOLO 自动批准，沿用 `default: allow`、空 rules 的现有
@@ -41,9 +41,9 @@ seed43240曾暴露远端新用例沿用旧`usage.input`断言：现有契约保�
 允许范围内的功能验证、编译、格式与 diff 检查。
 
 2026-10-27用户明确暂缓`web::run`、`image_gen::imagegen`及实际插件registry来源的
-选择与接入：“这些作为todo就可以了，现在用不到”。同日又确认remote encrypted History
-和`notes.thread_hint`“同样先记 TODO”。五项保留TODO，不作为本阶段完成条件；现有
-本地History4／Notes5、configured插件宿主与剩余功能／生命周期验收继续，不选择默认服务或endpoint。
+选择与接入：“这些作为todo就可以了，现在用不到”。这三项保留 TODO。
+2026-11-20 用户明确将 History/Notes 限定为 Sigma 本地实现。远程 Codex History/Notes、
+加密归档结果回放和 `notes.thread_hint` 已移出项目范围与验收条件。
 
 对照基线为 Runtime 固定的 Codex revision
 `46fdd5ef39735f4159cdcf0ec5e85c10521494e5`；更新 builder 的差异另行标识。
@@ -227,9 +227,9 @@ dev／test／prod warnings-as-errors及两文件format通过；五包／lock与�
 新生产包独立tar解压、移走assembly，四个实际模块的公开BEAM code identity与当前prod一致。
 
 修正后的完整Writer目录仍被所选服务拒绝：HTTP400 `invalid_request_error`，要求
-`history.search_contents.query`声明`encrypted: true`。这是当前在线服务与本地明文History
-的兼容边界；用户已暂缓remote encrypted History，本轮不实现或伪标加密、不删改生产工具或
-更换Provider默认值。两次原失败记录保留，完整默认目录在线验收尚未通过。
+`history.search_contents.query`声明`encrypted: true`。两次原失败记录保留，
+该批次的完整目录在线验收尚未通过。后续 Responses 使用 `local_history` 和 `local_notes`
+投影本地工具。远程 Codex History/Notes 已移出项目范围。
 
 独立使用既有无Writer profile（native19＋实际MCP4／discovery1）验证不依赖History的链路：
 6个真实turn／19次Provider request与response、38条canonical消息、13个outer工具结果全部成功，
@@ -991,10 +991,8 @@ dev／test／prod严格编译、assets build、显式格式与diff检查通过�
   root／managed child使用实际owner目录；ChildIO读取在Subagents锁外完成，支持Registry引用。
   省略agent_name绑定精确当前child Session，同名归档按最新durable registration event选取；
   live owner错误保留，确认已死child可读其精确持久文件。后一个同名规则是Sigma解释。
-  DirectModelOnly在真实Deno中排除；remote encrypted history未实现并已由用户暂缓，transient checkout
-  仍须下一次conversation append才成为持久选择。读取不重放effects。
-- [ ] TODO（用户暂缓，不作本阶段完成条件）：remote encrypted History的真实后端与
-  encrypted envelope接入；保留本地History4的现有实现与验收范围。
+  DirectModelOnly 在真实 Deno 中排除；transient checkout 仍须下一次 conversation append
+  才成为持久选择。读取不重放 effects。
 - [x] Notes：`notes::list_files_by_prefix`、`notes::read_file`、`notes::search_contents`、
   `notes::append_to_file`、`notes::write_file`；同一root rollout共享application-owned
   serialized writer，存储`<root_transcript>.subagents/notes.json`，每次读真实JSON。
@@ -1002,15 +1000,7 @@ dev／test／prod严格编译、assets build、显式格式与diff检查通过�
   UTF-8 bytes、保留LF/CRLF的inclusive正负物理行、排序及显式limit已实现；无隐式result cap。
   只读不创建目录／文件；rename／adopt／delete跟随现有subtree，fork独立。
   复用file sync＋atomic rename，不宣称directory fsync／跨node排他；unknown不重试。
-  DirectModelOnly在真实Deno中排除；`notes.thread_hint`未实现。
-- [ ] TODO（用户暂缓，不作本阶段完成条件）：Notes full-context提示`notes.thread_hint`。
-  pinned Codex通过真实`alpha/notes/v2/thread_hint`后端，
-  使用session ID／agent path取得非空、至多4000 UTF-8 bytes的text。失败／空／超大则省略；
-  它进入独立developer `token_budget.context_window`的notes.thread_hint，与first／current／
-  previous窗口UUID一起贡献full context，不是第六个Notes工具，也不在普通增量重复。
-  Sigma缺实际backend和full-context投影契约；public ConversationAdapter context callback
-  是可评估接点，缺专用ExtensionRuntime hook本身不构成已确认上游blocker。
-  不把上游测试的recent-notes fixture编成生产摘要算法。
+  DirectModelOnly 在真实 Deno 中排除。Notes 使用 Sigma 本地存储。
 - [x] 消息板9项：`collaboration::create_channel`、`get_channels`、`list_threads`、
   `search_posts`、`read_thread`、`read_post`、`subscribe`、`unsubscribe`、`post`；
   root／child按真实Session／Subagents membership／Writer header共享board，独立于V2六工具。
@@ -1384,8 +1374,8 @@ profile，不改称完整53在线验收，不累计重叠批次为唯一总数�
 完整close／文件操作／新准入须真实完整completion；helper崩溃保留actual unconfirmed。
 board原raw argument envelope仍缺，按已接受安全／权限排除范围保留，不新增相关开发或测试。
 
-web::run／image_gen::imagegen实际backend、实际registry选择、remote encrypted History和
-notes.thread_hint五项由用户明确暂缓，不作本阶段完成门。当前允许范围的Goal验收已完成；
+web::run／image_gen::imagegen 实际 backend、实际 registry 选择继续暂缓。
+远程 Codex History/Notes 及 `notes.thread_hint` 已移出范围。当前允许范围的 Goal 验收已完成；
 这些TODO及其他平台／完整Writer在线限制继续明确保留。1.10.53采用批次的10个变更Elixir／
 test／manifest文件format和git diff检查通过；其675份原文件仅15份授权路径变化，其他660份
 保持、无删除。本次完整42工具验收不改产品源码／测试／依赖，当前675份基线仅四份工程文档
