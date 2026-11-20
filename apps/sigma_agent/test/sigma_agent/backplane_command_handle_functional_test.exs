@@ -83,19 +83,18 @@ defmodule Sigma.Agent.BackplaneCommandHandleFunctionalTest do
     assert hd(errors).metadata["structured_result"]["error"]["class"] == "not_found"
   end
 
-  # Published Backplane 1.10.42 serializes settled native errors for Code Mode.
-  # Keep the actual error and successful continuation in this consumer regression.
   @tag timeout: 60_000
-  test "real Deno can observe a completed handle error and continue with a native command", c do
+  test "real Deno settles both nested calls and continues after a completed handle error", c do
     assert is_binary(System.find_executable("deno"))
     {provider, handle} = completed_handle!(c.provider)
 
     code = """
-    const expired = await Promise.allSettled([
-      tools.write_stdin({session_id: #{handle}, chars: "unused\\n"})
+    const results = await Promise.allSettled([
+      tools.write_stdin({session_id: #{handle}, chars: "unused\\n"}),
+      tools.exec_command({cmd: "printf 'sibling-result'"})
     ]);
     const next = await tools.exec_command({cmd: "printf 'nested-after-expiry'"});
-    return {expired, output: next.output};
+    return {results, output: next.output};
     """
 
     provider = call!(provider, "exec", code)
@@ -109,8 +108,9 @@ defmodule Sigma.Agent.BackplaneCommandHandleFunctionalTest do
              %{
                "status" => "fulfilled",
                "value" => %{"is_error" => true, "error" => %{"class" => "not_found"}}
-             }
-           ] = value["value"]["expired"]
+             },
+             %{"status" => "fulfilled", "value" => %{"output" => "sibling-result"}}
+           ] = value["value"]["results"]
 
     finish!(provider)
     assert_receive {:agent_end, _}, 10_000
@@ -137,9 +137,12 @@ defmodule Sigma.Agent.BackplaneCommandHandleFunctionalTest do
 
     child =
       call!(child, "exec", """
-      const expired = await tools.write_stdin({session_id: #{handle}, chars: "unused\\n"});
+      const [expired, sibling] = await Promise.all([
+        tools.write_stdin({session_id: #{handle}, chars: "unused\\n"}),
+        tools.exec_command({cmd: "printf 'child-sibling'"})
+      ]);
       const next = await tools.exec_command({cmd: "printf 'child-after-expiry'"});
-      return {expired, output: next.output};
+      return {expired, sibling: sibling.output, output: next.output};
       """)
 
     nested = result!(child, "exec")
@@ -149,6 +152,7 @@ defmodule Sigma.Agent.BackplaneCommandHandleFunctionalTest do
              "status" => "completed",
              "value" => %{
                "expired" => %{"is_error" => true, "error" => %{"class" => "not_found"}},
+               "sibling" => "child-sibling",
                "output" => "child-after-expiry"
              }
            } = value!(nested)
