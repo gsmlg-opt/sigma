@@ -91,6 +91,12 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
       end
 
     body =
+      case options[:reasoning_effort] do
+        nil -> body
+        effort -> Map.put(body, :reasoning, %{effort: effort})
+      end
+
+    body =
       if Keyword.has_key?(options, :background),
         do: Map.put(body, :background, options[:background]),
         else: body

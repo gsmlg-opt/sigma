@@ -9,6 +9,18 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesImageFunctionalTest do
   @uri "data:image/png;base64," <> @png
   @model %{id: "image-model", provider: "image-fixture", api: "openai-responses"}
 
+  test "Responses sends the requested reasoning effort and preserves the provider default" do
+    messages = [%{role: :user, content: "Review the changes"}]
+
+    with_server(fn url, capture ->
+      assert_finished!(url, messages, reasoning_effort: "high")
+      assert Agent.get(capture, & &1["reasoning"]) == %{"effort" => "high"}
+
+      assert_finished!(url, messages)
+      refute Agent.get(capture, &Map.has_key?(&1, "reasoning"))
+    end)
+  end
+
   test "actual HTTP preserves ordered function and custom image outputs through the public codec" do
     content =
       [%{type: :text, text: "  image caption 中文\r\n"}] ++
@@ -242,12 +254,12 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesImageFunctionalTest do
     end)
   end
 
-  defp assert_finished!(url, messages) do
+  defp assert_finished!(url, messages, options \\ []) do
     events =
       OpenAIResponses.stream(%{
         model: @model,
         context: %{messages: messages, tools: []},
-        options: [api_key: "image-fixture", base_url: url, receive_timeout: 2_000]
+        options: [api_key: "image-fixture", base_url: url, receive_timeout: 2_000] ++ options
       })
       |> Enum.to_list()
 
