@@ -793,6 +793,10 @@ el-dm-button:focus-within {
   min-width: 0;
 }
 .sigma-session-shell .sigma-tool-title { font-weight: 600; flex-shrink: 0; }
+.sigma-session-shell .sigma-tool .chat-tool-status {
+  flex: none;
+  white-space: nowrap;
+}
 .sigma-session-shell .sigma-tool-detail {
   min-width: 0;
   overflow: hidden;
@@ -807,16 +811,12 @@ el-dm-button:focus-within {
   overflow-wrap: anywhere;
   font-size: 0.75rem;
 }
-.sigma-session-shell .sigma-tool-preview {
-  margin: 0 0 0.5rem 1.25rem;
-  padding-left: 0.75rem;
-  border-left: 1px solid var(--color-outline-variant);
+.sigma-session-shell .sigma-turn-details > summary {
+  width: fit-content;
   color: var(--color-on-surface-variant);
   font-size: 0.75rem;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  cursor: pointer;
 }
-.sigma-session-shell .sigma-tool[open] + .sigma-tool-preview { display: none; }
 .sigma-session-shell .sigma-plan { margin: 0 0 0.5rem 1.25rem; font-size: 0.8125rem; list-style: none; }
 .sigma-session-shell .sigma-plan li::before { content: "☐ "; }
 .sigma-session-shell .sigma-plan li[data-status="in_progress"]::before { content: "◐ "; }

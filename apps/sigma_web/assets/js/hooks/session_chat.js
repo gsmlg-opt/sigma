@@ -162,57 +162,53 @@ function Composer(props) {
 }
 
 // This HTML comes only from Sigma's escaped observability components, never model HTML.
-function Metrics({ html }) {
+function Metrics({ html, turnStatus }) {
   const ref = useRef(null)
   const opened = useRef(new Set())
   useLayoutEffect(() => {
     ref.current.querySelectorAll("details[id]").forEach((el) => { el.open = opened.current.has(el.id) })
   }, [html])
-  return h("div", {
-    ref, dangerouslySetInnerHTML: { __html: html },
-    onToggleCapture: (event) => {
-      const el = event.target
-      if (!el.id) return
-      el.open ? opened.current.add(el.id) : opened.current.delete(el.id)
-    }
-  })
+  const needsAttention = ["failed", "cancelled", "error"].includes(turnStatus)
+  return h("details", { className: "sigma-turn-details" },
+    h("summary", null, needsAttention ? `Turn ${turnStatus} · details` : "Turn details"),
+    h("div", {
+      ref, dangerouslySetInnerHTML: { __html: html },
+      onToggleCapture: (event) => {
+        const el = event.target
+        if (!el.id) return
+        el.open ? opened.current.add(el.id) : opened.current.delete(el.id)
+      }
+    }))
 }
 
-const PREVIEW_LINES = 4
 const RESEND_HINT = "Starts a new turn with this message. Earlier file edits, commands, Git changes, and external requests remain."
 // Terminal colour/control sequences are display noise in the transcript.
 // eslint-disable-next-line no-control-regex
 const ANSI = /\u001b\[[0-9;?]*[A-Za-z]/g
 const pre = (key, text) => h("pre", { key, className: "sigma-tool-pre" }, text)
 
-// Codex-style tool row: one summary line ("Ran git status") with a short output
-// preview, and the full input/output inside the native Chat.Tool disclosure.
 function toolBlock(tool) {
   const raw = tool.output ?? tool.result
   const output = raw && raw.replace(ANSI, "")
-  const lines = output ? output.replace(/\s+$/, "").split("\n") : []
   const exitFailed = tool.exitCode != null && tool.exitCode !== 0
   const state = tool.status === "running" ? "running…"
     : tool.status === "pending" ? tool.statusLabel
-      : tool.status === "error" ? "failed"
-        : exitFailed ? `exit ${tool.exitCode}` : null
-  return h(React.Fragment, { key: `tool:${tool.id}` },
-    h(Chat.Tool, { status: exitFailed ? "error" : tool.status, className: "sigma-tool" },
-      h(Chat.ToolHeader, null,
-        h("span", { className: "sigma-tool-title" }, tool.title || tool.name),
-        tool.detail && h("code", { className: "sigma-tool-detail" }, tool.detail),
-        state && h(Chat.ToolStatus, null, state)),
-      tool.input && h(Chat.ToolCall, null, pre("input", tool.input)),
-      (lines.length > 0 || tool.images?.length > 0) && h(Chat.ToolResult, null,
-        lines.length > 0 && pre("output", output),
-        ...(tool.images || []).map((src, index) => h("img", {
-          key: index, src, alt: `${tool.name} result ${index + 1}`, loading: "lazy",
-          className: "max-h-96 max-w-full rounded object-contain"
-        })))),
-    tool.plan && h("ol", { className: "sigma-plan" }, ...tool.plan.map((item, index) =>
+      : exitFailed ? `exit ${tool.exitCode}`
+        : tool.status === "error" ? "failed" : null
+  return h(Chat.Tool, { key: `tool:${tool.id}`, status: exitFailed ? "error" : tool.status, className: "sigma-tool" },
+    h(Chat.ToolHeader, null,
+      h("span", { className: "sigma-tool-title" }, tool.title || tool.name),
+      tool.detail && h("code", { className: "sigma-tool-detail" }, tool.detail),
+      state && h(Chat.ToolStatus, null, state)),
+    tool.plan?.length > 0 && h("ol", { className: "sigma-plan" }, ...tool.plan.map((item, index) =>
       h("li", { key: index, "data-status": item.status }, item.step))),
-    lines.length > 0 && !tool.plan && h("pre", { className: "sigma-tool-preview", "aria-hidden": true },
-      lines.slice(0, PREVIEW_LINES).join("\n") + (lines.length > PREVIEW_LINES ? `\n… +${lines.length - PREVIEW_LINES} lines` : "")))
+    tool.input && h(Chat.ToolCall, null, pre("input", tool.input)),
+    (Boolean(output) || tool.images?.length > 0) && h(Chat.ToolResult, null,
+      output && pre("output", output),
+      ...(tool.images || []).map((src, index) => h("img", {
+        key: index, src, alt: `${tool.name} result ${index + 1}`, loading: "lazy",
+        className: "max-h-96 max-w-full rounded object-contain"
+      }))))
 }
 
 function renderBlock(block) {
@@ -232,8 +228,8 @@ function splitWork(blocks) {
 
 function workSummary(work, running) {
   const tools = work.filter((block) => block.type === "tool").length
-  if (running) return "Working…"
-  return tools ? `Worked · ${tools} tool call${tools === 1 ? "" : "s"}` : "Thought"
+  if (!tools) return running ? "Working…" : "Thought"
+  return `${running ? "Working…" : "Worked"} · ${tools} tool call${tools === 1 ? "" : "s"}`
 }
 
 function Sources({ sources }) {
@@ -262,7 +258,7 @@ function Message(props) {
   const metadata = message.metadata || {}
   const images = (metadata.images || []).map((src, index) => h("img", { key: `image:${index}`, src, alt: "Attached image", loading: "lazy", className: "max-h-96 max-w-full rounded object-contain" }))
   const footer = [
-    metadata.footerHtml && h(Metrics, { key: "metrics", html: metadata.footerHtml }),
+    metadata.footerHtml && h(Metrics, { key: "metrics", html: metadata.footerHtml, turnStatus: message.turnStatus }),
     h(Actions, { key: "actions", ...props, setNotice }),
     h("span", { key: "notice", role: "status" }, notice)
   ]
@@ -281,7 +277,7 @@ function Message(props) {
     work.some((block) => block.type === "tool" && block.status === "running")
   return h(Chat.Agent, { id: targetId, timeline, role: "article", className: "sigma-chat-agent mx-auto w-full max-w-4xl", "data-message-id": message.id },
     message.role !== "assistant" && h("div", { className: "sigma-message-role" }, message.author),
-    work.length > 0 && h(Chat.Work, { open: running },
+    work.length > 0 && h(Chat.Work, null,
       h(Chat.WorkSummary, null, workSummary(work, running)),
       h(Chat.WorkBody, null, ...work.map(renderBlock))),
     answer.length > 0 && h(Chat.Content, { streaming: message.status === "streaming" }, ...answer.map(renderBlock)),
@@ -290,6 +286,7 @@ function Message(props) {
     ...footer)
 }
 
+// TODO(upstream): duskmoon-dev/phoenix-duskmoon-ui#218 — resume following on manual return to the bottom.
 const chat = createDuskmoonReactChat({ Composer, renderMessage: Message })
 export const SigmaReactChat = {
   ...chat,
