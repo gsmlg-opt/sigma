@@ -87,7 +87,6 @@ defmodule Sigma.Web.SessionSubagents do
             type="button"
             phx-click="filter_subagents"
             phx-value-filter={value}
-            phx-hook="WebComponentHook"
             aria-pressed={to_string(@filter == value)}
             variant="ghost"
             size="xs"

@@ -1,1 +1,1 @@
-import 'phoenix_duskmoon/hooks'
+import 'duskmoon_phoenix/hooks'

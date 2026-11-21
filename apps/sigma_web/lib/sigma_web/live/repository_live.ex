@@ -65,7 +65,6 @@ defmodule Sigma.Web.RepositoryLive do
             <.dm_btn
               id="start-first-session-btn"
               phx-click="new_session"
-              phx-hook="WebComponentHook"
               variant="primary"
               size="lg"
               class="mt-8"
@@ -78,7 +77,7 @@ defmodule Sigma.Web.RepositoryLive do
             <.dm_card
               :for={s <- @sessions}
               variant="bordered"
-              class="grid-stretch h-full group interactive hover:shadow-xl transition-all duration-300 bg-surface-container-low"
+              class="h-full group interactive hover:shadow-xl transition-all duration-300 bg-surface-container-low"
             >
               <:title class="min-w-0 flex-1 overflow-hidden">
                 <form
@@ -112,7 +111,6 @@ defmodule Sigma.Web.RepositoryLive do
                       shape="circle"
                       title="Save title"
                       aria-label="Save title"
-                      phx-hook="WebComponentHook"
                     >
                       <.dm_mdi name="check" class="w-4 h-4" />
                     </.dm_btn>
@@ -126,7 +124,6 @@ defmodule Sigma.Web.RepositoryLive do
                       shape="circle"
                       title="Cancel"
                       aria-label="Cancel rename"
-                      phx-hook="WebComponentHook"
                     >
                       <.dm_mdi name="close" class="w-4 h-4" />
                     </.dm_btn>
@@ -154,7 +151,6 @@ defmodule Sigma.Web.RepositoryLive do
                       id={"rename-session-#{s.session_id}"}
                       phx-click="start_rename_title"
                       phx-value-id={s.session_id}
-                      phx-hook="WebComponentHook"
                       variant="ghost"
                       size="sm"
                       shape="circle"
@@ -168,7 +164,6 @@ defmodule Sigma.Web.RepositoryLive do
                       id={"delete-session-#{s.session_id}"}
                       phx-click="delete_session"
                       phx-value-id={s.session_id}
-                      phx-hook="WebComponentHook"
                       variant="ghost"
                       size="sm"
                       shape="circle"
@@ -194,7 +189,6 @@ defmodule Sigma.Web.RepositoryLive do
                   id={"adopt-session-#{s.session_id}"}
                   phx-click="adopt_session"
                   phx-value-id={s.session_id}
-                  phx-hook="WebComponentHook"
                   variant="ghost"
                   size="sm"
                   class="mt-3"
@@ -234,7 +228,6 @@ defmodule Sigma.Web.RepositoryLive do
           <.dm_btn
             id="cancel-delete-btn"
             phx-click="cancel_delete"
-            phx-hook="WebComponentHook"
             variant="ghost"
           >
             Cancel
@@ -242,7 +235,6 @@ defmodule Sigma.Web.RepositoryLive do
           <.dm_btn
             id="confirm-delete-btn"
             phx-click="confirm_delete"
-            phx-hook="WebComponentHook"
             variant="error"
           >
             Delete Permanently

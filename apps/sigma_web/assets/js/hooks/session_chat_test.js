@@ -3,11 +3,15 @@ import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 
 // Exercise the message renderer registered with the chat bridge.
-mock.module("phoenix_duskmoon/react-chat", () => ({
+mock.module("duskmoon_phoenix/react-chat", () => ({
   createDuskmoonReactChat: (options) => options,
   useChatSubmission: () => ({})
 }))
 const { SigmaReactChat } = await import("./session_chat.js")
+
+test("the session transcript resumes following after scrolling back to the bottom", () => {
+  expect(SigmaReactChat.resumeFollowOnScroll).toBe(true)
+})
 
 for (const [turnStatus, workLabel, detailsLabel] of [
   ["running", "Working… · 1 tool call", "Turn details"],

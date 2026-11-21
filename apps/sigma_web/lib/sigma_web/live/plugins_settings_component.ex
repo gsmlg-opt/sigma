@@ -34,7 +34,7 @@ defmodule Sigma.Web.PluginsSettingsComponent do
           <h2 class="text-2xl font-bold">Plugins</h2>
           <p class="mt-1 text-sm text-on-surface-variant">Review plugin requests and install their packages. Installed skills are available on the next agent turn.</p>
         </div>
-        <.dm_btn id="plugins-refresh" phx-click="refresh_plugins" phx-target={@myself} phx-hook="WebComponentHook" variant="outline" disabled={@loading}>Refresh</.dm_btn>
+        <.dm_btn id="plugins-refresh" phx-click="refresh_plugins" phx-target={@myself} variant="outline" disabled={@loading}>Refresh</.dm_btn>
       </div>
 
       <p :if={@notice} role="status" class="text-on-surface-variant">{@notice}</p>
@@ -60,15 +60,15 @@ defmodule Sigma.Web.PluginsSettingsComponent do
               <p :if={request["releaseId"]} class="mt-2 text-sm break-all">Release: {request["releaseId"]}</p>
               <p class="mt-2 text-xs text-on-surface-variant break-all">Request: {request["requestId"]}</p>
               <p class="text-xs text-on-surface-variant">Requested: {format_time(request["requestedAt"])}</p>
-              <.dm_btn :if={request["status"] in ["requested", "installing"]} id={install_dom_id(request["requestId"])} phx-click="install_plugin" phx-value-request-id={request["requestId"]} phx-target={@myself} phx-hook="WebComponentHook" variant="primary" size="sm" class="mt-4" disabled={@installing != nil or @loading}>
+              <.dm_btn :if={request["status"] in ["requested", "installing"]} id={install_dom_id(request["requestId"])} phx-click="install_plugin" phx-value-request-id={request["requestId"]} phx-target={@myself} variant="primary" size="sm" class="mt-4" disabled={@installing != nil or @loading}>
                 {if request["status"] == "installing", do: "Check installation", else: "Install package"}
               </.dm_btn>
             </.dm_card>
           </div>
           <div :if={@page["total"] > 0} class="flex flex-wrap items-center gap-3">
             <p id="plugin-page-position" class="text-sm text-on-surface-variant">Showing {@page["offset"] + 1}–{@page["offset"] + length(@page["items"])} of {@page["total"]}</p>
-            <.dm_btn :if={@page["offset"] > 0} id="plugins-first" phx-click="refresh_plugins" phx-target={@myself} phx-hook="WebComponentHook" variant="outline" disabled={@loading}>First page</.dm_btn>
-            <.dm_btn :if={@page["nextOffset"] != nil} id="plugins-next" phx-click="next_plugins" phx-target={@myself} phx-hook="WebComponentHook" variant="outline" disabled={@loading}>Next page</.dm_btn>
+            <.dm_btn :if={@page["offset"] > 0} id="plugins-first" phx-click="refresh_plugins" phx-target={@myself} variant="outline" disabled={@loading}>First page</.dm_btn>
+            <.dm_btn :if={@page["nextOffset"] != nil} id="plugins-next" phx-click="next_plugins" phx-target={@myself} variant="outline" disabled={@loading}>Next page</.dm_btn>
           </div>
         <% else %>
           <p id="plugins-unconfigured" class="text-on-surface-variant">No plugin registry is configured.</p>

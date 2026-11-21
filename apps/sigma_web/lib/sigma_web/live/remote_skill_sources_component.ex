@@ -35,7 +35,7 @@ defmodule Sigma.Web.RemoteSkillSourcesComponent do
   def render(assigns) do
     ~H"""
     <section id={@id} class="space-y-4 mb-8">
-      <div class="flex flex-wrap items-center justify-between gap-3"><h3 class="text-xl font-bold">Remote sources</h3><.dm_btn id="remote-source-new" phx-click="new_remote_source" phx-target={@myself} phx-hook="WebComponentHook" variant="primary" size="sm">Add remote source</.dm_btn></div>
+      <div class="flex flex-wrap items-center justify-between gap-3"><h3 class="text-xl font-bold">Remote sources</h3><.dm_btn id="remote-source-new" phx-click="new_remote_source" phx-target={@myself} variant="primary" size="sm">Add remote source</.dm_btn></div>
       <p :if={@error} class="text-error" role="alert">{@error}</p>
       <p :if={@sources == []} class="text-sm text-on-surface-variant">No remote sources configured.</p>
       <div class="grid gap-4 lg:grid-cols-2">
@@ -47,9 +47,9 @@ defmodule Sigma.Web.RemoteSkillSourcesComponent do
           <p class="text-sm text-on-surface-variant">Credential: {credential_name(@credentials, source.credential_id)}</p>
           <p :if={Map.get(source, :provider_id) in [nil, ""]} class="text-sm text-on-surface-variant">Standalone source</p>
           <div class="flex flex-wrap gap-2 mt-4">
-            <.dm_btn id={source_dom_id("browse", source.source_id)} phx-click="browse_remote_source" phx-value-id={source.source_id} phx-target={@myself} phx-hook="WebComponentHook" variant="outline" size="sm" disabled={!source.enabled? or source.offline?}>Browse</.dm_btn>
-            <.dm_btn id={source_dom_id("edit", source.source_id)} phx-click="edit_remote_source" phx-value-id={source.source_id} phx-target={@myself} phx-hook="WebComponentHook" variant="outline" size="sm">Edit</.dm_btn>
-            <.dm_btn id={source_dom_id("delete", source.source_id)} phx-click="confirm_delete_remote_source" phx-value-id={source.source_id} phx-target={@myself} phx-hook="WebComponentHook" variant="error" size="sm">Delete</.dm_btn>
+            <.dm_btn id={source_dom_id("browse", source.source_id)} phx-click="browse_remote_source" phx-value-id={source.source_id} phx-target={@myself} variant="outline" size="sm" disabled={!source.enabled? or source.offline?}>Browse</.dm_btn>
+            <.dm_btn id={source_dom_id("edit", source.source_id)} phx-click="edit_remote_source" phx-value-id={source.source_id} phx-target={@myself} variant="outline" size="sm">Edit</.dm_btn>
+            <.dm_btn id={source_dom_id("delete", source.source_id)} phx-click="confirm_delete_remote_source" phx-value-id={source.source_id} phx-target={@myself} variant="error" size="sm">Delete</.dm_btn>
           </div>
         </.dm_card>
       </div>
@@ -67,7 +67,7 @@ defmodule Sigma.Web.RemoteSkillSourcesComponent do
             <p class="text-xs mt-2">Use this reference with the existing manual skill invocation:</p><code class="text-sm break-all">{skill.reference}</code>
             <p class="text-xs text-on-surface-variant">{skill.status}</p>
           </article>
-          <.dm_btn :if={@catalog.next_cursor} id="remote-catalog-next" phx-click="next_remote_catalog" phx-target={@myself} phx-hook="WebComponentHook" variant="outline" disabled={@catalog_state == :loading}>Next page</.dm_btn>
+          <.dm_btn :if={@catalog.next_cursor} id="remote-catalog-next" phx-click="next_remote_catalog" phx-target={@myself} variant="outline" disabled={@catalog_state == :loading}>Next page</.dm_btn>
         </div>
       </div>
       <.dm_modal :if={@form} id="remote-source-modal" phx-hook="ModalHook" hide_close={true}>
@@ -82,13 +82,13 @@ defmodule Sigma.Web.RemoteSkillSourcesComponent do
             <p :if={@form["provider_id"] == "" and @form["standalone"]} class="text-sm">This standalone source keeps its existing origin and credential. Select a provider to use a shared connection.</p>
             <.dm_select name="source[enabled]" value={@form["enabled"]} label="Enabled" options={[{"true", "Enabled"}, {"false", "Disabled"}]} />
             <.dm_select name="source[offline]" value={@form["offline"]} label="Access" options={[{"false", "Online"}, {"true", "Offline: verified cached skills only"}]} />
-            <div class="flex gap-2"><.dm_btn native_submit variant="primary">Save source</.dm_btn><.dm_btn id="remote-source-cancel" phx-click="cancel_remote_source" phx-target={@myself} phx-hook="WebComponentHook" variant="ghost">Cancel</.dm_btn></div>
+            <div class="flex gap-2"><.dm_btn native_submit variant="primary">Save source</.dm_btn><.dm_btn id="remote-source-cancel" phx-click="cancel_remote_source" phx-target={@myself} variant="ghost">Cancel</.dm_btn></div>
           </form>
         </:body>
       </.dm_modal>
       <.dm_modal :if={@deleting} id="remote-source-delete-modal" phx-hook="ModalHook" hide_close={true}>
         <:title>Delete remote source</:title><:body><p>Delete {@deleting}? Its remote skills will no longer be available through this source.</p></:body>
-        <:footer><.dm_btn id="remote-source-confirm-delete" phx-click="delete_remote_source" phx-target={@myself} phx-hook="WebComponentHook" variant="error">Delete source</.dm_btn><.dm_btn id="remote-source-cancel-delete" phx-click="cancel_remote_source_delete" phx-target={@myself} phx-hook="WebComponentHook" variant="ghost">Cancel</.dm_btn></:footer>
+        <:footer><.dm_btn id="remote-source-confirm-delete" phx-click="delete_remote_source" phx-target={@myself} variant="error">Delete source</.dm_btn><.dm_btn id="remote-source-cancel-delete" phx-click="cancel_remote_source_delete" phx-target={@myself} variant="ghost">Cancel</.dm_btn></:footer>
       </.dm_modal>
     </section>
     """

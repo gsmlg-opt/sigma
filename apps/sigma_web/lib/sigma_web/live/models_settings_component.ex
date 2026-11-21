@@ -58,9 +58,9 @@ defmodule Sigma.Web.ModelsSettingsComponent do
           <p :if={!Models.available_provider?(@providers[row.provider_id])} class="text-on-surface-variant text-sm">Unavailable for sessions</p>
           <p :if={Models.available_provider?(@providers[row.provider_id]) and @default_pair == {row.provider_id, row.model_id}} class="text-success text-sm">Global default</p>
           <div class="mt-4 flex flex-wrap gap-2">
-            <.dm_btn :if={Models.available_provider?(@providers[row.provider_id])} id={row_id("default", row)} phx-click="default_model" phx-value-provider={row.provider_id} phx-value-model={row.model_id} phx-target={@myself} phx-hook="WebComponentHook" variant="outline" size="sm">Set global default</.dm_btn>
-            <.dm_btn id={row_id("edit", row)} phx-click="edit_model" phx-value-provider={row.provider_id} phx-value-model={row.model_id} phx-target={@myself} phx-hook="WebComponentHook" variant="outline" size="sm">Edit</.dm_btn>
-            <.dm_btn id={row_id("remove", row)} phx-click="confirm_remove_model" phx-value-provider={row.provider_id} phx-value-model={row.model_id} phx-target={@myself} phx-hook="WebComponentHook" variant="error" size="sm">Remove</.dm_btn>
+            <.dm_btn :if={Models.available_provider?(@providers[row.provider_id])} id={row_id("default", row)} phx-click="default_model" phx-value-provider={row.provider_id} phx-value-model={row.model_id} phx-target={@myself} variant="outline" size="sm">Set global default</.dm_btn>
+            <.dm_btn id={row_id("edit", row)} phx-click="edit_model" phx-value-provider={row.provider_id} phx-value-model={row.model_id} phx-target={@myself} variant="outline" size="sm">Edit</.dm_btn>
+            <.dm_btn id={row_id("remove", row)} phx-click="confirm_remove_model" phx-value-provider={row.provider_id} phx-value-model={row.model_id} phx-target={@myself} variant="error" size="sm">Remove</.dm_btn>
           </div>
         </.dm_card>
       </div>
@@ -72,7 +72,7 @@ defmodule Sigma.Web.ModelsSettingsComponent do
           <.dm_input name="model[defaultContextLimit]" value={@manual["defaultContextLimit"] || ""} label="Default context budget" type="number" min="1" placeholder="Session fallback" />
           <.dm_btn id="model-manual-add" native_submit variant="primary">Add model</.dm_btn>
         </form>
-        <.dm_btn id="models-discover" phx-click="discover_models" phx-target={@myself} phx-hook="WebComponentHook" variant="outline" disabled={@discovery == :loading}>Discover candidates</.dm_btn>
+        <.dm_btn id="models-discover" phx-click="discover_models" phx-target={@myself} variant="outline" disabled={@discovery == :loading}>Discover candidates</.dm_btn>
         <p :if={@discovery == :loading} role="status">Loading model candidates…</p>
         <div :if={is_list(@candidates)} class="space-y-3">
           <form id="model-candidate-search" phx-change="search_candidates" phx-target={@myself}>
@@ -85,7 +85,7 @@ defmodule Sigma.Web.ModelsSettingsComponent do
             <code class="text-xs break-all">{candidate["id"]}</code>
             <span :if={configured?(@rows, @provider_id, candidate["id"])} class="text-sm text-on-surface-variant">Already configured</span>
           </div>
-          <.dm_btn id="models-add-selected" phx-click="add_selected_models" phx-target={@myself} phx-hook="WebComponentHook" variant="primary" disabled={MapSet.size(@selected) == 0}>Add selected ({MapSet.size(@selected)})</.dm_btn>
+          <.dm_btn id="models-add-selected" phx-click="add_selected_models" phx-target={@myself} variant="primary" disabled={MapSet.size(@selected) == 0}>Add selected ({MapSet.size(@selected)})</.dm_btn>
         </div>
       </div>
       <.dm_modal :if={@editing} id="model-edit-modal" phx-hook="ModalHook" hide_close={true}>
@@ -96,14 +96,14 @@ defmodule Sigma.Web.ModelsSettingsComponent do
             <p class="text-sm break-all">{@editing.provider_id} / {@editing.model_id}</p>
             <.dm_input name="model[name]" value={@editing.name} label="Display name" />
             <.dm_input name="model[defaultContextLimit]" value={@editing.default_context_limit || ""} label="Default context budget" type="number" min="1" placeholder="Session fallback" />
-            <div class="flex gap-2"><.dm_btn native_submit variant="primary">Save model</.dm_btn><.dm_btn id="model-cancel-edit" phx-click="cancel_model_edit" phx-target={@myself} phx-hook="WebComponentHook" variant="ghost">Cancel</.dm_btn></div>
+            <div class="flex gap-2"><.dm_btn native_submit variant="primary">Save model</.dm_btn><.dm_btn id="model-cancel-edit" phx-click="cancel_model_edit" phx-target={@myself} variant="ghost">Cancel</.dm_btn></div>
           </form>
         </:body>
       </.dm_modal>
       <.dm_modal :if={@removing} id="model-remove-modal" phx-hook="ModalHook" hide_close={true}>
         <:title>Remove model</:title>
         <:body><p>Remove {@removing.name}? Removing the global default also clears the default selection.</p></:body>
-        <:footer><.dm_btn id="model-confirm-remove" phx-click="remove_model" phx-target={@myself} phx-hook="WebComponentHook" variant="error">Remove model</.dm_btn><.dm_btn id="model-cancel-remove" phx-click="cancel_model_remove" phx-target={@myself} phx-hook="WebComponentHook" variant="ghost">Cancel</.dm_btn></:footer>
+        <:footer><.dm_btn id="model-confirm-remove" phx-click="remove_model" phx-target={@myself} variant="error">Remove model</.dm_btn><.dm_btn id="model-cancel-remove" phx-click="cancel_model_remove" phx-target={@myself} variant="ghost">Cancel</.dm_btn></:footer>
       </.dm_modal>
     </section>
     """

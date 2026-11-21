@@ -7,15 +7,13 @@
 @import "@xterm/xterm/css/xterm.css" layer(base);
 
 @plugin "@duskmoon-dev/core/plugin";
-@import "@duskmoon-dev/core/themes/sunshine";
-@import "@duskmoon-dev/core/themes/moonlight";
-@import "@duskmoon-dev/core/components";
-@import "@duskmoon-dev/components/styles.css";
-@import "../../../../deps/phoenix_duskmoon/assets/css/element-theme-bridge.css" layer(components);
+@import "duskmoon_phoenix/css";
+@import "duskmoon_phoenix/react.css";
+@import "duskmoon_phoenix/elements.css" layer(components);
 
 /* WORKAROUND(upstream): duskmoon-dev/duskmoon-react#86
    @duskmoon-dev/components/styles.css overrides .radio and .radio::before,
-   breaking phoenix_duskmoon's native input[type="radio"].radio elements.
+   breaking native input[type="radio"].radio elements.
    Restore core styling specifically on input[type="radio"].radio. */
 input[type="radio"].radio {
   --radio-size: 1.25rem;
@@ -91,25 +89,10 @@ input[type="radio"].radio-lg {
 @source "../../lib/sigma_web/**/*.ex";
 @source "../../lib/sigma_web/**/*.heex";
 @source "../js/**/*.js";
-@source "../../../../deps/phoenix_duskmoon/**/*.{ex,heex}";
+@source "../../../../deps/duskmoon_phoenix/lib/**/*.{ex,heex}";
+@source "../../../../deps/duskmoon_phoenix/assets/js/react_chat/**/*.js";
 
 @theme {
-}
-
-/* Fix for dm_btn confirm dialog forms stacking vertically */
-el-dm-dialog [slot="footer"] {
-  display: flex;
-  flex-direction: row-reverse;
-  justify-content: flex-start;
-  gap: 0.5rem;
-}
-
-/* Grid items: make el-dm-card propagate host height to its inner .card div
-   so cards in the same row share the same height and the action button sticks
-   to the bottom. Display: grid stretches the single shadow child to fill. */
-el-dm-card.grid-stretch {
-  display: grid;
-  grid-template-rows: 1fr;
 }
 
 .settings-table thead {
@@ -158,7 +141,7 @@ el-dm-card.grid-stretch {
   min-width: 0;
 }
 
-el-dm-button:focus-within {
+button.btn:focus-visible {
   outline: 2px solid var(--color-primary);
   outline-offset: 2px;
 }
@@ -725,7 +708,7 @@ el-dm-button:focus-within {
 }
 .sigma-session-rail > * { flex-shrink: 0; }
 .sigma-session-rail :is(p, dd, code) { overflow-wrap: anywhere; }
-.sigma-session-sidebar .group:focus-within > el-dm-button { opacity: 1; }
+.sigma-session-sidebar .group:focus-within > button { opacity: 1; }
 .sigma-session-header { padding-block: 0.75rem; }
 .sigma-session-header h1 { font-size: 1rem; }
 .sigma-session-shell .sigma-message-metrics { font-size: 0.75rem; }
@@ -735,7 +718,7 @@ el-dm-button:focus-within {
 .sigma-session-shell .sigma-context-budget { border-radius: 0.75rem; }
 
 @media (hover: none) {
-  .sigma-session-sidebar .group > el-dm-button { opacity: 1; }
+  .sigma-session-sidebar .group > button { opacity: 1; }
 }
 @media (max-width: 1279px) {
   .sigma-session-shell [data-session-panel="details"] {
@@ -835,4 +818,4 @@ el-dm-button:focus-within {
 .sigma-session-shell .chat-work-body .chat-reasoning > div { padding: 0 0 0.5rem 1rem; }
 .sigma-session-shell .chat-work-body .chat-tool-header { font-family: inherit; font-weight: 400; }
 .sigma-session-shell .chat-work-body .sigma-tool-detail { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.sigma-session-shell .sigma-message-actions :is(button, el-dm-button) { min-height: 1.75rem; padding-block: 0; font-size: 0.75rem; }
+.sigma-session-shell .sigma-message-actions button { min-height: 1.75rem; padding-block: 0; font-size: 0.75rem; }

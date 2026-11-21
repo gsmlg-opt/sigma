@@ -350,7 +350,6 @@ defmodule Sigma.Web.SettingsLive do
         <.dm_btn
           id="provider-new-btn"
           phx-click="add_provider"
-          phx-hook="WebComponentHook"
           variant="primary"
           size="sm"
         >
@@ -378,8 +377,8 @@ defmodule Sigma.Web.SettingsLive do
             <div><dt class="text-on-surface-variant">Credential</dt><dd>{credential_name(@credentials, row.provider["credential_id"])}</dd></div>
           </dl>
           <div class="mt-4 flex gap-2">
-            <.dm_btn id={"provider-edit-#{row.id}"} phx-click="edit_provider" phx-value-id={row.id} phx-hook="WebComponentHook" variant="outline" size="sm">Edit</.dm_btn>
-            <.dm_btn id={"provider-delete-#{row.id}"} phx-click="confirm_delete_provider" phx-value-id={row.id} phx-hook="WebComponentHook" variant="error" size="sm">Delete</.dm_btn>
+            <.dm_btn id={"provider-edit-#{row.id}"} phx-click="edit_provider" phx-value-id={row.id} variant="outline" size="sm">Edit</.dm_btn>
+            <.dm_btn id={"provider-delete-#{row.id}"} phx-click="confirm_delete_provider" phx-value-id={row.id} variant="error" size="sm">Delete</.dm_btn>
           </div>
         </.dm_card>
       </div>
@@ -454,7 +453,6 @@ defmodule Sigma.Web.SettingsLive do
             id="provider-cancel-form-btn"
             type="button"
             phx-click="cancel_provider_form"
-            phx-hook="WebComponentHook"
             variant="ghost"
           >
             Cancel
@@ -496,7 +494,6 @@ defmodule Sigma.Web.SettingsLive do
             id="provider-cancel-delete-btn"
             type="button"
             phx-click="cancel_delete_provider"
-            phx-hook="WebComponentHook"
             variant="ghost"
           >
             Cancel
@@ -506,7 +503,6 @@ defmodule Sigma.Web.SettingsLive do
             type="button"
             phx-click="delete_provider"
             phx-value-id={@deleting_provider["id"]}
-            phx-hook="WebComponentHook"
             variant="error"
           >
             Delete
@@ -541,7 +537,6 @@ defmodule Sigma.Web.SettingsLive do
         <.dm_btn
           id="credential-new-btn"
           phx-click="add_credential"
-          phx-hook="WebComponentHook"
           variant="primary"
           size="sm"
         >
@@ -583,7 +578,6 @@ defmodule Sigma.Web.SettingsLive do
                   type="button"
                   phx-click="edit_credential"
                   phx-value-id={row.id}
-                  phx-hook="WebComponentHook"
                   variant="outline"
                   size="xs"
                   shape="circle"
@@ -613,7 +607,6 @@ defmodule Sigma.Web.SettingsLive do
                   type="button"
                   phx-click="confirm_delete_credential"
                   phx-value-id={row.id}
-                  phx-hook="WebComponentHook"
                   variant="error"
                   size="xs"
                   shape="circle"
@@ -672,7 +665,6 @@ defmodule Sigma.Web.SettingsLive do
             id="credential-cancel-form-btn"
             type="button"
             phx-click="cancel_credential_form"
-            phx-hook="WebComponentHook"
             variant="ghost"
           >
             Cancel
@@ -706,7 +698,6 @@ defmodule Sigma.Web.SettingsLive do
             id="credential-cancel-delete-btn"
             type="button"
             phx-click="cancel_delete_credential"
-            phx-hook="WebComponentHook"
             variant="ghost"
           >
             Cancel
@@ -716,7 +707,6 @@ defmodule Sigma.Web.SettingsLive do
             type="button"
             phx-click="delete_credential"
             phx-value-id={@deleting_credential["id"]}
-            phx-hook="WebComponentHook"
             variant="error"
           >
             Delete
@@ -753,7 +743,6 @@ defmodule Sigma.Web.SettingsLive do
             <.dm_btn
               id="system-prompt-save-btn"
               type="submit"
-              phx-hook="WebComponentHook"
               variant="primary"
               size="md"
             >
@@ -849,7 +838,6 @@ defmodule Sigma.Web.SettingsLive do
           <.dm_btn
             id="skills-clear-selection"
             type="button"
-            phx-hook="WebComponentHook"
             phx-click="clear_skill_selection"
             variant="outline"
             size="sm"
@@ -861,7 +849,6 @@ defmodule Sigma.Web.SettingsLive do
           <.dm_btn
             id="skills-enable-selected"
             type="button"
-            phx-hook="WebComponentHook"
             phx-click="set_selected_skills_enabled"
             phx-value-enabled="true"
             variant="outline"
@@ -874,7 +861,6 @@ defmodule Sigma.Web.SettingsLive do
           <.dm_btn
             id="skills-disable-selected"
             type="button"
-            phx-hook="WebComponentHook"
             phx-click="set_selected_skills_enabled"
             phx-value-enabled="false"
             variant="outline"
@@ -1083,7 +1069,7 @@ defmodule Sigma.Web.SettingsLive do
           <h2 class="text-2xl font-bold font-display">MCP Servers</h2>
           <p class="text-sm text-on-surface-variant font-mono mt-1">{@file}</p>
         </div>
-        <.dm_btn id="mcp-new-server-btn" phx-click="new_mcp_server" phx-hook="WebComponentHook" variant="primary" size="sm">
+        <.dm_btn id="mcp-new-server-btn" phx-click="new_mcp_server" variant="primary" size="sm">
           <:prefix><.dm_mdi name="plus" /></:prefix>
           New Server
         </.dm_btn>
@@ -1142,7 +1128,6 @@ defmodule Sigma.Web.SettingsLive do
                 <.dm_btn
                   id={"mcp-edit-server-#{row.id}"}
                   type="button"
-                  phx-hook="WebComponentHook"
                   phx-click="edit_mcp_server"
                   phx-value-id={row.id}
                   variant="outline"
@@ -1172,7 +1157,6 @@ defmodule Sigma.Web.SettingsLive do
                 <.dm_btn
                   id={"mcp-delete-server-#{row.id}"}
                   type="button"
-                  phx-hook="WebComponentHook"
                   phx-click="confirm_delete_mcp_server"
                   phx-value-id={row.id}
                   variant="error"
@@ -1339,7 +1323,7 @@ defmodule Sigma.Web.SettingsLive do
             </div>
 
             <div class="flex justify-end gap-3 pt-4 border-t border-outline-variant">
-              <.dm_btn id="mcp-cancel-server-btn" type="button" phx-click="cancel_mcp_form" phx-hook="WebComponentHook" variant="ghost">
+              <.dm_btn id="mcp-cancel-server-btn" type="button" phx-click="cancel_mcp_form" variant="ghost">
                 Cancel
               </.dm_btn>
               <.dm_btn
@@ -1372,7 +1356,6 @@ defmodule Sigma.Web.SettingsLive do
             id="mcp-cancel-delete-server-btn"
             type="button"
             phx-click="cancel_delete_mcp_server"
-            phx-hook="WebComponentHook"
             variant="ghost"
           >
             Cancel
@@ -1382,7 +1365,6 @@ defmodule Sigma.Web.SettingsLive do
             type="button"
             phx-click="delete_mcp_server"
             phx-value-id={@deleting_server_id}
-            phx-hook="WebComponentHook"
             variant="error"
           >
             Delete
@@ -1451,7 +1433,6 @@ defmodule Sigma.Web.SettingsLive do
           type="button"
           phx-click="add_mcp_pair"
           phx-value-field={@field}
-          phx-hook="WebComponentHook"
           variant="outline"
           size="xs"
         >
@@ -1509,7 +1490,6 @@ defmodule Sigma.Web.SettingsLive do
             phx-click="remove_mcp_pair"
             phx-value-field={@field}
             phx-value-index={idx}
-            phx-hook="WebComponentHook"
             variant="ghost"
             size="sm"
             shape="circle"

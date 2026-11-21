@@ -57,8 +57,8 @@ defmodule Sigma.Web do
       import Phoenix.HTML.Form
       import Phoenix.Component
 
-      use PhoenixDuskmoon.Component
-      use PhoenixDuskmoon.ArtComponent
+      use DuskmoonPhoenix.Component
+      use DuskmoonPhoenix.ArtComponent
       use Gettext, backend: Sigma.Web.Gettext
 
       unquote(verified_routes())

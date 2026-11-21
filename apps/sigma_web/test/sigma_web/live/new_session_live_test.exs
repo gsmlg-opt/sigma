@@ -88,7 +88,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       assert html =~ ~s(value="github" checked)
 
       render_change(view, "select_mcp_servers", %{})
-      render_click(view, "create_session")
+      view |> element("button#create-session-btn") |> render_click()
 
       [meta_path] = Path.wildcard(Path.join(ConfigManager.sessions_dir(workdir), "*.meta.json"))
       session_id = Path.basename(meta_path, ".meta.json")
@@ -105,9 +105,13 @@ defmodule Sigma.Web.NewSessionLiveTest do
       {:ok, session_view, _session_html} =
         live(conn, "/repository/#{encoded_repository}/sessions/#{session_id}")
 
-      session_html = render_async(session_view, 1_000)
+      render_async(session_view, 3_000)
       menu_token = Base.url_encode64(session_id, padding: false)
-      assert session_html =~ ~s(id="session-menu-btn-#{menu_token}")
+
+      assert has_element?(
+               session_view,
+               ~s(button#session-menu-btn-#{menu_token}[popovertarget="session-menu-#{menu_token}"])
+             )
     end)
   end
 

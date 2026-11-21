@@ -213,7 +213,7 @@ defmodule Sigma.Web.SettingsLiveTest do
       credential_id = credential_id_by_name(config["credentials"], "OpenAI Token")
 
       view
-      |> element("el-dm-button[phx-click='edit_credential'][phx-value-id='#{credential_id}']")
+      |> element("button[phx-click='edit_credential'][phx-value-id='#{credential_id}']")
       |> render_click()
 
       edit_credential_html = render(view)
@@ -238,9 +238,7 @@ defmodule Sigma.Web.SettingsLiveTest do
       refute html =~ "OpenAI Token"
 
       view
-      |> element(
-        "el-dm-button[phx-click='confirm_delete_credential'][phx-value-id='#{credential_id}']"
-      )
+      |> element("button[phx-click='confirm_delete_credential'][phx-value-id='#{credential_id}']")
       |> render_click()
 
       delete_credential_html = render(view)
@@ -249,7 +247,7 @@ defmodule Sigma.Web.SettingsLiveTest do
       assert delete_credential_html =~ "Anthropic Token"
 
       view
-      |> element("el-dm-button[phx-click='delete_credential'][phx-value-id='#{credential_id}']")
+      |> element("button[phx-click='delete_credential'][phx-value-id='#{credential_id}']")
       |> render_click()
 
       html = render_async(view, 500)
@@ -479,7 +477,7 @@ defmodule Sigma.Web.SettingsLiveTest do
       assert_icon_tooltip_action(html, "mcp-delete-server-github", "Delete")
 
       view
-      |> element("el-dm-button[phx-click='edit_mcp_server'][phx-value-id='github']")
+      |> element("button[phx-click='edit_mcp_server'][phx-value-id='github']")
       |> render_click()
 
       render_change(view, "change_mcp_form", %{
@@ -557,10 +555,10 @@ defmodule Sigma.Web.SettingsLiveTest do
       refute Map.has_key?(saved["mcpServers"]["github"], "args")
       refute Map.has_key?(saved["mcpServers"]["github"], "env")
 
-      render_async(view)
+      assert render_async(view, 500) =~ "http: https://api.githubcopilot.com/mcp"
 
       view
-      |> element("el-dm-button[phx-click='confirm_delete_mcp_server'][phx-value-id='github']")
+      |> element("button[phx-click='confirm_delete_mcp_server'][phx-value-id='github']")
       |> render_click()
 
       delete_modal_html = render(view)
@@ -569,7 +567,7 @@ defmodule Sigma.Web.SettingsLiveTest do
       assert delete_modal_html =~ "github"
 
       view
-      |> element("el-dm-button[phx-click='delete_mcp_server'][phx-value-id='github']")
+      |> element("button[phx-click='delete_mcp_server'][phx-value-id='github']")
       |> render_click()
 
       saved = Sigma.Session.ConfigManager.mcp_file() |> File.read!() |> Jason.decode!()

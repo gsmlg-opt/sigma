@@ -177,7 +177,6 @@ defmodule Sigma.Web.ProjectSkillsLive do
         <.dm_btn
           id="project-skills-clear-selection"
           type="button"
-          phx-hook="WebComponentHook"
           phx-click="clear_skill_selection"
           variant="outline"
           size="sm"
@@ -189,7 +188,6 @@ defmodule Sigma.Web.ProjectSkillsLive do
         <.dm_btn
           id="project-skills-enable-selected"
           type="button"
-          phx-hook="WebComponentHook"
           phx-click="set_selected_skills_enabled"
           phx-value-enabled="true"
           variant="outline"
@@ -202,7 +200,6 @@ defmodule Sigma.Web.ProjectSkillsLive do
         <.dm_btn
           id="project-skills-disable-selected"
           type="button"
-          phx-hook="WebComponentHook"
           phx-click="set_selected_skills_enabled"
           phx-value-enabled="false"
           variant="outline"

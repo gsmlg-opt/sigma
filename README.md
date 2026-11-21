@@ -27,7 +27,7 @@ The original TypeScript `pi` project is [earendil-works/pi](https://github.com/e
 - Native Backplane V2 subagents and configured MCP tools. Legacy built-in coding tools have been retired; their Codex-aligned replacements are a separate development phase. See [tool availability](docs/features/tools.md).
 - Global and project MCP server selection, plus hook discovery for Pi, Codex, and Claude-style hook files.
 - Skills from `~/.agents/skills` and `<repo>/.agents/skills`.
-- DuskMoon UI components via `phoenix_duskmoon` and the DuskMoon web component packages.
+- DuskMoon UI components via `duskmoon_phoenix` and the matching [DuskMoon Web packages](https://github.com/duskmoon-dev/duskmoon-web).
 
 ## Requirements
 
@@ -190,7 +190,7 @@ For focused LiveView or umbrella-app work, run the relevant app test path direct
 mix test apps/sigma_web/test/sigma_web/live/session_live_test.exs
 ```
 
-The web app uses DuskMoon UI. Keep UI work on `phoenix_duskmoon` components and the configured Tailwind/DuskMoon pipeline; do not add DaisyUI or Phoenix `core_components.ex`.
+The web app uses DuskMoon UI. Keep UI work on `duskmoon_phoenix` components and the configured Tailwind/DuskMoon pipeline; do not add DaisyUI or Phoenix `core_components.ex`.
 
 Architecture contracts, ADRs, feature plans, and archived historical docs live under [docs/](docs/README.md).
 

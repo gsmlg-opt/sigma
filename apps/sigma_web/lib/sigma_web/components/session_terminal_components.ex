@@ -17,7 +17,6 @@ defmodule Sigma.Web.SessionTerminalComponents do
         id="session-terminal-open-btn"
         type="button"
         phx-click="terminal_open"
-        phx-hook="WebComponentHook"
         variant="ghost"
         size="sm"
         shape="circle"
@@ -100,7 +99,7 @@ defmodule Sigma.Web.SessionTerminalComponents do
 
       <div :if={not @unavailable? and @entries == []} class="sigma-terminal-empty">
         <p>No retained terminals.</p>
-        <.dm_btn id="session-terminal-empty-create-btn" type="button" phx-click="terminal_create" phx-hook="WebComponentHook" variant="outline" size="sm">
+        <.dm_btn id="session-terminal-empty-create-btn" type="button" phx-click="terminal_create" variant="outline" size="sm">
           <.dm_mdi name="plus" class="h-4 w-4" /> Create terminal
         </.dm_btn>
       </div>
@@ -154,7 +153,6 @@ defmodule Sigma.Web.SessionTerminalComponents do
                   type="button"
                   phx-click="terminal_rename_cancel"
                   phx-value-terminal_id={value(entry, :terminal_id)}
-                  phx-hook="WebComponentHook"
                   variant="ghost"
                   size="xs"
                   shape="square"
@@ -207,13 +205,8 @@ defmodule Sigma.Web.SessionTerminalComponents do
   attr(:confirm, :string, default: "")
 
   defp terminal_icon_button(assigns) do
-    # WORKAROUND(upstream): duskmoon-dev/phoenix-duskmoon-ui#165
-    # Confirm buttons render as native buttons; forwarding this hook creates an id-less hooked action.
-    assigns =
-      assign(assigns, :web_component_hook, if(assigns.confirm == "", do: "WebComponentHook"))
-
     ~H"""
-    <.dm_btn id={@id} type="button" phx-click={@event} phx-value-terminal_id={@value} phx-hook={@web_component_hook} data-terminal-action={@action} data-terminal-action-value={@action_value} variant="ghost" size="xs" shape="square" aria-label={@label} aria-pressed={@pressed} title={@label} confirm={@confirm} confirm_title="Confirm terminal action">
+    <.dm_btn id={@id} type="button" phx-click={@event} phx-value-terminal_id={@value} data-terminal-action={@action} data-terminal-action-value={@action_value} variant="ghost" size="xs" shape="square" aria-label={@label} aria-pressed={@pressed} title={@label} confirm={@confirm} confirm_title="Confirm terminal action">
       <.dm_mdi name={@icon} class="h-4 w-4" />
       <span class="sr-only" data-terminal-action-label={@action != nil}>{@label}</span>
     </.dm_btn>

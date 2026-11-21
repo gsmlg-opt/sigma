@@ -952,8 +952,9 @@ defmodule Sigma.Web.SessionLiveTest do
     {:ok, _view, html} = live_loaded(conn, session_path(session_id))
 
     assert html =~ ~s(id="session-menu-btn-UFIjNQ")
-    assert html =~ ~s(anchor="#session-menu-btn-UFIjNQ")
-    refute html =~ ~s(anchor="#session-menu-btn-PR#5")
+    assert html =~ ~s(popovertarget="session-menu-UFIjNQ")
+    assert html =~ ~s(data-anchor="#session-menu-btn-UFIjNQ")
+    refute html =~ ~s(data-anchor="#session-menu-btn-PR#5")
   end
 
   test "renders basename session id with hash", %{conn: conn} do
@@ -1031,7 +1032,9 @@ defmodule Sigma.Web.SessionLiveTest do
     owner = Sigma.Agent.Runtime.lookup(@workdir, session_id, :session)
     agent = Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent)
 
-    render_hook(view, "session_menu_action", %{"value" => "rename", "session" => session_id})
+    view
+    |> element(~s(button[role="menuitem"][value="rename"][phx-value-session="#{session_id}"]))
+    |> render_click()
 
     assert has_element?(
              view,
@@ -1061,7 +1064,9 @@ defmodule Sigma.Web.SessionLiveTest do
     assert html =~ "Renamed session"
     assert html =~ "hello"
 
-    render_hook(reloaded, "session_menu_action", %{"value" => "rename", "session" => session_id})
+    reloaded
+    |> element(~s(button[role="menuitem"][value="rename"][phx-value-session="#{session_id}"]))
+    |> render_click()
 
     assert has_element?(
              reloaded,
@@ -3747,13 +3752,15 @@ defmodule Sigma.Web.SessionLiveTest do
     assert html =~ "Type another answer"
     assert html =~ ~s(id="ask-user-question-option-)
 
-    hook_buttons =
+    action_buttons =
       html
       |> Floki.parse_document!()
-      |> Floki.find(~s(#ask-user-questions el-dm-button[phx-hook="WebComponentHook"]))
+      |> Floki.find(~s(#ask-user-questions button.btn))
 
-    assert [_cancel_button, _submit_button] = hook_buttons
-    assert Enum.all?(hook_buttons, &has_attr?(&1, "id"))
+    assert [cancel_button, submit_button] = action_buttons
+    assert has_attr?(cancel_button, "id") and has_attr?(submit_button, "id")
+    assert has_attr?(cancel_button, "phx-click")
+    assert Floki.attribute(submit_button, "type") == ["submit"]
 
     view
     |> form("#ask-user-questions form", %{

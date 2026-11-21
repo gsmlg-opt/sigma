@@ -4,7 +4,7 @@ import { Chat } from "@duskmoon-dev/components/chat"
 import { Markdown } from "@duskmoon-dev/components/markdown"
 import { Button } from "@duskmoon-dev/components/button"
 import { Typography } from "@duskmoon-dev/components/typography"
-import { createDuskmoonReactChat, useChatSubmission } from "phoenix_duskmoon/react-chat"
+import { createDuskmoonReactChat, useChatSubmission } from "duskmoon_phoenix/react-chat"
 import { encodeImageFiles, validateImageFiles } from "../chat_attachments.js"
 import { filterSkillCandidates, insertSkillCandidate, searchableRemoteSources } from "../skill_completion.js"
 
@@ -286,8 +286,7 @@ function Message(props) {
     ...footer)
 }
 
-// TODO(upstream): duskmoon-dev/phoenix-duskmoon-ui#218 — resume following on manual return to the bottom.
-const chat = createDuskmoonReactChat({ Composer, renderMessage: Message })
+const chat = createDuskmoonReactChat({ Composer, renderMessage: Message, resumeFollowOnScroll: true })
 export const SigmaReactChat = {
   ...chat,
   mounted() {

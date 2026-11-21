@@ -112,6 +112,6 @@ defmodule Sigma.Web.SessionTerminalComponentsTest do
 
     assert html
            |> Floki.parse_fragment!()
-           |> Floki.find(~s|[phx-hook="WebComponentHook"]:not([id])|) == []
+           |> Floki.find("[phx-hook]:not([id])") == []
   end
 end

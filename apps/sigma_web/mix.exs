@@ -40,7 +40,7 @@ defmodule Sigma.Web.MixProject do
       {:samgita_protocol_websocket, "~> 0.4.1"},
       {:gettext, "~> 1.0"},
       {:duskmoon_bundler, "~> 10.0"},
-      {:phoenix_duskmoon, "~> 10.0"},
+      {:duskmoon_phoenix, "2.0.0-rc.2"},
       {:sigma_agent, in_umbrella: true},
       {:sigma_session, in_umbrella: true},
       {:sigma_logs, in_umbrella: true},

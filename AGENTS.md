@@ -86,12 +86,12 @@ The `:repository` param is a Base64 URL-encoded absolute path with no padding.
 
 ## UI Conventions
 
-- Use Phoenix LiveView and `phoenix_duskmoon` components for UI work.
+- Use Phoenix LiveView and `duskmoon_phoenix` components for UI work. Pin the Phoenix Hex and npm packages and the DuskMoon UI packages to the same published Web version.
 - Do not introduce DaisyUI or other component libraries.
 - Do not use Phoenix `core_components.ex`; prefer DuskMoon components and existing local patterns.
 - Keep Tailwind configured through `@duskmoon-dev/core/plugin`.
 - If a required DuskMoon capability is missing, open an `internal request` issue in the relevant DuskMoon repository rather than adding a competing local component system.
-- DuskMoon issue targets: `phoenix_duskmoon` -> `https://github.com/gsmlg-dev/phoenix_duskmoon/issues`; JS/CSS packages -> `https://github.com/gsmlg-dev/duskmoon-dev/issues`.
+- Report Phoenix, React, Elements, and Core UI issues in [duskmoon-dev/duskmoon-web](https://github.com/duskmoon-dev/duskmoon-web/issues). DuskMoon Bundler has its own repository and version.
 
 ## Code Style
 

@@ -338,7 +338,6 @@ defmodule Sigma.Web.NewSessionLive do
               <.dm_btn
                 id="create-session-btn"
                 phx-click="create_session"
-                phx-hook="WebComponentHook"
                 variant="primary"
                 size="lg"
                 disabled={@session_options_loading}

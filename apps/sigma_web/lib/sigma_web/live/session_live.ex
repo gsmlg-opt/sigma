@@ -522,7 +522,6 @@ defmodule Sigma.Web.SessionLive do
               id="session-terminal-sidebar-open-btn"
               type="button"
               phx-click="terminal_open"
-              phx-hook="WebComponentHook"
               variant="ghost"
               class="w-full justify-start"
             >
@@ -589,6 +588,8 @@ defmodule Sigma.Web.SessionLive do
                 :if={not is_renaming}
                 id={menu_button_id}
                 type="button"
+                popovertarget={menu_id}
+                aria-haspopup="menu"
                 variant="ghost"
                 size="xs"
                 class="mr-1 shrink-0 opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
@@ -601,13 +602,11 @@ defmodule Sigma.Web.SessionLive do
                 id={menu_id}
                 anchor={"##{menu_button_id}"}
                 placement="bottom-end"
-                phx-hook="SessionMenuHook"
-                data-session={session_id}
               >
-                <.dm_menu_item value="rename" icon="pencil-outline">Rename</.dm_menu_item>
-                <.dm_menu_item value="fork" icon="source-branch">Fork</.dm_menu_item>
-                <.dm_menu_item value="archive" icon="archive-outline">Archive</.dm_menu_item>
-                <.dm_menu_item value="delete" icon="delete-outline">Delete</.dm_menu_item>
+                <.dm_menu_item value="rename" icon="pencil-outline" phx-click="session_menu_action" phx-value-session={session_id}>Rename</.dm_menu_item>
+                <.dm_menu_item value="fork" icon="source-branch" phx-click="session_menu_action" phx-value-session={session_id}>Fork</.dm_menu_item>
+                <.dm_menu_item value="archive" icon="archive-outline" phx-click="session_menu_action" phx-value-session={session_id}>Archive</.dm_menu_item>
+                <.dm_menu_item value="delete" icon="delete-outline" phx-click="session_menu_action" phx-value-session={session_id}>Delete</.dm_menu_item>
               </.dm_menu>
             </li>
           </ul>
@@ -675,7 +674,6 @@ defmodule Sigma.Web.SessionLive do
                 id="stop-subagents-btn"
                 type="button"
                 phx-click="cancel_turn"
-                phx-hook="WebComponentHook"
                 variant="error"
                 size="xs"
               >Stop subagents</.dm_btn>
@@ -824,7 +822,6 @@ defmodule Sigma.Web.SessionLive do
             id="compact-session-btn"
             type="button"
             phx-click="compact_session"
-            phx-hook="WebComponentHook"
             variant="ghost"
             size="sm"
             disabled={not @session_ready or @turn_in_flight or @pending_compaction}
@@ -876,7 +873,6 @@ defmodule Sigma.Web.SessionLive do
             id="cancel-retry-turn-btn"
             type="button"
             phx-click="cancel_retry"
-            phx-hook="WebComponentHook"
             variant="ghost"
           >
             Cancel
@@ -885,7 +881,6 @@ defmodule Sigma.Web.SessionLive do
             id="confirm-retry-turn-btn"
             type="button"
             phx-click="confirm_retry"
-            phx-hook="WebComponentHook"
             variant="primary"
           >
             Retry once
@@ -939,7 +934,6 @@ defmodule Sigma.Web.SessionLive do
                 id="cancel-fork-session-btn"
                 type="button"
                 phx-click="cancel_fork"
-                phx-hook="WebComponentHook"
                 variant="ghost"
               >
                 Cancel
@@ -947,7 +941,6 @@ defmodule Sigma.Web.SessionLive do
               <.dm_btn
                 id="confirm-fork-session-btn"
                 type="submit"
-                phx-hook="WebComponentHook"
                 variant="primary"
               >
                 Create fork
@@ -1063,7 +1056,6 @@ defmodule Sigma.Web.SessionLive do
               type="button"
               phx-click="cancel_user_question"
               phx-value-question-id={question.id}
-              phx-hook="WebComponentHook"
               variant="ghost"
               size="sm"
             >
@@ -1072,7 +1064,6 @@ defmodule Sigma.Web.SessionLive do
             <.dm_btn
               id={"ask-user-question-submit-#{question.id}"}
               type="submit"
-              phx-hook="WebComponentHook"
               variant="primary"
               size="sm"
             >
@@ -1109,8 +1100,8 @@ defmodule Sigma.Web.SessionLive do
           </fieldset>
           <.dm_textarea :if={item["message"]} id={"async-text-#{item["item_id"]}"} name="text" value="" label="Optional reply" rows={2} />
           <div class="flex justify-end gap-2">
-            <.dm_btn id={"async-dismiss-#{item["item_id"]}"} type="button" variant="ghost" size="sm" phx-hook="WebComponentHook" phx-click="dismiss_async_interaction" phx-value-item-id={item["item_id"]} phx-value-expected-leaf={@snapshot.leaf_id}>Dismiss</.dm_btn>
-            <.dm_btn id={"async-submit-#{item["item_id"]}"} type="submit" variant="primary" size="sm" phx-hook="WebComponentHook">Send reply</.dm_btn>
+            <.dm_btn id={"async-dismiss-#{item["item_id"]}"} type="button" variant="ghost" size="sm" phx-click="dismiss_async_interaction" phx-value-item-id={item["item_id"]} phx-value-expected-leaf={@snapshot.leaf_id}>Dismiss</.dm_btn>
+            <.dm_btn id={"async-submit-#{item["item_id"]}"} type="submit" variant="primary" size="sm">Send reply</.dm_btn>
           </div>
         </form>
         <div :if={not item["can_reply"]} class="mt-2 space-y-2 text-sm">
@@ -1196,7 +1187,6 @@ defmodule Sigma.Web.SessionLive do
               type="button"
               phx-click="decline_mcp_elicitation"
               phx-value-elicitation-id={elicitation.id}
-              phx-hook="WebComponentHook"
               variant="ghost"
               size="sm"
             >
@@ -1205,7 +1195,6 @@ defmodule Sigma.Web.SessionLive do
             <.dm_btn
               id={"mcp-elicitation-submit-#{elicitation.id}"}
               type="submit"
-              phx-hook="WebComponentHook"
               variant="primary"
               size="sm"
             >

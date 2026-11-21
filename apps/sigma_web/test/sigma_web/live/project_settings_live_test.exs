@@ -42,13 +42,7 @@ defmodule Sigma.Web.ProjectSettingsLiveTest do
 
       {:ok, view, html} = live(conn, "/repository/#{encoded_repository}/settings")
 
-      hooked_without_id =
-        html
-        |> Floki.parse_document!()
-        |> Floki.find(~s([phx-hook="WebComponentHook"]))
-        |> Enum.reject(fn {_tag, attrs, _children} -> List.keymember?(attrs, "id", 0) end)
-
-      assert hooked_without_id == []
+      assert html |> Floki.parse_document!() |> Floki.find("[phx-hook]:not([id])") == []
       assert html =~ "New Session"
       assert html =~ "Skills"
       assert html =~ "Session List"

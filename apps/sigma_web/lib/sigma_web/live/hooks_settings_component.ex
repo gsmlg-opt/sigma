@@ -107,7 +107,6 @@ defmodule Sigma.Web.HooksSettingsComponent do
                   phx-value-group={row.group_index}
                   phx-value-handler={row.handler_index}
                   phx-target={@myself}
-                  phx-hook="WebComponentHook"
                   variant="outline"
                   size="sm"
                 >Edit</.dm_btn>
@@ -118,7 +117,6 @@ defmodule Sigma.Web.HooksSettingsComponent do
                   phx-value-group={row.group_index}
                   phx-value-handler={row.handler_index}
                   phx-target={@myself}
-                  phx-hook="WebComponentHook"
                   variant="error"
                   size="sm"
                 >Remove</.dm_btn>
@@ -186,7 +184,6 @@ defmodule Sigma.Web.HooksSettingsComponent do
                   id={@id <> "-command-cancel"}
                   phx-click="cancel_command"
                   phx-target={@myself}
-                  phx-hook="WebComponentHook"
                   variant="ghost"
                 >Cancel</.dm_btn>
               </div>
@@ -198,7 +195,6 @@ defmodule Sigma.Web.HooksSettingsComponent do
               phx-click="add_command"
               phx-value-event={event.name}
               phx-target={@myself}
-              phx-hook="WebComponentHook"
               variant="outline"
               size="sm"
             >
@@ -220,7 +216,7 @@ defmodule Sigma.Web.HooksSettingsComponent do
             spellcheck="false"
           >{@json}</textarea>
           <div class="flex flex-wrap justify-between gap-2">
-            <.dm_btn id={@id <> "-format"} phx-click="format_hooks" phx-target={@myself} phx-hook="WebComponentHook" variant="outline" size="sm">Format JSON</.dm_btn>
+            <.dm_btn id={@id <> "-format"} phx-click="format_hooks" phx-target={@myself} variant="outline" size="sm">Format JSON</.dm_btn>
             <.dm_btn id={@id <> "-save"} native_submit variant="primary">Save hooks.json</.dm_btn>
           </div>
         </form>

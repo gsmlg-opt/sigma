@@ -62,7 +62,7 @@ defmodule Sigma.Web.HomeLive do
         <.dm_card
           :for={repo <- @repos}
           variant="bordered"
-          class="grid-stretch h-full group interactive transition-all duration-300 hover:border-primary/50 hover:shadow-xl bg-surface-container-low"
+          class="h-full group interactive transition-all duration-300 hover:border-primary/50 hover:shadow-xl bg-surface-container-low"
         >
           <:title>
             <div class="flex items-center gap-3 py-1">
@@ -119,7 +119,7 @@ defmodule Sigma.Web.HomeLive do
             </form>
 
             <div class="flex items-center gap-2 mb-4 p-2 bg-surface-container-high rounded-lg border border-outline-variant">
-              <.dm_btn id="browser-up-btn" phx-click="browser_up" phx-hook="WebComponentHook" variant="ghost" size="xs">
+              <.dm_btn id="browser-up-btn" phx-click="browser_up" variant="ghost" size="xs">
                 <.dm_mdi name="arrow-up" class="w-4 h-4" />
               </.dm_btn>
               <div class="text-xs font-mono truncate flex-1 text-on-surface-variant">{@browsing_path}</div>
@@ -132,7 +132,6 @@ defmodule Sigma.Web.HomeLive do
               <div :for={entry <- @browser_entries} 
                    id={"entry-#{Base.encode16(:crypto.hash(:md5, entry.name), case: :lower)}"}
                    phx-click="browser_select" 
-                   phx-hook="WebComponentHook"
                    phx-value-name={entry.name}
                    class="flex items-center gap-3 p-3 hover:bg-primary/5 cursor-pointer group transition-colors text-on-surface">
                 <.dm_mdi name={if entry.is_dir, do: "folder", else: "file-outline"} 
@@ -155,7 +154,7 @@ defmodule Sigma.Web.HomeLive do
 
             <div class="mt-6 flex justify-end gap-3">
                <.dm_link navigate={~p"/"} class="btn btn-ghost">Cancel</.dm_link>
-               <.dm_btn id="confirm-add-btn" phx-click="browser_confirm" phx-hook="WebComponentHook" variant="primary">
+               <.dm_btn id="confirm-add-btn" phx-click="browser_confirm" variant="primary">
                  Add This Directory
                </.dm_btn>
             </div>

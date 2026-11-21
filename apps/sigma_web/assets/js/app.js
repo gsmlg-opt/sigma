@@ -2,7 +2,8 @@ import "phoenix_html"
 import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import topbar from "topbar"
-import * as DuskmoonHooks from "phoenix_duskmoon/hooks"
+import * as DuskmoonHooks from "duskmoon_phoenix/hooks"
+import { WebComponentHook } from "duskmoon_phoenix/elements"
 import { formatElapsedTime, formatRelativeTime } from "./session_time.js"
 import { SessionPanels } from "./hooks/session_panels.js"
 import { SessionTerminals } from "./hooks/session_terminals.js"
@@ -24,7 +25,7 @@ const MarkdownInputHook = {
   }
 }
 
-// Mirrors phoenix_duskmoon's ThemeSwitcher hook for a radio-button group.
+// Mirrors the Duskmoon ThemeSwitcher hook for a radio-button group.
 // Reads the active theme from localStorage (or "default") and reflects it on the
 // form's radio inputs; on change, applies the theme via `data-theme` on <html>
 // and persists the selection. Use: wrap a group of <input type="radio" name="theme"> in
@@ -253,33 +254,6 @@ const ModalHook = {
   }
 }
 
-// Drives el-dm-menu open/close from an anchor button and forwards select events to LiveView.
-// Use: phx-hook="SessionMenuHook" data-session="session_id" anchor="#btn-id"
-const SessionMenuHook = {
-  mounted() {
-    // Forward menu select events to LiveView
-    this._selectHandler = (e) => {
-      const session = this.el.dataset.session
-      this.pushEvent("session_menu_action", { value: e.detail?.value, session })
-    }
-    this.el.addEventListener("select", this._selectHandler)
-
-    // Wire anchor button click → menu toggle (el-dm-menu anchor is positioning-only)
-    const anchorSel = this.el.getAttribute("anchor")
-    this._anchorEl = anchorSel ? document.querySelector(anchorSel) : null
-    if (this._anchorEl) {
-      this._clickHandler = (e) => { e.stopPropagation(); this.el.toggle() }
-      this._anchorEl.addEventListener("click", this._clickHandler)
-    }
-  },
-  destroyed() {
-    this.el.removeEventListener("select", this._selectHandler)
-    if (this._anchorEl && this._clickHandler) {
-      this._anchorEl.removeEventListener("click", this._clickHandler)
-    }
-  }
-}
-
 // Use: phx-hook="LocalTime" data-ts={milliseconds} id="unique-id"
 const LocalTime = {
   mounted() { this._format() },
@@ -367,7 +341,7 @@ let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("
 
 let liveSocket = new LiveSocket("/live", Socket, {
   params: {_csrf_token: csrfToken},
-  hooks: { ...DuskmoonHooks, ModalHook, AutocompleteHook, SessionMenuHook, SigmaReactChat, MarkdownInputHook, AppearanceThemeHook, LocalTime, RelativeTime, ElapsedTime, SessionPanels, SessionTerminals, SessionTitleDblClick }
+  hooks: { ...DuskmoonHooks, WebComponentHook, ModalHook, AutocompleteHook, SigmaReactChat, MarkdownInputHook, AppearanceThemeHook, LocalTime, RelativeTime, ElapsedTime, SessionPanels, SessionTerminals, SessionTitleDblClick }
 })
 
 // Show progress bar on live navigation and form submits
