@@ -2,6 +2,8 @@ import { FitAddon } from "@xterm/addon-fit"
 import { Terminal } from "@xterm/xterm"
 
 const storagePrefix = "sigma:terminal-presentation:"
+const inputFrameBytes = 16 * 1024
+const maxWriteBatchBytes = 64 * 1024
 const heightSteps = [240, 360, 480]
 
 const emptyPresentation = (panelOpen = true) => ({
@@ -24,7 +26,7 @@ export function readPresentation(identity, storage = globalThis.window?.sessionS
     const value = JSON.parse(storage.getItem(presentationStorageKey(identity)) || "{}")
     return {
       selectedId: typeof value.selectedId === "string" ? value.selectedId : null,
-      panelOpen,
+      panelOpen: value.panelOpen === true || (value.panelOpen !== false && panelOpen),
       height: Number.isFinite(value.height) ? value.height : null,
       maximized: value.maximized === true,
       scroll: value.scroll && typeof value.scroll === "object" ? value.scroll : {},
@@ -37,6 +39,7 @@ export function readPresentation(identity, storage = globalThis.window?.sessionS
 
 export function writePresentation(identity, presentation, storage = globalThis.window?.sessionStorage) {
   const safe = {
+    panelOpen: presentation.panelOpen === true,
     selectedId: typeof presentation.selectedId === "string" ? presentation.selectedId : null,
     height: Number.isFinite(presentation.height) ? presentation.height : null,
     maximized: presentation.maximized === true,
@@ -101,6 +104,7 @@ function createInstance(host) {
   const terminal = new Terminal({ convertEol: false, cursorBlink: true, scrollback: 5000, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: 13, lineHeight: 1.25 })
   const fit = new FitAddon()
   terminal.loadAddon(fit)
+  suppressDeviceReplies(terminal)
   terminal.open(host)
   return {
     terminal,
@@ -121,6 +125,60 @@ function createInstance(host) {
     resynced: false,
     disposed: false,
     subscriptions: []
+  }
+}
+
+export function suppressDeviceReplies(terminal) {
+  terminal.parser.registerCsiHandler({ final: "n" }, ([status]) => status === 5 || status === 6)
+  terminal.parser.registerCsiHandler({ final: "c" }, ([device]) => device === 0)
+  terminal.parser.registerCsiHandler({ prefix: "?", final: "n" }, ([status]) => status === 6)
+  terminal.parser.registerCsiHandler({ prefix: ">", final: "c" }, ([device]) => device === 0)
+}
+
+export const SessionTerminalRestore = {
+  mounted() {
+    this.onTerminalPush = ({ detail: { event, payload, onReply } }) => {
+      this.pushEvent(event, payload).then(
+        (reply) => onReply?.(reply),
+        () => onReply?.(null)
+      )
+    }
+    this.el.addEventListener("sigma:terminal-push", this.onTerminalPush)
+    this.restoreTerminalView()
+  },
+  destroyed() { this.el.removeEventListener("sigma:terminal-push", this.onTerminalPush) },
+  updated() { this.restoreTerminalView() },
+  reconnected() {
+    this.restoreAttempt = null
+    this.restoreTerminalView()
+  },
+  restoreTerminalView() {
+    const data = this.el.dataset
+    const key = data.terminalStorageKey
+    if (data.terminalAvailable !== "true" || data.terminalRetained === "0") return
+
+    const { panelOpen, selectedId } = readPresentation(key, globalThis.window?.sessionStorage, false)
+    const trigger = this.el.ownerDocument?.getElementById("session-terminal-open-btn")
+    if (selectedId) trigger?.setAttribute("phx-value-terminal_id", selectedId)
+    else trigger?.removeAttribute("phx-value-terminal_id")
+
+    if (!panelOpen || data.terminalPanelOpen === "true" || this.restoreAttempt === key) return
+    this.restoreAttempt = key
+    pushTerminalEvent(this, "terminal_restore", {
+      incarnation_id: data.terminalIncarnation,
+      terminal_id: selectedId
+    })
+  }
+}
+
+function pushTerminalEvent(hook, event, payload, onReply) {
+  // Phoenix locks the element that pushes an event until its reply. Use a leaf
+  // outside the terminal panel so a recovery patch can precede its output.
+  const transport = hook.el?.ownerDocument?.getElementById("session-terminal-transport")
+  if (transport) {
+    transport.dispatchEvent(new CustomEvent("sigma:terminal-push", { detail: { event, payload, onReply } }))
+  } else {
+    hook.pushEvent(event, payload, onReply)
   }
 }
 
@@ -201,6 +259,8 @@ export const SessionTerminals = {
       globalThis.window?.sessionStorage,
       this.el.dataset.terminalPanelOpen === "true"
     )
+    this.presentation.panelOpen = true
+    this.persistPresentation()
     this.installEvents()
     this.installKeyboardNavigation()
     this.installPresentationControls()
@@ -215,6 +275,11 @@ export const SessionTerminals = {
     this.syncHosts()
     this.synchronizeSelection()
   },
+  disconnected() {
+    this.disconnectedFromServer = true
+    this.instances.forEach((instance) => { instance.inputBatch = null })
+  },
+  reconnected() { this.disconnectedFromServer = false },
   destroyed() {
     this.resizeObserver?.disconnect()
     globalThis.window?.removeEventListener?.("resize", this.onResize)
@@ -257,7 +322,7 @@ export const SessionTerminals = {
         this.persistPresentation()
         this.applyPresentation()
         this.syncHosts()
-        SessionTerminals.requestSelection.call(this, tab.dataset.terminalId)
+        SessionTerminals.requestSelection.call(this, tab.dataset.terminalId, true)
       }
 
       const action = event.target.closest?.("[data-terminal-action]")?.dataset.terminalAction
@@ -281,7 +346,7 @@ export const SessionTerminals = {
     this.heartbeatTimer = globalThis.window?.setInterval?.(() => {
       this.instances.forEach((instance) => {
         if (!instance.disposed && instance.fence?.attachment_id) {
-          this.pushEvent("terminal_heartbeat", instance.fence)
+          pushTerminalEvent(this, "terminal_heartbeat", instance.fence)
         }
       })
     }, 10_000)
@@ -289,7 +354,7 @@ export const SessionTerminals = {
   persistPresentation() {
     writePresentation(this.storageIdentity, this.presentation)
   },
-  requestSelection(terminalId) {
+  requestSelection(terminalId, explicit = false) {
     if (typeof this.el.querySelectorAll !== "function") return
     const tab = [...this.el.querySelectorAll('[role="tab"][data-terminal-id]')]
       .find((candidate) => candidate.dataset.terminalId === terminalId)
@@ -297,9 +362,10 @@ export const SessionTerminals = {
     const generation = integer(tab.dataset.terminalGeneration)
     const instance = this.instances.get(terminalKey(terminalId, generation))
     this.selectionRequest = `${terminalId}:${generation}`
-    this.pushEvent("terminal_select", {
+    pushTerminalEvent(this, "terminal_select", {
       terminal_id: terminalId,
       generation,
+      ...(explicit ? { acquire_control: true } : {}),
       rendered_sequence: Number.isInteger(instance?.renderedSequence) ? instance.renderedSequence : 0
     })
   },
@@ -407,14 +473,9 @@ export const SessionTerminals = {
       if (!instance) {
         instance = createInstance(host)
         this.instances.set(key, instance)
-        instance.subscriptions.push(instance.terminal.onData((data) => {
-          if (canSendInput(instance)) {
-            this.pushEvent("terminal_input", {
-              ...instance.fence,
-              data_base64: encodeTerminalBytes(data)
-            })
-          }
-        }))
+        instance.subscriptions.push(instance.terminal.onData((data) =>
+          SessionTerminals.sendInput.call(this, instance, data)
+        ))
         instance.subscriptions.push(instance.terminal.onScroll((position) => {
           this.presentation.scroll[instance.terminalId] = position
           this.persistPresentation()
@@ -432,7 +493,9 @@ export const SessionTerminals = {
         cols: integer(panel.dataset.terminalColumns),
         rows: integer(panel.dataset.terminalRows)
       }
-      SessionTerminals.applyCanonicalSize.call(this, instance, canonicalSize)
+      if (!instance.fence.attachment_id || !instance.canonicalSize) {
+        SessionTerminals.applyCanonicalSize.call(this, instance, canonicalSize)
+      }
       const scrollPosition = this.presentation.scroll[instance.terminalId]
       if (Number.isInteger(scrollPosition)) instance.terminal.scrollToLine(scrollPosition)
       afterPaint(() => this.fit(instance.panel, instance))
@@ -443,6 +506,55 @@ export const SessionTerminals = {
         this.instances.delete(key)
       }
     })
+  },
+  sendInput(instance, data) {
+    if (this.disconnectedFromServer || !canSendInput(instance)) return
+
+    const bytes = new TextEncoder().encode(data)
+    const fence = instance.fence
+    const send = (chunk, reply) => pushTerminalEvent(this, "terminal_input", {
+      ...instance.fence,
+      data_base64: encodeTerminalBytes(chunk),
+      ...(reply ? { input_batch: true } : {})
+    }, reply)
+
+    if (bytes.length <= inputFrameBytes && !instance.inputBatch) {
+      send(bytes)
+      return
+    }
+
+    let batch = instance.inputBatch
+    if (batch && batch.fence.attachment_id === fence.attachment_id &&
+        batch.fence.control_epoch === fence.control_epoch && batch.fence.recovery_id === fence.recovery_id) {
+      batch.pending.push(bytes)
+      return
+    }
+
+    batch = { fence, pending: [bytes], offset: 0 }
+    instance.inputBatch = batch
+    const next = () => {
+      if (instance.inputBatch !== batch) return
+      const current = instance.fence
+      if (this.disconnectedFromServer || !canSendInput(instance) ||
+          fence.attachment_id !== current.attachment_id || fence.control_epoch !== current.control_epoch ||
+          fence.recovery_id !== current.recovery_id || batch.pending.length === 0) {
+        instance.inputBatch = null
+        return
+      }
+      const input = batch.pending[0]
+      const end = Math.min(batch.offset + inputFrameBytes, input.length)
+      const chunk = input.subarray(batch.offset, end)
+      batch.offset = end
+      if (end === input.length) {
+        batch.pending.shift()
+        batch.offset = 0
+      }
+      send(chunk, (reply) => {
+        if (reply?.accepted) next()
+        else if (instance.inputBatch === batch) instance.inputBatch = null
+      })
+    }
+    next()
   },
   write(frame, options = {}) {
     const instance = this.instances.get(terminalKey(frame.terminal_id, frame.generation))
@@ -459,6 +571,14 @@ export const SessionTerminals = {
     }
     const sequence = integer(frame.sequence)
     if (!Number.isInteger(sequence)) return
+    if (!options.reset && instance.receivedSequence > 0 && sequence > instance.receivedSequence + 1) {
+      pushTerminalEvent(this, "terminal_resync_request", {
+        ...instance.fence,
+        recovery_id: instance.recoveryId,
+        rendered_sequence: instance.renderedSequence
+      })
+      return
+    }
     const delivery = instance.delivery
     const sameDelivery = !options.reset &&
       delivery?.attachmentId === frame.attachment_id && delivery?.recoveryId === frame.recovery_id
@@ -470,7 +590,7 @@ export const SessionTerminals = {
     if (!options.reset && sequence <= instance.receivedSequence) {
       // Recovery may replay bytes already rendered before its new acknowledgement arrived.
       if (sequence <= instance.renderedSequence) {
-        this.pushEvent("terminal_rendered", {
+        pushTerminalEvent(this, "terminal_rendered", {
           terminal_id: frame.terminal_id,
           generation: frame.generation,
           ...instance.fence,
@@ -478,14 +598,6 @@ export const SessionTerminals = {
           sequence
         })
       }
-      return
-    }
-    if (!options.reset && instance.receivedSequence > 0 && sequence > instance.receivedSequence + 1) {
-      this.pushEvent("terminal_resync_request", {
-        ...instance.fence,
-        recovery_id: instance.recoveryId,
-        rendered_sequence: instance.renderedSequence
-      })
       return
     }
     instance.receivedSequence = Math.max(instance.receivedSequence, sequence)
@@ -496,14 +608,43 @@ export const SessionTerminals = {
     if (instance.rendering || instance.disposed) return
     const queued = instance.frameQueue.shift()
     if (!queued) return
+
     instance.rendering = true
     const { frame, options } = queued
-    const data = frame.data_base64 ? decodeTerminalBytes(frame.data_base64) : frame.data
-    const validData = typeof data === "string" || data instanceof Uint8Array
-    const snapshotEpoch = instance.snapshotEpoch || 0
+    let lastSequence = integer(frame.sequence)
+    let data = frame.data_base64 ? decodeTerminalBytes(frame.data_base64) : frame.data
 
+    if (!options.reset && data instanceof Uint8Array) {
+      const chunks = [data]
+      let length = data.length
+      let consumed = 0
+      for (const next of instance.frameQueue) {
+        const pending = next.frame
+        if (next.options.reset || pending.attachment_id !== frame.attachment_id ||
+            pending.recovery_id !== frame.recovery_id || integer(pending.sequence) !== lastSequence + 1 ||
+            pending.columns !== frame.columns || pending.rows !== frame.rows) break
+
+        const bytes = pending.data_base64 ? decodeTerminalBytes(pending.data_base64) : pending.data
+        if (!(bytes instanceof Uint8Array) || length + bytes.length > maxWriteBatchBytes) break
+        chunks.push(bytes)
+        length += bytes.length
+        lastSequence += 1
+        consumed += 1
+      }
+      if (consumed > 0) {
+        instance.frameQueue.splice(0, consumed)
+        data = new Uint8Array(length)
+        let offset = 0
+        for (const chunk of chunks) {
+          data.set(chunk, offset)
+          offset += chunk.length
+        }
+      }
+    }
+
+    const snapshotEpoch = instance.snapshotEpoch || 0
     const visible = this.presentation.panelOpen && !instance.panel?.hidden
-    if (!visible) {
+    if (!visible && !this.presentation.unread[instance.terminalId]) {
       this.presentation.unread[instance.terminalId] = true
       this.persistPresentation()
       this.applyPresentation()
@@ -512,40 +653,39 @@ export const SessionTerminals = {
     SessionTerminals.applyCanonicalSize.call(this, instance, { cols: integer(frame.columns), rows: integer(frame.rows) })
     if (options.reset) instance.terminal.reset()
 
-    const rendered = () => afterPaint(() => {
+    const rendered = () => {
       instance.rendering = false
-      const current = !instance.disposed &&
-        (instance.snapshotEpoch || 0) === snapshotEpoch
-      if (!current) {
-        instance.frameQueue = instance.frameQueue.filter(({ frame: pending }) =>
-          (!pending.attachment_id || pending.attachment_id === instance.fence?.attachment_id) &&
-          (!pending.recovery_id || pending.recovery_id === instance.recoveryId)
-        )
+      if (instance.disposed) return
+      if ((instance.snapshotEpoch || 0) !== snapshotEpoch) {
         SessionTerminals.drainFrames.call(this, instance)
         return
       }
-      instance.renderedSequence = Math.max(instance.renderedSequence, integer(frame.sequence))
-      if (this.presentation.panelOpen && !instance.panel?.hidden) {
+
+      instance.renderedSequence = Math.max(instance.renderedSequence, lastSequence)
+      if (this.presentation.panelOpen && !instance.panel?.hidden && this.presentation.unread[instance.terminalId]) {
         this.presentation.unread[instance.terminalId] = false
         this.persistPresentation()
         this.applyPresentation()
       }
-      // Reattachment can retain the same ordered bytes; acknowledge only its actual delivery.
+
       const delivery = instance.delivery
       if (delivery?.attachmentId === instance.fence?.attachment_id &&
-          delivery?.recoveryId === instance.recoveryId && frame.sequence <= delivery.sequence) {
-        this.pushEvent("terminal_rendered", {
-          terminal_id: frame.terminal_id,
-          generation: frame.generation,
-          ...instance.fence,
-          recovery_id: instance.recoveryId,
-          sequence: frame.sequence
-        })
+          delivery?.recoveryId === instance.recoveryId) {
+        const sequence = Math.min(lastSequence, delivery.sequence)
+        if (sequence >= integer(frame.sequence)) {
+          pushTerminalEvent(this, "terminal_rendered", {
+            terminal_id: frame.terminal_id,
+            generation: frame.generation,
+            ...instance.fence,
+            recovery_id: instance.recoveryId,
+            sequence
+          })
+        }
       }
       SessionTerminals.drainFrames.call(this, instance)
-    })
+    }
 
-    if (validData) instance.terminal.write(data, rendered)
+    if (typeof data === "string" || data instanceof Uint8Array) instance.terminal.write(data, rendered)
     else rendered()
   },
   setControl(frame) {
@@ -573,7 +713,7 @@ export const SessionTerminals = {
     if (!size) return
     if (size.cols <= 0 || size.rows <= 0 || (instance.lastSize && size.cols === instance.lastSize.cols && size.rows === instance.lastSize.rows)) return
     instance.lastSize = size
-    this.pushEvent("terminal_resize", { ...instance.fence, ...size })
+    pushTerminalEvent(this, "terminal_resize", { ...instance.fence, ...size })
   },
   applyCanonicalSize(instance, size) {
     if (!Number.isInteger(size?.cols) || !Number.isInteger(size?.rows) || size.cols <= 0 || size.rows <= 0) return

@@ -10,6 +10,7 @@ defmodule Sigma.Agent.Terminals.ScreenStream do
     next_sequence: 1,
     frames: [],
     replay_bytes: 0,
+    bytes_since_checkpoint: 0,
     dimensions: {120, 24},
     native_sequence: 0,
     degraded: nil,
@@ -38,9 +39,12 @@ defmodule Sigma.Agent.Terminals.ScreenStream do
          :ok <- parser_capacity(stream, bytes) do
       {tail, responses} = device_responses(stream.parser_tail <> bytes)
 
+      frame = %{frame | dimensions: stream.dimensions}
+
       stream =
         stream
         |> append(frame, byte_size(bytes))
+        |> Map.update!(:bytes_since_checkpoint, &(&1 + byte_size(bytes)))
         |> Map.put(:parser_tail, tail)
         |> maybe_put_native_sequence(native_sequence)
 
@@ -79,6 +83,7 @@ defmodule Sigma.Agent.Terminals.ScreenStream do
             dimensions: {columns, rows},
             native_sequence: native_sequence || stream.native_sequence,
             degraded: nil,
+            bytes_since_checkpoint: 0,
             frames: if(healing?, do: [], else: stream.frames),
             replay_bytes: if(healing?, do: 0, else: stream.replay_bytes),
             next_sequence: if(healing?, do: stream.next_sequence + 1, else: stream.next_sequence)
@@ -98,6 +103,10 @@ defmodule Sigma.Agent.Terminals.ScreenStream do
   def mark_gap(%__MODULE__{} = stream, expected, actual) do
     %{stream | degraded: %{reason: :sequence_gap, expected: expected, actual: actual}}
   end
+
+  def delivery(%__MODULE__{degraded: degraded}, %Identity.Run{}, _rendered_sequence)
+      when not is_nil(degraded),
+      do: {:error, Error.new(:snapshot_unavailable, %{reason: :stream_gap})}
 
   def delivery(%__MODULE__{} = stream, %Identity.Run{} = run, rendered_sequence) do
     replay =

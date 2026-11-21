@@ -77,7 +77,15 @@ defmodule Sigma.Coding.Terminal.Native do
          :ok <- valid_dimensions(columns, rows),
          {:ok, command} <- shell_command(opts),
          {:ok, helper} <- helper_path(opts),
-         {:ok, port} <- open_port(helper, cwd, columns, rows, command) do
+         {:ok, port} <-
+           open_port(
+             helper,
+             cwd,
+             columns,
+             rows,
+             command,
+             Keyword.get(opts, :terminal_state, false)
+           ) do
       owner_ref = Process.monitor(owner)
       {:os_pid, helper_pid} = Port.info(port, :os_pid)
 
@@ -161,6 +169,7 @@ defmodule Sigma.Coding.Terminal.Native do
       if is_nil(state.cleanup_result) do
         result = {:error, :cleanup_unconfirmed}
         notify(state, {:backend_failed, {:helper_exit, status}})
+        notify(state, {:cleanup, result, %{reason: {:helper_exit, status}}})
         finish_cleanup(state, result)
       else
         state
@@ -309,8 +318,9 @@ defmodule Sigma.Coding.Terminal.Native do
     ArgumentError -> {:error, :backend_unavailable}
   end
 
-  defp open_port(helper, cwd, columns, rows, command) do
+  defp open_port(helper, cwd, columns, rows, command, terminal_state?) do
     args = ["--cwd", cwd, "--rows", to_string(rows), "--cols", to_string(columns), "--" | command]
+    args = if terminal_state?, do: ["--terminal-state" | args], else: args
 
     {:ok,
      Port.open({:spawn_executable, helper}, [

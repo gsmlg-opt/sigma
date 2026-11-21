@@ -680,6 +680,7 @@ defmodule Sigma.Web.SessionLive do
 
               <SessionTerminalComponents.terminal_trigger
                 catalog={@terminal_catalog}
+                session={@terminal_session}
                 panel_open?={@terminal_panel_open}
               />
 
@@ -2938,12 +2939,24 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
-  def handle_event("terminal_open", _params, socket) do
+  def handle_event("terminal_open", params, socket) do
     socket = assign(socket, :terminal_panel_open, true)
 
-    case terminal_entries(socket) do
-      [] -> terminal_create(socket, :ensure_initial)
-      [entry | _] -> {:noreply, select_terminal(socket, entry.terminal_id)}
+    case requested_terminal(socket, params["terminal_id"]) do
+      nil -> terminal_create(socket, :ensure_initial)
+      terminal_id -> {:noreply, open_existing_terminal(socket, terminal_id, 0, true)}
+    end
+  end
+
+  def handle_event("terminal_restore", params, socket) do
+    with false <- socket.assigns.terminal_panel_open,
+         true <- socket.assigns.terminal_session.incarnation_id == params["incarnation_id"],
+         terminal_id when is_binary(terminal_id) <-
+           requested_terminal(socket, params["terminal_id"]) do
+      socket = assign(socket, :terminal_panel_open, true)
+      {:noreply, open_existing_terminal(socket, terminal_id, 0, false)}
+    else
+      _ -> {:noreply, socket}
     end
   end
 
@@ -2954,11 +2967,13 @@ defmodule Sigma.Web.SessionLive do
   end
 
   def handle_event("terminal_select", %{"terminal_id" => terminal_id} = params, socket) do
-    with {:ok, entry} <- terminal_entry(socket, terminal_id),
+    with true <- socket.assigns.terminal_panel_open,
+         {:ok, entry} <- terminal_entry(socket, terminal_id),
          generation when generation == entry.generation <- parse_integer(params["generation"]),
          sequence when is_integer(sequence) and sequence >= 0 <-
            parse_integer(params["rendered_sequence"]) do
-      {:noreply, select_terminal(socket, terminal_id, sequence)}
+      {:noreply,
+       open_existing_terminal(socket, terminal_id, sequence, params["acquire_control"] == true)}
     else
       _stale -> {:noreply, socket}
     end
@@ -3005,23 +3020,29 @@ defmodule Sigma.Web.SessionLive do
              socket.assigns.terminal_catalog.revision,
              params["data_base64"]
            ) do
-      {:noreply, socket}
+      terminal_input_reply(params, true, socket)
     else
       {:error, :stale_browser_frame} ->
-        {:noreply, socket}
+        terminal_input_reply(params, false, socket)
 
       {:error,
        %Sigma.Agent.Terminals.Error{
          code: :session_unavailable,
          details: %{reason: :terminal_exited}
        } = error} ->
-        {:noreply, revoke_terminal_authority(socket, params["terminal_id"], error)}
+        terminal_input_reply(
+          params,
+          false,
+          revoke_terminal_authority(socket, params["terminal_id"], error)
+        )
 
       {:error, error} ->
-        {:noreply,
-         socket
-         |> revoke_terminal_authority(params["terminal_id"], error)
-         |> terminal_error(error)}
+        socket =
+          socket
+          |> revoke_terminal_authority(params["terminal_id"], error)
+          |> terminal_error(error)
+
+        terminal_input_reply(params, false, socket)
     end
   end
 
@@ -3072,14 +3093,18 @@ defmodule Sigma.Web.SessionLive do
         params["recovery_id"] == attachment.recovery_id and
           rendered_sequence >= attachment.recovery_boundary
 
-      attachment = %{attachment | rendered_sequence: rendered_sequence, resynced?: resynced?}
-      socket = put_terminal_attachment(socket, attachment.terminal_id, attachment)
+      updated = %{attachment | rendered_sequence: rendered_sequence, resynced?: resynced?}
 
-      {:noreply,
-       if(resynced?,
-         do: push_terminal_authority(socket, attachment),
-         else: socket
-       )}
+      socket =
+        if attachment.resynced? == resynced? do
+          update_terminal_attachment(socket, attachment.terminal_id, fn _ -> updated end)
+        else
+          socket
+          |> put_terminal_attachment(attachment.terminal_id, updated)
+          |> push_terminal_authority(updated)
+        end
+
+      {:noreply, socket}
     else
       {:error, _error} -> {:noreply, socket}
     end
@@ -4159,6 +4184,40 @@ defmodule Sigma.Web.SessionLive do
     end
   end
 
+  defp terminal_input_reply(%{"input_batch" => true}, accepted?, socket),
+    do: {:reply, %{accepted: accepted?}, socket}
+
+  defp terminal_input_reply(_params, _accepted?, socket), do: {:noreply, socket}
+
+  defp requested_terminal(socket, terminal_id) do
+    case terminal_entry(socket, terminal_id) do
+      {:ok, entry} -> entry.terminal_id
+      {:error, _} -> selected_terminal_after_refresh(socket)
+    end
+  end
+
+  defp open_existing_terminal(socket, terminal_id, sequence, acquire_control?) do
+    socket = select_terminal(socket, terminal_id, sequence)
+
+    with true <- acquire_control?,
+         {:ok, %{state: :running}} <- terminal_entry(socket, terminal_id),
+         {:ok, %{controller?: false} = attachment} <- terminal_attachment(socket, terminal_id),
+         {:ok, control} <-
+           TerminalBinding.acquire_control(
+             socket.assigns.workdir,
+             socket.assigns.session_id,
+             attachment
+           ) do
+      attachment = control_attachment(attachment, control)
+
+      socket
+      |> put_terminal_attachment(terminal_id, attachment)
+      |> push_terminal_authority(attachment)
+    else
+      _ -> socket
+    end
+  end
+
   defp select_terminal(socket, terminal_id, rendered_sequence \\ 0) do
     socket =
       case socket.assigns.terminal_selected_id do
@@ -4381,12 +4440,10 @@ defmodule Sigma.Web.SessionLive do
           Map.get(frame, :dimensions) || Map.get(frame, :resize) || attachment.dimensions
 
         socket =
-          if (Map.has_key?(frame, :dimensions) or Map.has_key?(frame, :resize)) and
-               attachment.dimensions != {columns, rows} do
-            put_terminal_attachment(socket, attachment.terminal_id, %{
-              attachment
-              | dimensions: {columns, rows}
-            })
+          if attachment.dimensions != {columns, rows} do
+            update_terminal_attachment(socket, attachment.terminal_id, fn current ->
+              %{current | dimensions: {columns, rows}}
+            end)
           else
             socket
           end

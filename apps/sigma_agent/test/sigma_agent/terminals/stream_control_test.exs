@@ -15,6 +15,122 @@ defmodule Sigma.Agent.Terminals.StreamControlTest do
     Worker
   }
 
+  defmodule CheckpointBackend do
+    def start_link(opts) do
+      owner = Keyword.fetch!(opts, :owner)
+      test = Keyword.fetch!(opts, :test)
+      {:ok, pid} = Agent.start_link(fn -> %{owner: owner, test: test} end)
+      send(test, {:checkpoint_backend, pid, owner})
+      send(owner, {:terminal_backend, pid, {:started, %{}}})
+      {:ok, pid}
+    end
+
+    def checkpoint(pid, id) do
+      %{test: test} = Agent.get(pid, & &1)
+      send(test, {:checkpoint_requested, id})
+      :ok
+    end
+
+    def close(_pid), do: {:ok, :confirmed}
+  end
+
+  test "missing replay coalesces native checkpoint requests while catalog stays responsive" do
+    runtime =
+      start_runtime(
+        backend: CheckpointBackend,
+        backend_opts: [test: self()],
+        limits: Limits.new(max_raw_replay_bytes: 4)
+      )
+
+    terminal = create(runtime)
+    terminal_id = terminal.identity.terminal_id
+    assert_receive {:checkpoint_backend, backend, worker}
+    send(worker, {:terminal_backend, backend, {:output, 1, "aaaa"}})
+    send(worker, {:terminal_backend, backend, {:output, 2, "bbbb"}})
+    assert_receive {:checkpoint_requested, request}
+
+    observer = self()
+    first = Task.async(fn -> Manager.attach(runtime.manager, terminal_id, 1, observer, 0) end)
+    second = Task.async(fn -> Manager.attach(runtime.manager, terminal_id, 1, observer, 0) end)
+    eventually(fn -> map_size(:sys.get_state(worker).pending_deliveries) == 2 end)
+    assert {:ok, _catalog} = Manager.list(runtime.manager)
+    refute_receive {:checkpoint_requested, _duplicate}, 20
+
+    send(worker, {:terminal_backend, backend, {:checkpoint, "old", 2, 120, 24, "old screen"}})
+    refute Task.yield(first, 10)
+
+    send(
+      worker,
+      {:terminal_backend, backend, {:checkpoint, request, 2, 120, 24, "current screen"}}
+    )
+
+    for task <- [first, second] do
+      assert {:ok, %{delivery: %{snapshot: %{bytes: "current screen", sequence: 2}}}} =
+               Task.await(task)
+    end
+
+    assert :sys.get_state(worker).pending_deliveries == %{}
+  end
+
+  test "pending replay reports bounded checkpoint failure and removes the new attachment" do
+    runtime =
+      start_runtime(
+        backend: CheckpointBackend,
+        backend_opts: [test: self()],
+        limits: Limits.new(max_raw_replay_bytes: 4)
+      )
+
+    terminal = create(runtime)
+    assert_receive {:checkpoint_backend, backend, worker}
+    send(worker, {:terminal_backend, backend, {:output, 1, "aaaa"}})
+    send(worker, {:terminal_backend, backend, {:output, 2, "bbbb"}})
+    assert_receive {:checkpoint_requested, request}
+    observer = self()
+
+    pending =
+      Task.async(fn ->
+        Manager.attach(runtime.manager, terminal.identity.terminal_id, 1, observer, 0)
+      end)
+
+    eventually(fn -> map_size(:sys.get_state(worker).pending_deliveries) == 1 end)
+    send(worker, {:checkpoint_timeout, request})
+
+    assert {:error, %Error{code: :snapshot_unavailable, details: %{reason: :checkpoint_timeout}}} =
+             Task.await(pending)
+
+    assert :sys.get_state(worker).attachments == %{}
+    assert {:ok, _catalog} = Manager.list(runtime.manager)
+  end
+
+  test "replay output retains dimensions from before each ordered resize" do
+    runtime = start_runtime()
+    terminal = create(runtime)
+    run = run(terminal)
+
+    assert {:ok, %{attachment_id: id}} =
+             Manager.attach(runtime.manager, terminal.identity.terminal_id, 1, self())
+
+    assert {:ok, %{control_epoch: epoch}} =
+             Manager.acquire_control(runtime.manager, terminal.identity.terminal_id, 1, id)
+
+    assert {:ok, %{dimensions: {120, 24}}} = Manager.output(runtime.manager, run, "before")
+    request = fence(run, snapshot(runtime.manager).revision, id, epoch)
+
+    assert {:ok, _event} =
+             Manager.resize(runtime.manager, terminal.identity.terminal_id, 1, request, 80, 10)
+
+    assert {:ok, %{dimensions: {80, 10}}} = Manager.output(runtime.manager, run, "after")
+
+    assert {:ok, %{delivery: %{events: events}}} =
+             Manager.attach(runtime.manager, terminal.identity.terminal_id, 1, self(), 0)
+
+    assert [
+             %{bytes: "before", dimensions: {120, 24}},
+             %{resize: {80, 10}},
+             %{bytes: "after", dimensions: {80, 10}}
+           ] = events
+  end
+
   test "creator receives initial control and observer capacity is enforced" do
     runtime = start_runtime(limits: Limits.new(max_observers_per_terminal: 2))
     terminal = create(runtime, %{creator: %{observer: self()}})
@@ -445,7 +561,7 @@ defmodule Sigma.Agent.Terminals.StreamControlTest do
          session: session,
          ledger: ledger,
          worker_supervisor: workers,
-         backend: FakeBackend,
+         backend: Keyword.get(opts, :backend, FakeBackend),
          backend_opts: Keyword.get(opts, :backend_opts, []),
          limits: Keyword.get(opts, :limits, Limits.new())}
       )

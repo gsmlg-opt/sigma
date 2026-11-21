@@ -4,7 +4,7 @@ defmodule Sigma.Agent.Terminals.OutputFrame do
   alias Sigma.Agent.Terminals.{Error, Identity, Limits}
 
   @enforce_keys [:run, :sequence, :bytes]
-  defstruct [:run, :sequence, :bytes]
+  defstruct [:run, :sequence, :bytes, :dimensions]
 
   @type t :: %__MODULE__{run: Identity.Run.t(), sequence: pos_integer(), bytes: binary()}
 

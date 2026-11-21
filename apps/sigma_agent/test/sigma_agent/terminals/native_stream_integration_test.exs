@@ -64,17 +64,11 @@ defmodule Sigma.Agent.Terminals.NativeStreamIntegrationTest do
     send(
       worker,
       {:terminal_backend, backend,
-       {:checkpoint_failed, "too-large", :snapshot_too_large, %{maximum_bytes: 2_097_152}}}
+       {:checkpoint_failed, "old-request", :snapshot_too_large, %{maximum_bytes: 2_097_152}}}
     )
 
-    assert_receive {:terminal_stream, ^attachment,
-                    {:resync_required, _recovery,
-                     %Sigma.Agent.Terminals.Error{
-                       code: :snapshot_unavailable,
-                       details: %{reason: :snapshot_too_large, maximum_bytes: 2_097_152}
-                     }}}
-
-    assert :sys.get_state(worker).stream.checkpoint == nil
+    refute_receive {:terminal_stream, ^attachment, {:resync_required, _, _}}
+    assert :sys.get_state(worker).stream.checkpoint != nil
     assert {:ok, :confirmed} = Native.close(backend)
     eventually(fn -> not Process.alive?(backend) end)
   end
@@ -133,6 +127,58 @@ defmodule Sigma.Agent.Terminals.NativeStreamIntegrationTest do
 
     assert {:ok, :confirmed} = Native.close(backend)
     eventually(fn -> not Process.alive?(backend) end)
+  end
+
+  test "long detached native output restores the same live run and its final exited screen" do
+    script = ~S"""
+    stty raw -echo
+    i=0
+    while [ $i -lt 18000 ]; do printf '%064d\n' "$i"; i=$((i+1)); done
+    printf '\r\nDETACHED_FINAL'
+    read done
+    """
+
+    runtime = start_runtime(Limits.new(), command: ["/bin/sh", "-c", script])
+    terminal = create(runtime)
+    terminal_id = terminal.identity.terminal_id
+    eventually(fn -> running?(runtime.manager, terminal_id) end)
+    worker = Manager.worker_pid(runtime.manager, terminal_id)
+    backend = :sys.get_state(worker).backend_state.value
+    assert {:ok, original_resource} = Native.resource(backend)
+
+    eventually(
+      fn ->
+        stream = :sys.get_state(worker).stream
+
+        Enum.any?(stream.frames, fn frame ->
+          :binary.match(Map.get(frame, :bytes, ""), "DETACHED_FINAL") != :nomatch
+        end)
+      end,
+      2_000
+    )
+
+    assert {:ok, %{delivery: %{snapshot: %{bytes: screen}, events: events}, attachment_id: id}} =
+             Manager.attach(runtime.manager, terminal_id, 1, self(), 0)
+
+    assert :binary.match(
+             IO.iodata_to_binary([screen | Enum.map(events, &Map.get(&1, :bytes, ""))]),
+             "DETACHED_FINAL"
+           ) != :nomatch
+
+    assert {:ok, current_resource} = Native.resource(backend)
+    assert current_resource.pid == original_resource.pid
+    assert :ok = Manager.detach(runtime.manager, terminal_id, 1, id)
+    assert :ok = Native.input(backend, "done\n")
+
+    eventually(fn ->
+      {:ok, %{entries: entries}} = Manager.list(runtime.manager)
+      Enum.any?(entries, &(&1.identity.terminal_id == terminal_id and &1.state == :exited))
+    end)
+
+    assert {:ok, %{delivery: %{snapshot: %{bytes: final_screen}}, controller: false}} =
+             Manager.attach(runtime.manager, terminal_id, 1, self(), 0)
+
+    assert :binary.match(final_screen, "DETACHED_FINAL") != :nomatch
   end
 
   defp start_runtime(limits, attrs) do

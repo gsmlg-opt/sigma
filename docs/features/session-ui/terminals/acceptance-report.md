@@ -1,6 +1,21 @@
 # Session terminal acceptance report
 
-Date: 2026-09-14
+## 2026-11-21 recovery and rendering repair
+
+Verified on Linux x86_64 against main `d15a160` plus the working-tree repair. The browser used Chromium 152 at 1440×900, a separate local BEAM on port 14680, and a JavaScript bundle built from the working tree for the test page. Bundle SHA-256 was `f720634e5882f433c0860334f2fb378156567f7ec7e0f3918b9c1e1afb069122`. The installed native helper SHA-256 was `d3632cf3849ffee8874c3f2f0c0d4c906d9c3157edbb34027089894dcfcf9c49`.
+
+| Check | Result |
+| --- | --- |
+| Rendered output | Five alternating Chromium trials per workload produced identical xterm buffer digests for direct writes and the Sigma hook. On 491,520 bytes from a real PTY `cat` in 90 chunks, median time was 61 ms directly and 66 ms through Sigma, with 9 cumulative acknowledgements. On 120 one-byte chunks it was 3 ms and 1 ms respectively, with 2 acknowledgements. The complete LiveView path displayed the last line and marker from the 491,520-byte file in 1,113 ms in the final run. |
+| Window lifecycle and replay | Reload restored the expanded panel as an observer. Explicit open acquired the vacant lease. After all pages closed, the same shell produced 1,200,000 bytes. A fresh page restored the original terminal and generation, the same shell PID, the last output marker, and dimensions of 112×15. Two views at the same acknowledged sequence had equal cursor positions and recent text. |
+| Device replies and input | Zero, one, and two connected views each yielded exactly one response to each of DSR 5, CPR and primary DA. The PTY received an exact 42,012-byte bracketed paste with mixed ASCII and UTF-8. Native tests additionally cover private CPR and secondary DA. |
+| Snapshot boundaries and exit | Native tests cover partial UTF-8, CSI, OSC and control strings, alternate screen restoration, resize and single-row wrap. The browser restored the final output marker and exit status 7 in a read-only view after OS cleanup. |
+
+The final focused run passed 34 Bun tests, 26 native Rust tests, and 41 selected ExUnit tests. The installed helper build, test-environment warnings-as-errors compilation, Elixir formatting and integrated diff checks passed. The single-row parser crash found during browser qualification required updating only `vt100` to 0.17.0. The terminal transport hook sends ACKs through a separate DOM element so LiveView can apply recovery state while acknowledgements are in flight.
+
+Scope of current evidence is the local test server. Published assets, remote CI and execution on other platforms require separate verification.
+
+## 2026-09-14 historical acceptance
 
 Reviewed baseline: `bba9564a09a04b6903b728fdc8ce144da8b68eb6`
 

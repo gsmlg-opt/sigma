@@ -375,24 +375,24 @@ defmodule Sigma.Agent.Terminals.Manager do
 
   def handle_call(
         {:attach, terminal_id, generation, observer, rendered_sequence, opts},
-        _from,
+        from,
         state
       ) do
     with {:ok, worker} <- fetch_worker(state, terminal_id, generation) do
       attachment_id = state.attachment_id_generator.()
 
-      {:reply,
-       Worker.attach(
-         worker,
-         observer,
-         attachment_id,
-         state.catalog.revision,
-         rendered_sequence,
-         opts
-       ), state}
+      Worker.reply_when_ready(worker, from, {
+        :attach,
+        observer,
+        attachment_id,
+        state.catalog.revision,
+        rendered_sequence,
+        opts
+      })
+
+      {:noreply, state}
     else
-      {:error, error} ->
-        {:reply, {:error, error}, state}
+      {:error, error} -> {:reply, {:error, error}, state}
     end
   end
 
@@ -467,12 +467,15 @@ defmodule Sigma.Agent.Terminals.Manager do
 
   def handle_call(
         {:terminal_resync, terminal_id, generation, attachment_id, rendered_sequence},
-        _from,
+        from,
         state
       ) do
-    worker_reply(state, terminal_id, generation, fn worker ->
-      Worker.resync(worker, attachment_id, rendered_sequence)
-    end)
+    with {:ok, worker} <- fetch_worker(state, terminal_id, generation) do
+      Worker.reply_when_ready(worker, from, {:resync, attachment_id, rendered_sequence})
+      {:noreply, state}
+    else
+      {:error, error} -> {:reply, {:error, error}, state}
+    end
   end
 
   def handle_call(

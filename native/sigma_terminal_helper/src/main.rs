@@ -19,6 +19,7 @@ struct Options {
     rows: u16,
     cols: u16,
     command: Vec<String>,
+    terminal_state: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,38 +56,182 @@ enum ScreenTransition {
     ExitAlternate,
 }
 
+#[derive(Default)]
+struct DeviceResponses {
+    enabled: bool,
+    pending: Vec<Vec<u8>>,
+}
+
+impl vt100::Callbacks for DeviceResponses {
+    fn unhandled_csi(
+        &mut self,
+        screen: &mut vt100::Screen,
+        first: Option<u8>,
+        second: Option<u8>,
+        params: &[&[u16]],
+        command: char,
+    ) {
+        if !self.enabled || second.is_some() || params.len() != 1 {
+            return;
+        }
+        match (first, command, params[0]) {
+            (None, 'n', [5]) => self.pending.push(b"\x1b[0n".to_vec()),
+            (None | Some(b'?'), 'n', [6]) => {
+                let (row, col) = screen.cursor_position();
+                let prefix = if first == Some(b'?') { "?" } else { "" };
+                self.pending
+                    .push(format!("\x1b[{prefix}{};{}R", row + 1, col + 1).into_bytes());
+            }
+            (None, 'c', [0]) => self.pending.push(b"\x1b[?1;2c".to_vec()),
+            (Some(b'>'), 'c', [0]) => self.pending.push(b"\x1b[>0;276;0c".to_vec()),
+            _ => {}
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+enum PendingState {
+    #[default]
+    Ground,
+    Utf8(u8),
+    Escape,
+    EscapeIntermediate,
+    Csi,
+    Osc,
+    String,
+}
+
+impl PendingState {
+    fn advance(self, byte: u8) -> Self {
+        use PendingState::*;
+        if matches!(byte, 0x18 | 0x1a) {
+            return Ground;
+        }
+        match self {
+            Ground => match byte {
+                0x1b => Escape,
+                0xc2..=0xdf => Utf8(1),
+                0xe0..=0xef => Utf8(2),
+                0xf0..=0xf4 => Utf8(3),
+                _ => Ground,
+            },
+            Utf8(remaining) if (0x80..=0xbf).contains(&byte) => {
+                if remaining == 1 {
+                    Ground
+                } else {
+                    Utf8(remaining - 1)
+                }
+            }
+            Utf8(_) => Ground.advance(byte),
+            Osc => match byte {
+                0x07 => Ground,
+                0x1b => Escape,
+                _ => Osc,
+            },
+            String => {
+                if byte == 0x1b {
+                    Escape
+                } else {
+                    String
+                }
+            }
+            _ if byte == 0x1b => Escape,
+            Escape => match byte {
+                b'[' => Csi,
+                b']' => Osc,
+                b'P' | b'X' | b'^' | b'_' => String,
+                0x20..=0x2f => EscapeIntermediate,
+                0x30..=0x7e => Ground,
+                _ => Escape,
+            },
+            EscapeIntermediate => {
+                if (0x30..=0x7e).contains(&byte) {
+                    Ground
+                } else {
+                    EscapeIntermediate
+                }
+            }
+            Csi => {
+                if (0x40..=0x7e).contains(&byte) {
+                    Ground
+                } else {
+                    Csi
+                }
+            }
+        }
+    }
+}
+
 struct TerminalState {
-    parser: vt100::Parser,
+    parser: vt100::Parser<DeviceResponses>,
     normal_screen: Option<vt100::Screen>,
-    transition_prefix: Vec<u8>,
+    pending: Vec<u8>,
+    pending_state: PendingState,
+    pending_overflow: bool,
 }
 
 impl TerminalState {
     fn new(rows: u16, cols: u16) -> Self {
         Self {
-            parser: vt100::Parser::new(rows, cols, SCROLLBACK_ROWS),
+            parser: vt100::Parser::new_with_callbacks(
+                rows,
+                cols,
+                SCROLLBACK_ROWS,
+                DeviceResponses::default(),
+            ),
             normal_screen: None,
-            transition_prefix: Vec::new(),
+            pending: Vec::new(),
+            pending_state: PendingState::Ground,
+            pending_overflow: false,
         }
     }
 
     fn process(&mut self, bytes: &[u8]) {
-        for (segment, transition) in transition_segments(&mut self.transition_prefix, bytes) {
-            let was_alternate = self.parser.screen().alternate_screen();
-            let normal_candidate = (!was_alternate).then(|| self.parser.screen().clone());
-            self.parser.process(&segment);
-            let is_alternate = self.parser.screen().alternate_screen();
-
-            match (transition, was_alternate, is_alternate) {
-                (Some(ScreenTransition::EnterAlternate), false, true) => {
-                    self.normal_screen = normal_candidate;
+        let mut plain = Vec::new();
+        for &byte in bytes {
+            self.pending_state = self.pending_state.advance(byte);
+            self.pending.push(byte);
+            let complete = matches!(self.pending_state, PendingState::Ground);
+            if self.pending.len() > MAX_CHECKPOINT_BYTES {
+                self.pending_overflow = true;
+            }
+            if complete || self.pending_overflow {
+                let transition = match self.pending.as_slice() {
+                    b"\x1b[?47h" | b"\x1b[?1047h" | b"\x1b[?1049h" => {
+                        Some(ScreenTransition::EnterAlternate)
+                    }
+                    b"\x1b[?47l" | b"\x1b[?1047l" | b"\x1b[?1049l" => {
+                        Some(ScreenTransition::ExitAlternate)
+                    }
+                    _ => None,
+                };
+                if let Some(transition) = transition {
+                    self.parser.process(&plain);
+                    plain.clear();
+                    let was_alternate = self.parser.screen().alternate_screen();
+                    let normal_candidate = (!was_alternate).then(|| self.parser.screen().clone());
+                    self.parser.process(&self.pending);
+                    match (
+                        transition,
+                        was_alternate,
+                        self.parser.screen().alternate_screen(),
+                    ) {
+                        (ScreenTransition::EnterAlternate, false, true) => {
+                            self.normal_screen = normal_candidate
+                        }
+                        (ScreenTransition::ExitAlternate, true, false) => self.normal_screen = None,
+                        _ => {}
+                    }
+                } else {
+                    plain.extend_from_slice(&self.pending);
                 }
-                (Some(ScreenTransition::ExitAlternate), true, false) => {
-                    self.normal_screen = None;
+                self.pending.clear();
+                if complete {
+                    self.pending_overflow = false;
                 }
-                _ => {}
             }
         }
+        self.parser.process(&plain);
     }
 
     fn resize(&mut self, rows: u16, cols: u16) {
@@ -102,7 +247,10 @@ impl TerminalState {
 
     fn checkpoint(&self) -> Result<Vec<u8>> {
         let screen = self.screen();
-        let pending = self.transition_prefix.as_slice();
+        if self.pending_overflow {
+            bail!("snapshot_too_large");
+        }
+        let pending = self.pending.as_slice();
 
         let mut state = if screen.alternate_screen() {
             let active = screen.state_formatted();
@@ -129,51 +277,6 @@ impl TerminalState {
         }
         Ok(state)
     }
-}
-
-fn transition_segments(
-    prefix: &mut Vec<u8>,
-    bytes: &[u8],
-) -> Vec<(Vec<u8>, Option<ScreenTransition>)> {
-    const TRANSITIONS: [(&[u8], ScreenTransition); 6] = [
-        (b"\x1b[?47h", ScreenTransition::EnterAlternate),
-        (b"\x1b[?1047h", ScreenTransition::EnterAlternate),
-        (b"\x1b[?1049h", ScreenTransition::EnterAlternate),
-        (b"\x1b[?47l", ScreenTransition::ExitAlternate),
-        (b"\x1b[?1047l", ScreenTransition::ExitAlternate),
-        (b"\x1b[?1049l", ScreenTransition::ExitAlternate),
-    ];
-
-    let mut segments = Vec::new();
-    let mut plain = Vec::new();
-
-    for byte in bytes {
-        prefix.push(*byte);
-
-        loop {
-            if let Some((_, transition)) = TRANSITIONS.iter().find(|(code, _)| *code == prefix) {
-                if !plain.is_empty() {
-                    segments.push((std::mem::take(&mut plain), None));
-                }
-                segments.push((std::mem::take(prefix), Some(*transition)));
-                break;
-            }
-
-            if TRANSITIONS.iter().any(|(code, _)| code.starts_with(prefix)) {
-                break;
-            }
-
-            plain.push(prefix.remove(0));
-            if prefix.is_empty() {
-                break;
-            }
-        }
-    }
-
-    if !plain.is_empty() {
-        segments.push((plain, None));
-    }
-    segments
 }
 
 fn serialize_normal_screen(screen: &vt100::Screen, maximum: usize) -> Result<Vec<u8>> {
@@ -301,6 +404,7 @@ fn run() -> Result<()> {
     resume_child(&identity)?;
     let master = pair.master;
     let mut terminal_state = TerminalState::new(options.rows, options.cols);
+    terminal_state.parser.callbacks_mut().enabled = options.terminal_state;
     let mut sequence = 0_u64;
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
@@ -368,6 +472,11 @@ fn run() -> Result<()> {
                 output_closed,
                 shutdown_deadline,
             );
+            let final_snapshot = if options.terminal_state && drained.is_ok() {
+                write_checkpoint(&mut stdout, &terminal_state, sequence, "final")
+            } else {
+                Ok(())
+            };
             let exited = write_event(
                 &mut stdout,
                 &json!({
@@ -376,7 +485,7 @@ fn run() -> Result<()> {
                     "signal": status.signal()
                 }),
             );
-            drained.and(exited)
+            drained.and(final_snapshot).and(exited)
         }
         _ => Ok(()),
     };
@@ -459,6 +568,10 @@ fn run_loop(
         match event {
             RunEvent::Output(bytes) => {
                 write_output(stdout, terminal_state, sequence, &bytes)?;
+                for response in std::mem::take(&mut terminal_state.parser.callbacks_mut().pending) {
+                    writer.write_all(&response)?;
+                }
+                writer.flush()?;
             }
             RunEvent::OutputClosed => *output_closed = true,
             RunEvent::Control(Command::Input { data }) => {
@@ -479,37 +592,7 @@ fn run_loop(
                 )?;
             }
             RunEvent::Control(Command::Checkpoint { request_id }) => {
-                let screen = terminal_state.screen();
-                let (rows, cols) = screen.size();
-                match terminal_state.checkpoint() {
-                    Ok(state) => write_event(
-                        stdout,
-                        &json!({
-                            "event": "checkpoint",
-                            "request_id": request_id,
-                            "seq": *sequence,
-                            "rows": rows,
-                            "cols": cols,
-                            "data": BASE64.encode(state)
-                        }),
-                    )?,
-                    Err(error) => {
-                        let error = if error.to_string() == "snapshot_too_large" {
-                            "snapshot_too_large"
-                        } else {
-                            "snapshot_unavailable"
-                        };
-                        write_event(
-                            stdout,
-                            &json!({
-                                "event": "checkpoint_failed",
-                                "request_id": request_id,
-                                "error": error,
-                                "maximum_bytes": MAX_CHECKPOINT_BYTES
-                            }),
-                        )?
-                    }
-                }
+                write_checkpoint(stdout, terminal_state, *sequence, &request_id)?;
             }
             RunEvent::Control(Command::Close) | RunEvent::ControlClosed => break,
             RunEvent::ControlError(error) => bail!(error),
@@ -560,6 +643,32 @@ fn write_output(
     )
 }
 
+fn write_checkpoint(
+    stdout: &mut impl Write,
+    terminal_state: &TerminalState,
+    sequence: u64,
+    request_id: &str,
+) -> Result<()> {
+    let (rows, cols) = terminal_state.screen().size();
+    match terminal_state.checkpoint() {
+        Ok(state) => write_event(
+            stdout,
+            &json!({
+                "event": "checkpoint", "request_id": request_id, "seq": sequence,
+                "rows": rows, "cols": cols, "data": BASE64.encode(state)
+            }),
+        ),
+        Err(error) => write_event(
+            stdout,
+            &json!({
+                "event": "checkpoint_failed", "request_id": request_id,
+                "error": if error.to_string() == "snapshot_too_large" { "snapshot_too_large" } else { "snapshot_unavailable" },
+                "maximum_bytes": MAX_CHECKPOINT_BYTES
+            }),
+        ),
+    }
+}
+
 fn write_event(writer: &mut impl Write, event: &Value) -> Result<()> {
     serde_json::to_writer(&mut *writer, event)?;
     writer.write_all(b"\n")?;
@@ -591,9 +700,11 @@ fn parse_options() -> Result<Options> {
     let mut rows = 24;
     let mut cols = 80;
     let mut command = Vec::new();
+    let mut terminal_state = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--terminal-state" => terminal_state = true,
             "--cwd" => cwd = PathBuf::from(args.next().context("--cwd requires a value")?),
             "--rows" => rows = args.next().context("--rows requires a value")?.parse()?,
             "--cols" => cols = args.next().context("--cols requires a value")?.parse()?,
@@ -615,5 +726,131 @@ fn parse_options() -> Result<Options> {
         rows,
         cols,
         command,
+        terminal_state,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_restores_every_partial_parser_boundary() {
+        let cases: &[&[u8]] = &[
+            "BEFORE€AFTER".as_bytes(),
+            b"BEFORE\x1b[31mRED\x1b[0mAFTER",
+            b"BEFORE\x1b]2;window title\x07AFTER",
+            b"BEFORE\x1b]2;window title\x1b\\AFTER",
+            b"BEFORE\x1b]2;title\x1b[31mRED",
+            b"BEFORE\x1bPignored\x1b\\AFTER",
+            b"BEFORE\x1b[31\r\nmRED",
+            b"BEFORE\x1b[?1049hALT\x1b[?1049lAFTER",
+            b"BEFORE\xe2INVALID\x1b[31mRED",
+        ];
+        for &bytes in cases {
+            for split in 0..=bytes.len() {
+                let mut original = TerminalState::new(6, 40);
+                original.process(&bytes[..split]);
+                let snapshot = original.checkpoint().unwrap();
+                original.process(&bytes[split..]);
+                let mut continuous = vt100::Parser::new(6, 40, SCROLLBACK_ROWS);
+                continuous.process(bytes);
+                assert_eq!(original.screen().contents(), continuous.screen().contents());
+                assert_eq!(
+                    original.screen().cursor_position(),
+                    continuous.screen().cursor_position()
+                );
+                let mut restored = vt100::Parser::new(6, 40, SCROLLBACK_ROWS);
+                restored.process(&snapshot);
+                restored.process(&bytes[split..]);
+                assert_eq!(
+                    restored.screen().contents(),
+                    original.screen().contents(),
+                    "split={split} bytes={bytes:?}"
+                );
+                assert_eq!(
+                    restored.screen().cursor_position(),
+                    original.screen().cursor_position()
+                );
+                assert_eq!(restored.screen().fgcolor(), original.screen().fgcolor());
+                assert_eq!(
+                    restored.screen().alternate_screen(),
+                    original.screen().alternate_screen()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn checkpoint_survives_wrapping_in_a_single_row() {
+        let mut terminal = TerminalState::new(3, 10);
+        terminal.resize(1, 10);
+        terminal.process(b"0123456789wrapped");
+
+        let checkpoint = terminal.checkpoint().unwrap();
+        let mut restored = vt100::Parser::new(1, 10, SCROLLBACK_ROWS);
+        restored.process(&checkpoint);
+        assert_eq!(terminal.screen().contents(), "wrapped");
+        assert_eq!(restored.screen().contents(), "wrapped");
+        assert_eq!(
+            restored.screen().cursor_position(),
+            terminal.screen().cursor_position()
+        );
+    }
+
+    #[test]
+    fn checkpoint_keeps_partial_sequences_across_resize() {
+        let mut original = TerminalState::new(6, 40);
+        original.process(b"BEFORE\x1b[31");
+        original.resize(8, 50);
+        let snapshot = original.checkpoint().unwrap();
+        original.process(b"mRED");
+        let mut restored = vt100::Parser::new(8, 50, SCROLLBACK_ROWS);
+        restored.process(&snapshot);
+        restored.process(b"mRED");
+        assert_eq!(restored.screen().contents(), original.screen().contents());
+        assert_eq!(restored.screen().fgcolor(), original.screen().fgcolor());
+        assert_eq!(restored.screen().size(), original.screen().size());
+    }
+
+    #[test]
+    fn checkpoint_bounds_unfinished_control_strings_and_recovers_after_termination() {
+        let mut terminal = TerminalState::new(6, 40);
+        terminal.process(b"\x1b]2;");
+        terminal.process(&vec![b'x'; MAX_CHECKPOINT_BYTES]);
+        assert!(terminal.pending.len() <= MAX_CHECKPOINT_BYTES);
+        assert_eq!(
+            terminal.checkpoint().unwrap_err().to_string(),
+            "snapshot_too_large"
+        );
+        terminal.process(b"\x07AFTER");
+        assert!(terminal.checkpoint().is_ok());
+        assert!(terminal.screen().contents().contains("AFTER"));
+    }
+
+    #[test]
+    fn terminal_queries_use_server_cursor_and_are_generated_once() {
+        let mut terminal = TerminalState::new(6, 40);
+        terminal.parser.callbacks_mut().enabled = true;
+        terminal.process(b"\x1b[3;7H\x1b[5n\x1b[6n\x1b[c\x1b[?6n\x1b[>c");
+        assert_eq!(
+            terminal.parser.callbacks().pending,
+            vec![
+                b"\x1b[0n".to_vec(),
+                b"\x1b[3;7R".to_vec(),
+                b"\x1b[?1;2c".to_vec(),
+                b"\x1b[?3;7R".to_vec(),
+                b"\x1b[>0;276;0c".to_vec()
+            ]
+        );
+        terminal.checkpoint().unwrap();
+        assert_eq!(terminal.parser.callbacks().pending.len(), 5);
+        terminal.process(&vec![b'X'; 40]);
+        let (row, col) = terminal.screen().cursor_position();
+        terminal.process(b"\x1b[6n");
+        assert_eq!(
+            terminal.parser.callbacks().pending.last().unwrap(),
+            format!("\x1b[{};{}R", row + 1, col + 1).as_bytes()
+        );
+    }
 }

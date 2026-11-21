@@ -380,3 +380,50 @@ fn cleanup_spans_job_control_process_groups_in_the_managed_session() {
     helper.send(json!({"op": "close"}));
     assert_eq!(helper.event("cleanup")["result"]["complete"], true);
 }
+
+#[test]
+fn terminal_state_emits_final_checkpoint_after_output_before_exit() {
+    let mut helper = Helper::start_with_args(&[
+        "--terminal-state",
+        "--rows",
+        "6",
+        "--cols",
+        "40",
+        "--",
+        "/bin/sh",
+        "-c",
+        "printf 'FINAL-SCREEN'; exit 7",
+    ]);
+    helper.event("started");
+    let (output, last_sequence) = helper.output_until_with_seq("FINAL-SCREEN");
+    assert!(output.contains("FINAL-SCREEN"));
+    let checkpoint = helper.event("checkpoint");
+    assert_eq!(checkpoint["request_id"], "final");
+    assert_eq!(checkpoint["seq"], last_sequence);
+    let mut restored = vt100::Parser::new(6, 40, 1_000);
+    restored.process(&BASE64.decode(checkpoint["data"].as_str().unwrap()).unwrap());
+    assert!(restored.screen().contents().contains("FINAL-SCREEN"));
+    assert_eq!(helper.event("shell_exit")["status"], 7);
+    assert_eq!(helper.event("cleanup")["result"]["complete"], true);
+    assert!(helper
+        .child
+        .wait_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap()
+        .success());
+}
+
+#[test]
+fn terminal_state_answers_queries_without_an_observer() {
+    let mut helper = Helper::start_with_args(&[
+        "--terminal-state", "--", "/bin/sh", "-c",
+        "stty raw -echo; printf '\\033[3;7H\\033[5n\\033[6n\\033[c'; dd bs=1 count=17 2>/dev/null | od -An -tx1; printf QUERY-DONE",
+    ]);
+    helper.event("started");
+    let text = helper.output_until("QUERY-DONE");
+    assert!(text.contains("1b 5b 30 6e 1b 5b 33 3b 37 52 1b 5b 3f 31 3b 32"));
+    assert!(text.contains("63"));
+    helper.event("checkpoint");
+    helper.event("shell_exit");
+    assert_eq!(helper.event("cleanup")["result"]["complete"], true);
+}

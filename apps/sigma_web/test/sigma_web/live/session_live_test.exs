@@ -1293,6 +1293,42 @@ defmodule Sigma.Web.SessionLiveTest do
     assert has_element?(view, ".sigma-session-main > .sigma-session-composer")
   end
 
+  test "restores a retained terminal as an observer and explicitly reacquires vacant control", %{
+    conn: conn
+  } do
+    path = session_path(unique_session_id("terminal-restore"))
+    {:ok, first, _} = live_loaded(conn, path)
+    render_hook(first, "terminal_open", %{})
+    assert_eventually(fn -> render(first) =~ "You control input" end)
+    [id] = terminal_ids(render(first))
+    fence = terminal_fence(render(first), id)
+    render_hook(first, "terminal_collapse", %{})
+
+    {:ok, second, _} = live_loaded(conn, path)
+    restore = %{"terminal_id" => id, "incarnation_id" => fence["incarnation_id"]}
+
+    assert terminal_ids(
+             render_hook(second, "terminal_restore", %{restore | "incarnation_id" => "old"})
+           ) == []
+
+    assert terminal_ids(render_hook(second, "terminal_restore", restore)) == [id]
+    assert render(second) =~ "Read only"
+
+    render_hook(second, "terminal_select", %{
+      "terminal_id" => id,
+      "generation" => fence["generation"],
+      "rendered_sequence" => 0,
+      "acquire_control" => true
+    })
+
+    assert render(second) =~ "You control input"
+    assert terminal_fence(render(second), id)["generation"] == fence["generation"]
+    render_hook(first, "terminal_open", %{"terminal_id" => id})
+    assert render(first) =~ "Read only"
+    assert render(second) =~ "You control input"
+    render_hook(second, "terminal_close", %{"terminal_id" => id})
+  end
+
   test "two windows share the catalog while keeping terminal selection local", %{conn: conn} do
     session_id = unique_session_id("terminal-windows")
     path = session_path(session_id)

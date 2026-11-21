@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import {
+  SessionTerminalRestore,
   SessionTerminals,
   applyPresentationAction,
   canResize,
@@ -54,23 +55,56 @@ const fencedInstance = (overrides = {}) => ({
 })
 
 describe("session terminal presentation storage", () => {
-  test("keys browser presentation by repository session incarnation without output, authority, or server-owned visibility", () => {
+  test("persists window presentation by repository session incarnation without output or authority", () => {
     const local = storage()
     const identity = "repo:session:incarnation"
     writePresentation(identity, { selectedId: "terminal-1", panelOpen: false, height: 360, maximized: true, scroll: { "terminal-1": 20 }, unread: { "terminal-2": true }, output: "secret", controllerToken: "secret" }, local)
 
     expect(presentationStorageKey(identity)).toBe("sigma:terminal-presentation:repo:session:incarnation")
-    expect(readPresentation(identity, local, true)).toEqual({ selectedId: "terminal-1", panelOpen: true, height: 360, maximized: true, scroll: { "terminal-1": 20 }, unread: { "terminal-2": true } })
+    expect(readPresentation(identity, local, true)).toEqual({ selectedId: "terminal-1", panelOpen: false, height: 360, maximized: true, scroll: { "terminal-1": 20 }, unread: { "terminal-2": true } })
     expect(local.getItem(presentationStorageKey(identity))).not.toContain("secret")
-    expect(local.getItem(presentationStorageKey(identity))).not.toContain("panelOpen")
   })
 
-  test("server-declared reopen wins after a persisted collapse while keeping local preferences", () => {
+  test("retains collapsed presentation and local preferences", () => {
     const local = storage()
     const identity = "repo:session:incarnation"
     writePresentation(identity, presentation({ panelOpen: false, height: 480, maximized: true, unread: { "terminal-2": true } }), local)
 
-    expect(readPresentation(identity, local, true)).toEqual(presentation({ height: 480, maximized: true, unread: { "terminal-2": true } }))
+    expect(readPresentation(identity, local, true)).toEqual(presentation({ panelOpen: false, height: 480, maximized: true, unread: { "terminal-2": true } }))
+  })
+
+  test("restores only after a matching session exposes retained terminals", () => {
+    const local = storage()
+    writePresentation("scope", presentation(), local)
+    const dataset = {
+      terminalStorageKey: "scope",
+      terminalIncarnation: "incarnation",
+      terminalAvailable: "false",
+      terminalRetained: "0"
+    }
+    const events = []
+    const context = {
+      el: { dataset, setAttribute() {}, removeAttribute() {} },
+      pushEvent: (event, payload) => events.push([event, payload])
+    }
+    const originalWindow = globalThis.window
+    globalThis.window = { sessionStorage: local }
+    try {
+      SessionTerminalRestore.restoreTerminalView.call(context)
+      dataset.terminalAvailable = "true"
+      SessionTerminalRestore.restoreTerminalView.call(context)
+      expect(events).toEqual([])
+      dataset.terminalRetained = "1"
+      SessionTerminalRestore.restoreTerminalView.call(context)
+      SessionTerminalRestore.restoreTerminalView.call(context)
+      dataset.terminalStorageKey = "different-incarnation"
+      SessionTerminalRestore.restoreTerminalView.call(context)
+      expect(events).toEqual([["terminal_restore", {
+        terminal_id: "terminal-1", incarnation_id: "incarnation"
+      }]])
+    } finally {
+      globalThis.window = originalWindow
+    }
   })
 
   test("fails closed when browser storage is unavailable or corrupt", () => {
@@ -491,6 +525,38 @@ describe("session terminal authority and rendering", () => {
     expect(order).toEqual([["resize", 90, 31], ["reset"], ["write"]])
   })
 
+  test("drains backlogged PTY bytes in order without waiting for a paint per frame", () => {
+    const paints = []
+    const callbacks = []
+    const bytes = []
+    const acks = []
+    const instance = fencedInstance({
+      panel: { hidden: false },
+      terminal: { write(data, done) { bytes.push(...data); callbacks.push(done) } }
+    })
+    const context = {
+      instances: new Map([[terminalKey("terminal-1", 1), instance]]),
+      presentation: presentation(),
+      pushEvent: (name, payload) => { if (name === "terminal_rendered") acks.push(payload.sequence) }
+    }
+    const originalWindow = globalThis.window
+    globalThis.window = { requestAnimationFrame: (callback) => paints.push(callback) }
+    try {
+      for (let sequence = 1; sequence <= 120; sequence += 1) {
+        SessionTerminals.write.call(context, serverFrame({ sequence, data: Uint8Array.of(sequence) }))
+      }
+      expect(bytes).toEqual([1])
+      callbacks.shift()()
+      expect(bytes).toEqual(Array.from({ length: 120 }, (_, index) => index + 1))
+      expect(acks).toEqual([1])
+      callbacks.shift()()
+      expect(acks).toEqual([1, 120])
+      expect(paints).toHaveLength(0)
+    } finally {
+      globalThis.window = originalWindow
+    }
+  })
+
   test("finishes queued output under a new same-attachment recovery without duplicating bytes", () => {
     const callbacks = []
     const writes = []
@@ -779,6 +845,39 @@ describe("session terminal authority and rendering", () => {
     SessionTerminals.disposeInstance(instance)
 
     expect({ terminalDisposals, subscriptionDisposals }).toEqual({ terminalDisposals: 1, subscriptionDisposals: 1 })
+  })
+
+  test("serializes UTF-8 paste bytes under the frame limit and stops on authority loss", () => {
+    const chunks = []
+    const replies = []
+    const instance = fencedInstance({ controller: true, resynced: true })
+    const context = {
+      pushEvent(event, payload, reply) {
+        expect(event).toBe("terminal_input")
+        const bytes = decodeTerminalBytes(payload.data_base64)
+        expect(bytes.length).toBeLessThanOrEqual(16 * 1024)
+        chunks.push(bytes)
+        replies.push(reply)
+      }
+    }
+    const paste = "\x1b[200~" + "a你€".repeat(6000) + "\x1b[201~"
+    SessionTerminals.sendInput.call(context, instance, paste)
+    SessionTerminals.sendInput.call(context, instance, "x")
+    expect(chunks).toHaveLength(1)
+    while (replies.length) replies.shift()({ accepted: true })
+    const combined = Buffer.concat(chunks)
+    expect(combined.toString("utf8")).toBe(paste + "x")
+    const completed = chunks.length
+
+    SessionTerminals.sendInput.call(context, instance, paste)
+    instance.fence = { ...instance.fence, control_epoch: 42 }
+    replies.shift()({ accepted: true })
+    expect(chunks).toHaveLength(completed + 1)
+
+    SessionTerminals.sendInput.call(context, instance, paste)
+    context.disconnectedFromServer = true
+    replies.shift()({ accepted: true })
+    expect(chunks).toHaveLength(completed + 2)
   })
 
   test("does not replay unconfirmed input after disconnect or before control resync", () => {

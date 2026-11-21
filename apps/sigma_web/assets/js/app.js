@@ -6,7 +6,7 @@ import * as DuskmoonHooks from "duskmoon_phoenix/hooks"
 import { WebComponentHook } from "duskmoon_phoenix/elements"
 import { formatElapsedTime, formatRelativeTime } from "./session_time.js"
 import { SessionPanels } from "./hooks/session_panels.js"
-import { SessionTerminals } from "./hooks/session_terminals.js"
+import { SessionTerminalRestore, SessionTerminals } from "./hooks/session_terminals.js"
 import { SigmaReactChat } from "./hooks/session_chat.js"
 
 import "./duskmoon_elements.js"
@@ -341,7 +341,7 @@ let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("
 
 let liveSocket = new LiveSocket("/live", Socket, {
   params: {_csrf_token: csrfToken},
-  hooks: { ...DuskmoonHooks, WebComponentHook, ModalHook, AutocompleteHook, SigmaReactChat, MarkdownInputHook, AppearanceThemeHook, LocalTime, RelativeTime, ElapsedTime, SessionPanels, SessionTerminals, SessionTitleDblClick }
+  hooks: { ...DuskmoonHooks, WebComponentHook, ModalHook, AutocompleteHook, SigmaReactChat, MarkdownInputHook, AppearanceThemeHook, LocalTime, RelativeTime, ElapsedTime, SessionPanels, SessionTerminalRestore, SessionTerminals, SessionTitleDblClick }
 })
 
 // Show progress bar on live navigation and form submits

@@ -10,12 +10,22 @@ defmodule Sigma.Agent.Terminals.Attachment do
   def require_resync(relay, reason), do: GenServer.cast(relay, {:require_resync, reason})
   def reset(relay, recovery_id), do: GenServer.call(relay, {:reset, recovery_id})
 
-  def recover(relay, recovery_id, boundary, delivery),
-    do: GenServer.call(relay, {:recover, recovery_id, boundary, delivery})
+  def recover(relay, recovery_id, boundary, delivery) do
+    GenServer.call(relay, {:recover, recovery_id, boundary, delivery})
+  catch
+    :exit, {reason, _call} when reason in [:noproc, :normal] -> {:error, :observer_down}
+  end
 
   def touch(relay), do: GenServer.call(relay, :touch)
   def acknowledge(relay, sequence), do: GenServer.call(relay, {:acknowledge, sequence})
-  def stop(relay), do: GenServer.stop(relay, :normal)
+
+  def stop(relay) do
+    GenServer.stop(relay, :normal)
+  catch
+    :exit, :noproc -> :ok
+    :exit, {:noproc, _call} -> :ok
+  end
+
   def status(relay), do: GenServer.call(relay, :status)
 
   @impl true

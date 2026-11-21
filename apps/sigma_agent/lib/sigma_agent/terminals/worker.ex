@@ -14,7 +14,12 @@ defmodule Sigma.Agent.Terminals.Worker do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
+  @checkpoint_timeout_ms 2_000
+
   def start(worker), do: GenServer.call(worker, :start)
+
+  def reply_when_ready(worker, from, request),
+    do: GenServer.cast(worker, {:reply_when_ready, from, request})
 
   def complete_start(worker, resource \\ %{}),
     do: GenServer.call(worker, {:complete_start, resource})
@@ -75,6 +80,11 @@ defmodule Sigma.Agent.Terminals.Worker do
     backend = Keyword.fetch!(opts, :backend)
     backend_opts = Keyword.get(opts, :backend_opts, [])
 
+    backend_opts =
+      if backend == Sigma.Coding.Terminal.Native,
+        do: Keyword.put(backend_opts, :terminal_state, true),
+        else: backend_opts
+
     limits = Keyword.get(opts, :limits, Limits.new())
     clock = Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end)
 
@@ -87,6 +97,11 @@ defmodule Sigma.Agent.Terminals.Worker do
        attrs: Keyword.get(opts, :attrs, %{}),
        start_ref: nil,
        pending_checkpoint: nil,
+       checkpoint_timer: nil,
+       pending_deliveries: %{},
+       native_shell_exited?: false,
+       native_cleanup_result: nil,
+       native_cleanup_waiter: nil,
        limits: limits,
        stream: ScreenStream.new(Keyword.fetch!(opts, :run), limits),
        lease: ControllerLease.new(),
@@ -129,12 +144,14 @@ defmodule Sigma.Agent.Terminals.Worker do
 
   def handle_call(:retain, _from, state) do
     state = set_lease(state, ControllerLease.new())
+    error = Error.new(:snapshot_unavailable, %{reason: :terminal_exited})
+    state = state |> clear_checkpoint() |> fail_pending_deliveries(error)
     {:reply, :ok, %{state | retained?: true}}
   end
 
   def handle_call(
         {:attach, observer, attachment_id, catalog_revision, rendered_sequence, opts},
-        _from,
+        from,
         state
       ) do
     cond do
@@ -167,35 +184,19 @@ defmodule Sigma.Agent.Terminals.Worker do
         attachment = %{pid: relay, ref: relay_ref, observer: observer}
         state = put_in(state.attachments[attachment_id], attachment)
 
-        {control, state} =
+        {_control, state} =
           if Keyword.get(opts, :initial_control, false),
             do: grant_vacant(state, attachment_id),
             else: {control_status(state, attachment_id), state}
 
-        case ScreenStream.delivery(state.stream, state.run, rendered_sequence) do
-          {:ok, delivery} ->
-            boundary = delivery_boundary(delivery)
-            :ok = Attachment.recover(relay, recovery_id, boundary, delivery)
+        pending = %{
+          kind: :attach,
+          from: from,
+          recovery_id: recovery_id,
+          catalog_revision: catalog_revision
+        }
 
-            reply =
-              Map.merge(control, %{
-                attachment_id: attachment_id,
-                run: state.run,
-                catalog_revision: catalog_revision,
-                dimensions: state.stream.dimensions,
-                recovery_id: recovery_id,
-                recovery_boundary: boundary,
-                requires_render: delivery_requires_render?(delivery),
-                resynced: not delivery_requires_render?(delivery),
-                delivery: delivery
-              })
-
-            {:reply, {:ok, reply}, state}
-
-          {:error, error} ->
-            {_, state} = drop_attachment(state, attachment_id)
-            {:reply, {:error, error}, state}
-        end
+        deliver_or_wait(state, attachment_id, rendered_sequence, pending)
     end
   end
 
@@ -354,13 +355,9 @@ defmodule Sigma.Agent.Terminals.Worker do
     do: {:reply, {:error, Error.new(:stale_run_generation)}, state}
 
   def handle_call({:request_checkpoint, request_id}, _from, state) when is_binary(request_id) do
-    if state.retained? do
-      {:reply, {:error, Error.new(:session_unavailable, %{reason: :terminal_exited})}, state}
-    else
-      case BackendAdapter.checkpoint(state.backend_state, request_id) do
-        :ok -> {:reply, :ok, %{state | pending_checkpoint: request_id}}
-        {:error, reason} -> {:reply, {:error, reason}, state}
-      end
+    case ensure_checkpoint(state, request_id) do
+      {:ok, state} -> {:reply, :ok, state}
+      {:error, error} -> {:reply, {:error, error}, state}
     end
   end
 
@@ -380,25 +377,18 @@ defmodule Sigma.Agent.Terminals.Worker do
     end
   end
 
-  def handle_call({:resync, attachment_id, rendered_sequence}, _from, state) do
-    recovery_id = recovery_id(attachment_id)
-
-    with {:ok, relay} <- attachment_pid(state, attachment_id),
-         {:ok, delivery} <- ScreenStream.delivery(state.stream, state.run, rendered_sequence) do
-      boundary = delivery_boundary(delivery)
-      :ok = Attachment.recover(relay, recovery_id, boundary, delivery)
-
-      {:reply,
-       {:ok,
-        Map.merge(delivery, %{
-          recovery_id: recovery_id,
-          recovery_boundary: boundary,
-          dimensions: state.stream.dimensions,
-          requires_render: delivery_requires_render?(delivery),
-          resynced: not delivery_requires_render?(delivery)
-        })}, state}
+  def handle_call({:resync, attachment_id, rendered_sequence}, from, state) do
+    with :ok <- attachment_exists(state, attachment_id),
+         false <- Map.has_key?(state.pending_deliveries, attachment_id) do
+      pending = %{kind: :resync, from: from, recovery_id: recovery_id(attachment_id)}
+      deliver_or_wait(state, attachment_id, rendered_sequence, pending)
     else
-      {:error, error} -> {:reply, {:error, error}, state}
+      true ->
+        error = Error.new(:snapshot_unavailable, %{reason: :checkpoint_pending}, retryable: true)
+        {:reply, {:error, error}, state}
+
+      {:error, error} ->
+        {:reply, {:error, error}, state}
     end
   end
 
@@ -411,11 +401,43 @@ defmodule Sigma.Agent.Terminals.Worker do
   end
 
   @impl true
-  def handle_cast({:begin_cleanup, reply_to, token}, state) do
-    {result, backend_state} = BackendAdapter.cleanup(state.backend_state, state.run)
-    send(reply_to, {:terminal_cleanup_result, self(), state.run, token, result})
-    {:noreply, %{state | backend_state: backend_state}}
+  def handle_cast({:reply_when_ready, from, request}, state) do
+    case handle_call(request, from, state) do
+      {:reply, reply, state} ->
+        GenServer.reply(from, reply)
+        {:noreply, state}
+
+      {:noreply, state} ->
+        {:noreply, state}
+    end
   end
+
+  def handle_cast(
+        {:begin_cleanup, reply_to, token},
+        %{backend: Sigma.Coding.Terminal.Native} = state
+      ) do
+    cond do
+      state.native_cleanup_result != nil ->
+        send(
+          reply_to,
+          {:terminal_cleanup_result, self(), state.run, token, state.native_cleanup_result}
+        )
+
+        {:noreply, state}
+
+      state.native_shell_exited? ->
+        {:noreply, %{state | native_cleanup_waiter: {reply_to, token}}}
+
+      true ->
+        cleanup(state, reply_to, token)
+    end
+  catch
+    :exit, {:noproc, _call} ->
+      {:noreply, %{state | native_cleanup_waiter: {reply_to, token}}}
+  end
+
+  def handle_cast({:begin_cleanup, reply_to, token}, state),
+    do: cleanup(state, reply_to, token)
 
   @impl true
   def handle_info({:terminal_attachment_down, relay, attachment_id, _reason}, state) do
@@ -462,7 +484,9 @@ defmodule Sigma.Agent.Terminals.Worker do
           case send_device_responses(state, responses) do
             {:ok, backend_state} ->
               broadcast(state, frame)
-              {:noreply, %{state | stream: stream, backend_state: backend_state}}
+
+              {:noreply,
+               maybe_checkpoint(%{state | stream: stream, backend_state: backend_state})}
 
             {:error, _error} ->
               {:noreply, degrade_stream(state, :device_response_failed)}
@@ -493,18 +517,19 @@ defmodule Sigma.Agent.Terminals.Worker do
         {:terminal_backend, backend, {:checkpoint, request_id, sequence, columns, rows, bytes}},
         %{backend_state: adapter} = state
       ) do
-    if process_backend?(adapter, backend) do
+    if process_backend?(adapter, backend) and
+         (request_id == state.pending_checkpoint or request_id == "final") do
       healing? = not is_nil(state.stream.degraded)
+      state = clear_checkpoint(state)
 
       case ScreenStream.accept_checkpoint(state.stream, sequence, columns, rows, bytes) do
         {:ok, stream} ->
+          state = %{state | stream: stream}
           if healing?, do: deliver_recovery(state, stream.checkpoint)
+          {:noreply, complete_pending_deliveries(state)}
 
-          {:noreply,
-           %{state | stream: stream, pending_checkpoint: clear_request(state, request_id)}}
-
-        {:error, _error} ->
-          {:noreply, degrade_stream(state, :stale_checkpoint)}
+        {:error, error} ->
+          {:noreply, fail_pending_deliveries(state, error)}
       end
     else
       {:noreply, state}
@@ -515,23 +540,22 @@ defmodule Sigma.Agent.Terminals.Worker do
         {:terminal_backend, backend, {:checkpoint_failed, request_id, reason, details}},
         %{backend_state: adapter} = state
       ) do
-    if process_backend?(adapter, backend) do
+    if process_backend?(adapter, backend) and
+         (request_id == state.pending_checkpoint or request_id == "final") do
       error = Error.new(:snapshot_unavailable, Map.put(details, :reason, reason))
-
-      Enum.each(state.attachments, fn {_id, attachment} ->
-        Attachment.require_resync(attachment.pid, error)
-      end)
-
-      {:noreply,
-       %{
-         state
-         | stream: %{state.stream | checkpoint: nil, degraded: error},
-           pending_checkpoint: clear_request(state, request_id)
-       }}
+      state = %{state | stream: %{state.stream | bytes_since_checkpoint: 0}}
+      {:noreply, state |> clear_checkpoint() |> fail_pending_deliveries(error)}
     else
       {:noreply, state}
     end
   end
+
+  def handle_info({:checkpoint_timeout, request_id}, %{pending_checkpoint: request_id} = state) do
+    error = Error.new(:snapshot_unavailable, %{reason: :checkpoint_timeout})
+    {:noreply, state |> clear_checkpoint() |> fail_pending_deliveries(error)}
+  end
+
+  def handle_info({:checkpoint_timeout, _old_request}, state), do: {:noreply, state}
 
   def handle_info(
         {:terminal_backend, backend, {:shell_exit, status, _signal}},
@@ -539,9 +563,10 @@ defmodule Sigma.Agent.Terminals.Worker do
       ) do
     if process_backend?(adapter, backend) do
       send(state.manager, {:terminal_worker_shell_exited, self(), state.run, status})
+      {:noreply, %{state | native_shell_exited?: state.backend == Sigma.Coding.Terminal.Native}}
+    else
+      {:noreply, state}
     end
-
-    {:noreply, state}
   end
 
   def handle_info({:terminal_backend, backend, {:backend_failed, reason}}, state) do
@@ -552,8 +577,22 @@ defmodule Sigma.Agent.Terminals.Worker do
     {:noreply, state}
   end
 
-  def handle_info({:terminal_backend, _backend, {:cleanup, _result, _evidence}}, state),
-    do: {:noreply, state}
+  def handle_info({:terminal_backend, backend, {:cleanup, result, _evidence}}, state) do
+    if state.backend == Sigma.Coding.Terminal.Native and
+         process_backend?(state.backend_state, backend) do
+      case state.native_cleanup_waiter do
+        {reply_to, token} ->
+          send(reply_to, {:terminal_cleanup_result, self(), state.run, token, result})
+
+        nil ->
+          :ok
+      end
+
+      {:noreply, %{state | native_cleanup_result: result, native_cleanup_waiter: nil}}
+    else
+      {:noreply, state}
+    end
+  end
 
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
     case Enum.find(state.attachments, fn {_id, attachment} -> attachment.ref == ref end) do
@@ -581,6 +620,12 @@ defmodule Sigma.Agent.Terminals.Worker do
       start: {__MODULE__, :start_link, [opts]},
       restart: :temporary
     }
+  end
+
+  defp cleanup(state, reply_to, token) do
+    {result, backend_state} = BackendAdapter.cleanup(state.backend_state, state.run)
+    send(reply_to, {:terminal_cleanup_result, self(), state.run, token, result})
+    {:noreply, %{state | backend_state: backend_state}}
   end
 
   defp grant_vacant(state, attachment_id) do
@@ -625,6 +670,7 @@ defmodule Sigma.Agent.Terminals.Worker do
       {%{pid: relay, ref: ref}, attachments} ->
         Process.demonitor(ref, [:flush])
         if Process.alive?(relay), do: Attachment.stop(relay)
+        state = cancel_pending_delivery(state, attachment_id)
         state = %{state | attachments: attachments}
 
         state =
@@ -655,10 +701,15 @@ defmodule Sigma.Agent.Terminals.Worker do
   end
 
   defp broadcast(state, event) do
-    Enum.each(state.attachments, fn {_id, attachment} ->
-      Attachment.deliver(attachment.pid, event)
+    Enum.each(state.attachments, fn {id, attachment} ->
+      unless Map.has_key?(state.pending_deliveries, id) do
+        Attachment.deliver(attachment.pid, event)
+      end
     end)
   end
+
+  defp send_device_responses(%{backend: Sigma.Coding.Terminal.Native} = state, _responses),
+    do: {:ok, state.backend_state}
 
   defp send_device_responses(state, responses) do
     Enum.reduce_while(responses, {:ok, state.backend_state}, fn response, {:ok, backend_state} ->
@@ -688,16 +739,21 @@ defmodule Sigma.Agent.Terminals.Worker do
 
     stream = ScreenStream.mark_gap(state.stream, expected, actual)
 
-    request_id = state.pending_checkpoint || "recovery-#{System.unique_integer([:positive])}"
-    _ = BackendAdapter.checkpoint(state.backend_state, request_id)
-    %{state | stream: stream, pending_checkpoint: request_id}
+    state = %{state | stream: stream}
+
+    case ensure_checkpoint(state) do
+      {:ok, state} -> state
+      {:error, _error} -> state
+    end
   end
 
   defp deliver_recovery(state, checkpoint) do
     Enum.each(state.attachments, fn {attachment_id, attachment} ->
-      recovery_id = recovery_id(attachment_id)
-      delivery = %{snapshot: checkpoint, events: []}
-      :ok = Attachment.recover(attachment.pid, recovery_id, checkpoint.sequence, delivery)
+      unless Map.has_key?(state.pending_deliveries, attachment_id) do
+        recovery_id = recovery_id(attachment_id)
+        delivery = %{snapshot: checkpoint, events: []}
+        _ = Attachment.recover(attachment.pid, recovery_id, checkpoint.sequence, delivery)
+      end
     end)
   end
 
@@ -719,8 +775,147 @@ defmodule Sigma.Agent.Terminals.Worker do
     Enum.reduce(events, 0, &max(&1.sequence, &2))
   end
 
-  defp clear_request(%{pending_checkpoint: request_id}, request_id), do: nil
-  defp clear_request(state, _request_id), do: state.pending_checkpoint
+  defp deliver_or_wait(state, attachment_id, rendered_sequence, pending) do
+    case ScreenStream.delivery(state.stream, state.run, rendered_sequence) do
+      {:ok, delivery} ->
+        {reply, state} = deliver(state, attachment_id, pending, delivery)
+        {:reply, reply, state}
+
+      {:error, error} ->
+        with false <- state.retained?,
+             true <- BackendAdapter.process?(state.backend_state),
+             {:ok, state} <- ensure_checkpoint(state) do
+          state = cancel_pending_delivery(state, attachment_id)
+          state = put_in(state.pending_deliveries[attachment_id], pending)
+          {:noreply, state}
+        else
+          _unavailable ->
+            state =
+              if pending.kind == :attach,
+                do: elem(drop_attachment(state, attachment_id), 1),
+                else: state
+
+            {:reply, {:error, error}, state}
+        end
+    end
+  end
+
+  defp deliver(state, attachment_id, pending, delivery) do
+    attachment = state.attachments[attachment_id]
+    boundary = delivery_boundary(delivery)
+
+    case Attachment.recover(attachment.pid, pending.recovery_id, boundary, delivery) do
+      :ok ->
+        result = %{
+          recovery_id: pending.recovery_id,
+          recovery_boundary: boundary,
+          dimensions: state.stream.dimensions,
+          requires_render: delivery_requires_render?(delivery),
+          resynced: not delivery_requires_render?(delivery)
+        }
+
+        result =
+          if pending.kind == :attach do
+            control_status(state, attachment_id)
+            |> Map.merge(result)
+            |> Map.merge(%{
+              attachment_id: attachment_id,
+              run: state.run,
+              catalog_revision: pending.catalog_revision,
+              delivery: delivery
+            })
+          else
+            Map.merge(delivery, result)
+          end
+
+        {{:ok, result}, state}
+
+      {:error, :observer_down} ->
+        {_, state} = drop_attachment(state, attachment_id)
+        {{:error, Error.new(:session_unavailable, %{reason: :observer_down})}, state}
+    end
+  end
+
+  defp complete_pending_deliveries(state) do
+    pending_deliveries = state.pending_deliveries
+    state = %{state | pending_deliveries: %{}}
+    delivery = %{mode: :snapshot_then_replay, snapshot: state.stream.checkpoint, events: []}
+
+    Enum.reduce(pending_deliveries, state, fn {id, pending}, state ->
+      {reply, state} = deliver(state, id, pending, delivery)
+      GenServer.reply(pending.from, reply)
+      state
+    end)
+  end
+
+  defp fail_pending_deliveries(state, error) do
+    pending_deliveries = state.pending_deliveries
+    state = %{state | pending_deliveries: %{}}
+
+    Enum.reduce(pending_deliveries, state, fn {id, pending}, state ->
+      GenServer.reply(pending.from, {:error, error})
+      if pending.kind == :attach, do: elem(drop_attachment(state, id), 1), else: state
+    end)
+  end
+
+  defp cancel_pending_delivery(state, id) do
+    case Map.pop(state.pending_deliveries, id) do
+      {nil, _pending} ->
+        state
+
+      {pending, remaining} ->
+        GenServer.reply(
+          pending.from,
+          {:error, Error.new(:session_unavailable, %{reason: :observer_down})}
+        )
+
+        %{state | pending_deliveries: remaining}
+    end
+  end
+
+  defp maybe_checkpoint(state) do
+    if BackendAdapter.process?(state.backend_state) and
+         state.stream.bytes_since_checkpoint >= max(div(state.limits.max_raw_replay_bytes, 2), 1) do
+      case ensure_checkpoint(state) do
+        {:ok, state} -> state
+        {:error, _error} -> state
+      end
+    else
+      state
+    end
+  end
+
+  defp ensure_checkpoint(state, request_id \\ nil)
+
+  defp ensure_checkpoint(%{retained?: true}, _request_id),
+    do: {:error, Error.new(:session_unavailable, %{reason: :terminal_exited})}
+
+  defp ensure_checkpoint(%{pending_checkpoint: pending} = state, _request_id)
+       when not is_nil(pending),
+       do: {:ok, state}
+
+  defp ensure_checkpoint(state, request_id) do
+    request_id = request_id || "recovery-#{System.unique_integer([:positive])}"
+
+    case BackendAdapter.checkpoint(state.backend_state, request_id) do
+      :ok ->
+        timer =
+          Process.send_after(self(), {:checkpoint_timeout, request_id}, @checkpoint_timeout_ms)
+
+        stream = %{state.stream | bytes_since_checkpoint: 0}
+        {:ok, %{state | stream: stream, pending_checkpoint: request_id, checkpoint_timer: timer}}
+
+      {:error, reason} ->
+        {:error, Error.new(:snapshot_unavailable, %{reason: reason})}
+    end
+  catch
+    :exit, _reason -> {:error, Error.new(:snapshot_unavailable, %{reason: :backend_unavailable})}
+  end
+
+  defp clear_checkpoint(state) do
+    if state.checkpoint_timer, do: Process.cancel_timer(state.checkpoint_timer)
+    %{state | pending_checkpoint: nil, checkpoint_timer: nil}
+  end
 
   defp degradation_details(_state, %Error{details: details}) do
     {details[:expected], details[:actual], details[:reason]}

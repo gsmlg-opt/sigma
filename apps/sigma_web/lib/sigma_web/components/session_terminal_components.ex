@@ -8,6 +8,8 @@ defmodule Sigma.Web.SessionTerminalComponents do
   attr(:catalog, :map, required: true)
   attr(:panel_open?, :boolean, default: false)
 
+  attr(:session, :map, default: %{})
+
   def terminal_trigger(assigns) do
     assigns = assign(assigns, :count, catalog_count(assigns.catalog))
 
@@ -26,6 +28,16 @@ defmodule Sigma.Web.SessionTerminalComponents do
         <.dm_mdi name="console-line" class="h-4 w-4" />
         <span class="sr-only">{catalog_title(@catalog)}</span>
       </.dm_btn>
+      <span
+        id="session-terminal-transport"
+        phx-hook="SessionTerminalRestore"
+        data-terminal-storage-key={storage_key(@session)}
+        data-terminal-incarnation={value(@session, :incarnation_id)}
+        data-terminal-panel-open={to_string(@panel_open?)}
+        data-terminal-retained={@count}
+        data-terminal-available={to_string(value(@catalog, :status) == :available)}
+        hidden
+      />
       <span :if={is_integer(@count) and @count > 0} class="sigma-terminal-count" aria-hidden="true">
         {@count}
       </span>
