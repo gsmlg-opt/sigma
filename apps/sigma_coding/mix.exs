@@ -26,7 +26,7 @@ defmodule Sigma.Coding.MixProject do
     [
       {:sigma_ai, in_umbrella: true},
       {:backplane_mcp_protocol, "~> 1.10.68"},
-      {:jason, "~> 1.4"},
+      {:formata, "~> 0.3.5"},
       {:telemetry, "~> 1.0"}
     ]
   end

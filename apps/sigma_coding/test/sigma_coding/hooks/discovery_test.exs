@@ -8,7 +8,7 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
   describe "parse/2 — Codex format" do
     test "parses a PreToolUse command hook" do
       json =
-        Jason.encode!([
+        Formata.JSON.encode!([
           %{
             "event" => "PreToolUse",
             "hooks" => [
@@ -33,7 +33,7 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
 
     test "parses multiple events" do
       json =
-        Jason.encode!([
+        Formata.JSON.encode!([
           %{
             "event" => "PreToolUse",
             "hooks" => [%{"matcher" => "Bash", "hooks" => [%{"command" => "a"}]}]
@@ -52,7 +52,7 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
 
     test "matcher nil becomes :any" do
       json =
-        Jason.encode!([
+        Formata.JSON.encode!([
           %{"event" => "Stop", "hooks" => [%{"hooks" => [%{"command" => "x"}]}]}
         ])
 
@@ -62,7 +62,7 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
 
     test "matcher * becomes :any" do
       json =
-        Jason.encode!([
+        Formata.JSON.encode!([
           %{
             "event" => "SessionStart",
             "hooks" => [%{"matcher" => "*", "hooks" => [%{"command" => "x"}]}]
@@ -75,7 +75,7 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
 
     test "regex matcher is compiled" do
       json =
-        Jason.encode!([
+        Formata.JSON.encode!([
           %{
             "event" => "PreToolUse",
             "hooks" => [%{"matcher" => "mcp__.*", "hooks" => [%{"command" => "x"}]}]
@@ -88,7 +88,7 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
 
     test "default timeout is 600_000ms" do
       json =
-        Jason.encode!([
+        Formata.JSON.encode!([
           %{"event" => "PreToolUse", "hooks" => [%{"hooks" => [%{"command" => "x"}]}]}
         ])
 
@@ -98,7 +98,7 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
 
     test "UserPromptSubmit default timeout matches Codex at 600_000ms" do
       json =
-        Jason.encode!([
+        Formata.JSON.encode!([
           %{"event" => "UserPromptSubmit", "hooks" => [%{"hooks" => [%{"command" => "x"}]}]}
         ])
 
@@ -108,7 +108,7 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
 
     test "explicit timeout in seconds is converted to ms" do
       json =
-        Jason.encode!([
+        Formata.JSON.encode!([
           %{"event" => "Stop", "hooks" => [%{"hooks" => [%{"command" => "x", "timeout" => 5}]}]}
         ])
 
@@ -118,7 +118,7 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
 
     test "timeoutSec alias works" do
       json =
-        Jason.encode!([
+        Formata.JSON.encode!([
           %{
             "event" => "Stop",
             "hooks" => [%{"hooks" => [%{"command" => "x", "timeoutSec" => 15}]}]
@@ -131,7 +131,7 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
 
     test "unknown event is silently skipped" do
       json =
-        Jason.encode!([
+        Formata.JSON.encode!([
           %{"event" => "UnknownEvent", "hooks" => [%{"hooks" => [%{"command" => "x"}]}]}
         ])
 
@@ -141,7 +141,7 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
 
     test "http handler is marked unsupported" do
       json =
-        Jason.encode!([
+        Formata.JSON.encode!([
           %{
             "event" => "PreToolUse",
             "hooks" => [%{"hooks" => [%{"url" => "http://example.com"}]}]
@@ -158,12 +158,14 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
 
     test "additive: multiple sources produce all specs" do
       json1 =
-        Jason.encode!([
+        Formata.JSON.encode!([
           %{"event" => "PreToolUse", "hooks" => [%{"hooks" => [%{"command" => "a"}]}]}
         ])
 
       json2 =
-        Jason.encode!([%{"event" => "Stop", "hooks" => [%{"hooks" => [%{"command" => "b"}]}]}])
+        Formata.JSON.encode!([
+          %{"event" => "Stop", "hooks" => [%{"hooks" => [%{"command" => "b"}]}]}
+        ])
 
       {:ok, specs1} = Discovery.parse(json1, :codex)
       {:ok, specs2} = Discovery.parse(json2, :codex)
@@ -178,7 +180,7 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
   describe "parse/2 — Claude settings.json format" do
     test "extracts hooks from the 'hooks' key" do
       json =
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "hooks" => [
             %{
               "event" => "PreToolUse",
@@ -193,14 +195,14 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
     end
 
     test "returns empty list when no hooks key" do
-      json = Jason.encode!(%{"other" => "stuff"})
+      json = Formata.JSON.encode!(%{"other" => "stuff"})
       {:ok, specs} = Discovery.parse(json, :claude)
       assert specs == []
     end
 
     test "parses map-keyed format (actual Claude Code settings.json)" do
       json =
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "hooks" => %{
             "SessionStart" => [
               %{
@@ -220,7 +222,7 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
 
     test "map-keyed format with multiple events" do
       json =
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "hooks" => %{
             "PreToolUse" => [
               %{"matcher" => "Bash", "hooks" => [%{"command" => "check-bash"}]}
@@ -257,7 +259,9 @@ defmodule Sigma.Coding.Hooks.DiscoveryTest do
       @expected expected
       test "#{raw} → #{expected}" do
         json =
-          Jason.encode!([%{"event" => @raw, "hooks" => [%{"hooks" => [%{"command" => "x"}]}]}])
+          Formata.JSON.encode!([
+            %{"event" => @raw, "hooks" => [%{"hooks" => [%{"command" => "x"}]}]}
+          ])
 
         {:ok, [spec]} = Discovery.parse(json, :codex)
         assert spec.event == @expected

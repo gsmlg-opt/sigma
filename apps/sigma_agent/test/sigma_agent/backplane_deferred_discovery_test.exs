@@ -46,7 +46,7 @@ defmodule Sigma.Agent.BackplaneDeferredDiscoveryTest do
     inventory = Path.join(dir, "inventory.json")
     log = Path.join(dir, "requests.jsonl")
     File.write!(fixture, fixture())
-    File.write!(inventory, Jason.encode!([definition("fetch_item")]))
+    File.write!(inventory, Formata.JSON.encode!([definition("fetch_item")]))
     File.write!(log, "")
 
     on_exit(fn ->
@@ -204,7 +204,7 @@ defmodule Sigma.Agent.BackplaneDeferredDiscoveryTest do
     assert [%{"name" => @tool}] = result(agent)["tools"]
     finish!(provider)
 
-    File.write!(c.inventory, Jason.encode!([definition("replacement")]))
+    File.write!(c.inventory, Formata.JSON.encode!([definition("replacement")]))
     assert {:ok, 1} = Sigma.Agent.reload_mcp_tools(agent)
     prompt!(agent)
     {provider, initial} = provider!()
@@ -227,7 +227,7 @@ defmodule Sigma.Agent.BackplaneDeferredDiscoveryTest do
         "http://json-schema.org/draft-07/schema#"
       )
 
-    File.write!(c.inventory, Jason.encode!([definition("fetch_item"), legacy]))
+    File.write!(c.inventory, Formata.JSON.encode!([definition("fetch_item"), legacy]))
     agent = session!(c)
     prompt!(agent)
     {provider, initial} = provider!()
@@ -257,7 +257,7 @@ defmodule Sigma.Agent.BackplaneDeferredDiscoveryTest do
         end)
     ]
 
-    File.write!(c.inventory, Jason.encode!(definitions))
+    File.write!(c.inventory, Formata.JSON.encode!(definitions))
     agent = session!(c)
     prompt!(agent)
     {provider, initial} = provider!()
@@ -450,7 +450,8 @@ defmodule Sigma.Agent.BackplaneDeferredDiscoveryTest do
   defp requests(log), do: json_lines(log)
 
   defp json_lines(path),
-    do: path |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    do:
+      path |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
 
   defp finish!(provider) do
     send(provider, {:discovery_response, [%{type: :text, text: "done"}]})
@@ -489,7 +490,7 @@ defmodule Sigma.Agent.BackplaneDeferredDiscoveryTest do
          ]}
       end)
 
-    assert {:ok, specs} = Discovery.parse(Jason.encode!(%{"hooks" => groups}), :claude)
+    assert {:ok, specs} = Discovery.parse(Formata.JSON.encode!(%{"hooks" => groups}), :claude)
     Enum.map(specs, &%{&1 | origin: {:user, "discovery-test"}, trusted?: true})
   end
 

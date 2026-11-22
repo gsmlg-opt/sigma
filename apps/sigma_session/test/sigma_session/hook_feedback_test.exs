@@ -9,7 +9,7 @@ defmodule Sigma.Session.HookFeedbackTest do
     assert String.starts_with?(received["item_id"], "sigma-async-hook-")
 
     assert {:ok, ^received} =
-             received |> Jason.encode!() |> Jason.decode!() |> HookFeedback.event()
+             received |> Formata.JSON.encode!() |> Formata.JSON.decode!() |> HookFeedback.event()
 
     assert {:ok, state} = HookFeedback.apply_event(HookFeedback.new(), received)
     item = state.items[received["item_id"]]

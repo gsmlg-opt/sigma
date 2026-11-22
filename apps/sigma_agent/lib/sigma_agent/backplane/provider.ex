@@ -365,7 +365,7 @@ defmodule Sigma.Agent.Backplane.Provider do
 
   defp tool_result("history::read_item", %{content: text, images: images} = result)
        when is_binary(text) and is_list(images) do
-    case Jason.encode(Map.delete(result, :images)) do
+    case Sigma.Ai.JSON.encode(Map.delete(result, :images)) do
       {:ok, json} -> project_result(result, [%{type: :text, text: json} | images])
       {:error, _} -> malformed_result()
     end
@@ -393,8 +393,8 @@ defmodule Sigma.Agent.Backplane.Provider do
   defp project_result(result, content) do
     with true <- is_boolean(Map.get(result, :is_error, false)),
          true <- is_nil(content) or Enum.all?(content, &valid_result_block?/1),
-         {:ok, json} <- Jason.encode(result) do
-      {content || [%{type: :text, text: json}], %{structured_result: Jason.decode!(json)},
+         {:ok, json} <- Sigma.Ai.JSON.encode(result) do
+      {content || [%{type: :text, text: json}], %{structured_result: Formata.JSON.decode!(json)},
        Map.get(result, :is_error, false)}
     else
       _ -> malformed_result()

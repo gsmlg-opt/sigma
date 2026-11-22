@@ -31,7 +31,7 @@ defmodule Sigma.Coding.Hooks.Discovery do
   """
   @spec parse(binary(), Spec.dialect()) :: {:ok, [Spec.t()]} | {:error, term()}
   def parse(bytes, dialect) when is_binary(bytes) and dialect in [:codex, :claude, :pi] do
-    case Jason.decode(bytes) do
+    case Formata.JSON.decode(bytes) do
       {:ok, data} ->
         hooks_list = extract_hooks_list(data, dialect)
         specs = parse_hooks_list(hooks_list, dialect)
@@ -346,7 +346,7 @@ defmodule Sigma.Coding.Hooks.Discovery do
       content
       |> String.split("\n", trim: true)
       |> Enum.any?(fn line ->
-        case Jason.decode(line) do
+        case Formata.JSON.decode(line) do
           {:ok, %{"path" => ^cwd, "trusted" => true}} -> true
           _ -> false
         end

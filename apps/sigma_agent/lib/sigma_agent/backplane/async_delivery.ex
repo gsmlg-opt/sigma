@@ -246,8 +246,8 @@ defmodule Sigma.Agent.Backplane.AsyncDelivery do
   defp consumed?(_store, _item, _nodes), do: {:ok, false}
 
   defp same_content?(content, canonical) do
-    with {:ok, json} <- Jason.encode(content),
-         {:ok, normalized} <- Jason.decode(json),
+    with {:ok, json} <- Sigma.Ai.JSON.encode(content),
+         {:ok, normalized} <- Formata.JSON.decode(json),
          do: normalized == canonical,
          else: (_ -> false)
   end

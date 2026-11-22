@@ -77,13 +77,13 @@ try do
   true = File.read!(snapshot) == bytes
   true = Bitwise.band(File.stat!(snapshot).mode, 0o777) == 0o500
   true = Bitwise.band(File.stat!(Path.dirname(snapshot)).mode, 0o777) == 0o700
-  config = System.fetch_env!("SIGMA_NATIVE_SMOKE_CONFIG") |> Jason.decode!()
+  config = System.fetch_env!("SIGMA_NATIVE_SMOKE_CONFIG") |> Formata.JSON.decode!()
 
   for {round, previous} <- [{"first", nil}, {"second", "first"}] do
     config = Map.update!(config, "args", &(&1 ++ [round]))
-    {output, 23} = System.cmd(snapshot, ["--config-json", Jason.encode!(config)],
+    {output, 23} = System.cmd(snapshot, ["--config-json", Formata.JSON.encode!(config)],
       stderr_to_stdout: true, env: [{"SIGMA_NATIVE_SMOKE_AMBIENT", "must-not-leak"}])
-    result = Jason.decode!(output)
+    result = Formata.JSON.decode!(output)
     ^round = result["round"]
     ^previous = result["previous"]
     ^workspace = result["workspace"]
@@ -107,7 +107,7 @@ try do
 
   :ok = GenServer.stop(host, :normal)
   false = File.exists?(snapshot)
-  IO.puts(Jason.encode!(%{check: "packaged_launcher", source: source, beam: beam,
+  IO.puts(Formata.JSON.encode!(%{check: "packaged_launcher", source: source, beam: beam,
     sha256: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower),
     rounds: 2, exit_status: 23, cleanup: true, tamper_rejected: true}))
 after

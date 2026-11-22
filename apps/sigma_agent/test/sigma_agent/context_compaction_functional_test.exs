@@ -449,7 +449,7 @@ defmodule Sigma.Agent.ContextCompactionFunctionalTest do
     for {provider, frames} <- [
           {Sigma.Ai.Providers.OpenAIResponses,
            "data: " <>
-             Jason.encode!(%{
+             Formata.JSON.encode!(%{
                type: "response.completed",
                response: %{id: "wire-response", status: "completed", output: []}
              }) <> "\n\n"},
@@ -475,7 +475,7 @@ defmodule Sigma.Agent.ContextCompactionFunctionalTest do
                 }},
                {"message_stop", %{type: "message_stop"}}
              ],
-             fn {event, frame} -> "event: #{event}\ndata: #{Jason.encode!(frame)}\n\n" end
+             fn {event, frame} -> "event: #{event}\ndata: #{Formata.JSON.encode!(frame)}\n\n" end
            )}
         ] do
       with_http(frames, fn url, capture ->
@@ -577,7 +577,7 @@ defmodule Sigma.Agent.ContextCompactionFunctionalTest do
         {:ok, socket} = :gen_tcp.accept(listener)
         request = receive_http(socket, "")
         [_headers, body] = String.split(request, "\r\n\r\n", parts: 2)
-        Agent.update(capture, fn _ -> Jason.decode!(body) end)
+        Agent.update(capture, fn _ -> Formata.JSON.decode!(body) end)
 
         :ok =
           :gen_tcp.send(socket, [

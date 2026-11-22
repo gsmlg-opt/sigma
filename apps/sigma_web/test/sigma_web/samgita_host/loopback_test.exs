@@ -669,12 +669,12 @@ defmodule Sigma.Web.SamgitaHost.LoopbackTest do
 
     File.write!(
       Path.join(agent_dir, "settings.json"),
-      Jason.encode!(%{"defaultProvider" => "mock", "defaultModel" => "mock-model"})
+      Formata.JSON.encode!(%{"defaultProvider" => "mock", "defaultModel" => "mock-model"})
     )
 
     File.write!(
       Path.join(agent_dir, "models.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "providers" => %{
           "mock" => %{"name" => "Mock", "api" => "mock", "models" => [%{"id" => "mock-model"}]}
         }

@@ -92,7 +92,7 @@ defmodule Sigma.Session.SkillInvocationStore do
   end
 
   defp decode(content) do
-    case Jason.decode(content) do
+    case Formata.JSON.decode(content) do
       {:ok, records} when is_list(records) ->
         if Enum.all?(records, &is_map/1),
           do: {:ok, records},
@@ -107,7 +107,7 @@ defmodule Sigma.Session.SkillInvocationStore do
     temporary = path <> ".tmp-#{System.unique_integer([:positive])}"
 
     with :ok <- File.mkdir_p(Path.dirname(path)),
-         {:ok, content} <- Jason.encode(records),
+         {:ok, content} <- Sigma.Ai.JSON.encode(records),
          :ok <- File.write(temporary, content),
          :ok <- File.rename(temporary, path) do
       :ok

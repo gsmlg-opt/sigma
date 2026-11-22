@@ -7,7 +7,7 @@ defmodule Sigma.Protocol.AsyncInteractionsTest do
     event = received()
     assert {:ok, normalized} = AsyncInteractions.event(event)
     assert AsyncInteractions.to_map(normalized) == event
-    assert Jason.decode!(Jason.encode!(normalized)) == event
+    assert Formata.JSON.decode!(Formata.JSON.encode!(normalized)) == event
     assert {:ok, state} = AsyncInteractions.apply_event(AsyncInteractions.new(), event)
     assert [item] = AsyncInteractions.snapshot(state, ["anchor"])
     assert item["questions"] == event["questions"]

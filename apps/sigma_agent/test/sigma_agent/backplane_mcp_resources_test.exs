@@ -242,7 +242,10 @@ defmodule Sigma.Agent.BackplaneMcpResourcesTest do
       })
 
     assert inspect(result) =~ "beta content"
-    requests = File.read!(ctx.log) |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+
+    requests =
+      File.read!(ctx.log) |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
+
     assert Enum.count(requests, &(&1["method"] == "initialize")) == 4
     finish!(provider)
   end

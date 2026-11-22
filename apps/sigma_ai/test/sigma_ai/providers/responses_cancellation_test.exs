@@ -206,7 +206,7 @@ defmodule Sigma.Ai.Providers.ResponsesCancellationTest do
             },
             %{"type" => "response.output_text.delta", "sequence_number" => 1, "delta" => "hello"}
           ]
-          |> Enum.map_join(fn event -> "data: " <> Jason.encode!(event) <> "\n\n" end)
+          |> Enum.map_join(fn event -> "data: " <> Formata.JSON.encode!(event) <> "\n\n" end)
 
         :ok =
           :gen_tcp.send(
@@ -218,7 +218,7 @@ defmodule Sigma.Ai.Providers.ResponsesCancellationTest do
         {:ok, cancel_socket} = :gen_tcp.accept(listener, 2_000)
         {:ok, cancel} = :gen_tcp.recv(cancel_socket, 0, 1_000)
         assert cancel =~ "POST /responses/resp_test/cancel HTTP/1.1"
-        body = Jason.encode!(%{id: "resp_test", status: "cancelled"})
+        body = Formata.JSON.encode!(%{id: "resp_test", status: "cancelled"})
 
         :ok =
           :gen_tcp.send(
@@ -360,7 +360,7 @@ defmodule Sigma.Ai.Providers.ResponsesCancellationTest do
         {:ok, request} = :gen_tcp.recv(socket, 0, 1_000)
         send(parent, {:http_request, request})
         Process.sleep(delay)
-        encoded = Jason.encode!(body)
+        encoded = Formata.JSON.encode!(body)
 
         :gen_tcp.send(
           socket,

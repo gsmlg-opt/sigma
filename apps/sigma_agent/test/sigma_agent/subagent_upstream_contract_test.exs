@@ -189,7 +189,7 @@ defmodule Sigma.Agent.SubagentUpstreamContractTest do
     spawn = Task.async(fn -> spawn_agent(runtime, "worker") end)
     assert_receive {:intent_waiting, intent, manager}, 5_000
     assert is_binary(intent[:attempt_id])
-    assert is_binary(Jason.encode!(intent))
+    assert is_binary(Formata.JSON.encode!(intent))
     refute File.exists?(intent_path)
     refute_receive {:provider, _, _, _}, 20
 
@@ -199,7 +199,7 @@ defmodule Sigma.Agent.SubagentUpstreamContractTest do
     assert receipt.agent_id == intent.agent_id
     assert receipt.run_id == intent.run_id
     assert receipt.process_started
-    assert Jason.decode!(File.read!(intent_path))["attempt_id"] == intent.attempt_id
+    assert Formata.JSON.decode!(File.read!(intent_path))["attempt_id"] == intent.attempt_id
     refute File.exists?(receipt_path)
     refute_receive {:provider, _, _, _}, 20
 
@@ -207,7 +207,7 @@ defmodule Sigma.Agent.SubagentUpstreamContractTest do
     assert {:ok, %{task_name: "/root/worker"}} = Task.await(spawn, 5_000)
     assert_receive {:provider, run_id, _, _}, 5_000
     assert run_id == intent.run_id
-    assert Jason.decode!(File.read!(receipt_path))["attempt_id"] == intent.attempt_id
+    assert Formata.JSON.decode!(File.read!(receipt_path))["attempt_id"] == intent.attempt_id
     assert {:ok, %{admissions: [record], agents: [agent]}} = MultiAgent.snapshot(runtime)
     assert record.status == :created
     assert record.receipt_acknowledged
@@ -244,7 +244,7 @@ defmodule Sigma.Agent.SubagentUpstreamContractTest do
     assert created_record.attempt_id == accepted.attempt_id
     assert rejected_record.receipt_acknowledged
     assert created_record.receipt_acknowledged
-    assert is_binary(Jason.encode!([rejected_record, created_record]))
+    assert is_binary(Formata.JSON.encode!([rejected_record, created_record]))
   end
 
   @tag :capture_log
@@ -331,7 +331,7 @@ defmodule Sigma.Agent.SubagentUpstreamContractTest do
     assert started.revision == created.revision + 2
     assert {:ok, snapshot} = MultiAgent.snapshot(runtime)
     assert snapshot.revision == started.revision
-    assert is_binary(Jason.encode!(snapshot))
+    assert is_binary(Formata.JSON.encode!(snapshot))
 
     finish(provider)
     assert_receive {:codex_collaboration, %{type: :settled, agent: %{run_id: ^run_id}}}, 5_000
@@ -572,7 +572,7 @@ defmodule Sigma.Agent.SubagentUpstreamContractTest do
 
   defp persist(path, record) do
     {:ok, file} = File.open(path, [:write, :binary, :sync])
-    :ok = IO.binwrite(file, Jason.encode!(record))
+    :ok = IO.binwrite(file, Formata.JSON.encode!(record))
     File.close(file)
   end
 

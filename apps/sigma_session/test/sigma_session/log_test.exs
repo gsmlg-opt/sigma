@@ -702,7 +702,7 @@ defmodule Sigma.Session.LogTest do
     }
 
     File.write!(path, [
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "type" => "session",
         "version" => 3,
         "id" => "session",

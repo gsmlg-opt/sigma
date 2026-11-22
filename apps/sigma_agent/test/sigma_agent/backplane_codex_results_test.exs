@@ -58,7 +58,7 @@ defmodule Sigma.Agent.BackplaneCodexResultsTest do
     assert text =~ "outside workspace"
     assert message.metadata.structured_result["error"] == json_value(Error.to_map(error))
     refute text =~ inspect(self())
-    assert {:ok, _} = Jason.encode(message.metadata)
+    assert {:ok, _} = Sigma.Ai.JSON.encode(message.metadata)
   end
 
   test "nonserializable sibling metadata cannot leak process handles" do
@@ -92,5 +92,5 @@ defmodule Sigma.Agent.BackplaneCodexResultsTest do
     message
   end
 
-  defp json_value(value), do: value |> Jason.encode!() |> Jason.decode!()
+  defp json_value(value), do: value |> Formata.JSON.encode!() |> Formata.JSON.decode!()
 end

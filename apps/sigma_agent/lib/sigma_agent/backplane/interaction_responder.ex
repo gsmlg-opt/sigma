@@ -200,7 +200,8 @@ defmodule Sigma.Agent.Backplane.InteractionResponder do
        )
        when is_binary(id) and is_binary(call_id) and call_id != "" and is_binary(name) and
               name != "" and (is_map(input) or is_binary(input)),
-       do: match?({:ok, _}, Jason.encode(request)) and current_request?(conversation, event)
+       do:
+         match?({:ok, _}, Sigma.Ai.JSON.encode(request)) and current_request?(conversation, event)
 
   defp current_event?(
          conversation,
@@ -211,7 +212,7 @@ defmodule Sigma.Agent.Backplane.InteractionResponder do
          } = event
        )
        when is_binary(id) and id != "" do
-    match?({:ok, _}, Jason.encode(request)) and current_request?(conversation, event)
+    match?({:ok, _}, Sigma.Ai.JSON.encode(request)) and current_request?(conversation, event)
   end
 
   # Runtime's independent approval is never passed to Sigma's policy resolver.

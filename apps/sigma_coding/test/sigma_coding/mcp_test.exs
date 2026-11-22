@@ -286,7 +286,7 @@ defmodule Sigma.Coding.MCPTest do
   defp serve_legacy_http(listener) do
     {:ok, socket} = :gen_tcp.accept(listener)
     {:ok, request} = read_http_request(socket, "")
-    message = Jason.decode!(request)
+    message = Formata.JSON.decode!(request)
     send_http_response(socket, legacy_http_response(message))
     :gen_tcp.close(socket)
     serve_legacy_http(listener)
@@ -360,7 +360,7 @@ defmodule Sigma.Coding.MCPTest do
   end
 
   defp send_http_response(socket, {status, extra_headers, payload}) do
-    body = if payload, do: Jason.encode!(payload), else: ""
+    body = if payload, do: Formata.JSON.encode!(payload), else: ""
 
     headers =
       [

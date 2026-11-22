@@ -131,8 +131,8 @@ defmodule Sigma.Agent.BackplaneHistoryFunctionalTest do
 
     refute message.is_error
     assert [%{type: :text, text: json}, %{type: :image, data: @png}] = message.content
-    assert Jason.decode!(json)["item"]["id"] == item.id
-    assert Jason.decode!(json)["content"] == "́🙂"
+    assert Formata.JSON.decode!(json)["item"]["id"] == item.id
+    assert Formata.JSON.decode!(json)["content"] == "́🙂"
 
     assert message.metadata.structured_result["images"] == [
              %{"type" => "image", "data" => @png, "mime_type" => "image/png"}
@@ -196,10 +196,11 @@ defmodule Sigma.Agent.BackplaneHistoryFunctionalTest do
     assert note.id == id <> ":call:2"
     assert {:ok, %{content: encoded}} = read(c, note)
 
-    assert String.replace_prefix(encoded, "notes::write_file\n", "") |> Jason.decode!() == %{
-             "path" => "a.md",
-             "text" => "完整"
-           }
+    assert String.replace_prefix(encoded, "notes::write_file\n", "") |> Formata.JSON.decode!() ==
+             %{
+               "path" => "a.md",
+               "text" => "完整"
+             }
   end
 
   test "selected retry ancestry excludes sibling items and persists after its first append", c do

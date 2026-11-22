@@ -155,9 +155,12 @@ defmodule Sigma.Coding.Terminal.Native do
 
   @impl true
   def handle_info({port, {:data, {:eol, line}}}, %{port: port} = state) do
-    case Jason.decode(line) do
-      {:ok, event} -> handle_helper_event(event, state)
-      {:error, error} -> fail_protocol(state, {:invalid_helper_event, Exception.message(error)})
+    case Formata.JSON.decode(line) do
+      {:ok, event} ->
+        handle_helper_event(event, state)
+
+      {:error, [error | _]} ->
+        fail_protocol(state, {:invalid_helper_event, Exception.message(error)})
     end
   end
 
@@ -312,7 +315,7 @@ defmodule Sigma.Coding.Terminal.Native do
   defp notify(state, event), do: send(state.owner, {:terminal_backend, self(), event})
 
   defp send_command(%{port: port}, command) do
-    Port.command(port, [Jason.encode_to_iodata!(command), ?\n])
+    Port.command(port, [Formata.JSON.encode_to_iodata!(command), ?\n])
     :ok
   rescue
     ArgumentError -> {:error, :backend_unavailable}

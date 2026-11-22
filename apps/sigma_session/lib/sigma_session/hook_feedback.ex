@@ -63,7 +63,7 @@ defmodule Sigma.Session.HookFeedback do
          true <- valid_item_id?(value["item_id"]),
          true <- value["event_id"] == event_id(value["item_id"], value["fact"]),
          true <- valid_fact?(value),
-         {:ok, encoded} <- Jason.encode(value),
+         {:ok, encoded} <- Sigma.Ai.JSON.encode(value),
          true <- byte_size(encoded) <= @max_event_bytes do
       {:ok, value}
     else
@@ -189,7 +189,7 @@ defmodule Sigma.Session.HookFeedback do
   defp valid_origin?(_), do: false
 
   defp item_id(session_id, origin) do
-    identity = Jason.encode!([session_id | Enum.map(@origin, &origin[&1])])
+    identity = Formata.JSON.encode!([session_id | Enum.map(@origin, &origin[&1])])
     "sigma-async-hook-" <> Base.encode16(:crypto.hash(:sha256, identity), case: :lower)
   end
 

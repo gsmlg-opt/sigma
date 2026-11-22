@@ -60,7 +60,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
 
     response = Path.join(dir, "catalog.json")
     log = Path.join(dir, "registry.jsonl")
-    File.write!(response, Jason.encode!(catalog))
+    File.write!(response, Formata.JSON.encode!(catalog))
     File.write!(log, "")
     python = System.find_executable("python3")
     assert is_binary(python)
@@ -125,7 +125,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
 
     code = """
     const catalog = await tools.list_available_plugins_to_install({});
-    const requested = await tools.request_plugin_install(#{Jason.encode!(arguments("Deno 完整请求\r\n"))});
+    const requested = await tools.request_plugin_install(#{Formata.JSON.encode!(arguments("Deno 完整请求\r\n"))});
     return {catalog, requested};
     """
 
@@ -203,7 +203,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
       install_call!(
         child,
         "exec",
-        "return await tools.request_plugin_install(#{Jason.encode!(arguments("child Deno\r\n完整"))});",
+        "return await tools.request_plugin_install(#{Formata.JSON.encode!(arguments("child Deno\r\n完整"))});",
         c
       )
 
@@ -219,12 +219,12 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
 
   test "catalog failures return an ordinary tool error and a later read succeeds without creating requests",
        c do
-    File.write!(c.response, Jason.encode!(%{"_status" => 503}))
+    File.write!(c.response, Formata.JSON.encode!(%{"_status" => 503}))
     agent = session!(c)
     root = prompt!(agent)
     root = call!(root, @list, %{})
     assert result!(root, @list).is_error
-    File.write!(c.response, Jason.encode!(c.catalog))
+    File.write!(c.response, Formata.JSON.encode!(c.catalog))
     root = call!(root, @list, %{})
     refute result!(root, @list).is_error
     assert data!(root, @list) == expected_catalog(c)
@@ -352,7 +352,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
     assert eventually(fn -> File.exists?(c.requests) end)
     [request] = saved!(c)
     assert Task.yield(pending, 50) == nil
-    File.write!(Path.join(c.dir, "release.json"), Jason.encode!(%{"_status" => 503}))
+    File.write!(Path.join(c.dir, "release.json"), Formata.JSON.encode!(%{"_status" => 503}))
     assert {:error, error} = PluginInstallations.install(c.host, request["id"], :protocol)
     assert {:error, ^error} = Task.await(pending)
     assert {:error, ^error} = PluginResources.request_install(operation.arguments, operation)
@@ -427,8 +427,11 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
 
       {tool, input} =
         case unquote(mode) do
-          :direct -> {@request, args}
-          :deno -> {"exec", "return await tools.request_plugin_install(#{Jason.encode!(args)});"}
+          :direct ->
+            {@request, args}
+
+          :deno ->
+            {"exec", "return await tools.request_plugin_install(#{Formata.JSON.encode!(args)});"}
         end
 
       send_call(root, tool, input)
@@ -512,8 +515,11 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
 
       {tool, input} =
         case unquote(mode) do
-          :direct -> {@request, args}
-          :deno -> {"exec", "return await tools.request_plugin_install(#{Jason.encode!(args)});"}
+          :direct ->
+            {@request, args}
+
+          :deno ->
+            {"exec", "return await tools.request_plugin_install(#{Formata.JSON.encode!(args)});"}
         end
 
       send_call(child, tool, input)
@@ -743,7 +749,10 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
     assert eventually(fn -> not os_process?(first_process) end)
     refute function in names(root)
     {root, ^function} = plugin_function!(root)
-    code = "return await tools[#{Jason.encode!(function)}](#{Jason.encode!(%{value: value})});"
+
+    code =
+      "return await tools[#{Formata.JSON.encode!(function)}](#{Formata.JSON.encode!(%{value: value})});"
+
     root = call!(root, "exec", code)
     refute result!(root, "exec").is_error
 
@@ -860,7 +869,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
     followed_value = "  Deno 后续 e\u0301\r\n"
 
     code =
-      "return await tools[#{Jason.encode!(function)}](#{Jason.encode!(%{value: followed_value})});"
+      "return await tools[#{Formata.JSON.encode!(function)}](#{Formata.JSON.encode!(%{value: followed_value})});"
 
     child = call!(child, "exec", code)
     refute result!(child, "exec").is_error
@@ -976,7 +985,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
     assert {:ok, installed} = PluginResources.install(c.host, request["id"])
     ledger = Path.join(c.config["requestsRoot"], "installations.json")
     pending = installed |> Map.put("status", "installing") |> Map.delete("installed_at")
-    File.write!(ledger, Jason.encode!(%{version: 1, installations: [pending]}))
+    File.write!(ledger, Formata.JSON.encode!(%{version: 1, installations: [pending]}))
     assert :ok = File.rename(installed["root"], installed["root"] <> ".unpublished")
     before = file_state(ledger)
 
@@ -998,7 +1007,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
     request = request!(c)
     release = Path.join(c.dir, "release.json")
     descriptor = File.read!(release)
-    File.write!(release, Jason.encode!(%{"_status" => 503}))
+    File.write!(release, Formata.JSON.encode!(%{"_status" => 503}))
     before = file_state(c.requests)
 
     assert {:error, %{class: :execution_failure, cause: {:http_status, 503}}} =
@@ -1025,7 +1034,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
     ledger = Path.join(c.config["requestsRoot"], "installations.json")
 
     assert [%{"status" => "failed", "failure" => failure}] =
-             Jason.decode!(File.read!(ledger))["installations"]
+             Formata.JSON.decode!(File.read!(ledger))["installations"]
 
     assert failure =~ "enotdir"
     receipt = file_state(ledger)
@@ -1153,7 +1162,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
     ledger = Path.join(c.config["requestsRoot"], "installations.json")
     native_ledger = Path.join(c.config["requestsRoot"], "native-installations.etf")
     installing = installed |> Map.put("status", "installing") |> Map.delete("installed_at")
-    File.write!(ledger, Jason.encode!(%{version: 1, installations: [installing]}))
+    File.write!(ledger, Formata.JSON.encode!(%{version: 1, installations: [installing]}))
     assert :ok = File.rename(installed["root"], installed["root"] <> ".unpublished")
 
     assert {:error, %{class: :unknown_outcome, cause: :enoent}} =
@@ -1288,7 +1297,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
                guardian_path
              ])
 
-    binding = Jason.decode!(binding_json)
+    binding = Formata.JSON.decode!(binding_json)
     guardian_pid = binding["guardian"]["pid"]
     assert binding["target"]["pid"] == child_process["pid"]
     assert binding["target"]["ppid"] == guardian_pid
@@ -1466,7 +1475,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
       Path.join([
         c.config["requestsRoot"],
         "data",
-        Archive.digest(Jason.encode!([c.config["registryUrl"], "plugin-example"])),
+        Archive.digest(Formata.JSON.encode!([c.config["registryUrl"], "plugin-example"])),
         "calls.jsonl"
       ])
 
@@ -1474,13 +1483,13 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
 
     files = %{
       "plugin.json" =>
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "$schema" => "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
           "name" => "example",
           "version" => "1.0.0"
         }),
       "mcp.json" =>
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "$schema" => "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
           "mcpServers" => %{
             "example" => %{
@@ -1503,7 +1512,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
 
     File.write!(
       Path.join(c.dir, "release.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "plugin_id" => "plugin-example",
         "release_id" => Keyword.get(opts, :release_id, "release-example"),
         "artifact_digest" => digest
@@ -1523,7 +1532,8 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
   end
 
   defp json_lines(path),
-    do: path |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    do:
+      path |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
 
   defp plugin_skill?(skill), do: String.starts_with?(skill["reference"], "plugin:")
 
@@ -1728,7 +1738,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
       |> field(:content)
       |> Enum.find(&(field(&1, :type) in [:text, "text"]))
       |> field(:text)
-      |> Jason.decode!()
+      |> Formata.JSON.decode!()
   end
 
   defp expected_catalog(c), do: Map.put(c.catalog, "is_error", false)
@@ -1743,10 +1753,11 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
       "suggest_reason" => reason
     }
 
-  defp saved!(c), do: Jason.decode!(File.read!(c.requests))["requests"]
+  defp saved!(c), do: Formata.JSON.decode!(File.read!(c.requests))["requests"]
 
   defp http_requests(c),
-    do: c.log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    do:
+      c.log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
 
   defp file_state(path) do
     stat = File.stat!(path, time: :posix)

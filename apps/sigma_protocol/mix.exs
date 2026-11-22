@@ -24,7 +24,7 @@ defmodule Sigma.Protocol.MixProject do
   defp deps do
     [
       {:sigma_ai, in_umbrella: true},
-      {:jason, "~> 1.4"}
+      {:formata, "~> 0.3.5"}
     ]
   end
 end

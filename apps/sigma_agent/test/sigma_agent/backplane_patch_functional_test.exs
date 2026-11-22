@@ -82,7 +82,7 @@ defmodule Sigma.Agent.BackplanePatchFunctionalTest do
     patch = fixture_patch!(c.dir, "nested-root")
     agent = session!(c)
     root = prompt!(agent)
-    root = call!(root, "exec", "return await tools.apply_patch(#{Jason.encode!(patch)});")
+    root = call!(root, "exec", "return await tools.apply_patch(#{Formata.JSON.encode!(patch)});")
     result = structured!(root, "exec")
     assert result["status"] == "completed"
 
@@ -125,7 +125,7 @@ defmodule Sigma.Agent.BackplanePatchFunctionalTest do
     assert_effects!(c.dir, "child")
 
     nested_patch = "*** Begin Patch\n*** Add File: child-nested.txt\n+nested 中文\n*** End Patch"
-    code = "return await tools.apply_patch(#{Jason.encode!(nested_patch)});"
+    code = "return await tools.apply_patch(#{Formata.JSON.encode!(nested_patch)});"
     child = call!(child, "exec", code)
     nested = structured!(child, "exec")
 
@@ -296,7 +296,7 @@ defmodule Sigma.Agent.BackplanePatchFunctionalTest do
 
   defp structured!(provider, name) do
     assert [%{type: :text, text: json}] = result!(provider, name).content
-    Jason.decode!(json)
+    Formata.JSON.decode!(json)
   end
 
   defp canonical_result!(agent, name) do

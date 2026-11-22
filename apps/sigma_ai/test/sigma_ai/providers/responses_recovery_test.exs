@@ -323,7 +323,7 @@ defmodule Sigma.Ai.Providers.ResponsesRecoveryTest do
     })
   end
 
-  defp frame(event), do: "data: " <> Jason.encode!(event) <> "\n\n"
+  defp frame(event), do: "data: " <> Formata.JSON.encode!(event) <> "\n\n"
 
   defp created,
     do:
@@ -421,7 +421,7 @@ defmodule Sigma.Ai.Providers.ResponsesRecoveryTest do
           %{
             method: method,
             target: target,
-            body: if(body == "", do: nil, else: Jason.decode!(body))
+            body: if(body == "", do: nil, else: Formata.JSON.decode!(body))
           }
         else
           read_more(socket, bytes)

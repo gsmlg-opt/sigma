@@ -406,12 +406,12 @@ defmodule Sigma.Agent.BackplaneCodexHookContextTest do
           Map.merge(specific, %{"permissionDecision" => "allow", "updatedInput" => plan("final")}),
         else: specific
 
-    output = Jason.encode!(Map.put(controls, "hookSpecificOutput", specific))
+    output = Formata.JSON.encode!(Map.put(controls, "hookSpecificOutput", specific))
     command = "printf '%s' '" <> String.replace(output, "'", "'\\''") <> "'"
 
     assert {:ok, specs} =
              Discovery.parse(
-               Jason.encode!(%{
+               Formata.JSON.encode!(%{
                  "hooks" => %{
                    event => [
                      %{"hooks" => [%{"type" => "command", "command" => command, "timeout" => 2}]}

@@ -286,8 +286,8 @@ defmodule Sigma.Agent.Backplane.HookDelivery do
   defp canonical_message(_, _), do: nil
 
   defp same_content?(content, canonical) do
-    with {:ok, json} <- Jason.encode(content),
-         {:ok, normalized} <- Jason.decode(json),
+    with {:ok, json} <- Sigma.Ai.JSON.encode(content),
+         {:ok, normalized} <- Formata.JSON.decode(json),
          do: normalized == canonical,
          else: (_ -> false)
   end

@@ -46,6 +46,18 @@ defmodule Sigma.Session.Storage.JsonlFileTest do
     assert {:ok, []} = JsonlFile.read(test_file)
   end
 
+  test "an encoding error leaves existing JSONL records intact", %{test_file: path} do
+    original = ~s({"type":"message","content":"你好"}\n)
+    File.write!(path, original)
+
+    for value <- [{:unexpected, 1}, <<255>>] do
+      assert {:error, _reason} = JsonlFile.append(path, %{"value" => value})
+    end
+
+    assert File.read!(path) == original
+    assert {:ok, [%{"content" => "你好"}], []} = JsonlFile.read_with_diagnostics(path)
+  end
+
   test "read_with_diagnostics returns tagged I/O errors", %{test_file: path} do
     File.mkdir!(path)
 
@@ -62,7 +74,7 @@ defmodule Sigma.Session.Storage.JsonlFileTest do
 
   test "read file with empty lines", %{test_file: test_file} do
     entry = %{"type" => "test", "id" => "1"}
-    {:ok, json} = Jason.encode(entry)
+    {:ok, json} = Sigma.Ai.JSON.encode(entry)
     File.write!(test_file, json <> "\n\n" <> json <> "\n")
 
     assert {:ok, entries} = JsonlFile.read(test_file)
@@ -87,10 +99,10 @@ defmodule Sigma.Session.Storage.JsonlFileTest do
     entry2 = %{"type" => "message", "id" => "m1"}
 
     File.write!(path, [
-      Jason.encode!(entry1),
+      Formata.JSON.encode!(entry1),
       "\r\n\r\n",
       "not-valid-json\r\n",
-      Jason.encode!(entry2),
+      Formata.JSON.encode!(entry2),
       "\r\n"
     ])
 
@@ -107,12 +119,12 @@ defmodule Sigma.Session.Storage.JsonlFileTest do
     entry3 = %{"type" => "message", "id" => "m2"}
 
     File.write!(path, [
-      Jason.encode!(entry1),
+      Formata.JSON.encode!(entry1),
       "\n",
-      Jason.encode!(entry2),
+      Formata.JSON.encode!(entry2),
       "\n",
       "not-valid-json\n",
-      Jason.encode!(entry3),
+      Formata.JSON.encode!(entry3),
       "\n",
       "{torn"
     ])

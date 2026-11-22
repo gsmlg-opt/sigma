@@ -185,7 +185,8 @@ defmodule Sigma.Agent.Backplane.NotesResources do
   defp load(path) do
     case File.read(path) do
       {:ok, bytes} ->
-        with {:ok, %{"version" => 1, "files" => files}} when is_map(files) <- Jason.decode(bytes),
+        with {:ok, %{"version" => 1, "files" => files}} when is_map(files) <-
+               Formata.JSON.decode(bytes),
              true <- Enum.all?(files, fn {path, note} -> stored_note?(path, note) end) do
           {:ok, files}
         else
@@ -213,7 +214,7 @@ defmodule Sigma.Agent.Backplane.NotesResources do
   defp stored_note?(_path, _note), do: false
 
   defp save(path, notes) do
-    with {:ok, bytes} <- Jason.encode(%{version: 1, files: notes}),
+    with {:ok, bytes} <- Sigma.Ai.JSON.encode(%{version: 1, files: notes}),
          :ok <- File.mkdir_p(Path.dirname(path)) do
       case FileSystem.write_atomic(path, bytes) do
         :ok ->

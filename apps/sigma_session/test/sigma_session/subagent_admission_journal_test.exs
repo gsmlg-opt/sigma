@@ -92,7 +92,10 @@ defmodule Sigma.Session.SubagentAdmissionJournalTest do
   test "admissions round trip with strict fields, safe metadata and validated facts" do
     assert {:ok, entry} = EntryEncoder.encode({:subagent_admission, intent()}, nil, true)
     assert entry["type"] == "subagent_admission"
-    assert {:ok, decoded} = EntryDecoder.subagent_admission(Jason.decode!(Jason.encode!(entry)))
+
+    assert {:ok, decoded} =
+             EntryDecoder.subagent_admission(Formata.JSON.decode!(Formata.JSON.encode!(entry)))
+
     assert decoded.phase == :intent
     assert decoded.metadata == %{"task" => "inspect", "depth" => 1}
 

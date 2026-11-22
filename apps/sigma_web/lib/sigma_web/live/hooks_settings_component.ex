@@ -333,9 +333,10 @@ defmodule Sigma.Web.HooksSettingsComponent do
   end
 
   def handle_event("format_hooks", _params, socket) do
-    case Jason.decode(socket.assigns.json) do
+    case Formata.JSON.decode(socket.assigns.json) do
       {:ok, data} ->
-        {:noreply, socket |> load_json(Jason.encode!(data, pretty: true)) |> assign(error: nil)}
+        {:noreply,
+         socket |> load_json(Formata.JSON.encode!(data, pretty: true)) |> assign(error: nil)}
 
       {:error, _} ->
         {:noreply, assign(socket, :error, "Cannot format invalid JSON.")}
@@ -403,7 +404,7 @@ defmodule Sigma.Web.HooksSettingsComponent do
             </.dm_table>
           </div>
           <p class="font-medium">Example input</p>
-          <pre data-hook-input-example class="overflow-x-auto rounded-lg bg-surface-container-high text-on-surface p-3 text-xs"><code>{Jason.encode!(@help.input_example, pretty: true)}</code></pre>
+          <pre data-hook-input-example class="overflow-x-auto rounded-lg bg-surface-container-high text-on-surface p-3 text-xs"><code>{Formata.JSON.encode!(@help.input_example, pretty: true)}</code></pre>
         </section>
         <section aria-labelledby={@id <> "-output-title"} class="space-y-3">
           <h3 id={@id <> "-output-title"} class="font-semibold">Output · stdout</h3>
@@ -432,7 +433,7 @@ defmodule Sigma.Web.HooksSettingsComponent do
   end
 
   defp output_example(output) when is_binary(output), do: output
-  defp output_example(output), do: Jason.encode!(output, pretty: true)
+  defp output_example(output), do: Formata.JSON.encode!(output, pretty: true)
 
   defp location(%{"group" => group, "handler" => handler}) do
     with {group, ""} <- Integer.parse(group),
@@ -465,7 +466,7 @@ defmodule Sigma.Web.HooksSettingsComponent do
     end
   end
 
-  defp handler_label(handler), do: command_value(handler) || Jason.encode!(handler)
+  defp handler_label(handler), do: command_value(handler) || Formata.JSON.encode!(handler)
 
   defp timeout(handler, default) do
     case handler["timeout"] || handler["timeoutSec"] || handler["timeout_sec"] do

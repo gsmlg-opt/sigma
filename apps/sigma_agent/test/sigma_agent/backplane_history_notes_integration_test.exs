@@ -454,7 +454,7 @@ defmodule Sigma.Agent.BackplaneHistoryNotesIntegrationTest do
     root = call!(root, "history::read_item", item_arguments(item))
     read = result!(root, "history::read_item")
     assert [%{type: :text, text: json}, ^image] = read.content
-    model_result = Jason.decode!(json)
+    model_result = Formata.JSON.decode!(json)
     assert model_result["content"] == text
     assert model_result["item"]["id"] == item["id"]
     assert model_result["truncated"] == false
@@ -599,7 +599,7 @@ defmodule Sigma.Agent.BackplaneHistoryNotesIntegrationTest do
 
   defp structured!(provider, name) do
     assert [%{type: :text, text: json}] = result!(provider, name).content
-    Jason.decode!(json)
+    Formata.JSON.decode!(json)
   end
 
   defp canonical_result!(agent, name) do

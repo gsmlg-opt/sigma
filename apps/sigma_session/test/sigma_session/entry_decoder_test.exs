@@ -25,7 +25,7 @@ defmodule Sigma.Session.EntryDecoderTest do
         })
 
       assert {:ok, entry} = EntryEncoder.encode({:message_end, message}, "previous", true)
-      wire_entry = entry |> Jason.encode!() |> Jason.decode!()
+      wire_entry = entry |> Formata.JSON.encode!() |> Formata.JSON.decode!()
       assert {:ok, replayed} = EntryDecoder.message(wire_entry)
       assert replayed.content == message.content
       assert replayed.stop_reason == :tool_use
@@ -90,7 +90,10 @@ defmodule Sigma.Session.EntryDecoderTest do
       })
 
     assert {:ok, entry} = EntryEncoder.encode({:message_end, message}, nil, true)
-    assert {:ok, replayed} = entry |> Jason.encode!() |> Jason.decode!() |> EntryDecoder.message()
+
+    assert {:ok, replayed} =
+             entry |> Formata.JSON.encode!() |> Formata.JSON.decode!() |> EntryDecoder.message()
+
     assert replayed.content == message.content
 
     image = %{type: :image, data: Base.encode64(<<137, 80, 78, 71>>), mime_type: "image/png"}
@@ -105,7 +108,10 @@ defmodule Sigma.Session.EntryDecoderTest do
       })
 
     assert {:ok, entry} = EntryEncoder.encode({:message_end, result}, entry["id"], true)
-    assert {:ok, replayed} = entry |> Jason.encode!() |> Jason.decode!() |> EntryDecoder.message()
+
+    assert {:ok, replayed} =
+             entry |> Formata.JSON.encode!() |> Formata.JSON.decode!() |> EntryDecoder.message()
+
     assert replayed.content == [image]
     assert replayed.metadata["structured_result"]["detail"] == "original"
   end
@@ -412,7 +418,10 @@ defmodule Sigma.Session.EntryDecoderTest do
         assert {:ok, entry} = EntryEncoder.encode({:message_end, message}, nil, true)
 
         assert {:ok, decoded} =
-                 entry |> Jason.encode!() |> Jason.decode!() |> EntryDecoder.message()
+                 entry
+                 |> Formata.JSON.encode!()
+                 |> Formata.JSON.decode!()
+                 |> EntryDecoder.message()
 
         assert decoded.usage ==
                  Map.put(usage, :provenance, %{

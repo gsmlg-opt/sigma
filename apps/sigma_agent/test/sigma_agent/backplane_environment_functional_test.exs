@@ -167,7 +167,7 @@ defmodule Sigma.Agent.BackplaneEnvironmentFunctionalTest do
       call!(
         second,
         "exec",
-        "return await tools.wait_for_environment(#{Jason.encode!(%{environment_id: environment["environment_id"]})});"
+        "return await tools.wait_for_environment(#{Formata.JSON.encode!(%{environment_id: environment["environment_id"]})});"
       )
 
     result = result!(nested, "exec")
@@ -297,7 +297,7 @@ defmodule Sigma.Agent.BackplaneEnvironmentFunctionalTest do
       call!(
         child,
         "exec",
-        "return await tools.wait_for_environment(#{Jason.encode!(%{environment_id: child_environment["environment_id"]})});"
+        "return await tools.wait_for_environment(#{Formata.JSON.encode!(%{environment_id: child_environment["environment_id"]})});"
       )
 
     nested = result!(child, "exec")
@@ -392,7 +392,7 @@ defmodule Sigma.Agent.BackplaneEnvironmentFunctionalTest do
     assert result, "missing #{name} in next Provider input"
     refute result.is_error
     assert [%{type: :text, text: json}] = result.content
-    Jason.decode!(json)
+    Formata.JSON.decode!(json)
   end
 
   defp saved_result(messages, name) do
@@ -404,7 +404,7 @@ defmodule Sigma.Agent.BackplaneEnvironmentFunctionalTest do
   defp environment!(provider) do
     text = Enum.map_join(provider.params.context.system, "\n", & &1.text)
     assert [_, json] = Regex.run(~r/<environment_context>\n(.*?)\n<\/environment_context>/s, text)
-    Jason.decode!(json)
+    Formata.JSON.decode!(json)
   end
 
   defp names(provider), do: Enum.map(provider.params.context.tools, & &1.name)

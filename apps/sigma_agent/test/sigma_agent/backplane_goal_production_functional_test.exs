@@ -270,7 +270,7 @@ defmodule Sigma.Agent.BackplaneGoalProductionFunctionalTest do
 
     assert nested_result
     assert [%{type: :text, text: json}] = nested_result.content
-    assert Jason.decode!(json) == nested
+    assert Formata.JSON.decode!(json) == nested
     refute_receive {:goal_provider, _, _}, 100
   end
 
@@ -491,7 +491,7 @@ defmodule Sigma.Agent.BackplaneGoalProductionFunctionalTest do
   defp structured!(provider, name) do
     result = result!(provider, name)
     assert [%{type: :text, text: json}] = result.content
-    Jason.decode!(json)
+    Formata.JSON.decode!(json)
   end
 
   defp names(provider), do: Enum.map(provider.params.context.tools, & &1.name)

@@ -151,7 +151,7 @@ defmodule Sigma.Protocol.AsyncInteractions do
     with true <- value["version"] == 1 and value["fact"] in @facts,
          true <- Enum.all?(~w(event_id item_id session_id), &text?(value[&1], 512)),
          true <- valid_fact?(value),
-         {:ok, encoded} <- Jason.encode(value),
+         {:ok, encoded} <- Sigma.Ai.JSON.encode(value),
          true <- byte_size(encoded) <= event_limit(value) do
       {:ok, value}
     else
@@ -402,7 +402,7 @@ defmodule Sigma.Protocol.AsyncInteractions do
     texts = Enum.map(answers, & &1["answer"])
 
     Enum.reduce(texts, 0, &(byte_size(&1) + &2)) <= @max_answer_bytes and
-      byte_size(Jason.encode!(texts)) <= @max_bytes
+      byte_size(Formata.JSON.encode!(texts)) <= @max_bytes
   end
 
   defp bounded_content(text) do
@@ -442,5 +442,5 @@ defmodule Sigma.Protocol.AsyncInteractions do
         String.trim(text) != ""
 
   defp digest(value),
-    do: :crypto.hash(:sha256, Jason.encode!(value)) |> Base.url_encode64(padding: false)
+    do: :crypto.hash(:sha256, Formata.JSON.encode!(value)) |> Base.url_encode64(padding: false)
 end

@@ -478,7 +478,7 @@ defmodule Sigma.Agent.BackplaneRootRetirementFunctionalTest do
 
   defp value!(result) do
     assert [%{type: :text, text: json}] = result.content
-    Jason.decode!(json)
+    Formata.JSON.decode!(json)
   end
 
   defp store!(path) do
@@ -538,7 +538,7 @@ defmodule Sigma.Agent.BackplaneRootRetirementFunctionalTest do
 
   defp end_payloads(c) do
     case File.read(c.end_path) do
-      {:ok, text} -> text |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+      {:ok, text} -> text |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
       {:error, :enoent} -> []
     end
   end

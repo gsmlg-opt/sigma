@@ -47,7 +47,7 @@ defmodule Sigma.Agent.BackplaneMcpStructuredFunctionalTest do
     path = Path.join(dir, "root.jsonl")
     payload = payload()
     File.write!(fixture, fixture())
-    File.write!(payload_path, Jason.encode!(payload))
+    File.write!(payload_path, Formata.JSON.encode!(payload))
     File.write!(log, "")
 
     assert {:ok, handle} =
@@ -315,7 +315,7 @@ defmodule Sigma.Agent.BackplaneMcpStructuredFunctionalTest do
     assert %{"failed" => failed, "recovered" => recovered} = nested["value"]
     assert failed["is_error"] == true
     assert [%{"type" => "text", "text" => json}] = failed["content"]
-    assert {:ok, ^payload} = Jason.decode(json)
+    assert {:ok, ^payload} = Formata.JSON.decode(json)
     assert failed["details"] == envelope(payload, "error")
     assert recovered["is_error"] == false
 
@@ -364,7 +364,9 @@ defmodule Sigma.Agent.BackplaneMcpStructuredFunctionalTest do
     assert File.stat!(path, time: :posix).mtime == journal_stat.mtime
     assert File.stat!(log, time: :posix).mtime == requests_stat.mtime
 
-    requests = requests_before |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    requests =
+      requests_before |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
+
     assert Enum.count(requests, &(&1["method"] == "initialize")) == 1
     calls = Enum.filter(requests, &(&1["method"] == "tools/call"))
 
@@ -397,14 +399,14 @@ defmodule Sigma.Agent.BackplaneMcpStructuredFunctionalTest do
   end
 
   defp assert_unknown_content!(content, payload) do
-    normalized = content |> Jason.encode!() |> Jason.decode!()
+    normalized = content |> Formata.JSON.encode!() |> Formata.JSON.decode!()
     assert [plain, resource, link, future] = normalized
     assert plain == %{"type" => "text", "text" => "ordinary sibling 中文\r\n  "}
     [_plain | expected] = unknown_blocks(payload)
 
     for {actual, original} <- Enum.zip([resource, link, future], expected) do
       assert %{"type" => "text", "text" => json} = actual
-      assert {:ok, ^original} = Jason.decode(json)
+      assert {:ok, ^original} = Formata.JSON.decode(json)
     end
   end
 
@@ -436,7 +438,9 @@ defmodule Sigma.Agent.BackplaneMcpStructuredFunctionalTest do
     assert File.stat!(path, time: :posix).mtime == journal_stat.mtime
     assert File.stat!(log, time: :posix).mtime == requests_stat.mtime
 
-    requests = requests_before |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    requests =
+      requests_before |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
+
     assert Enum.count(requests, &(&1["method"] == "initialize")) == 1
     calls = Enum.filter(requests, &(&1["method"] == "tools/call"))
 
@@ -496,7 +500,7 @@ defmodule Sigma.Agent.BackplaneMcpStructuredFunctionalTest do
     value = nested["value"]
     assert value["is_error"] == false
     assert [%{"type" => "text", "text" => json}] = value["content"]
-    assert {:ok, ^payload} = Jason.decode(json)
+    assert {:ok, ^payload} = Formata.JSON.decode(json)
     assert value["details"] == envelope(payload, "missing")
 
     provider = call!(provider, @tool, %{"mode" => "error"})
@@ -513,7 +517,7 @@ defmodule Sigma.Agent.BackplaneMcpStructuredFunctionalTest do
   defp assert_direct_result!(result, payload, mode) do
     assert result.is_error == (mode == "error")
     assert [%{type: :text, text: json}] = result.content
-    assert {:ok, ^payload} = Jason.decode(json)
+    assert {:ok, ^payload} = Formata.JSON.decode(json)
   end
 
   defp assert_previous_result!(provider, previous) do
@@ -551,7 +555,7 @@ defmodule Sigma.Agent.BackplaneMcpStructuredFunctionalTest do
     assert nested
     assert structured!(nested)["value"]["details"] == envelope(payload, "missing")
     assert [%{"text" => json}] = structured!(nested)["value"]["content"]
-    assert {:ok, ^payload} = Jason.decode(json)
+    assert {:ok, ^payload} = Formata.JSON.decode(json)
 
     assert File.read!(path) == journal_before
     assert File.read!(log) == requests_before
@@ -560,7 +564,9 @@ defmodule Sigma.Agent.BackplaneMcpStructuredFunctionalTest do
   end
 
   defp assert_calls!(log) do
-    requests = log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    requests =
+      log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
+
     assert Enum.count(requests, &(&1["method"] == "initialize")) == 1
     calls = Enum.filter(requests, &(&1["method"] == "tools/call"))
 
@@ -664,7 +670,7 @@ defmodule Sigma.Agent.BackplaneMcpStructuredFunctionalTest do
     case metadata[:structured_result] || metadata["structured_result"] do
       nil ->
         assert [%{type: :text, text: json}] = result.content
-        Jason.decode!(json)
+        Formata.JSON.decode!(json)
 
       value ->
         value

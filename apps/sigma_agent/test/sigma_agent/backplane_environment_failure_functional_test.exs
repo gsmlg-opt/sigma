@@ -92,7 +92,7 @@ defmodule Sigma.Agent.BackplaneEnvironmentFailureFunctionalTest do
     {failed, original} = failed_startup!()
 
     code = """
-    const failed = await tools.wait_for_environment({environment_id: #{Jason.encode!(failed.environment_id)}});
+    const failed = await tools.wait_for_environment({environment_id: #{Formata.JSON.encode!(failed.environment_id)}});
     const plan = await tools.update_plan({plan: [{step: "Continue inside Deno", status: "completed"}]});
     return {failed, plan};
     """
@@ -175,7 +175,7 @@ defmodule Sigma.Agent.BackplaneEnvironmentFailureFunctionalTest do
   defp assert_persisted!(dir, id, messages, result, is_error) do
     [message] = Provider.normalize_messages([result])
     assert message.is_error == is_error
-    expected = result.result |> Jason.encode!() |> Jason.decode!()
+    expected = result.result |> Formata.JSON.encode!() |> Formata.JSON.decode!()
     assert message.metadata.structured_result == expected
     path = Path.join(dir, id <> ".jsonl")
     writer = start_supervised!({Writer, storage_id: path, session_id: id, cwd: dir})
@@ -207,7 +207,7 @@ defmodule Sigma.Agent.BackplaneEnvironmentFailureFunctionalTest do
   end
 
   defp assert_model_failure(result, failed, original) do
-    canonical = result |> Jason.encode!() |> Jason.decode!()
+    canonical = result |> Formata.JSON.encode!() |> Formata.JSON.decode!()
 
     assert %{
              "is_error" => true,
@@ -251,6 +251,6 @@ defmodule Sigma.Agent.BackplaneEnvironmentFailureFunctionalTest do
   defp assert_failure(result, original) do
     assert {:error, %Error{} = error} = result
     refute error.class == :timeout
-    assert Jason.encode!(Error.to_map(error)) =~ original.message
+    assert Formata.JSON.encode!(Error.to_map(error)) =~ original.message
   end
 end

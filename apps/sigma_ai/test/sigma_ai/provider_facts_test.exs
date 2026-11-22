@@ -85,7 +85,7 @@ defmodule Sigma.Ai.ProviderFactsTest do
 
     assert usage.provenance == %{source: :provider, input_tokens: :input_tokens}
 
-    encoded = usage |> ProviderUsage.to_fact() |> Jason.encode!()
+    encoded = usage |> ProviderUsage.to_fact() |> Formata.JSON.encode!()
     refute encoded =~ secret
     refute encoded =~ "authorization"
     refute encoded =~ "headers"

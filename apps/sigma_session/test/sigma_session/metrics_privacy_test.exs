@@ -34,7 +34,7 @@ defmodule Sigma.Session.MetricsPrivacyTest do
     refute Map.has_key?(entry["data"], "api_key")
     refute Map.has_key?(entry["data"], "raw_payload")
 
-    json = Jason.encode!(entry)
+    json = Formata.JSON.encode!(entry)
     refute json =~ secret
     refute json =~ "authorization"
     refute json =~ "raw_payload"

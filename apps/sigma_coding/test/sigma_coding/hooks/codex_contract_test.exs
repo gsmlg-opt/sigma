@@ -35,7 +35,7 @@ defmodule Sigma.Coding.Hooks.CodexContractTest do
     hooks =
       Map.new(@names, &{&1, [%{"hooks" => [%{"type" => "command", "command" => "echo ok"}]}]})
 
-    assert {:ok, specs} = Discovery.parse(Jason.encode!(%{"hooks" => hooks}), :pi)
+    assert {:ok, specs} = Discovery.parse(Formata.JSON.encode!(%{"hooks" => hooks}), :pi)
     assert length(specs) == 14
 
     for spec <- specs do
@@ -95,7 +95,7 @@ defmodule Sigma.Coding.Hooks.CodexContractTest do
 
   test "invalid regex does not become match-all; ignored event matchers remain ignored" do
     json =
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "hooks" => %{"PreToolUse" => [%{"matcher" => "[", "hooks" => [%{"command" => "true"}]}]}
       })
 
@@ -381,11 +381,15 @@ defmodule Sigma.Coding.Hooks.CodexContractTest do
              Outcome.evaluate(:post_tool_use, %{exit: 0, stdout: "diagnostic", stderr: ""}, :pi)
   end
 
-  defp raw(output), do: %{exit: 0, stdout: Jason.encode!(output), stderr: ""}
+  defp raw(output), do: %{exit: 0, stdout: Formata.JSON.encode!(output), stderr: ""}
 
   defp spec(event, matcher),
     do: %Spec{event: event, matcher: matcher, handler: nil, origin: nil, dialect: :pi}
 
   defp parse(name, handler),
-    do: Discovery.parse(Jason.encode!(%{"hooks" => %{name => [%{"hooks" => [handler]}]}}), :pi)
+    do:
+      Discovery.parse(
+        Formata.JSON.encode!(%{"hooks" => %{name => [%{"hooks" => [handler]}]}}),
+        :pi
+      )
 end

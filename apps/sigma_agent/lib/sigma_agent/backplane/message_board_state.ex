@@ -100,7 +100,7 @@ defmodule Sigma.Agent.Backplane.MessageBoardState do
       "invalid logical invocation identity"
     )
 
-    key = Jason.encode!([host.agent_id, invocation])
+    key = Formata.JSON.encode!([host.agent_id, invocation])
     input = %{"name" => name, "arguments" => receipt_arguments(name, args, path)}
 
     case state["accepted_calls"][key] do
@@ -491,14 +491,14 @@ defmodule Sigma.Agent.Backplane.MessageBoardState do
         else: latest["metadata"]["created_at"]
       )
 
-  defp channel_target(channel), do: Jason.encode!(["channel", channel])
-  defp thread_target(thread), do: Jason.encode!(["thread", thread])
+  defp channel_target(channel), do: Formata.JSON.encode!(["channel", channel])
+  defp thread_target(thread), do: Formata.JSON.encode!(["thread", thread])
   defp page_limit(args), do: min(Map.get(args, "limit", 20), 50)
   defp preview_limit(args), do: min(Map.get(args, "max_chars_per_post", 1000), 20_000)
   defp scaled(value, scale), do: max(div(value, scale), 1)
   defp direction(args), do: if(Map.get(args, "recent_first", true), do: :desc, else: :asc)
   defp fold(text), do: :unicode.characters_to_binary(:string.casefold(text))
-  defp encoded_size(value), do: byte_size(Jason.encode!(value))
+  defp encoded_size(value), do: byte_size(Formata.JSON.encode!(value))
 
   defp validate_arguments(name, args) do
     {required, optional} = @schemas[name]

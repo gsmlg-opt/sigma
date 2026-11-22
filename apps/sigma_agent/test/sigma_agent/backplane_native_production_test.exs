@@ -96,7 +96,7 @@ defmodule Sigma.Agent.BackplaneNativeProductionTest do
     provider =
       call!(provider, "exec", """
       const names = ALL_TOOLS.map(tool => tool.tool_name);
-      const result = await tools.apply_patch(#{Jason.encode!(patch)});
+      const result = await tools.apply_patch(#{Formata.JSON.encode!(patch)});
       return {result, names};
       """)
 
@@ -323,7 +323,7 @@ defmodule Sigma.Agent.BackplaneNativeProductionTest do
         runtime_readonly = True
     with open("sandbox-effect", "w") as output:
         output.write("workspace")
-    print(json.dumps({"home": os.environ.get("HOME"), "outside": os.path.exists(#{Jason.encode!(outside)}), "network": network, "runtime_readonly": runtime_readonly}))
+    print(json.dumps({"home": os.environ.get("HOME"), "outside": os.path.exists(#{Formata.JSON.encode!(outside)}), "network": network, "runtime_readonly": runtime_readonly}))
     """
 
     command = "python3 -c '" <> String.replace(script, "'", "'\"'\"'") <> "'"
@@ -342,16 +342,20 @@ defmodule Sigma.Agent.BackplaneNativeProductionTest do
       "runtime_readonly" => true
     }
 
-    assert Jason.decode!(direct["output"]) == expected
+    assert Formata.JSON.decode!(direct["output"]) == expected
     assert File.read!(Path.join(ctx.dir, "sandbox-effect")) == "workspace"
 
     provider =
-      call!(provider, "exec", "return await tools.exec_command(#{Jason.encode!(arguments)});")
+      call!(
+        provider,
+        "exec",
+        "return await tools.exec_command(#{Formata.JSON.encode!(arguments)});"
+      )
 
     nested = last_result!(agent).metadata.structured_result
     assert nested["status"] == "completed"
     assert nested["value"]["exit_code"] == 0
-    assert Jason.decode!(nested["value"]["output"]) == expected
+    assert Formata.JSON.decode!(nested["value"]["output"]) == expected
     finish!(agent, provider)
   end
 
@@ -449,7 +453,7 @@ defmodule Sigma.Agent.BackplaneNativeProductionTest do
 
     assert eventually(fn ->
              case File.read(post_input) do
-               {:ok, json} -> match?({:ok, %{}}, Jason.decode(json))
+               {:ok, json} -> match?({:ok, %{}}, Formata.JSON.decode(json))
                _ -> false
              end
            end)
@@ -458,7 +462,7 @@ defmodule Sigma.Agent.BackplaneNativeProductionTest do
     assert {:ok, %{run: run}} = Store.load(store, turn_id)
     assert [invocation] = Map.values(run.active_tools)
     assert invocation.arguments == final
-    assert File.read!(post_input) |> Jason.decode!() |> get_in(["tool_input"]) == final
+    assert File.read!(post_input) |> Formata.JSON.decode!() |> get_in(["tool_input"]) == final
     File.write!(post_release, "continue")
     {provider, params} = provider!()
     assert provider_feedback_texts(params.context.messages) == ["before native", "after native"]
@@ -809,7 +813,7 @@ defmodule Sigma.Agent.BackplaneNativeProductionTest do
         response =
           controls
           |> Map.put("hookSpecificOutput", Map.put(output, "hookEventName", event))
-          |> Jason.encode!()
+          |> Formata.JSON.encode!()
 
         command =
           "cat >> " <>
@@ -826,7 +830,7 @@ defmodule Sigma.Agent.BackplaneNativeProductionTest do
          ]}
       end)
 
-    {:ok, specs} = Discovery.parse(Jason.encode!(%{"hooks" => hooks}), :codex)
+    {:ok, specs} = Discovery.parse(Formata.JSON.encode!(%{"hooks" => hooks}), :codex)
     Enum.map(specs, &%{&1 | origin: {:user, "test"}, trusted?: true, dialect: :codex})
   end
 

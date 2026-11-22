@@ -204,7 +204,7 @@ defmodule Sigma.Ai.Providers.CreationSafetyTest do
         "response" => %{"id" => "resp_existing"}
       })
 
-  defp sse(event), do: "data: " <> Jason.encode!(event) <> "\n\n"
+  defp sse(event), do: "data: " <> Formata.JSON.encode!(event) <> "\n\n"
 
   defp respond(socket, status, body, size \\ nil) do
     :gen_tcp.send(socket, [

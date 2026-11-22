@@ -123,7 +123,7 @@ defmodule Sigma.Session.EntryEncoderTest do
              }
            } = entry
 
-    assert :ok = Jason.encode!(entry) |> then(fn _ -> :ok end)
+    assert :ok = Formata.JSON.encode!(entry) |> then(fn _ -> :ok end)
 
     assert {:ok, %{"type" => "metrics", "fact" => "request_started"}} =
              EntryEncoder.encode({:request_started, %{request_id: "req-1"}}, "leaf-1", true)
@@ -141,7 +141,7 @@ defmodule Sigma.Session.EntryEncoderTest do
       {:event_persistence_failed, :runtime,
        {:storage_append_failed,
         %Protocol.UndefinedError{
-          protocol: Jason.Encoder,
+          protocol: JSON.Encoder,
           value: {:storage_append_failed, :enoent},
           description: "not encodable"
         }}}
@@ -159,7 +159,7 @@ defmodule Sigma.Session.EntryEncoderTest do
 
     assert error["__struct__"] == "Elixir.Protocol.UndefinedError"
     assert error["value"] == ["storage_append_failed", "enoent"]
-    assert is_binary(Jason.encode!(entry))
+    assert is_binary(Formata.JSON.encode!(entry))
   end
 
   test "preserves null and boolean metrics values while encoding atom labels" do
@@ -175,14 +175,14 @@ defmodule Sigma.Session.EntryEncoderTest do
                     cancelled: false,
                     values: [nil, true, false, :unknown],
                     result: {:ok, nil, false},
-                    error: %Protocol.UndefinedError{protocol: Jason.Encoder, value: nil}
+                    error: %Protocol.UndefinedError{protocol: JSON.Encoder, value: nil}
                   }
                 }},
                "leaf-1",
                true
              )
 
-    persisted = entry |> Jason.encode!() |> Jason.decode!()
+    persisted = entry |> Formata.JSON.encode!() |> Formata.JSON.decode!()
 
     assert %{
              "status" => "completed",
@@ -192,7 +192,7 @@ defmodule Sigma.Session.EntryEncoderTest do
                "cancelled" => false,
                "values" => [nil, true, false, "unknown"],
                "result" => ["ok", nil, false],
-               "error" => %{"protocol" => "Elixir.Jason.Encoder", "value" => nil}
+               "error" => %{"protocol" => "Elixir.JSON.Encoder", "value" => nil}
              }
            } = persisted["data"]
   end

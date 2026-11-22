@@ -434,7 +434,7 @@ defmodule Sigma.Session.SkillsTest do
 
       File.write!(
         settings_path,
-        Jason.encode!(%{"disabledSkills" => %{"global" => ["global-a"]}})
+        Formata.JSON.encode!(%{"disabledSkills" => %{"global" => ["global-a"]}})
       )
 
       Application.put_env(:sigma_session, :global_skills_dir, Path.join(tmp_dir, "global"))

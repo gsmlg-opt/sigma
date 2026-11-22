@@ -396,7 +396,7 @@ defmodule Sigma.Coding.Hooks.Runner do
       File.chmod!(directory, 0o700)
       stdin_path = Path.join(directory, "stdin.json")
       stderr_path = Path.join(directory, "stderr")
-      File.write!(stdin_path, Jason.encode!(payload))
+      File.write!(stdin_path, Formata.JSON.encode!(payload))
       File.write!(stderr_path, "")
 
       try do
@@ -794,7 +794,7 @@ defmodule Sigma.Coding.Hooks.Runner do
         Regex.replace(pattern, value, fn _match, path ->
           case resolve_path(payload, path) do
             text when is_binary(text) -> text
-            other -> Jason.encode!(other)
+            other -> Formata.JSON.encode!(other)
           end
         end)
     end

@@ -279,7 +279,7 @@ defmodule Sigma.Web.SettingsLiveTest do
 
       File.write!(
         Path.join([tmp_dir, "agent", "settings.json"]),
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "skillSources" => %{
             "remote-one" => %{
               "kind" => "backplane",
@@ -294,7 +294,7 @@ defmodule Sigma.Web.SettingsLiveTest do
 
       File.write!(
         Path.join([tmp_dir, "agent", "auth.json"]),
-        Jason.encode!(%{"remote-token" => %{"type" => "api_key", "key" => "token"}})
+        Formata.JSON.encode!(%{"remote-token" => %{"type" => "api_key", "key" => "token"}})
       )
 
       {:ok, view, html} = live(conn, "/settings/skills")
@@ -447,7 +447,7 @@ defmodule Sigma.Web.SettingsLiveTest do
         }
       })
 
-      saved = Sigma.Session.ConfigManager.mcp_file() |> File.read!() |> Jason.decode!()
+      saved = Sigma.Session.ConfigManager.mcp_file() |> File.read!() |> Formata.JSON.decode!()
       credential_ref = "{{credential:#{credential_id}}}"
 
       assert %{
@@ -534,7 +534,7 @@ defmodule Sigma.Web.SettingsLiveTest do
         }
       })
 
-      saved = Sigma.Session.ConfigManager.mcp_file() |> File.read!() |> Jason.decode!()
+      saved = Sigma.Session.ConfigManager.mcp_file() |> File.read!() |> Formata.JSON.decode!()
 
       assert %{
                "mcpServers" => %{
@@ -570,7 +570,7 @@ defmodule Sigma.Web.SettingsLiveTest do
       |> element("button[phx-click='delete_mcp_server'][phx-value-id='github']")
       |> render_click()
 
-      saved = Sigma.Session.ConfigManager.mcp_file() |> File.read!() |> Jason.decode!()
+      saved = Sigma.Session.ConfigManager.mcp_file() |> File.read!() |> Formata.JSON.decode!()
       assert saved["mcpServers"] == %{}
     end)
   end

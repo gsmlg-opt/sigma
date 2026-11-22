@@ -93,7 +93,7 @@ defmodule Sigma.Agent.Backplane.PlanProjection do
            "explanation" => explanation,
            "plan" => steps
          },
-         {:ok, json} <- Jason.encode(snapshot),
+         {:ok, json} <- Sigma.Ai.JSON.encode(snapshot),
          true <- byte_size(json) <= @max_snapshot_bytes do
       {:ok, snapshot}
     else

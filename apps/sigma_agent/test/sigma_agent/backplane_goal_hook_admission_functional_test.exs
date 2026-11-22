@@ -148,6 +148,6 @@ defmodule Sigma.Agent.BackplaneGoalHookAdmissionFunctionalTest do
     path
     |> File.read!()
     |> String.split("\n", trim: true)
-    |> Enum.map(&Jason.decode!/1)
+    |> Enum.map(&Formata.JSON.decode!/1)
   end
 end

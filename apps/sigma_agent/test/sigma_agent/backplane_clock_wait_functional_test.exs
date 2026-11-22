@@ -403,7 +403,10 @@ defmodule Sigma.Agent.BackplaneClockWaitFunctionalTest do
     assert effect_stat(effect.path) == effect.stat
 
     hooks =
-      c.hook_log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+      c.hook_log
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.map(&Formata.JSON.decode!/1)
 
     assert Enum.count(hooks, &(&1["tool_name"] == "apply_patch")) == 1
     refute Enum.any?(hooks, &(&1["tool_name"] == "clock::sleep"))
@@ -436,7 +439,7 @@ defmodule Sigma.Agent.BackplaneClockWaitFunctionalTest do
     result = result!(next, name)
     refute result.is_error
     assert [%{type: :text, text: json}] = result.content
-    value = Jason.decode!(json)
+    value = Formata.JSON.decode!(json)
     value = if mode == :deno, do: value["value"], else: value
     assert value["current_time"] =~ ~r/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$/
     next

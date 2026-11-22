@@ -41,7 +41,7 @@ defmodule Sigma.Agent.BackplaneResponsesImageFunctionalTest do
     log = Path.join(dir, "mcp.jsonl")
     png = Path.join(dir, "chart.png")
     File.write!(fixture, fixture())
-    File.write!(payload, Jason.encode!(envelope()))
+    File.write!(payload, Formata.JSON.encode!(envelope()))
     File.write!(log, "")
     File.write!(png, Base.decode64!(@png))
 
@@ -278,7 +278,7 @@ defmodule Sigma.Agent.BackplaneResponsesImageFunctionalTest do
       log
       |> File.read!()
       |> String.split("\n", trim: true)
-      |> Enum.map(&Jason.decode!/1)
+      |> Enum.map(&Formata.JSON.decode!/1)
       |> Enum.filter(&(&1["method"] == "tools/call"))
 
     assert length(calls) == count
@@ -304,7 +304,7 @@ defmodule Sigma.Agent.BackplaneResponsesImageFunctionalTest do
     item =
       if is_binary(input),
         do: Map.put(item, "input", input),
-        else: Map.put(item, "arguments", Jason.encode!(input))
+        else: Map.put(item, "arguments", Formata.JSON.encode!(input))
 
     send(provider.http, {:image_response, [terminal([item])]})
   end
@@ -385,14 +385,14 @@ defmodule Sigma.Agent.BackplaneResponsesImageFunctionalTest do
     case metadata[:structured_result] || metadata["structured_result"] do
       nil ->
         assert [%{type: :text, text: json}] = result.content
-        Jason.decode!(json)
+        Formata.JSON.decode!(json)
 
       value ->
         value
     end
   end
 
-  defp json_value(value), do: value |> Jason.encode!() |> Jason.decode!()
+  defp json_value(value), do: value |> Formata.JSON.encode!() |> Formata.JSON.decode!()
 
   defp images do
     for {data, detail} <- [{@png, "auto"}, {@uri, "low"}, {@png, "original"}, {@uri, "high"}] do
@@ -513,11 +513,11 @@ defmodule Sigma.Agent.BackplaneResponsesImageFunctionalTest do
       [headers, body] = String.split(request, "\r\n\r\n", parts: 2)
       [_, path, _] = headers |> String.split("\r\n", parts: 2) |> hd() |> String.split(" ")
       [id, "responses"] = String.split(path, "/", trim: true)
-      send(owner, {:image_http, server, id, self(), Jason.decode!(body)})
+      send(owner, {:image_http, server, id, self(), Formata.JSON.decode!(body)})
 
       receive do
         {:image_response, frames} ->
-          response = Enum.map_join(frames, &("data: " <> Jason.encode!(&1) <> "\n\n"))
+          response = Enum.map_join(frames, &("data: " <> Formata.JSON.encode!(&1) <> "\n\n"))
 
           :ok =
             :gen_tcp.send(socket, [

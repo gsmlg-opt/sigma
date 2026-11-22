@@ -352,7 +352,7 @@ defmodule Sigma.Agent.HooksLifecycleTest do
   end
 
   defp capture_hook(dir, event, output \\ %{}, opts \\ []) do
-    write_hook(dir, event, "printf '%s' #{quote_shell(Jason.encode!(output))}\n", opts)
+    write_hook(dir, event, "printf '%s' #{quote_shell(Formata.JSON.encode!(output))}\n", opts)
   end
 
   defp waiting_hook(dir, event) do
@@ -421,7 +421,7 @@ defmodule Sigma.Agent.HooksLifecycleTest do
 
   defp payloads(dir, event) do
     case File.read(capture_path(dir, event)) do
-      {:ok, bytes} -> bytes |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+      {:ok, bytes} -> bytes |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
       {:error, :enoent} -> []
     end
   end

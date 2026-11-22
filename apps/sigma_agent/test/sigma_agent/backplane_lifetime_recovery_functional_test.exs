@@ -593,7 +593,7 @@ defmodule Sigma.Agent.BackplaneLifetimeRecoveryFunctionalTest do
     [request] =
       c.dir |> Path.join("cold-provider.jsonl") |> File.read!() |> String.split("\n", trim: true)
 
-    assert %{"session_id" => @session, "turn_id" => turn_id} = Jason.decode!(request)
+    assert %{"session_id" => @session, "turn_id" => turn_id} = Formata.JSON.decode!(request)
     refute turn_id == original.run.run_id
   end
 

@@ -323,7 +323,7 @@ defmodule Sigma.Web.SessionChannelTest do
     metadata =
       Path.join(context.sessions_dir, session_id <> ".meta.json")
       |> File.read!()
-      |> Jason.decode!()
+      |> Formata.JSON.decode!()
 
     assert metadata["context_limit"] == 131_072
     agent = Sigma.Agent.Runtime.lookup(context.repo, session_id, :agent)
@@ -588,12 +588,12 @@ defmodule Sigma.Web.SessionChannelTest do
 
     File.write!(
       Path.join(agent_dir, "settings.json"),
-      Jason.encode!(%{"defaultProvider" => "mock", "defaultModel" => "mock-model"})
+      Formata.JSON.encode!(%{"defaultProvider" => "mock", "defaultModel" => "mock-model"})
     )
 
     File.write!(
       Path.join(agent_dir, "models.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "providers" => %{
           "mock" => %{
             "name" => "Mock",

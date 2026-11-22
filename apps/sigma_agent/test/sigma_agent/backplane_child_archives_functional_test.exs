@@ -470,7 +470,7 @@ defmodule Sigma.Agent.BackplaneChildArchivesFunctionalTest do
 
   defp value!(message) do
     assert [%{type: :text, text: json}] = message.content
-    Jason.decode!(json)
+    Formata.JSON.decode!(json)
   end
 
   defp options(repo, path),

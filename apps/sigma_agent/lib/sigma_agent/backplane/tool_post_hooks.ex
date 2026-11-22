@@ -213,9 +213,9 @@ defmodule Sigma.Agent.Backplane.ToolPostHooks do
 
   defp json_response(result) do
     with true <- plain_json?(result, @max_depth),
-         {:ok, json} <- Jason.encode(result),
+         {:ok, json} <- Sigma.Ai.JSON.encode(result),
          true <- byte_size(json) <= @max_response_bytes,
-         {:ok, response} <- Jason.decode(json) do
+         {:ok, response} <- Formata.JSON.decode(json) do
       {:ok, response}
     else
       _ ->

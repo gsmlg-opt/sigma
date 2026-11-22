@@ -36,7 +36,7 @@ defmodule Sigma.Session.Skills.RemoteAdapterTest do
        %{
          status: 200,
          body:
-           Jason.encode!(%{
+           Formata.JSON.encode!(%{
              "protocol_version" => "1",
              "data" => [
                %{
@@ -103,7 +103,7 @@ defmodule Sigma.Session.Skills.RemoteAdapterTest do
 
       case uri.path do
         "/skill-protocol/v1/resolve" ->
-          {:ok, %{status: 200, body: Jason.encode!(fixture.manifest)}}
+          {:ok, %{status: 200, body: Formata.JSON.encode!(fixture.manifest)}}
 
         "/skill-protocol/v1/artifact" ->
           {:ok, %{status: 200, body: fixture.archive}}
@@ -138,9 +138,9 @@ defmodule Sigma.Session.Skills.RemoteAdapterTest do
     assert_receive {:request, "/skill-protocol/v1/artifact"}
 
     settings_path = Path.join([tmp_dir, "agent", "settings.json"])
-    settings = settings_path |> File.read!() |> Jason.decode!()
+    settings = settings_path |> File.read!() |> Formata.JSON.decode!()
     offline = put_in(settings, ["skillSources", "remote-one", "offline"], true)
-    File.write!(settings_path, Jason.encode!(offline))
+    File.write!(settings_path, Formata.JSON.encode!(offline))
 
     Application.put_env(:sigma_session, :remote_skill_source_options,
       transport: fn _request -> flunk("explicit offline preparation must not use network") end,
@@ -162,7 +162,7 @@ defmodule Sigma.Session.Skills.RemoteAdapterTest do
 
     File.write!(
       Path.join([tmp_dir, "agent", "models.json"]),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "providers" => %{
           "bp" => %{
             "kind" => "backplane",
@@ -188,7 +188,8 @@ defmodule Sigma.Session.Skills.RemoteAdapterTest do
       {:ok,
        %{
          status: 200,
-         body: Jason.encode!(%{"protocol_version" => "1", "data" => [], "next_cursor" => nil})
+         body:
+           Formata.JSON.encode!(%{"protocol_version" => "1", "data" => [], "next_cursor" => nil})
        }}
     end
 
@@ -244,7 +245,7 @@ defmodule Sigma.Session.Skills.RemoteAdapterTest do
 
     File.write!(
       Path.join(agent_dir, "settings.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "skillSources" => %{
           "remote-one" => %{
             "kind" => "backplane",
@@ -259,7 +260,7 @@ defmodule Sigma.Session.Skills.RemoteAdapterTest do
 
     File.write!(
       Path.join(agent_dir, "auth.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "remote-token" => %{"type" => "api_key", "key" => "test-secret"}
       })
     )

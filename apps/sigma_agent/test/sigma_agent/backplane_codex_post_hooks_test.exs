@@ -84,7 +84,7 @@ defmodule Sigma.Agent.BackplaneCodexPostHooksTest do
     assert payload["tool_use_id"] == "post-call"
 
     assert payload["tool_response"] ==
-             Jason.decode!(Jason.encode!(Map.delete(tool.result, :is_error)))
+             Formata.JSON.decode!(Formata.JSON.encode!(Map.delete(tool.result, :is_error)))
 
     assert {:ok, persisted} = Store.load(run.store, run.id)
     assert persisted.run.state == :completed
@@ -102,7 +102,7 @@ defmodule Sigma.Agent.BackplaneCodexPostHooksTest do
     assert payload["tool_input"] == raw
 
     assert payload["tool_response"] ==
-             Jason.decode!(Jason.encode!(Map.delete(tool.result, :is_error)))
+             Formata.JSON.decode!(Formata.JSON.encode!(Map.delete(tool.result, :is_error)))
   end
 
   test "decorated Code Mode retains Runtime callbacks and executes a real nested native plan", %{
@@ -200,7 +200,10 @@ defmodule Sigma.Agent.BackplaneCodexPostHooksTest do
            ]
 
     assert {:ok, entry} = EntryEncoder.encode({:message_end, projected}, nil, true)
-    assert {:ok, restored} = entry |> Jason.encode!() |> Jason.decode!() |> EntryDecoder.message()
+
+    assert {:ok, restored} =
+             entry |> Formata.JSON.encode!() |> Formata.JSON.decode!() |> EntryDecoder.message()
+
     assert restored.content == projected.content
     assert restored.metadata["structured_result"] == projected.metadata.structured_result
     assert {:ok, persisted} = Store.load(run.store, run.id)
@@ -468,7 +471,7 @@ defmodule Sigma.Agent.BackplaneCodexPostHooksTest do
 
     {:ok, specs} =
       Discovery.parse(
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "hooks" => %{
             "PostToolUse" => [
               %{
@@ -599,11 +602,11 @@ defmodule Sigma.Agent.BackplaneCodexPostHooksTest do
         payloads <>
         "'; printf '\\n' >> '" <>
         payloads <>
-        "'; printf '%s' '" <> String.replace(Jason.encode!(output), "'", "'\\''") <> "'"
+        "'; printf '%s' '" <> String.replace(Formata.JSON.encode!(output), "'", "'\\''") <> "'"
 
     {:ok, specs} =
       Discovery.parse(
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "hooks" => %{
             "PostToolUse" => [
               %{"hooks" => [%{"type" => "command", "command" => command, "timeout" => 2}]}
@@ -629,7 +632,7 @@ defmodule Sigma.Agent.BackplaneCodexPostHooksTest do
       Path.join(dir, "hook-payloads.jsonl")
       |> File.read!()
       |> String.split("\n", trim: true)
-      |> Enum.map(&Jason.decode!/1)
+      |> Enum.map(&Formata.JSON.decode!/1)
 
   defp plan(step), do: %{"plan" => [%{"step" => step, "status" => "completed"}]}
   defp patch, do: "*** Begin Patch\n*** Add File: effect.txt\n+中文 {\"raw\":true}\n*** End Patch\n"

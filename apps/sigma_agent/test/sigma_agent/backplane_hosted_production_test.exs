@@ -220,7 +220,7 @@ defmodule Sigma.Agent.BackplaneHostedProductionTest do
     |> transcript_path()
     |> File.read!()
     |> String.split("\n", trim: true)
-    |> Enum.map(&Jason.decode!/1)
+    |> Enum.map(&Formata.JSON.decode!/1)
     |> Enum.filter(&(&1["type"] == "message"))
     |> Enum.map(& &1["message"])
   end
@@ -382,11 +382,11 @@ defmodule Sigma.Agent.BackplaneHostedProductionTest do
           request = receive_request(socket, "")
           [headers, request_body] = String.split(request, "\r\n\r\n", parts: 2)
           [_, path, _] = headers |> String.split("\r\n", parts: 2) |> hd() |> String.split(" ")
-          send(owner, {:hosted_http, server, index, path, Jason.decode!(request_body)})
+          send(owner, {:hosted_http, server, index, path, Formata.JSON.decode!(request_body)})
 
           body =
             Enum.map_join(response_frames(index), fn frame ->
-              "data: " <> Jason.encode!(frame) <> "\n\n"
+              "data: " <> Formata.JSON.encode!(frame) <> "\n\n"
             end)
 
           :ok =

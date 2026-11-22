@@ -350,7 +350,7 @@ defmodule Sigma.Agent.BackplaneChildHookDeliveryTest do
     reject = Path.join(dir, "reject-submission")
 
     output =
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "hookSpecificOutput" => %{
           "hookEventName" => "PostToolUse",
           "additionalContext" => "child hook feedback"
@@ -365,7 +365,7 @@ defmodule Sigma.Agent.BackplaneChildHookDeliveryTest do
 
     {:ok, specs} =
       Discovery.parse(
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "hooks" => %{
             "UserPromptSubmit" => [
               %{"hooks" => [%{"type" => "command", "command" => submit_command, "timeout" => 5}]}
@@ -485,7 +485,7 @@ defmodule Sigma.Agent.BackplaneChildHookDeliveryTest do
     child.submit_path
     |> File.read!()
     |> String.split("\n", trim: true)
-    |> Enum.map(&Jason.decode!/1)
+    |> Enum.map(&Formata.JSON.decode!/1)
   end
 
   defp await!(predicate, attempts \\ 500)

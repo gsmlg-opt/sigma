@@ -20,8 +20,8 @@ defmodule Sigma.Agent.BackplaneChildIOTest do
 
       assert %Message{role: :tool_result, tool_name: ^name, is_error: false} = message
       assert [%{type: :text, text: json}] = message.content
-      expected = result |> Jason.encode!() |> Jason.decode!()
-      assert Jason.decode!(json) == expected
+      expected = result |> Formata.JSON.encode!() |> Formata.JSON.decode!()
+      assert Formata.JSON.decode!(json) == expected
       assert message.metadata.structured_result == expected
     end
   end

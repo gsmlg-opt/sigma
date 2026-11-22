@@ -448,7 +448,7 @@ defmodule Sigma.Web.NewSessionLive do
   end
 
   defp model_option_value(provider_id, model_id) do
-    Jason.encode!(%{"provider_id" => provider_id, "model_id" => model_id})
+    Formata.JSON.encode!(%{"provider_id" => provider_id, "model_id" => model_id})
   end
 
   defp effective_path(assigns) do

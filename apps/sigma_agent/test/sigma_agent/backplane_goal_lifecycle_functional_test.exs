@@ -321,7 +321,10 @@ defmodule Sigma.Agent.BackplaneGoalLifecycleFunctionalTest do
     assert result
     refute result.is_error
     assert [%{type: :text, text: json}] = result.content
-    assert Jason.decode!(json)["goal"] == expected |> Jason.encode!() |> Jason.decode!()
+
+    assert Formata.JSON.decode!(json)["goal"] ==
+             expected |> Formata.JSON.encode!() |> Formata.JSON.decode!()
+
     send(root, {:lifecycle_response, [%{type: :text, text: "Persisted Goal read"}]})
     assert_receive {:agent_end, _}, 8_000
   end

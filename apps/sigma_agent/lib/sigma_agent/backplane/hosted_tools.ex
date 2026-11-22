@@ -59,7 +59,7 @@ defmodule Sigma.Agent.Backplane.HostedTools do
   def observe(event), do: Hosted.observe(__MODULE__, [event])
 
   def observe_hosted(events) do
-    case Jason.encode(events) do
+    case Sigma.Ai.JSON.encode(events) do
       {:ok, bytes} when byte_size(bytes) <= 1_048_576 -> {:ok, %{observed: length(events)}}
       _ -> invalid()
     end
@@ -67,7 +67,7 @@ defmodule Sigma.Agent.Backplane.HostedTools do
 
   defp configure(OpenAIResponses, config) do
     with true <- Enum.all?(Map.keys(config), &(&1 in Map.values(@keys))),
-         {:ok, bytes} when byte_size(bytes) <= 16_384 <- Jason.encode(config),
+         {:ok, bytes} when byte_size(bytes) <= 16_384 <- Sigma.Ai.JSON.encode(config),
          hosted <- %{
            adapter: __MODULE__,
            capabilities: ["web_search"],

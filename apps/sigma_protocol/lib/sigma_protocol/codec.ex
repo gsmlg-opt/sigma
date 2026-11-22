@@ -13,7 +13,7 @@ defmodule Sigma.Protocol.Codec do
 
   def encode(%Envelope{} = envelope) do
     with {:ok, document} <- envelope_document(envelope),
-         {:ok, encoded} <- Jason.encode(document),
+         {:ok, encoded} <- Sigma.Ai.JSON.encode(document),
          true <- byte_size(encoded) <= @max_encoded_bytes do
       {:ok, encoded}
     else
@@ -25,7 +25,7 @@ defmodule Sigma.Protocol.Codec do
   def encode(_envelope), do: {:error, :invalid_envelope}
 
   def decode(encoded) when is_binary(encoded) and byte_size(encoded) <= @max_encoded_bytes do
-    with {:ok, document} when is_map(document) <- Jason.decode(encoded),
+    with {:ok, document} when is_map(document) <- Formata.JSON.decode(encoded),
          :ok <- validate_version(document["version"]),
          {:ok, kind, type} <- validate_type(document["kind"], document["type"]),
          :ok <- validate_required_strings(document),

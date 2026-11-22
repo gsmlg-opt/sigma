@@ -210,12 +210,12 @@ defmodule Sigma.Agent.BackplanePluginSkillsFunctionalTest do
 
     files = %{
       "plugin.json" =>
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "$schema" => "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
           "name" => "example"
         }),
       "mcp.json" =>
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "$schema" => "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
           "mcpServers" => %{
             "example" => %{"type" => "stdio", "command" => "./mcp-server"}

@@ -13,7 +13,7 @@ defmodule Sigma.Protocol.AsyncReplyUploadsTest do
         )
     }
 
-    bytes = Jason.encode!(reply)
+    bytes = Formata.JSON.encode!(reply)
     assert byte_size(bytes) > 65_536
     binding = upload_binding(bytes)
     {utf8_start, _} = :binary.match(bytes, "原")
@@ -45,7 +45,7 @@ defmodule Sigma.Protocol.AsyncReplyUploadsTest do
   end
 
   test "only the next offset or an exact fully contained duplicate is accepted" do
-    bytes = Jason.encode!(%{"text" => "abcdef"})
+    bytes = Formata.JSON.encode!(%{"text" => "abcdef"})
     binding = upload_binding(bytes)
     empty = AsyncReplyUploads.new()
 
@@ -70,7 +70,7 @@ defmodule Sigma.Protocol.AsyncReplyUploadsTest do
   end
 
   test "upload item length and checksum are immutable while command leaf fences may change" do
-    bytes = Jason.encode!(%{"replyId" => "reply", "text" => "Continue"})
+    bytes = Formata.JSON.encode!(%{"replyId" => "reply", "text" => "Continue"})
     binding = upload_binding(bytes)
 
     assert {:ok, state, _} =
@@ -96,7 +96,7 @@ defmodule Sigma.Protocol.AsyncReplyUploadsTest do
   end
 
   test "a bad final checksum never accepts the last chunk or consumes a fresh slot" do
-    bytes = Jason.encode!(%{"replyId" => "reply", "text" => "Continue"})
+    bytes = Formata.JSON.encode!(%{"replyId" => "reply", "text" => "Continue"})
     binding = upload_binding(bytes)
     empty = AsyncReplyUploads.new()
 
@@ -129,7 +129,7 @@ defmodule Sigma.Protocol.AsyncReplyUploadsTest do
   end
 
   test "eight uploads fill capacity until cancellation or fixed expiry releases slots" do
-    bytes = Jason.encode!(%{"text" => "unfinished"})
+    bytes = Formata.JSON.encode!(%{"text" => "unfinished"})
 
     state =
       Enum.reduce(1..8, AsyncReplyUploads.new(), fn index, state ->
@@ -159,7 +159,7 @@ defmodule Sigma.Protocol.AsyncReplyUploadsTest do
   end
 
   test "duplicates appends and commits never extend the first chunk deadline" do
-    bytes = Jason.encode!(%{"text" => "Continue"})
+    bytes = Formata.JSON.encode!(%{"text" => "Continue"})
     binding = upload_binding(bytes)
 
     assert {:ok, state, _} =
@@ -183,7 +183,7 @@ defmodule Sigma.Protocol.AsyncReplyUploadsTest do
   end
 
   test "every operation prunes expired entries even when its request is invalid or missing" do
-    bytes = Jason.encode!(%{"text" => "Continue"})
+    bytes = Formata.JSON.encode!(%{"text" => "Continue"})
     binding = upload_binding(bytes)
 
     assert {:ok, state, _} =
@@ -206,7 +206,7 @@ defmodule Sigma.Protocol.AsyncReplyUploadsTest do
   end
 
   test "cancel is idempotent and needs no current card or leaf fence" do
-    bytes = Jason.encode!(%{"text" => "Continue"})
+    bytes = Formata.JSON.encode!(%{"text" => "Continue"})
     binding = upload_binding(bytes)
 
     assert {:ok, state, _} =
@@ -246,7 +246,7 @@ defmodule Sigma.Protocol.AsyncReplyUploadsTest do
     key = "unknown_upload_json_key_#{System.unique_integer([:positive])}"
     assert_raise ArgumentError, fn -> String.to_existing_atom(key) end
     reply = %{key => %{"text" => "原文\n"}}
-    bytes = Jason.encode!(reply)
+    bytes = Formata.JSON.encode!(reply)
     binding = upload_binding(bytes)
 
     assert {:ok, state, _} =
@@ -276,7 +276,7 @@ defmodule Sigma.Protocol.AsyncReplyUploadsTest do
   end
 
   test "strict command validation rejects malformed types unknown fields and noncanonical base64" do
-    bytes = Jason.encode!(%{"text" => "Continue"})
+    bytes = Formata.JSON.encode!(%{"text" => "Continue"})
     binding = upload_binding(bytes)
     request = chunk(binding, bytes, 0, 1)
     assert :ok = AsyncReplyUploads.validate_request("async_interaction.reply_chunk", request)

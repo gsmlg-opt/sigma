@@ -165,7 +165,7 @@ defmodule Sigma.Agent.BackplaneDiscoveryDiscardFunctionalTest do
     search_result = result!(published, "tool_search")
     refute search_result.is_error
     assert [%{type: :text, text: json}] = search_result.content
-    assert [%{"name" => @tool}] = Jason.decode!(json)["tools"]
+    assert [%{"name" => @tool}] = Formata.JSON.decode!(json)["tools"]
 
     assert published.params.context.catalog_revision >
              after_discard.params.context.catalog_revision
@@ -205,7 +205,7 @@ defmodule Sigma.Agent.BackplaneDiscoveryDiscardFunctionalTest do
     assert inspect(saved_outer.content) =~ "outer discarded"
     refute saved_search.is_error
     assert [%{type: :text, text: saved_json}] = saved_search.content
-    assert [%{"name" => @tool}] = Jason.decode!(saved_json)["tools"]
+    assert [%{"name" => @tool}] = Formata.JSON.decode!(saved_json)["tools"]
     refute saved_mcp.is_error
     assert saved_mcp.content == mcp_result.content
   end
@@ -239,7 +239,7 @@ defmodule Sigma.Agent.BackplaneDiscoveryDiscardFunctionalTest do
   end
 
   defp requests(log),
-    do: log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    do: log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
 
   defp schema do
     %{

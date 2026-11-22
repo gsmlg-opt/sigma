@@ -362,7 +362,7 @@ defmodule Sigma.Agent.BackplanePostHookPresentationFunctionalTest do
       nil ->
         result.content
         |> Enum.map_join("", fn %{type: :text, text: text} -> text end)
-        |> Jason.decode!()
+        |> Formata.JSON.decode!()
 
       value ->
         value
@@ -407,11 +407,11 @@ defmodule Sigma.Agent.BackplanePostHookPresentationFunctionalTest do
         payloads <>
         "; printf '\\n' >> " <>
         payloads <>
-        "; printf '%s' " <> shell_quote(Jason.encode!(output))
+        "; printf '%s' " <> shell_quote(Formata.JSON.encode!(output))
 
     assert {:ok, specs} =
              Discovery.parse(
-               Jason.encode!(%{
+               Formata.JSON.encode!(%{
                  "hooks" => %{
                    "PostToolUse" => [
                      %{

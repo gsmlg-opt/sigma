@@ -619,7 +619,7 @@ defmodule Sigma.Agent.ProtocolAsyncInteractionsTest do
     assert Enum.map(cards, & &1["itemId"]) == Enum.map(snapshot(inbox).items, & &1["item_id"])
     assert hd(cards)["byteLength"] > 65_536
     bytes = paged_card(context, descriptor, "item", 0)
-    assert Jason.decode!(bytes) == hd(snapshot(inbox).items)
+    assert Formata.JSON.decode!(bytes) == hd(snapshot(inbox).items)
     assert Base.encode16(:crypto.hash(:sha256, bytes), case: :lower) == hd(cards)["sha256"]
 
     id = attached.payload["subscriptionId"]

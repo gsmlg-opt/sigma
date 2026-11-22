@@ -365,7 +365,7 @@ defmodule Sigma.Agent.Backplane.CommandHost do
        %{
          invocation
          | executable: state.launcher,
-           arguments: ["--config-json", Jason.encode!(config)],
+           arguments: ["--config-json", Formata.JSON.encode!(config)],
            environment: %{}
        }
        |> Map.put(:owner_pid, self())}

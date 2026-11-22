@@ -117,7 +117,7 @@ defmodule Sigma.Web.ProjectHooksLiveTest do
       )
       |> render_submit()
 
-      assert Jason.decode!(File.read!(path))["hooks"]["PreToolUse"] == [
+      assert Formata.JSON.decode!(File.read!(path))["hooks"]["PreToolUse"] == [
                %{
                  "matcher" => "Bash",
                  "hooks" => [%{"type" => "command", "command" => "echo project", "timeout" => 25}]
@@ -127,7 +127,7 @@ defmodule Sigma.Web.ProjectHooksLiveTest do
       {:ok, reloaded, html} = live(conn, route)
       assert html =~ "echo project"
       reloaded |> element("#project-hooks-PreToolUse-0-0-remove") |> render_click()
-      assert Jason.decode!(File.read!(path))["hooks"]["PreToolUse"] == []
+      assert Formata.JSON.decode!(File.read!(path))["hooks"]["PreToolUse"] == []
       assert File.read!(ConfigManager.hooks_file()) == global_json
       refute File.exists?(ConfigManager.project_hooks_file(other_workdir))
     end)

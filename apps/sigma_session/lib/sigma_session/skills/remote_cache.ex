@@ -46,7 +46,7 @@ defmodule Sigma.Session.Skills.RemoteCache do
 
   defp load_entry(entry, ref) do
     with {:ok, bytes} <- File.read(Path.join(entry, @metadata_file)),
-         {:ok, metadata} <- Jason.decode(bytes),
+         {:ok, metadata} <- Formata.JSON.decode(bytes),
          %{"manifest" => manifest_map} <- metadata,
          {:ok, manifest} <- Wire.decode_manifest_map(manifest_map, ref.source_id),
          :ok <- same_ref(manifest.ref, ref),
@@ -69,7 +69,7 @@ defmodule Sigma.Session.Skills.RemoteCache do
   defp write_metadata(stage, prepared) do
     metadata = %{"manifest" => Wire.manifest_map(prepared.manifest)}
 
-    with {:ok, encoded} <- Jason.encode(metadata),
+    with {:ok, encoded} <- Sigma.Ai.JSON.encode(metadata),
          :ok <- File.write(Path.join(stage, @metadata_file), encoded) do
       :ok
     else

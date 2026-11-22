@@ -50,7 +50,7 @@ defmodule Sigma.Agent.ProtocolPluginInstallationsTest do
     # The live session override is intentionally different from global settings.
     File.write!(
       Path.join(agent_dir, "settings.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "plugins" => %{
           "registryUrl" => "http://global-config.example",
           "requestsRoot" => Path.join(dir, "global-plugins")
@@ -60,7 +60,7 @@ defmodule Sigma.Agent.ProtocolPluginInstallationsTest do
 
     files = %{
       "plugin.json" =>
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "$schema" => "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
           "name" => "example",
           "version" => "1.0.0"
@@ -78,7 +78,7 @@ defmodule Sigma.Agent.ProtocolPluginInstallationsTest do
       "artifact_digest" => Archive.digest(archive)
     }
 
-    File.write!(Path.join(dir, "release.json"), Jason.encode!(release))
+    File.write!(Path.join(dir, "release.json"), Formata.JSON.encode!(release))
     log = Path.join(dir, "registry.jsonl")
     File.write!(log, "")
 
@@ -244,7 +244,7 @@ defmodule Sigma.Agent.ProtocolPluginInstallationsTest do
     {pid, _params} = provider!()
     send(pid, {:plugin_protocol_response, [plugin_call("native-protocol-install")]})
     assert eventually(fn -> File.exists?(c.requests) end)
-    [request] = Jason.decode!(File.read!(c.requests))["requests"]
+    [request] = Formata.JSON.decode!(File.read!(c.requests))["requests"]
     refute_receive {:plugin_protocol_provider, _, _}, 50
     before = file_state(c.requests)
 
@@ -286,7 +286,7 @@ defmodule Sigma.Agent.ProtocolPluginInstallationsTest do
   test "installation failure preserves the public error class and the requested receipt", c do
     [request] = requests!(c, 1)
     before = file_state(c.requests)
-    File.write!(Path.join(c.dir, "release.json"), Jason.encode!(%{"_status" => 503}))
+    File.write!(Path.join(c.dir, "release.json"), Formata.JSON.encode!(%{"_status" => 503}))
 
     assert {:error, event} =
              execute(c.context, "plugins.install", opted(%{"requestId" => request["id"]}))
@@ -392,7 +392,7 @@ defmodule Sigma.Agent.ProtocolPluginInstallationsTest do
     |> field(:content)
     |> Enum.find(&(field(&1, :type) in [:text, "text"]))
     |> field(:text)
-    |> Jason.decode!()
+    |> Formata.JSON.decode!()
   end
 
   defp field(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
@@ -418,7 +418,7 @@ defmodule Sigma.Agent.ProtocolPluginInstallationsTest do
   defp opted(payload \\ %{}), do: Map.put(payload, "requiredCapabilities", [@capability])
 
   defp http_requests(c),
-    do: File.read!(c.log) |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    do: File.read!(c.log) |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
 
   defp file_state(path) do
     stat = File.stat!(path, time: :posix)

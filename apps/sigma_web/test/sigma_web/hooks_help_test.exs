@@ -35,7 +35,7 @@ defmodule Sigma.Web.HooksHelpTest do
       assert Enum.sort(names) == Enum.sort(Map.keys(child))
       assert length(names) == length(Enum.uniq(names))
       assert Enum.sort(Map.keys(help.input_example)) == Enum.sort(Map.keys(root))
-      assert Jason.decode!(Jason.encode!(help.input_example)) == help.input_example
+      assert Formata.JSON.decode!(Formata.JSON.encode!(help.input_example)) == help.input_example
 
       for field <- help.input_fields do
         assert is_binary(field.type) and field.type != ""
@@ -143,7 +143,11 @@ defmodule Sigma.Web.HooksHelpTest do
   end
 
   defp raw(output) do
-    %{exit: 0, stderr: "", stdout: if(is_binary(output), do: output, else: Jason.encode!(output))}
+    %{
+      exit: 0,
+      stderr: "",
+      stdout: if(is_binary(output), do: output, else: Formata.JSON.encode!(output))
+    }
   end
 
   defp expected_diagnostics(%{"systemMessage" => message}), do: [message]

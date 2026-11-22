@@ -108,7 +108,7 @@ defmodule Sigma.Coding.DispatcherHooksTest do
   defp hooks(event, command, matcher) do
     {:ok, specs} =
       Discovery.parse(
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "hooks" => %{
             event => [
               %{
@@ -125,6 +125,6 @@ defmodule Sigma.Coding.DispatcherHooksTest do
   end
 
   defp json_command(value) do
-    "printf '%s' '" <> String.replace(Jason.encode!(value), "'", "'\\''") <> "'"
+    "printf '%s' '" <> String.replace(Formata.JSON.encode!(value), "'", "'\\''") <> "'"
   end
 end

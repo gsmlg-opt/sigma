@@ -14,7 +14,7 @@ defmodule Sigma.Session.Operations do
 
   def dump(source_path, output_path, opts \\ []) do
     with {:ok, accepted} <- accepted_journal(source_path, opts),
-         {:ok, encoded} <- Jason.encode(dump_document(accepted), pretty: true),
+         {:ok, encoded} <- Sigma.Ai.JSON.encode(dump_document(accepted), pretty: true),
          :ok <- publish(output_path, encoded <> "\n", opts) do
       {:ok, output_path}
     end
@@ -138,7 +138,7 @@ defmodule Sigma.Session.Operations do
 
   defp render_setting(nil), do: nil
   defp render_setting(value) when is_binary(value), do: value
-  defp render_setting(value), do: Jason.encode!(value)
+  defp render_setting(value), do: Formata.JSON.encode!(value)
 
   defp render_message(message) do
     heading =
@@ -164,7 +164,7 @@ defmodule Sigma.Session.Operations do
         "> Thinking: #{thinking}"
 
       %{type: :tool_call, name: name, arguments: arguments} ->
-        "Tool call `#{name}`\n\n```json\n#{Jason.encode!(arguments, pretty: true)}\n```"
+        "Tool call `#{name}`\n\n```json\n#{Formata.JSON.encode!(arguments, pretty: true)}\n```"
 
       %{type: :image, mime_type: mime_type} ->
         "[Image: #{mime_type}]"
@@ -262,7 +262,7 @@ defmodule Sigma.Session.Operations do
         length = min(stat.size, budget)
 
         with {:ok, bytes} <- read_range(opts, path, 0, length),
-             {:ok, metadata} when is_map(metadata) <- Jason.decode(bytes) do
+             {:ok, metadata} when is_map(metadata) <- Formata.JSON.decode(bytes) do
           metadata
         else
           _error -> %{}
@@ -337,7 +337,7 @@ defmodule Sigma.Session.Operations do
           {entries, diagnostics}
 
         true ->
-          case Jason.decode(line) do
+          case Formata.JSON.decode(line) do
             {:ok, entry} ->
               {entries ++ [entry], diagnostics}
 

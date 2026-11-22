@@ -301,7 +301,7 @@ defmodule Sigma.Coding.PermissionTest do
   end
 
   defp raw_hook(event, dialect, output) do
-    command = "printf '%s' '" <> String.replace(Jason.encode!(output), "'", "'\\''") <> "'"
+    command = "printf '%s' '" <> String.replace(Formata.JSON.encode!(output), "'", "'\\''") <> "'"
 
     %Spec{
       event: event,

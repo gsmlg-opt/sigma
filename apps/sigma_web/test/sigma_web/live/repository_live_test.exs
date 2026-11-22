@@ -171,7 +171,7 @@ defmodule Sigma.Web.RepositoryLiveTest do
 
       File.write!(
         Path.join(sessions_dir, "orphan.meta.json"),
-        Jason.encode!(%{"cwd" => "/missing/repository", "branch" => "main"})
+        Formata.JSON.encode!(%{"cwd" => "/missing/repository", "branch" => "main"})
       )
 
       encoded_repository = Base.url_encode64(workdir, padding: false)
@@ -189,7 +189,7 @@ defmodule Sigma.Web.RepositoryLiveTest do
         sessions_dir
         |> Path.join("orphan.meta.json")
         |> File.read!()
-        |> Jason.decode!()
+        |> Formata.JSON.decode!()
 
       assert metadata == %{"cwd" => Path.expand(workdir), "branch" => "main"}
     end)
@@ -406,7 +406,7 @@ defmodule Sigma.Web.RepositoryLiveTest do
 
       File.write!(
         metadata_path,
-        Jason.encode!(%{"cwd" => "/missing/repository", "branch" => "main"})
+        Formata.JSON.encode!(%{"cwd" => "/missing/repository", "branch" => "main"})
       )
 
       operation = Sigma.Agent.Terminals.issue_operation(workdir, session_id, "create", :create)
@@ -421,7 +421,7 @@ defmodule Sigma.Web.RepositoryLiveTest do
 
       assert File.exists?(session_path)
 
-      assert Jason.decode!(File.read!(metadata_path)) == %{
+      assert Formata.JSON.decode!(File.read!(metadata_path)) == %{
                "cwd" => "/missing/repository",
                "branch" => "main"
              }
@@ -511,7 +511,7 @@ defmodule Sigma.Web.RepositoryLiveTest do
         sessions_dir
         |> Path.join("rename-me.meta.json")
         |> File.read!()
-        |> Jason.decode!()
+        |> Formata.JSON.decode!()
 
       assert meta["title"] == "Updated Session Title"
     end)
@@ -613,7 +613,7 @@ defmodule Sigma.Web.RepositoryLiveTest do
         sessions_dir
         |> Path.join("blur-race.meta.json")
         |> File.read!()
-        |> Jason.decode!()
+        |> Formata.JSON.decode!()
 
       refute meta["title"] == "Should Not Be Saved"
     end)
@@ -653,7 +653,7 @@ defmodule Sigma.Web.RepositoryLiveTest do
         sessions_dir
         |> Path.join("length-test.meta.json")
         |> File.read!()
-        |> Jason.decode!()
+        |> Formata.JSON.decode!()
 
       assert meta["title"] == expected_title
       assert byte_size(meta["title"]) == 120
@@ -724,7 +724,7 @@ defmodule Sigma.Web.RepositoryLiveTest do
 
     File.write!(
       Path.join(sessions_dir, "#{id}.meta.json"),
-      Jason.encode!(%{"cwd" => "/tmp/repo"})
+      Formata.JSON.encode!(%{"cwd" => "/tmp/repo"})
     )
   end
 

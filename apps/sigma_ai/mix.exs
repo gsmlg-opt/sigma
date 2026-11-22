@@ -26,7 +26,7 @@ defmodule Sigma.Ai.MixProject do
     [
       {:backplane_ai_protocol, "~> 1.10.87"},
       {:http_fetch, "~> 1.0.0-rc.12"},
-      {:jason, "~> 1.4"},
+      {:formata, "~> 0.3.5"},
       {:telemetry, "~> 1.0"}
     ]
   end

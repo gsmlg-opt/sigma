@@ -358,7 +358,7 @@ defmodule Sigma.Agent.BackplaneHookDeliveryTest do
 
   defp specs(dir) do
     output =
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "hookSpecificOutput" => %{"hookEventName" => "PostToolUse", "additionalContext" => @text}
       })
 
@@ -373,7 +373,7 @@ defmodule Sigma.Agent.BackplaneHookDeliveryTest do
 
     {:ok, specs} =
       Sigma.Coding.Hooks.Discovery.parse(
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "hooks" => %{
             "PostToolUse" => [
               %{

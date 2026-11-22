@@ -96,7 +96,7 @@ defmodule Sigma.Agent.BackplaneMessageBoardStoreFunctionalTest do
       |> Enum.to_list()
 
     assert Enum.all?(results, &match?({:ok, {:ok, _, []}}, &1))
-    stored = Jason.decode!(File.read!(c.path))
+    stored = Formata.JSON.decode!(File.read!(c.path))
     assert map_size(stored["channels"]) == 16
     assert map_size(stored["posts"]) == 16
     assert map_size(stored["accepted_calls"]) == 32
@@ -193,8 +193,8 @@ defmodule Sigma.Agent.BackplaneMessageBoardStoreFunctionalTest do
     assert {:ok, _, []} =
              call(c, "post", %{"thread_id" => thread, "text" => "still opted out"}, 8)
 
-    stored = Jason.decode!(File.read!(c.path))
-    assert stored["subscriptions"][Jason.encode!(["thread", thread])]["worker"] == false
+    stored = Formata.JSON.decode!(File.read!(c.path))
+    assert stored["subscriptions"][Formata.JSON.encode!(["thread", thread])]["worker"] == false
   end
 
   test "a fault before commit preserves existing bytes and returns the original failure without intents",
@@ -238,7 +238,7 @@ defmodule Sigma.Agent.BackplaneMessageBoardStoreFunctionalTest do
     assert {:error, %Error{class: :unknown_outcome, cause: :injected_ack_lost}} =
              call(c, "post", args, 1)
 
-    stored = Jason.decode!(File.read!(c.path))
+    stored = Formata.JSON.decode!(File.read!(c.path))
     [post] = Map.values(stored["posts"])
     original_result = post["metadata"]
     assert post["text"] == "committed"
@@ -253,7 +253,7 @@ defmodule Sigma.Agent.BackplaneMessageBoardStoreFunctionalTest do
   test "every call reads actual storage and malformed or unreadable files report typed errors",
        c do
     assert {:ok, _, []} = call(c, "create_channel", %{"channel_name" => "build"}, 1)
-    current = Jason.decode!(File.read!(c.path))
+    current = Formata.JSON.decode!(File.read!(c.path))
 
     assert {:ok, _, next, []} =
              Board.apply(
@@ -265,11 +265,11 @@ defmodule Sigma.Agent.BackplaneMessageBoardStoreFunctionalTest do
                host(2)
              )
 
-    File.write!(c.path, Jason.encode!(next))
+    File.write!(c.path, Formata.JSON.encode!(next))
     assert {:ok, page, []} = call(c, "search_posts", %{}, 3)
     assert [%{"text_preview" => "external update"}] = page["results"]
 
-    for bytes <- ["{", "[]", Jason.encode!(%{next | "posts" => %{"broken" => %{}}})] do
+    for bytes <- ["{", "[]", Formata.JSON.encode!(%{next | "posts" => %{"broken" => %{}}})] do
       File.write!(c.path, bytes)
       assert {:error, %Error{class: :malformed_result}} = call(c, "get_channels", %{}, 4)
       assert File.read!(c.path) == bytes
@@ -317,7 +317,7 @@ defmodule Sigma.Agent.BackplaneMessageBoardStoreFunctionalTest do
 
   defp pages(c, name, args, acc \\ []) do
     assert {:ok, page, []} = call(c, name, args, 1000)
-    assert byte_size(Jason.encode!(page)) <= 8000
+    assert byte_size(Formata.JSON.encode!(page)) <= 8000
     assert page["n_returned"] == length(page["results"])
     acc = acc ++ page["results"]
 

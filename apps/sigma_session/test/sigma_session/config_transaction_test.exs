@@ -9,7 +9,7 @@ defmodule Sigma.Session.ConfigTransactionTest do
 
     File.write!(
       Path.join(dir, "models.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "providers" => %{"p" => %{"name" => "Original", "models" => [%{"id" => "keep"}]}}
       })
     )

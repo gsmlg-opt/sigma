@@ -37,7 +37,7 @@ defmodule Sigma.Web.PluginsSettingsLiveTest do
 
     files = %{
       "plugin.json" =>
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "$schema" => "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
           "name" => "example",
           "version" => "1.0.0"
@@ -51,7 +51,7 @@ defmodule Sigma.Web.PluginsSettingsLiveTest do
 
     File.write!(
       Path.join(dir, "release.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "plugin_id" => "plugin-example",
         "release_id" => "release-example",
         "artifact_digest" => Archive.digest(artifact)
@@ -210,7 +210,7 @@ defmodule Sigma.Web.PluginsSettingsLiveTest do
     assert ConfigManager.get_plugin_config() == nil
   end
 
-  defp configure!(c), do: File.write!(c.settings, Jason.encode!(%{"plugins" => c.config}))
+  defp configure!(c), do: File.write!(c.settings, Formata.JSON.encode!(%{"plugins" => c.config}))
 
   defp requests!(c, count) do
     requests =
@@ -231,7 +231,7 @@ defmodule Sigma.Web.PluginsSettingsLiveTest do
       end)
 
     File.mkdir_p!(c.root)
-    File.write!(c.requests, Jason.encode!(%{"version" => 1, "requests" => requests}))
+    File.write!(c.requests, Formata.JSON.encode!(%{"version" => 1, "requests" => requests}))
     requests
   end
 
@@ -239,7 +239,7 @@ defmodule Sigma.Web.PluginsSettingsLiveTest do
     c.root
     |> Path.join("installations.json")
     |> File.read!()
-    |> Jason.decode!()
+    |> Formata.JSON.decode!()
     |> Map.fetch!("installations")
   end
 

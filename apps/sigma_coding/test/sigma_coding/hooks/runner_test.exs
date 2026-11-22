@@ -35,7 +35,7 @@ defmodule Sigma.Coding.Hooks.RunnerTest do
                tool_input: %{"command" => "true"}
              })
 
-    payload = Jason.decode!(File.read!(Path.join(directory, "payload.json")))
+    payload = Formata.JSON.decode!(File.read!(Path.join(directory, "payload.json")))
     assert payload["tool_name"] == "Bash"
     assert payload["turn_id"] == "t"
   end

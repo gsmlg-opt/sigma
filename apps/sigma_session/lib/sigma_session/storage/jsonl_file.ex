@@ -14,7 +14,7 @@ defmodule Sigma.Session.Storage.JsonlFile do
 
   @impl Storage
   def append(path, entry) do
-    with {:ok, json} <- Jason.encode(entry) do
+    with {:ok, json} <- Sigma.Ai.JSON.encode(entry) do
       sync? =
         entry["type"] in [
           "subagent",
@@ -108,7 +108,7 @@ defmodule Sigma.Session.Storage.JsonlFile do
     if line == "" do
       {good, bad, last_nonblank}
     else
-      case Jason.decode(line) do
+      case Formata.JSON.decode(line) do
         {:ok, decoded} ->
           {[decoded | good], bad, line_number}
 

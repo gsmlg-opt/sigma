@@ -65,7 +65,10 @@ defmodule Sigma.Session.SubagentJournalTest do
       assert entry["type"] == "subagent"
       assert entry["parentId"] == "parent"
       assert is_binary(entry["id"])
-      assert {:ok, decoded} = EntryDecoder.subagent(entry |> Jason.encode!() |> Jason.decode!())
+
+      assert {:ok, decoded} =
+               EntryDecoder.subagent(entry |> Formata.JSON.encode!() |> Formata.JSON.decode!())
+
       assert decoded.fact == fact
       assert decoded.data.agent_id == "agent-1"
       assert decoded.revision == 1

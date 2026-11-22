@@ -494,13 +494,13 @@ defmodule Sigma.Agent.BackplaneChildMcpDiscoveryTest do
 
   defp structured!(provider, name) do
     assert [%{type: :text, text: json}] = result!(provider, name).content
-    Jason.decode!(json)
+    Formata.JSON.decode!(json)
   end
 
   defp names(provider), do: Enum.map(provider.params.context.tools, & &1.name)
 
   defp requests(log),
-    do: log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    do: log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
 
   defp finish!(provider, c) do
     send(provider.pid, {:child_mcp_response, [%{type: :text, text: "done"}]})

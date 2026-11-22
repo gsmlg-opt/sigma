@@ -210,7 +210,7 @@ defmodule Sigma.Agent.Backplane.HistoryResources do
             arguments =
               if is_binary(call.arguments),
                 do: call.arguments,
-                else: Jason.encode!(call.arguments)
+                else: Formata.JSON.encode!(call.arguments)
 
             base
             |> Map.merge(%{id: base.id <> ":call:#{part}", part: part})

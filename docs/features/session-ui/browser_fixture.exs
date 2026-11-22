@@ -125,7 +125,7 @@ end
 
 File.write!(
   Path.join(sessions_dir, session_id <> ".meta.json"),
-  Jason.encode!(%{
+  Formata.JSON.encode!(%{
     "cwd" => workdir,
     "title" => "Session UI Browser Fixture",
     "provider_id" => "test",

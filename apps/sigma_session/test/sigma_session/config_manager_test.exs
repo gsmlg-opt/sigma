@@ -9,7 +9,7 @@ defmodule Sigma.Session.ConfigManagerTest do
 
     File.write!(
       Path.join(ConfigManager.agent_dir(), "settings.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "skillSources" => %{
           "source-b" => %{
             "kind" => "backplane",
@@ -59,7 +59,7 @@ defmodule Sigma.Session.ConfigManagerTest do
 
     File.write!(
       Path.join(ConfigManager.agent_dir(), "settings.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "permissions" => %{
           "default" => "ask",
           "rules" => %{"write" => "sometimes"}
@@ -117,7 +117,7 @@ defmodule Sigma.Session.ConfigManagerTest do
       ConfigManager.agent_dir()
       |> Path.join("settings.json")
       |> File.read!()
-      |> Jason.decode!()
+      |> Formata.JSON.decode!()
 
     assert saved["permissions"] == %{"default" => "allow", "rules" => rules}
   end
@@ -128,12 +128,12 @@ defmodule Sigma.Session.ConfigManagerTest do
 
     File.write!(
       Path.join(ConfigManager.agent_dir(), "settings.json"),
-      Jason.encode!(%{"defaultProvider" => "openai", "defaultModel" => "smart"})
+      Formata.JSON.encode!(%{"defaultProvider" => "openai", "defaultModel" => "smart"})
     )
 
     File.write!(
       Path.join(ConfigManager.agent_dir(), "models.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "providers" => %{
           "openai" => %{
             "name" => "OpenAI",
@@ -168,13 +168,13 @@ defmodule Sigma.Session.ConfigManagerTest do
       ConfigManager.agent_dir()
       |> Path.join("settings.json")
       |> File.read!()
-      |> Jason.decode!()
+      |> Formata.JSON.decode!()
 
     saved_models =
       ConfigManager.agent_dir()
       |> Path.join("models.json")
       |> File.read!()
-      |> Jason.decode!()
+      |> Formata.JSON.decode!()
 
     assert saved_settings["defaultModel"] == "smart"
 
@@ -194,12 +194,12 @@ defmodule Sigma.Session.ConfigManagerTest do
 
     File.write!(
       Path.join(ConfigManager.agent_dir(), "settings.json"),
-      Jason.encode!(%{"defaultProvider" => "minimax", "defaultModel" => "MiniMax-M3"})
+      Formata.JSON.encode!(%{"defaultProvider" => "minimax", "defaultModel" => "MiniMax-M3"})
     )
 
     File.write!(
       Path.join(ConfigManager.agent_dir(), "models.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "providers" => %{
           "minimax" => %{
             "name" => "MiniMax",
@@ -231,12 +231,12 @@ defmodule Sigma.Session.ConfigManagerTest do
 
     File.write!(
       Path.join(ConfigManager.agent_dir(), "settings.json"),
-      Jason.encode!(%{"defaultProvider" => "openai", "defaultModel" => "fast"})
+      Formata.JSON.encode!(%{"defaultProvider" => "openai", "defaultModel" => "fast"})
     )
 
     File.write!(
       Path.join(ConfigManager.agent_dir(), "models.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "providers" => %{
           "openai" => %{
             "name" => "OpenAI",
@@ -261,7 +261,7 @@ defmodule Sigma.Session.ConfigManagerTest do
       ConfigManager.agent_dir()
       |> Path.join("models.json")
       |> File.read!()
-      |> Jason.decode!()
+      |> Formata.JSON.decode!()
 
     assert Enum.map(saved_models["providers"]["anthropic"]["models"], & &1["id"]) == [
              "claude",
@@ -283,12 +283,12 @@ defmodule Sigma.Session.ConfigManagerTest do
 
     File.write!(
       Path.join(ConfigManager.agent_dir(), "settings.json"),
-      Jason.encode!(%{"defaultProvider" => "openai", "defaultModel" => "smart"})
+      Formata.JSON.encode!(%{"defaultProvider" => "openai", "defaultModel" => "smart"})
     )
 
     File.write!(
       Path.join(ConfigManager.agent_dir(), "models.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "providers" => %{
           "openai" => %{
             "name" => "OpenAI",
@@ -320,7 +320,7 @@ defmodule Sigma.Session.ConfigManagerTest do
       ConfigManager.agent_dir()
       |> Path.join("models.json")
       |> File.read!()
-      |> Jason.decode!()
+      |> Formata.JSON.decode!()
 
     assert saved_models["providers"]["openai"]["authType"] == "bearer"
     assert saved_models["providers"]["openai"]["authHeaderName"] == ""
@@ -333,7 +333,7 @@ defmodule Sigma.Session.ConfigManagerTest do
 
     File.write!(
       Path.join(ConfigManager.agent_dir(), "models.json"),
-      Jason.encode!(%{"providers" => Map.new(apis, &{&1, %{"api" => &1, "models" => []}})})
+      Formata.JSON.encode!(%{"providers" => Map.new(apis, &{&1, %{"api" => &1, "models" => []}})})
     )
 
     config = ConfigManager.get_config()
@@ -351,7 +351,9 @@ defmodule Sigma.Session.ConfigManagerTest do
     end
 
     persisted =
-      Path.join(ConfigManager.agent_dir(), "models.json") |> File.read!() |> Jason.decode!()
+      Path.join(ConfigManager.agent_dir(), "models.json")
+      |> File.read!()
+      |> Formata.JSON.decode!()
 
     assert Enum.all?(persisted["providers"], fn {_id, provider} ->
              provider["authType"] == "bearer"
@@ -364,14 +366,14 @@ defmodule Sigma.Session.ConfigManagerTest do
 
     File.write!(
       Path.join(ConfigManager.agent_dir(), "auth.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "minimax-cred" => %{"type" => "api_key", "key" => "secret-key", "name" => "MiniMax"}
       })
     )
 
     File.write!(
       Path.join(ConfigManager.agent_dir(), "models.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "providers" => %{
           "minimax" => %{
             "name" => "MiniMax",
@@ -411,7 +413,7 @@ defmodule Sigma.Session.ConfigManagerTest do
       ConfigManager.agent_dir()
       |> Path.join("settings.json")
       |> File.read!()
-      |> Jason.decode!()
+      |> Formata.JSON.decode!()
 
     assert saved_settings["disabledSkills"] == %{"global" => ["alpha"]}
   end
@@ -434,7 +436,7 @@ defmodule Sigma.Session.ConfigManagerTest do
       ConfigManager.agent_dir()
       |> Path.join("settings.json")
       |> File.read!()
-      |> Jason.decode!()
+      |> Formata.JSON.decode!()
 
     assert saved_settings["theme"] == "default"
   end
@@ -445,7 +447,7 @@ defmodule Sigma.Session.ConfigManagerTest do
 
     File.write!(
       ConfigManager.mcp_file(),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "servers" => %{
           "github" => %{
             "type" => "http",
@@ -474,7 +476,7 @@ defmodule Sigma.Session.ConfigManagerTest do
                "env" => %{"CACHE_DIR" => "/tmp"}
              })
 
-    saved = ConfigManager.mcp_file() |> File.read!() |> Jason.decode!()
+    saved = ConfigManager.mcp_file() |> File.read!() |> Formata.JSON.decode!()
 
     assert %{"mcpServers" => %{"local-weather" => %{"type" => "stdio"}}} = saved
     refute Map.has_key?(saved, "servers")

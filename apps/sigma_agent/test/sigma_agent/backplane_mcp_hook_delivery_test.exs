@@ -258,7 +258,7 @@ defmodule Sigma.Agent.BackplaneMcpHookDeliveryTest do
 
   defp hook_specs(c) do
     output =
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "hookSpecificOutput" => %{
           "hookEventName" => "PostToolUse",
           "additionalContext" => @text
@@ -293,7 +293,7 @@ defmodule Sigma.Agent.BackplaneMcpHookDeliveryTest do
   end
 
   defp parse_hooks(hooks) do
-    assert {:ok, specs} = Discovery.parse(Jason.encode!(%{"hooks" => hooks}), :codex)
+    assert {:ok, specs} = Discovery.parse(Formata.JSON.encode!(%{"hooks" => hooks}), :codex)
     Enum.map(specs, &%{&1 | origin: {:user, "mcp-hook-test"}, trusted?: true})
   end
 
@@ -338,7 +338,8 @@ defmodule Sigma.Agent.BackplaneMcpHookDeliveryTest do
   defp calls(c), do: json_lines(path(c, "mcp-calls.jsonl"))
 
   defp json_lines(path),
-    do: path |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    do:
+      path |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
 
   defp path(c, name), do: Path.join(c.dir, name)
   defp release!(c), do: File.write!(path(c, "release"), "ready")

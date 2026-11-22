@@ -100,7 +100,7 @@ defmodule Sigma.Agent.BackplaneCommandRuntimeTest do
     assert {:ok, job} = Command.start(command, request)
     result = completed!(command, request, job)
     assert result.exit_status == 0, inspect(result)
-    assert Jason.decode!(IO.iodata_to_binary(result.output)) == ["shell-ok", "env-ok"]
+    assert Formata.JSON.decode!(IO.iodata_to_binary(result.output)) == ["shell-ok", "env-ok"]
     assert :ok = Command.cancel_confirmed(command, request, 3_000)
     assert :ok = Command.acknowledge_release(command, request)
   end

@@ -61,7 +61,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesHostedTest do
       assert metadata["origin"]["model"] == @model.id
       assert metadata["origin"]["protocol"] == "openai-responses"
       assert metadata["origin"]["endpoint_sha256"] =~ ~r/^[0-9a-f]{64}$/
-      refute Jason.encode!(metadata) =~ base_url
+      refute Formata.JSON.encode!(metadata) =~ base_url
 
       assert metadata["items"] ==
                Enum.with_index(output, fn item, index ->
@@ -97,8 +97,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesHostedTest do
       refute Enum.any?(events, &(&1.type == :response_failed))
       assert done = Enum.find(events, &(&1.type == :response_completed))
       metadata = done.message.metadata["openai_responses_hosted"]
-      assert byte_size(Jason.encode!(metadata)) > 1_000_000
-      assert byte_size(Jason.encode!(metadata)) <= 1_048_576
+      assert byte_size(Formata.JSON.encode!(metadata)) > 1_000_000
+      assert byte_size(Formata.JSON.encode!(metadata)) <= 1_048_576
       assert Enum.map(metadata["items"], & &1["item"]) == native
       assert Hosted.project_metadata(done.message) == {:ok, metadata}
     end)
@@ -272,7 +272,12 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesHostedTest do
 
       entries = message.metadata["openai_responses_hosted"]["items"]
       assert entries == Enum.with_index(output, &%{"output_index" => &2, "item" => &1})
-      message = %{message | metadata: message.metadata |> Jason.encode!() |> Jason.decode!()}
+
+      message = %{
+        message
+        | metadata: message.metadata |> Formata.JSON.encode!() |> Formata.JSON.decode!()
+      }
+
       assert {:ok, _} = Hosted.project_metadata(message)
 
       tool_result = %{
@@ -420,7 +425,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesHostedTest do
       message =
         stream(base_url) |> Enum.find(&(&1.type == :response_completed)) |> Map.fetch!(:message)
 
-      metadata = message.metadata |> Jason.encode!() |> Jason.decode!()
+      metadata = message.metadata |> Formata.JSON.encode!() |> Formata.JSON.decode!()
       message = %{message | metadata: metadata}
       prepared = Hosted.prepare!(@model, %{messages: [message], tools: []}, [], base_url)
       assert Hosted.replay_items!(message, prepared) == output()
@@ -538,9 +543,9 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesHostedTest do
                                                                                        state} ->
           # HTTP transports may coalesce records and hit their own buffer limit.
           # Incremental framing isolates the additional cross-record host bound.
-          bytes = "data: " <> Jason.encode!(frame) <> "\n\n"
+          bytes = "data: " <> Formata.JSON.encode!(frame) <> "\n\n"
           assert {:ok, framer, [%{data: data}]} = Backplane.AiProtocol.SSE.feed(framer, bytes)
-          {_, _, state} = Hosted.observe(state, Jason.decode!(data), message)
+          {_, _, state} = Hosted.observe(state, Formata.JSON.decode!(data), message)
           {framer, state}
         end)
       end
@@ -622,7 +627,10 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesHostedTest do
     {:ok, listener} = :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
     {:ok, port} = :inet.port(listener)
     {:ok, capture} = Agent.start_link(fn -> nil end)
-    body = Enum.map_join(frames, fn event -> "data: " <> Jason.encode!(event) <> "\n\n" end)
+
+    body =
+      Enum.map_join(frames, fn event -> "data: " <> Formata.JSON.encode!(event) <> "\n\n" end)
+
     task = Task.async(fn -> serve(listener, capture, body) end)
 
     try do
@@ -639,7 +647,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesHostedTest do
       {:ok, socket} ->
         request = receive_request(socket, "")
         [_, request_body] = String.split(request, "\r\n\r\n", parts: 2)
-        Agent.update(capture, fn _ -> Jason.decode!(request_body) end)
+        Agent.update(capture, fn _ -> Formata.JSON.decode!(request_body) end)
 
         :ok =
           :gen_tcp.send(socket, [

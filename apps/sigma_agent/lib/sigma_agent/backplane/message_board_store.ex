@@ -128,7 +128,7 @@ defmodule Sigma.Agent.Backplane.MessageBoardStore do
   defp load(state) do
     case fs(state.filesystem, :read, [state.path]) do
       {:ok, bytes} ->
-        case Jason.decode(bytes) do
+        case Formata.JSON.decode(bytes) do
           {:ok, board} ->
             if stored_board?(board, state.root_id),
               do: {:ok, board},
@@ -149,7 +149,7 @@ defmodule Sigma.Agent.Backplane.MessageBoardStore do
   defp persist_changed(_state, current, current), do: :ok
 
   defp persist_changed(state, _current, next) do
-    with {:ok, bytes} <- Jason.encode(next),
+    with {:ok, bytes} <- Sigma.Ai.JSON.encode(next),
          :ok <- fs(state.filesystem, :ensure_dir, [Path.dirname(state.path)]) do
       case fs(state.filesystem, :write_atomic, [state.path, bytes]) do
         :ok -> :ok

@@ -878,11 +878,11 @@ defmodule Sigma.Agent.BackplaneCodexPreparationTest do
   end
 
   defp hook_specs(event, output, dialect \\ :codex) do
-    command = "printf '%s' '" <> String.replace(Jason.encode!(output), "'", "'\\''") <> "'"
+    command = "printf '%s' '" <> String.replace(Formata.JSON.encode!(output), "'", "'\\''") <> "'"
 
     {:ok, specs} =
       Discovery.parse(
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "hooks" => %{
             event => [
               %{"hooks" => [%{"type" => "command", "command" => command, "timeout" => 2}]}

@@ -77,7 +77,7 @@ defmodule Sigma.Web.EndpointHTTPTest do
     test "LiveView's frame and service budgets accept a #{bytes}-byte payload", %{port: port} do
       with_websocket(port, "/live", fn conn, ref, ws ->
         payload =
-          Jason.encode!([
+          Formata.JSON.encode!([
             "1",
             "2",
             "probe",
@@ -95,7 +95,7 @@ defmodule Sigma.Web.EndpointHTTPTest do
                  "phx_reply",
                  %{"status" => "ok", "response" => %{"bytes" => unquote(bytes)}}
                ] =
-                 Jason.decode!(reply)
+                 Formata.JSON.decode!(reply)
       end)
     end
   end
@@ -103,7 +103,13 @@ defmodule Sigma.Web.EndpointHTTPTest do
   test "accepts a fragmented Phoenix message larger than 256 KiB", %{port: port} do
     with_websocket(port, "/live", fn conn, ref, ws ->
       payload =
-        Jason.encode!(["1", "2", "probe", "echo", %{blob: String.duplicate("x", 300 * 1024)}])
+        Formata.JSON.encode!([
+          "1",
+          "2",
+          "probe",
+          "echo",
+          %{blob: String.duplicate("x", 300 * 1024)}
+        ])
 
       <<first::binary-size(150 * 1024), last::binary>> = payload
 
@@ -131,7 +137,7 @@ defmodule Sigma.Web.EndpointHTTPTest do
                "phx_reply",
                %{"status" => "ok", "response" => %{"bytes" => 307_200}}
              ] =
-               Jason.decode!(reply)
+               Formata.JSON.decode!(reply)
     end)
   end
 
@@ -176,10 +182,15 @@ defmodule Sigma.Web.EndpointHTTPTest do
       {:ok, conn, ws} = Mint.WebSocket.new(conn, ref, status, headers, mode: :passive)
 
       {conn, ws} =
-        send_frame(conn, ref, ws, {:text, Jason.encode!(["1", "1", "probe", "phx_join", %{}])})
+        send_frame(
+          conn,
+          ref,
+          ws,
+          {:text, Formata.JSON.encode!(["1", "1", "probe", "phx_join", %{}])}
+        )
 
       {conn, ws, [{:text, joined}]} = receive_frames(conn, ws)
-      assert ["1", "1", "probe", "phx_reply", %{"status" => "ok"}] = Jason.decode!(joined)
+      assert ["1", "1", "probe", "phx_reply", %{"status" => "ok"}] = Formata.JSON.decode!(joined)
       callback.(conn, ref, ws)
     end)
   end

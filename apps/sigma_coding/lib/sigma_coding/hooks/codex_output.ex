@@ -57,7 +57,7 @@ defmodule Sigma.Coding.Hooks.CodexOutput do
         {:proceed, []}
 
       String.starts_with?(text, ["{", "["]) ->
-        with {:ok, json} when is_map(json) <- Jason.decode(text),
+        with {:ok, json} when is_map(json) <- Formata.JSON.decode(text),
              :ok <- validate(event, json) do
           interpret(event, json, mode)
         else

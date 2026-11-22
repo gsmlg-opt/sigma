@@ -129,7 +129,7 @@ defmodule Sigma.Session.Skills.RemoteSourceTest do
         send(owner, {:artifact_waiting, self()})
         receive do: (:release_artifact -> {:ok, %{status: 200, body: fixture.archive}})
       else
-        {:ok, %{status: 200, body: Jason.encode!(fixture.manifest)}}
+        {:ok, %{status: 200, body: Formata.JSON.encode!(fixture.manifest)}}
       end
     end
 
@@ -197,7 +197,7 @@ defmodule Sigma.Session.Skills.RemoteSourceTest do
 
       case uri.path do
         "/skill-protocol/v1/resolve" ->
-          {:ok, %{status: 200, body: Jason.encode!(fixture.manifest)}}
+          {:ok, %{status: 200, body: Formata.JSON.encode!(fixture.manifest)}}
 
         "/skill-protocol/v1/artifact" ->
           {:ok, %{status: 200, body: fixture.archive}}

@@ -166,7 +166,7 @@ defmodule Sigma.Web.ProtocolSessionOptions do
 
   defp read_metadata(path) do
     with {:ok, content} <- File.read(path),
-         {:ok, metadata} when is_map(metadata) <- Jason.decode(content) do
+         {:ok, metadata} when is_map(metadata) <- Formata.JSON.decode(content) do
       metadata
     else
       _error -> %{}

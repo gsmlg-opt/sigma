@@ -254,7 +254,7 @@ defmodule Sigma.Ai.HTTP do
   defp normalize(opts) do
     {body, headers} =
       case Keyword.fetch(opts, :json) do
-        {:ok, json} -> {Jason.encode!(json), [{"content-type", "application/json"}]}
+        {:ok, json} -> {Formata.JSON.encode!(json), [{"content-type", "application/json"}]}
         :error -> {Keyword.get(opts, :body), []}
       end
 
@@ -295,7 +295,7 @@ defmodule Sigma.Ai.HTTP do
   defp decode(body, headers, %{decode_json: true}) when is_binary(body) and body != "" do
     with [type | _] <- Map.get(headers, "content-type", []),
          true <- String.contains?(type, "json"),
-         {:ok, decoded} <- Jason.decode(body) do
+         {:ok, decoded} <- Formata.JSON.decode(body) do
       decoded
     else
       _ -> body

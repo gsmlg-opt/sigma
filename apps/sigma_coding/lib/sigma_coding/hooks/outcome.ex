@@ -163,7 +163,7 @@ defmodule Sigma.Coding.Hooks.Outcome do
   defp parse_json_stdout(""), do: :plain
 
   defp parse_json_stdout(stdout) do
-    case Jason.decode(stdout) do
+    case Formata.JSON.decode(stdout) do
       {:ok, map} when is_map(map) -> {:ok, map}
       _ -> :plain
     end

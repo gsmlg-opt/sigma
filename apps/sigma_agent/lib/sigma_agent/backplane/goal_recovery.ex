@@ -78,7 +78,7 @@ defmodule Sigma.Agent.Backplane.GoalRecovery do
          line when is_binary(line) <- IO.read(file, :line),
          :ok <- File.close(file),
          {:ok, %{"type" => "session", "id" => id}} when is_binary(id) and id != "" <-
-           Jason.decode(line) do
+           Formata.JSON.decode(line) do
       {:ok, id}
     else
       _ -> {:error, Error.new(:not_found, "session header is unavailable")}

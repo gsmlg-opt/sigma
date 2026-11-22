@@ -202,7 +202,7 @@ defmodule Sigma.Protocol.HostedResultPages do
   defp current_revision(_descriptor, _request), do: {:error, :provider_hosted_results_stale}
 
   defp json(value) do
-    case Jason.encode(ordered(value)) do
+    case Sigma.Ai.JSON.encode(ordered(value)) do
       {:ok, bytes} -> {:ok, bytes}
       {:error, _} -> {:error, :provider_hosted_payload_rejected}
     end
@@ -212,7 +212,7 @@ defmodule Sigma.Protocol.HostedResultPages do
     value
     |> Enum.sort_by(&elem(&1, 0))
     |> Enum.map(fn {key, item} -> {key, ordered(item)} end)
-    |> Jason.OrderedObject.new()
+    |> Formata.JSON.OrderedObject.new()
   end
 
   defp ordered(value) when is_list(value), do: Enum.map(value, &ordered/1)

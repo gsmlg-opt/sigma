@@ -97,7 +97,7 @@ defmodule Sigma.Web.SettingsServicesLiveTest do
          %{
            status: 200,
            body:
-             Jason.encode!(%{
+             Formata.JSON.encode!(%{
                "protocol_version" => "1",
                "data" => [
                  %{
@@ -242,7 +242,7 @@ defmodule Sigma.Web.SettingsServicesLiveTest do
          %{
            status: 200,
            body:
-             Jason.encode!(%{
+             Formata.JSON.encode!(%{
                "protocol_version" => "1",
                "data" => [
                  %{

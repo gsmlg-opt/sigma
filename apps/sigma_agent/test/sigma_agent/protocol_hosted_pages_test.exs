@@ -329,7 +329,7 @@ defmodule Sigma.Agent.ProtocolHostedPagesTest do
     bytes = chunks |> Enum.to_list() |> IO.iodata_to_binary()
     assert byte_size(bytes) == summary["byteLength"]
     assert Base.encode16(:crypto.hash(:sha256, bytes), case: :lower) == summary["sha256"]
-    Jason.decode!(bytes)
+    Formata.JSON.decode!(bytes)
   end
 
   defp opted, do: %{"requiredCapabilities" => [@capability]}

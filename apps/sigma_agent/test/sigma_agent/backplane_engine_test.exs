@@ -703,7 +703,7 @@ defmodule Sigma.Agent.BackplaneEngineTest do
                "details" => %{"errors" => [%{"rule" => "enum"}]}
              }
            } =
-             Jason.decode!(error)
+             Formata.JSON.decode!(error)
 
     refute_receive {:metrics, :tool_finished, _}
     assert Sigma.Agent.status(agent).phase == :completed

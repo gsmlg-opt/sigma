@@ -232,7 +232,7 @@ defmodule Sigma.Agent.BackplaneMemorySearchFunctionalTest do
 
     assert {:accepted, _} = Sigma.Agent.prompt(agent, "Search through Code Mode")
     {provider, _} = provider!()
-    code = "return await tools.memories__search(#{Jason.encode!(args)});"
+    code = "return await tools.memories__search(#{Formata.JSON.encode!(args)});"
     {provider, nested_params} = call!(provider, "exec", code)
     nested = result!(agent)
     assert nested["status"] == "completed"
@@ -346,7 +346,7 @@ defmodule Sigma.Agent.BackplaneMemorySearchFunctionalTest do
       |> Enum.find(&(&1.role == :tool_result and &1.tool_name == name))
 
     [%{type: :text, text: json}] = message.content
-    Jason.decode!(json)
+    Formata.JSON.decode!(json)
   end
 
   defp finish!(provider) do

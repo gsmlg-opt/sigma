@@ -80,7 +80,9 @@ defmodule Sigma.Agent.ContextBuilder do
   def with_execution_environment(context, environment) when is_map(environment) do
     block = %{
       type: :text,
-      text: "<environment_context>\n" <> Jason.encode!(environment) <> "\n</environment_context>"
+      text:
+        "<environment_context>\n" <>
+          Formata.JSON.encode!(environment) <> "\n</environment_context>"
     }
 
     system = context.system ++ [block]

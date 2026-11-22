@@ -737,7 +737,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
   defp native_tool_frame?(_event, _acc), do: false
 
   defp process_tool_frame(frame, acc, codec) do
-    bytes = "data: " <> Jason.encode!(frame) <> "\n\n"
+    bytes = "data: " <> Formata.JSON.encode!(frame) <> "\n\n"
 
     case Codec.stream_feed(:anthropic, codec, bytes) do
       {:ok, codec, observations} ->
@@ -831,7 +831,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
   defp provider_error_message(error), do: "AI provider error: #{inspect(error)}"
 
   defp http_error_message(status, body) do
-    case Jason.decode(body) do
+    case Formata.JSON.decode(body) do
       {:ok, %{"error" => error}} ->
         provider_error_message(error)
 
@@ -845,7 +845,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
 
   defp http_provider_error(status, body, headers) do
     error =
-      case Jason.decode(body) do
+      case Formata.JSON.decode(body) do
         {:ok, %{"error" => error}} -> error
         {:ok, error} -> error
         {:error, _reason} -> %{"message" => http_error_message(status, body)}

@@ -24,12 +24,12 @@ defmodule Sigma.Agent.MixProject do
 
   defp deps do
     [
-      {:backplane_agent_runtime, "~> 1.10.88"},
+      {:backplane_agent_runtime, "~> 1.10.90"},
       {:sigma_protocol, in_umbrella: true},
       {:sigma_ai, in_umbrella: true},
       {:sigma_coding, in_umbrella: true},
       {:ex_image_info, "~> 1.0"},
-      {:jason, "~> 1.4"}
+      {:formata, "~> 0.3.5"}
     ]
   end
 end

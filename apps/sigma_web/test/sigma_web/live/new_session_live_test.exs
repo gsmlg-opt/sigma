@@ -94,7 +94,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       session_id = Path.basename(meta_path, ".meta.json")
       log_path = Path.join(ConfigManager.sessions_dir(workdir), "#{session_id}.jsonl")
 
-      assert %{"mcp_server_ids" => []} = meta_path |> File.read!() |> Jason.decode!()
+      assert %{"mcp_server_ids" => []} = meta_path |> File.read!() |> Formata.JSON.decode!()
 
       assert {:ok,
               [
@@ -157,7 +157,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       [meta_path] = Path.wildcard(Path.join(ConfigManager.sessions_dir(workdir), "*.meta.json"))
       session_id = Path.basename(meta_path, ".meta.json")
       log_path = Path.join(ConfigManager.sessions_dir(workdir), "#{session_id}.jsonl")
-      meta = meta_path |> File.read!() |> Jason.decode!()
+      meta = meta_path |> File.read!() |> Formata.JSON.decode!()
 
       assert %{"cwd" => ^workdir, "branch" => _branch, "worktree" => false} = meta
       refute Map.has_key?(meta, "provider_id")
@@ -191,7 +191,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       render_async(view, 1_000)
       assert {:error, {:live_redirect, _}} = render_click(view, "create_session")
       [path] = Path.wildcard(Path.join(ConfigManager.sessions_dir(workdir), "*.meta.json"))
-      assert Jason.decode!(File.read!(path))["context_limit"] == 131_072
+      assert Formata.JSON.decode!(File.read!(path))["context_limit"] == 131_072
 
       {:ok, stale, _} = live(conn, "/repository/#{encoded}/sessions/new")
       render_async(stale, 1_000)
@@ -229,7 +229,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       render_change(view, "select_context_limit", %{"context_limit" => "65536"})
       assert {:error, {:live_redirect, _}} = render_click(view, "create_session")
       [path] = Path.wildcard(Path.join(ConfigManager.sessions_dir(workdir), "*.meta.json"))
-      assert Jason.decode!(File.read!(path))["context_limit"] == 65_536
+      assert Formata.JSON.decode!(File.read!(path))["context_limit"] == 65_536
     end)
   end
 
@@ -482,7 +482,7 @@ defmodule Sigma.Web.NewSessionLiveTest do
       log_path = Path.join(sessions_dir, "#{session_id}.jsonl")
 
       assert %{"cwd" => ^worktree_path, "worktree" => true} =
-               meta_path |> File.read!() |> Jason.decode!()
+               meta_path |> File.read!() |> Formata.JSON.decode!()
 
       assert {:ok,
               [
@@ -639,12 +639,15 @@ defmodule Sigma.Web.NewSessionLiveTest do
 
     File.write!(
       Path.join(agent_dir, "settings.json"),
-      Jason.encode!(%{"defaultProvider" => default_provider_id, "defaultModel" => default_model})
+      Formata.JSON.encode!(%{
+        "defaultProvider" => default_provider_id,
+        "defaultModel" => default_model
+      })
     )
 
     File.write!(
       Path.join(agent_dir, "models.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "providers" =>
           Enum.into(providers, %{}, fn {provider_id, models} ->
             {provider_id,

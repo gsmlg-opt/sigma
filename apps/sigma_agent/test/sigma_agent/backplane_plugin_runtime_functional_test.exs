@@ -62,8 +62,8 @@ defmodule Sigma.Agent.BackplanePluginRuntimeFunctionalTest do
     value = "  完整结果 e\u0301 👩‍💻\r\n尾行"
     assert {:ok, %ToolResult{} = result} = dispatch(tool, %{"value" => value}, dir)
     assert [%{type: :text, text: json}] = result.content
-    assert Jason.decode!(json) == %{"release" => "release-one", "value" => value}
-    assert result.details["structuredContent"] == Jason.decode!(json)
+    assert Formata.JSON.decode!(json) == %{"release" => "release-one", "value" => value}
+    assert result.details["structuredContent"] == Formata.JSON.decode!(json)
     refute result.is_error
 
     assert {:ok, %ToolResult{is_error: true}} =
@@ -371,13 +371,13 @@ defmodule Sigma.Agent.BackplanePluginRuntimeFunctionalTest do
 
     files = %{
       "plugin.json" =>
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "$schema" => "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
           "name" => id,
           "version" => "1.0.0"
         }),
       "mcp.json" =>
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "$schema" => "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
           "mcpServers" => %{
             id => %{
@@ -424,7 +424,8 @@ defmodule Sigma.Agent.BackplanePluginRuntimeFunctionalTest do
   end
 
   defp events(path),
-    do: path |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    do:
+      path |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
 
   defp eventually(fun, attempts \\ 150)
   defp eventually(fun, 0), do: fun.()

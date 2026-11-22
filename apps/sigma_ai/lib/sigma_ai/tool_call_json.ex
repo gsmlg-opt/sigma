@@ -19,7 +19,7 @@ defmodule Sigma.Ai.ToolCallJson do
     if String.trim(arguments) == "" do
       {:ok, %{}}
     else
-      case Jason.decode(arguments) do
+      case Formata.JSON.decode(arguments) do
         {:ok, value} when is_map(value) ->
           {:ok, value}
 
@@ -30,7 +30,7 @@ defmodule Sigma.Ai.ToolCallJson do
           repaired = repair_json(arguments)
 
           if repaired != arguments do
-            case Jason.decode(repaired) do
+            case Formata.JSON.decode(repaired) do
               {:ok, value} when is_map(value) -> {:ok, value}
               _ -> :error
             end

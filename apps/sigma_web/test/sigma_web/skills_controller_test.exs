@@ -12,7 +12,7 @@ defmodule Sigma.Web.SkillsControllerTest do
 
     try do
       conn = get(build_conn(), "/api/v1/capabilities")
-      response = Jason.decode!(conn.resp_body)
+      response = Formata.JSON.decode!(conn.resp_body)
       assert conn.status == 200
       assert response["skills"]["localCatalog"]
       assert response["skills"]["manualInvocation"]
@@ -23,7 +23,7 @@ defmodule Sigma.Web.SkillsControllerTest do
 
       File.write!(
         Path.join(agent_dir, "settings.json"),
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "skillSources" => %{
             "remote-one" => %{
               "kind" => "backplane",
@@ -37,11 +37,11 @@ defmodule Sigma.Web.SkillsControllerTest do
 
       File.write!(
         Path.join(agent_dir, "auth.json"),
-        Jason.encode!(%{"remote-token" => %{"type" => "api_key", "key" => "token"}})
+        Formata.JSON.encode!(%{"remote-token" => %{"type" => "api_key", "key" => "token"}})
       )
 
       conn = get(build_conn(), "/api/v1/capabilities")
-      response = Jason.decode!(conn.resp_body)
+      response = Formata.JSON.decode!(conn.resp_body)
       assert response["skills"]["remoteRead"]
 
       assert [%{"sourceId" => "remote-one", "status" => "configured"}] =
@@ -68,7 +68,7 @@ defmodule Sigma.Web.SkillsControllerTest do
 
     File.write!(
       Path.join(agent_dir, "settings.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "skillSources" => %{
           "remote-one" => %{
             "kind" => "backplane",
@@ -82,7 +82,7 @@ defmodule Sigma.Web.SkillsControllerTest do
 
     File.write!(
       Path.join(agent_dir, "auth.json"),
-      Jason.encode!(%{"remote-token" => %{"type" => "api_key", "key" => "hidden-token"}})
+      Formata.JSON.encode!(%{"remote-token" => %{"type" => "api_key", "key" => "hidden-token"}})
     )
 
     transport = fn request ->
@@ -93,7 +93,7 @@ defmodule Sigma.Web.SkillsControllerTest do
        %{
          status: 200,
          body:
-           Jason.encode!(%{
+           Formata.JSON.encode!(%{
              "protocol_version" => "1",
              "data" => [
                %{
@@ -125,7 +125,7 @@ defmodule Sigma.Web.SkillsControllerTest do
         )
 
       assert conn.status == 200
-      response = Jason.decode!(conn.resp_body)
+      response = Formata.JSON.decode!(conn.resp_body)
       assert response["partial"]
 
       assert [%{"reference" => "remote-one:deploy", "artifactDigest" => digest}] =
@@ -168,7 +168,7 @@ defmodule Sigma.Web.SkillsControllerTest do
 
       File.write!(
         Path.join([tmp_dir, "agent", "settings.json"]),
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "skillSources" => %{
             "remote-one" => %{
               "kind" => "backplane",
@@ -182,7 +182,7 @@ defmodule Sigma.Web.SkillsControllerTest do
 
       File.write!(
         Path.join([tmp_dir, "agent", "auth.json"]),
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "private-credential" => %{"type" => "api_key", "key" => "private-token"}
         })
       )
@@ -190,7 +190,7 @@ defmodule Sigma.Web.SkillsControllerTest do
       repository_id = Base.url_encode64(workdir, padding: false)
       conn = get(conn, "/api/v1/skills?repositoryId=#{repository_id}")
       assert conn.status == 200
-      response = Jason.decode!(conn.resp_body)
+      response = Formata.JSON.decode!(conn.resp_body)
       assert [item] = response["items"]
       assert item["name"] == "review"
       assert item["description"] == "Review code"

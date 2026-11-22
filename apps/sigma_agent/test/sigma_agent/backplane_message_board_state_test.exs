@@ -19,8 +19,8 @@ defmodule Sigma.Agent.Backplane.MessageBoardStateTest do
     assert {:error, %Error{class: :resource_conflict}} =
              call(state, "post", Map.put(args, "text", "changed"), host(3))
 
-    assert Jason.decode!(Jason.encode!(state)) == state
-    restored = Jason.decode!(Jason.encode!(state))
+    assert Formata.JSON.decode!(Formata.JSON.encode!(state)) == state
+    restored = Formata.JSON.decode!(Formata.JSON.encode!(state))
     assert {:ok, ^result, ^restored, []} = call(restored, "post", args, host(3))
   end
 
@@ -56,7 +56,7 @@ defmodule Sigma.Agent.Backplane.MessageBoardStateTest do
     retry = Map.put(args, "agents_to_notify", [])
 
     assert {:ok, ^result, ^state, []} = call(state, "post", retry, host(1))
-    restored = Jason.decode!(Jason.encode!(state))
+    restored = Formata.JSON.decode!(Formata.JSON.encode!(state))
     assert {:ok, ^result, ^restored, []} = call(restored, "post", retry, host(1))
   end
 
@@ -188,7 +188,7 @@ defmodule Sigma.Agent.Backplane.MessageBoardStateTest do
     {page, _, _} =
       ok(state, "search_posts", %{"limit" => 50, "max_chars_per_post" => 20000}, host(31))
 
-    assert byte_size(Jason.encode!(page)) <= 8000
+    assert byte_size(Formata.JSON.encode!(page)) <= 8000
     assert page["n_returned"] < 23
     assert page["n_returned"] > 0
     assert page["has_more"]
@@ -251,7 +251,7 @@ defmodule Sigma.Agent.Backplane.MessageBoardStateTest do
       )
 
     assert read["next_offset_chars"] <= 20000
-    assert byte_size(Jason.encode!(read)) <= 8000
+    assert byte_size(Formata.JSON.encode!(read)) <= 8000
   end
 
   test "strict arguments, destinations, UUIDs and root identity reject invalid requests" do
@@ -317,7 +317,7 @@ defmodule Sigma.Agent.Backplane.MessageBoardStateTest do
     {_, state, _} =
       ok(Board.new("tree"), "post", %{"new_channel_name" => "a", "text" => "hello"}, host(1))
 
-    state = state |> Board.tombstone() |> Jason.encode!() |> Jason.decode!()
+    state = state |> Board.tombstone() |> Formata.JSON.encode!() |> Formata.JSON.decode!()
 
     assert {:error, %Error{class: :forbidden}} =
              call(state, "post", %{"new_channel_name" => "a", "text" => "hello"}, host(1))

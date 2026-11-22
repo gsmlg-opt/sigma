@@ -1564,7 +1564,7 @@ defmodule Sigma.Web.SessionLive do
 
   # Native command results are JSON with `output` and `exit_code`.
   defp tool_output(text) when is_binary(text) do
-    case Jason.decode(text) do
+    case Formata.JSON.decode(text) do
       {:ok, %{"output" => output} = result} when is_binary(output) ->
         {output, result["exit_code"]}
 
@@ -1757,7 +1757,7 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp format_tool_args(args) when is_map(args) do
-    Jason.encode!(args, pretty: true)
+    Formata.JSON.encode!(args, pretty: true)
   rescue
     _ -> inspect(args)
   end
@@ -2190,7 +2190,7 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp model_option_value(provider_id, model_id) do
-    Jason.encode!(%{"provider_id" => provider_id, "model_id" => model_id})
+    Formata.JSON.encode!(%{"provider_id" => provider_id, "model_id" => model_id})
   end
 
   defp agent_model(provider_config, provider_id, model_id) do
@@ -2232,7 +2232,7 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp parse_model_option_value(value) when is_binary(value) do
-    case Jason.decode(value) do
+    case Formata.JSON.decode(value) do
       {:ok, %{"provider_id" => provider_id, "model_id" => model_id}}
       when is_binary(provider_id) and is_binary(model_id) ->
         {:ok, provider_id, model_id}
@@ -5183,7 +5183,7 @@ defmodule Sigma.Web.SessionLive do
   defp read_session_meta(meta_path) do
     case File.read(meta_path) do
       {:ok, content} ->
-        case Jason.decode(content) do
+        case Formata.JSON.decode(content) do
           {:ok, meta} -> meta
           _ -> %{}
         end

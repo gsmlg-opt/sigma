@@ -552,7 +552,7 @@ defmodule Sigma.Agent.BackplaneMessageBoardProductionFunctionalTest do
   defp nested_post!(provider, channel, text) do
     provider =
       call!(provider, "exec", """
-      const posted = await tools["collaboration::post"]({new_channel_name:#{Jason.encode!(channel)},text:#{Jason.encode!(text)}});
+      const posted = await tools["collaboration::post"]({new_channel_name:#{Formata.JSON.encode!(channel)},text:#{Formata.JSON.encode!(text)}});
       const read = await tools["collaboration::read_post"]({message_id:posted.message_id,limit_chars:20000});
       return {posted,read};
       """)
@@ -593,7 +593,7 @@ defmodule Sigma.Agent.BackplaneMessageBoardProductionFunctionalTest do
     page = data!(provider, "read_post")
     assert page["message_id"] == id
     assert page["next_offset_chars"] == offset + length(String.to_charlist(page["text"]))
-    assert byte_size(Jason.encode!(page)) <= 8000
+    assert byte_size(Formata.JSON.encode!(page)) <= 8000
     chunks = [page["text"] | chunks]
 
     if page["next_offset_chars"] < page["n_chars"] do
@@ -693,7 +693,7 @@ defmodule Sigma.Agent.BackplaneMessageBoardProductionFunctionalTest do
       |> field(:content)
       |> Enum.find(&(field(&1, :type) in [:text, "text"]))
       |> field(:text)
-      |> Jason.decode!()
+      |> Formata.JSON.decode!()
   end
 
   defp field(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))

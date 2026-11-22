@@ -76,8 +76,8 @@ defmodule Sigma.Protocol.AsyncInteractionPagesTest do
     bytes = chunks!(snapshot, revision, "large-card", 0, summary)
     assert byte_size(bytes) == summary["byteLength"]
     assert sha256(bytes) == summary["sha256"]
-    assert Jason.decode!(bytes) == card
-    assert_sorted_objects!(Jason.decode!(bytes, objects: :ordered_objects))
+    assert Formata.JSON.decode!(bytes) == card
+    assert_sorted_objects!(Formata.JSON.decode!(bytes, objects: :ordered_objects))
 
     request = %{"expectedRevision" => revision, "itemId" => "large-card"}
     first = read!(snapshot, request)
@@ -490,7 +490,7 @@ defmodule Sigma.Protocol.AsyncInteractionPagesTest do
   defp reverse_map_order(value) when is_list(value), do: Enum.map(value, &reverse_map_order/1)
   defp reverse_map_order(value), do: value
 
-  defp assert_sorted_objects!(%Jason.OrderedObject{values: values}) do
+  defp assert_sorted_objects!(%Formata.JSON.OrderedObject{values: values}) do
     keys = Enum.map(values, &elem(&1, 0))
     assert keys == Enum.sort(keys)
     Enum.each(values, fn {_key, value} -> assert_sorted_objects!(value) end)

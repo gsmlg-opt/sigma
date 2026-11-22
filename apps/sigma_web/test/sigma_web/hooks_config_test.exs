@@ -30,7 +30,7 @@ defmodule Sigma.Web.HooksConfigTest do
                "async" => "false"
              })
 
-    assert Jason.decode!(updated)["hooks"]["Stop"] == [
+    assert Formata.JSON.decode!(updated)["hooks"]["Stop"] == [
              %{
                "hooks" => [
                  %{
@@ -81,13 +81,13 @@ defmodule Sigma.Web.HooksConfigTest do
     }
 
     assert {:ok, json} =
-             HooksConfig.put_command(Jason.encode!(original), "PreToolUse", :new, %{
+             HooksConfig.put_command(Formata.JSON.encode!(original), "PreToolUse", :new, %{
                "command" => "echo ready",
                "matcher" => "Bash|Edit",
                "timeout" => "20"
              })
 
-    edited = Jason.decode!(json)
+    edited = Formata.JSON.decode!(json)
     assert edited["version"] == 3
     assert edited["hooks"]["FutureEvent"] == original["hooks"]["FutureEvent"]
     assert hd(edited["hooks"]["PreToolUse"]) == hd(original["hooks"]["PreToolUse"])
@@ -105,7 +105,7 @@ defmodule Sigma.Web.HooksConfigTest do
     original = %{"hooks" => %{"PreToolUse" => [group]}, "other" => [1, 2]}
 
     assert {:ok, json} =
-             HooksConfig.put_command(Jason.encode!(original), "PreToolUse", {0, 0}, %{
+             HooksConfig.put_command(Formata.JSON.encode!(original), "PreToolUse", {0, 0}, %{
                "command" => "new",
                "matcher" => "Edit",
                "timeout" => "45"
@@ -132,12 +132,16 @@ defmodule Sigma.Web.HooksConfigTest do
 
   test "blank timeout restores default and removes every explicit timeout alias" do
     handler = %{"command" => "old", "timeout" => 10, "timeoutSec" => 12, "timeout_sec" => 15}
-    json = Jason.encode!(%{"hooks" => %{"Stop" => [%{"matcher" => "*", "hooks" => [handler]}]}})
+
+    json =
+      Formata.JSON.encode!(%{"hooks" => %{"Stop" => [%{"matcher" => "*", "hooks" => [handler]}]}})
 
     assert {:ok, updated} =
              HooksConfig.put_command(json, "Stop", {0, 0}, %{"command" => "new", "timeout" => ""})
 
-    assert Jason.decode!(updated)["hooks"]["Stop"] == [%{"hooks" => [%{"command" => "new"}]}]
+    assert Formata.JSON.decode!(updated)["hooks"]["Stop"] == [
+             %{"hooks" => [%{"command" => "new"}]}
+           ]
   end
 
   test "timeout_sec alias is retained when edited" do
@@ -146,7 +150,7 @@ defmodule Sigma.Web.HooksConfigTest do
     assert {:ok, updated} =
              HooksConfig.put_command(json, "Stop", {0, 0}, %{"command" => "new", "timeout" => 20})
 
-    assert Jason.decode!(updated)["hooks"]["Stop"] == [
+    assert Formata.JSON.decode!(updated)["hooks"]["Stop"] == [
              %{"hooks" => [%{"cmd" => "new", "timeout_sec" => 20}]}
            ]
   end
@@ -155,22 +159,30 @@ defmodule Sigma.Web.HooksConfigTest do
     sibling = %{"type" => "http", "url" => "https://example.test", "headers" => %{}}
     group = %{"matcher" => "Bash", "extra" => true, "hooks" => [%{"command" => "first"}, sibling]}
     other_group = %{"hooks" => [%{"command" => "second"}]}
-    json = Jason.encode!(%{"hooks" => %{"PreToolUse" => [group, other_group]}, "enabled" => true})
+
+    json =
+      Formata.JSON.encode!(%{
+        "hooks" => %{"PreToolUse" => [group, other_group]},
+        "enabled" => true
+      })
 
     assert {:ok, updated} = HooksConfig.remove_command(json, "PreToolUse", {0, 0})
 
-    assert Jason.decode!(updated) == %{
+    assert Formata.JSON.decode!(updated) == %{
              "hooks" => %{"PreToolUse" => [%{group | "hooks" => [sibling]}, other_group]},
              "enabled" => true
            }
 
     assert {:ok, updated} = HooksConfig.remove_command(updated, "PreToolUse", {1, 0})
-    assert Jason.decode!(updated)["hooks"]["PreToolUse"] == [%{group | "hooks" => [sibling]}]
+
+    assert Formata.JSON.decode!(updated)["hooks"]["PreToolUse"] == [
+             %{group | "hooks" => [sibling]}
+           ]
   end
 
   test "unsupported handlers require advanced JSON for editing and removal" do
     for handler <- [%{"type" => "prompt"}, %{"url" => "https://example.test"}] do
-      json = Jason.encode!(%{"hooks" => %{"Stop" => [%{"hooks" => [handler]}]}})
+      json = Formata.JSON.encode!(%{"hooks" => %{"Stop" => [%{"hooks" => [handler]}]}})
 
       assert {:error, message} =
                HooksConfig.put_command(json, "Stop", {0, 0}, %{"command" => "new"})

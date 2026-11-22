@@ -35,7 +35,7 @@ defmodule Sigma.Session.OperationsTest do
     assert File.read!(source) == source_before
     assert File.read!(sidecar) == sidecar_before
 
-    dump = dump_path |> File.read!() |> Jason.decode!()
+    dump = dump_path |> File.read!() |> Formata.JSON.decode!()
     assert dump["format"] == "sigma.session.dump"
     assert dump["activeLeafId"] == "unknown-entry"
 
@@ -63,7 +63,7 @@ defmodule Sigma.Session.OperationsTest do
     end
 
     assert {:ok, ^dump_path} = Log.dump(source, dump_path, after_capture: after_capture)
-    dump = dump_path |> File.read!() |> Jason.decode!()
+    dump = dump_path |> File.read!() |> Formata.JSON.decode!()
 
     refute Enum.any?(dump["entries"], &(get_in(&1, ["message", "id"]) == "after"))
     assert {:ok, replayed} = Log.replay(source)
@@ -129,7 +129,7 @@ defmodule Sigma.Session.OperationsTest do
     }
 
     entries = entries ++ [unknown]
-    source_bytes = Enum.map_join(entries, "\n", &Jason.encode!/1) <> "\n{\"type\":"
+    source_bytes = Enum.map_join(entries, "\n", &Formata.JSON.encode!/1) <> "\n{\"type\":"
     sidecar_bytes = ~s({"branch":"cancelled","exact":"汉字\\r\\n"})
     File.write!(source, source_bytes)
     File.write!(sidecar, sidecar_bytes)
@@ -150,7 +150,7 @@ defmodule Sigma.Session.OperationsTest do
            ]
 
     assert {:ok, ^dump_path} = Log.dump(source, dump_path)
-    dump = dump_path |> File.read!() |> Jason.decode!()
+    dump = dump_path |> File.read!() |> Formata.JSON.decode!()
 
     assert dump["diagnostics"] == [
              %{"kind" => "trailing_incomplete_json", "line" => 6},
@@ -220,7 +220,7 @@ defmodule Sigma.Session.OperationsTest do
 
     File.write!(
       path,
-      Enum.map_join([header, filler, model, user], "\n", &Jason.encode!/1) <> "\n"
+      Enum.map_join([header, filler, model, user], "\n", &Formata.JSON.encode!/1) <> "\n"
     )
 
     test_pid = self()

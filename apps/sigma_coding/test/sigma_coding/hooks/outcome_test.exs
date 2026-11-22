@@ -207,7 +207,7 @@ defmodule Sigma.Coding.Hooks.OutcomeTest do
 
   describe "decode/3 JSON stdout — new schema" do
     test "permissionDecision allow → :proceed" do
-      json = Jason.encode!(%{"hookSpecificOutput" => %{"permissionDecision" => "allow"}})
+      json = Formata.JSON.encode!(%{"hookSpecificOutput" => %{"permissionDecision" => "allow"}})
 
       assert :proceed =
                Outcome.decode(:pre_tool_use, %{exit: 0, stdout: json, stderr: ""}, :claude)
@@ -215,7 +215,7 @@ defmodule Sigma.Coding.Hooks.OutcomeTest do
 
     test "permissionDecision deny → :block" do
       json =
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "hookSpecificOutput" => %{
             "permissionDecision" => "deny",
             "permissionDecisionReason" => "not allowed"
@@ -227,7 +227,7 @@ defmodule Sigma.Coding.Hooks.OutcomeTest do
     end
 
     test "permissionDecision ask → :ask" do
-      json = Jason.encode!(%{"hookSpecificOutput" => %{"permissionDecision" => "ask"}})
+      json = Formata.JSON.encode!(%{"hookSpecificOutput" => %{"permissionDecision" => "ask"}})
 
       assert {:ask, _} =
                Outcome.decode(:pre_tool_use, %{exit: 0, stdout: json, stderr: ""}, :claude)
@@ -235,7 +235,7 @@ defmodule Sigma.Coding.Hooks.OutcomeTest do
 
     test "updatedInput → :modify with patch" do
       json =
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "hookSpecificOutput" => %{
             "permissionDecision" => "allow",
             "updatedInput" => %{"command" => "ls -la"}
@@ -247,7 +247,7 @@ defmodule Sigma.Coding.Hooks.OutcomeTest do
     end
 
     test "continue:false → :halt" do
-      json = Jason.encode!(%{"continue" => false})
+      json = Formata.JSON.encode!(%{"continue" => false})
 
       assert {:halt, _} =
                Outcome.decode(:stop, %{exit: 0, stdout: json, stderr: ""}, :codex)
@@ -255,7 +255,7 @@ defmodule Sigma.Coding.Hooks.OutcomeTest do
 
     test "additionalContext is joined as context" do
       json =
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "hookSpecificOutput" => %{
             "permissionDecision" => "allow",
             "additionalContext" => "some context"
@@ -270,14 +270,14 @@ defmodule Sigma.Coding.Hooks.OutcomeTest do
 
   describe "decode/3 JSON stdout — legacy schema" do
     test "decision block → :block" do
-      json = Jason.encode!(%{"decision" => "block", "reason" => "bad"})
+      json = Formata.JSON.encode!(%{"decision" => "block", "reason" => "bad"})
 
       assert {:block, "bad"} =
                Outcome.decode(:pre_tool_use, %{exit: 0, stdout: json, stderr: ""}, :codex)
     end
 
     test "legacy approve → allow → :proceed" do
-      json = Jason.encode!(%{"decision" => "approve"})
+      json = Formata.JSON.encode!(%{"decision" => "approve"})
 
       assert :proceed =
                Outcome.decode(:pre_tool_use, %{exit: 0, stdout: json, stderr: ""}, :codex)
@@ -286,21 +286,21 @@ defmodule Sigma.Coding.Hooks.OutcomeTest do
 
   describe "decode/3 PostToolUse dialect divergence — AC-3" do
     test "Codex block → substitute (returns :block)" do
-      json = Jason.encode!(%{"decision" => "block", "reason" => "feedback"})
+      json = Formata.JSON.encode!(%{"decision" => "block", "reason" => "feedback"})
 
       assert {:block, "feedback"} =
                Outcome.decode(:post_tool_use, %{exit: 0, stdout: json, stderr: ""}, :codex)
     end
 
     test "Claude block → annotate alongside (returns :context)" do
-      json = Jason.encode!(%{"decision" => "block", "reason" => "feedback"})
+      json = Formata.JSON.encode!(%{"decision" => "block", "reason" => "feedback"})
 
       assert {:context, "feedback"} =
                Outcome.decode(:post_tool_use, %{exit: 0, stdout: json, stderr: ""}, :claude)
     end
 
     test "Codex rejects unsupported updatedToolOutput while Claude compatibility remains" do
-      json = Jason.encode!(%{"hookSpecificOutput" => %{"updatedToolOutput" => "replaced"}})
+      json = Formata.JSON.encode!(%{"hookSpecificOutput" => %{"updatedToolOutput" => "replaced"}})
 
       assert :proceed =
                Outcome.decode(:post_tool_use, %{exit: 0, stdout: json, stderr: ""}, :codex)

@@ -648,7 +648,7 @@ defmodule Sigma.Web.SessionLiveTest do
         ConfigManager.sessions_dir(@workdir)
         |> Path.join(session_id <> ".meta.json")
         |> File.read!()
-        |> Jason.decode!()
+        |> Formata.JSON.decode!()
 
       assert metadata["context_limit"] == limit
     end
@@ -1088,7 +1088,7 @@ defmodule Sigma.Web.SessionLiveTest do
     assert has_element?(view, ~s(a[aria-current="page"][href="#{session_path(session_id)}"]))
     assert File.read!(source_path) == original_log
 
-    assert Jason.decode!(File.read!(Path.join(sessions_dir, "#{session_id}.meta.json"))) ==
+    assert Formata.JSON.decode!(File.read!(Path.join(sessions_dir, "#{session_id}.meta.json"))) ==
              Map.put(metadata, "title", "Renamed session")
 
     refute File.exists?(Path.join(sessions_dir, "Renamed session.jsonl"))
@@ -1128,7 +1128,9 @@ defmodule Sigma.Web.SessionLiveTest do
     assert File.read!(session_storage_path(other_id)) == original_log
     assert File.exists?(session_storage_path(session_id))
 
-    assert Jason.decode!(File.read!(Path.join(sessions_dir, "#{other_id}.meta.json")))["title"] ==
+    assert Formata.JSON.decode!(File.read!(Path.join(sessions_dir, "#{other_id}.meta.json")))[
+             "title"
+           ] ==
              session_id
 
     {:ok, _other_view, html} = live_loaded(conn, session_path(other_id))
@@ -1617,7 +1619,7 @@ defmodule Sigma.Web.SessionLiveTest do
       File.mkdir_p!(sessions_dir)
 
       meta_bytes =
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "cwd" => @workdir,
           "branch" => "main",
           "provider_id" => "openai",
@@ -1647,7 +1649,7 @@ defmodule Sigma.Web.SessionLiveTest do
         |> List.first()
 
       assert {:ok, %{"provider_id" => "openai", "model_id" => "smart"}} =
-               Jason.decode(selected_value)
+               Formata.JSON.decode(selected_value)
 
       anthropic_value =
         options
@@ -1661,7 +1663,7 @@ defmodule Sigma.Web.SessionLiveTest do
         Sigma.Session.ConfigManager.agent_dir()
         |> Path.join("settings.json")
         |> File.read!()
-        |> Jason.decode!()
+        |> Formata.JSON.decode!()
 
       assert settings["defaultProvider"] == "openai"
       assert settings["defaultModel"] == "smart"
@@ -1685,7 +1687,7 @@ defmodule Sigma.Web.SessionLiveTest do
       before_config = File.read!(Path.join(ConfigManager.agent_dir(), "models.json"))
       before_log = if File.exists?(storage_path), do: File.read!(storage_path)
 
-      value = Jason.encode!(%{"provider_id" => "openai", "model_id" => "unadded"})
+      value = Formata.JSON.encode!(%{"provider_id" => "openai", "model_id" => "unadded"})
       assert render_change(view, "select_model", %{"model" => value}) =~ "Unknown model selection"
       assert File.read!(Path.join(ConfigManager.agent_dir(), "models.json")) == before_config
       assert if(File.exists?(storage_path), do: File.read!(storage_path)) == before_log
@@ -1698,7 +1700,7 @@ defmodule Sigma.Web.SessionLiveTest do
       assert html =~ "Choose a configured model"
       assert if(File.exists?(storage_path), do: File.read!(storage_path)) == before_log
 
-      selected = Jason.encode!(%{"provider_id" => "openai", "model_id" => "fast"})
+      selected = Formata.JSON.encode!(%{"provider_id" => "openai", "model_id" => "fast"})
       render_change(view, "select_model", %{"model" => selected})
       refute render(view) =~ "Model unavailable"
     end)
@@ -1743,7 +1745,7 @@ defmodule Sigma.Web.SessionLiveTest do
       storage_path = Path.join(sessions_dir, "#{session_id}.jsonl")
       File.mkdir_p!(sessions_dir)
 
-      meta_bytes = Jason.encode!(%{"cwd" => @workdir})
+      meta_bytes = Formata.JSON.encode!(%{"cwd" => @workdir})
       File.write!(meta_path, meta_bytes)
       assert :ok = Log.persist_event(storage_path, {:agent_start, @workdir})
 
@@ -1776,7 +1778,7 @@ defmodule Sigma.Web.SessionLiveTest do
         Sigma.Session.ConfigManager.agent_dir()
         |> Path.join("settings.json")
         |> File.read!()
-        |> Jason.decode!()
+        |> Formata.JSON.decode!()
 
       assert settings["defaultProvider"] == "openai"
       assert settings["defaultModel"] == "smart"
@@ -1803,7 +1805,11 @@ defmodule Sigma.Web.SessionLiveTest do
       File.mkdir_p!(sessions_dir)
 
       meta_bytes =
-        Jason.encode!(%{"cwd" => @workdir, "provider_id" => "anthropic", "model_id" => "opus"})
+        Formata.JSON.encode!(%{
+          "cwd" => @workdir,
+          "provider_id" => "anthropic",
+          "model_id" => "opus"
+        })
 
       File.write!(meta_path, meta_bytes)
 
@@ -1856,7 +1862,11 @@ defmodule Sigma.Web.SessionLiveTest do
       File.mkdir_p!(sessions_dir)
 
       meta_bytes =
-        Jason.encode!(%{"cwd" => @workdir, "provider_id" => "openai", "model_id" => "smart"})
+        Formata.JSON.encode!(%{
+          "cwd" => @workdir,
+          "provider_id" => "openai",
+          "model_id" => "smart"
+        })
 
       File.write!(meta_path, meta_bytes)
 
@@ -1880,7 +1890,7 @@ defmodule Sigma.Web.SessionLiveTest do
         Sigma.Session.ConfigManager.agent_dir()
         |> Path.join("settings.json")
         |> File.read!()
-        |> Jason.decode!()
+        |> Formata.JSON.decode!()
 
       assert settings["defaultProvider"] == "openai"
       assert settings["defaultModel"] == "smart"
@@ -1906,7 +1916,11 @@ defmodule Sigma.Web.SessionLiveTest do
 
       File.write!(
         meta_path,
-        Jason.encode!(%{"cwd" => @workdir, "provider_id" => "anthropic", "model_id" => "opus"})
+        Formata.JSON.encode!(%{
+          "cwd" => @workdir,
+          "provider_id" => "anthropic",
+          "model_id" => "opus"
+        })
       )
 
       assert :ok = Log.persist_event(log_path, {:agent_start, @workdir})
@@ -3696,7 +3710,7 @@ defmodule Sigma.Web.SessionLiveTest do
                  target_id
                )
 
-      assert Jason.decode!(File.read!(meta_path))["title"] == "Alternative investigation"
+      assert Formata.JSON.decode!(File.read!(meta_path))["title"] == "Alternative investigation"
     end)
   end
 
@@ -4114,7 +4128,7 @@ defmodule Sigma.Web.SessionLiveTest do
     |> Floki.find("#messages")
     |> Floki.attribute("data-chat")
     |> hd()
-    |> Jason.decode!()
+    |> Formata.JSON.decode!()
   end
 
   defp chat_snapshot(view) do
@@ -4127,7 +4141,7 @@ defmodule Sigma.Web.SessionLiveTest do
       |> Floki.find("#messages")
       |> Floki.attribute("data-chat")
 
-    conversation_id = Jason.decode!(conversation_id)["conversationId"]
+    conversation_id = Formata.JSON.decode!(conversation_id)["conversationId"]
     render_hook(view, "chat.sync", %{"id" => "messages", "conversation_id" => conversation_id})
     assert_push_event(view, "chat:event", %{type: "chat.snapshot"} = snapshot)
     snapshot
@@ -4435,19 +4449,19 @@ defmodule Sigma.Web.SessionLiveTest do
 
     File.write!(
       Path.join(agent_dir, "settings.json"),
-      Jason.encode!(%{"defaultProvider" => "openai", "defaultModel" => "smart"})
+      Formata.JSON.encode!(%{"defaultProvider" => "openai", "defaultModel" => "smart"})
     )
 
     File.write!(
       Path.join(agent_dir, "auth.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "minimax-cred" => %{"type" => "api_key", "key" => "secret-key", "name" => "MiniMax"}
       })
     )
 
     File.write!(
       Path.join(agent_dir, "models.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "providers" => %{
           "openai" => %{
             "name" => "openai",
@@ -4472,12 +4486,15 @@ defmodule Sigma.Web.SessionLiveTest do
 
     File.write!(
       Path.join(agent_dir, "settings.json"),
-      Jason.encode!(%{"defaultProvider" => default_provider_id, "defaultModel" => default_model})
+      Formata.JSON.encode!(%{
+        "defaultProvider" => default_provider_id,
+        "defaultModel" => default_model
+      })
     )
 
     File.write!(
       Path.join(agent_dir, "models.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "providers" =>
           Enum.into(providers, %{}, fn {provider_id, models} ->
             {provider_id,

@@ -59,7 +59,7 @@ defmodule Sigma.Session.Skills.FacadeTest do
 
     File.write!(
       Path.join([tmp_dir, "agent", "settings.json"]),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "skillSources" => %{
           "online" => %{
             "kind" => "backplane",
@@ -74,7 +74,7 @@ defmodule Sigma.Session.Skills.FacadeTest do
 
     File.write!(
       Path.join([tmp_dir, "agent", "auth.json"]),
-      Jason.encode!(%{"secret-ref" => %{"type" => "api_key", "key" => "secret-value"}})
+      Formata.JSON.encode!(%{"secret-ref" => %{"type" => "api_key", "key" => "secret-value"}})
     )
 
     assert [invalid, online] = Facade.remote_sources()

@@ -33,8 +33,8 @@ defmodule Sigma.Ai.CancellationFeedbackTest do
           response_id: "resp_known"
         })
 
-      assert {:ok, encoded} = Jason.encode(payload)
-      assert Jason.decode!(encoded)["outcome"] == Atom.to_string(outcome)
+      assert {:ok, encoded} = Sigma.Ai.JSON.encode(payload)
+      assert Formata.JSON.decode!(encoded)["outcome"] == Atom.to_string(outcome)
       assert payload["responseId"] == "resp_known"
     end
   end

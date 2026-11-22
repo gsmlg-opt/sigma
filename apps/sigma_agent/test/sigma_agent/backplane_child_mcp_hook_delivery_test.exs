@@ -244,7 +244,7 @@ defmodule Sigma.Agent.BackplaneChildMcpHookDeliveryTest do
     post_path = Path.join(dir, "post-hooks.jsonl")
 
     output =
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "hookSpecificOutput" => %{
           "hookEventName" => "PostToolUse",
           "additionalContext" => @text
@@ -259,7 +259,7 @@ defmodule Sigma.Agent.BackplaneChildMcpHookDeliveryTest do
 
     {:ok, specs} =
       Discovery.parse(
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "hooks" => %{
             "UserPromptSubmit" => [
               %{"hooks" => [%{"type" => "command", "command" => submit, "timeout" => 10}]}
@@ -411,14 +411,14 @@ defmodule Sigma.Agent.BackplaneChildMcpHookDeliveryTest do
     child.submit_path
     |> File.read!()
     |> String.split("\n", trim: true)
-    |> Enum.map(&Jason.decode!(&1)["prompt"])
+    |> Enum.map(&Formata.JSON.decode!(&1)["prompt"])
   end
 
   defp post_hooks(child) do
     child.post_path
     |> File.read!()
     |> String.split("\n", trim: true)
-    |> Enum.map(&Jason.decode!/1)
+    |> Enum.map(&Formata.JSON.decode!/1)
   end
 
   defp assert_exact_origin!(child, tool_call_id) do
@@ -438,7 +438,7 @@ defmodule Sigma.Agent.BackplaneChildMcpHookDeliveryTest do
     c.mcp_log
     |> File.read!()
     |> String.split("\n", trim: true)
-    |> Enum.map(&Jason.decode!/1)
+    |> Enum.map(&Formata.JSON.decode!/1)
     |> Enum.filter(&(&1["method"] == "tools/call"))
   end
 

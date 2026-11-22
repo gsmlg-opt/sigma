@@ -357,7 +357,7 @@ defmodule Sigma.Agent.ProtocolEventMapper do
   defp fit_history(entries, nil), do: entries
 
   defp fit_history(entries, max_bytes) do
-    if entries == [] or byte_size(Jason.encode!(entries)) <= max_bytes,
+    if entries == [] or byte_size(Formata.JSON.encode!(entries)) <= max_bytes,
       do: entries,
       else: fit_history(tl(entries), max_bytes)
   end

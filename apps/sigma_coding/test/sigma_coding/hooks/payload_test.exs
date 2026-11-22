@@ -180,7 +180,7 @@ defmodule Sigma.Coding.Hooks.PayloadTest do
 
       for {event, data} <- events_and_data do
         payload = Payload.build(event, @base_ctx, data)
-        assert {:ok, _json} = Jason.encode(payload), "#{event} payload not JSON-encodable"
+        assert {:ok, _json} = Sigma.Ai.JSON.encode(payload), "#{event} payload not JSON-encodable"
       end
     end
   end

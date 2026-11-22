@@ -72,7 +72,7 @@ defmodule Sigma.Web.HooksSettingsLiveTest do
         |> Floki.parse_document!()
         |> Floki.find("#{help_selector} [data-hook-input-example] code")
         |> Floki.text()
-        |> Jason.decode!()
+        |> Formata.JSON.decode!()
 
       assert input["hook_event_name"] == event
       view |> element("#{event_selector} > summary") |> render_click()
@@ -125,14 +125,14 @@ defmodule Sigma.Web.HooksSettingsLiveTest do
     submit_command(view, "echo before", "Edit", "12")
     assert has_element?(view, ~s([data-hook-command="echo before"]))
     assert has_element?(view, "#settings-hooks-event-PreToolUse[open]")
-    added = Jason.decode!(File.read!(path))
+    added = Formata.JSON.decode!(File.read!(path))
     assert added["version"] == 3
     assert added["hooks"]["FutureEvent"] == []
     assert hd(added["hooks"]["PreToolUse"]) == group
 
     view |> element("#settings-hooks-PreToolUse-1-0-edit") |> render_click()
     submit_command(view, "echo after", "Read", "")
-    edited = Jason.decode!(File.read!(path))
+    edited = Formata.JSON.decode!(File.read!(path))
 
     assert List.last(edited["hooks"]["PreToolUse"]) == %{
              "matcher" => "Read",
@@ -142,7 +142,7 @@ defmodule Sigma.Web.HooksSettingsLiveTest do
     {:ok, reloaded, html} = live(conn, "/settings/hooks")
     assert html =~ "echo after"
     reloaded |> element("#settings-hooks-PreToolUse-1-0-remove") |> render_click()
-    assert Jason.decode!(File.read!(path)) == original
+    assert Formata.JSON.decode!(File.read!(path)) == original
     refute has_element?(reloaded, ~s([data-hook-command="echo after"]))
   end
 
@@ -167,7 +167,7 @@ defmodule Sigma.Web.HooksSettingsLiveTest do
     {:ok, view, _html} = live(conn, "/settings/hooks")
 
     raw =
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "extra" => "<tag> & \"quoted\" &quot; </textarea>",
         "hooks" => %{"Stop" => []}
       })
@@ -178,7 +178,7 @@ defmodule Sigma.Web.HooksSettingsLiveTest do
     assert has_element?(view, "#settings-hooks-advanced[open]")
 
     formatted = textarea_value(view, "#hooks-editor")
-    assert formatted == Jason.encode!(Jason.decode!(raw), pretty: true)
+    assert formatted == Formata.JSON.encode!(Formata.JSON.decode!(raw), pretty: true)
     assert formatted =~ "\n"
     refute File.exists?(path)
 
@@ -203,7 +203,7 @@ defmodule Sigma.Web.HooksSettingsLiveTest do
     view |> form("#settings-hooks-command-form", attrs) |> render_change()
     view |> form("#settings-hooks-command-form", attrs) |> render_submit()
 
-    assert Jason.decode!(File.read!(path))["hooks"]["Stop"] == [
+    assert Formata.JSON.decode!(File.read!(path))["hooks"]["Stop"] == [
              %{
                group
                | "hooks" => [
@@ -280,7 +280,7 @@ defmodule Sigma.Web.HooksSettingsLiveTest do
     )
     |> render_submit()
 
-    assert Jason.decode!(File.read!(path))["hooks"]["Interrupt"] == [
+    assert Formata.JSON.decode!(File.read!(path))["hooks"]["Interrupt"] == [
              %{
                "hooks" => [
                  %{
@@ -322,6 +322,6 @@ defmodule Sigma.Web.HooksSettingsLiveTest do
 
   defp write_json(path, data) do
     File.mkdir_p!(Path.dirname(path))
-    File.write!(path, Jason.encode!(data))
+    File.write!(path, Formata.JSON.encode!(data))
   end
 end

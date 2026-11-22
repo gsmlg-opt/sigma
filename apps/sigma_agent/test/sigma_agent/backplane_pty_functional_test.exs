@@ -105,7 +105,9 @@ defmodule Sigma.Agent.BackplanePtyFunctionalTest do
       "yield_time_ms" => 2_000
     }
 
-    provider = call!(provider, "exec", "return await tools.exec_command(#{Jason.encode!(args)});")
+    provider =
+      call!(provider, "exec", "return await tools.exec_command(#{Formata.JSON.encode!(args)});")
+
     nested = result!(provider, "exec")
     assert nested["status"] == "completed"
     assert nested["value"]["output"] == "nested 中文\r\n"
@@ -153,7 +155,7 @@ defmodule Sigma.Agent.BackplanePtyFunctionalTest do
       "yield_time_ms" => 2_000
     }
 
-    child = call!(child, "exec", "return await tools.write_stdin(#{Jason.encode!(args)});")
+    child = call!(child, "exec", "return await tools.write_stdin(#{Formata.JSON.encode!(args)});")
     nested = result!(child, "exec")
     assert nested["status"] == "completed"
     assert nested["value"]["output"] == "got:child 中文\r\n"
@@ -236,7 +238,7 @@ defmodule Sigma.Agent.BackplanePtyFunctionalTest do
     assert result, "missing #{name} in next Provider input"
     refute result.is_error
     assert [%{type: :text, text: json}] = result.content
-    Jason.decode!(json)
+    Formata.JSON.decode!(json)
   end
 
   defp saved_result(messages, name) do

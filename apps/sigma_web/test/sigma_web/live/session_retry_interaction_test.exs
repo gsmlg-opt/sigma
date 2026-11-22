@@ -116,7 +116,7 @@ defmodule Sigma.Web.SessionRetryInteractionTest do
       assert_receive {:retry_tool_result, result}, 1_000
       refute result.is_error
       assert [%{type: :text, text: text}] = result.content
-      assert %{"answers" => %{"path" => %{"answers" => ["Project"]}}} = Jason.decode!(text)
+      assert %{"answers" => %{"path" => %{"answers" => ["Project"]}}} = Formata.JSON.decode!(text)
       assert_completed(view, storage_path)
       refute has_element?(view, "#ask-user-questions")
     end
@@ -242,7 +242,7 @@ defmodule Sigma.Web.SessionRetryInteractionTest do
 
       render_hook(view, "chat.sync", %{
         "id" => "messages",
-        "conversation_id" => Jason.decode!(config)["conversationId"]
+        "conversation_id" => Formata.JSON.decode!(config)["conversationId"]
       })
 
       assert_push_event(view, "chat:event", %{type: "chat.snapshot", messages: messages})

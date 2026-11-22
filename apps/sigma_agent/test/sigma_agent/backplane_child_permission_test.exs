@@ -11,7 +11,7 @@ defmodule Sigma.Agent.BackplaneChildPermissionTest do
           {{:deny, :denied_once}, {:deny, "denied_once"}}
         ] do
       assert {:ok, envelope} = ChildPermission.encode(reply)
-      wire = envelope |> Jason.encode!() |> Jason.decode!()
+      wire = envelope |> Formata.JSON.encode!() |> Formata.JSON.decode!()
       assert wire["kind"] == "sigma_tool_permission_reply"
       assert {:ok, ^expected} = ChildPermission.decode(wire)
     end

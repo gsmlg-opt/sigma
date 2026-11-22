@@ -323,7 +323,7 @@ defmodule Sigma.Agent.ProtocolHostedResultsTest do
   end
 
   defp write_entries(path, entries),
-    do: File.write!(path, Enum.map(entries, &[Jason.encode!(&1), "\n"]))
+    do: File.write!(path, Enum.map(entries, &[Formata.JSON.encode!(&1), "\n"]))
 
   defp file_state(path) do
     stat = File.stat!(path, time: :posix)

@@ -341,7 +341,7 @@ defmodule Sigma.Web.SubagentStatusTest do
       |> Floki.find("#messages")
       |> Floki.attribute("data-chat")
       |> hd()
-      |> Jason.decode!()
+      |> Formata.JSON.decode!()
 
   defp row_id(html, path) do
     html

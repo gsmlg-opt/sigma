@@ -486,7 +486,7 @@ defmodule Sigma.Coding.MCP do
   defp normalize_tool_content(result) when is_map(result) do
     case Map.get(result, "structuredContent") do
       nil -> normalize_content(result["content"])
-      structured -> [%{type: :text, text: Jason.encode!(structured)}]
+      structured -> [%{type: :text, text: Formata.JSON.encode!(structured)}]
     end
   end
 
@@ -519,7 +519,7 @@ defmodule Sigma.Coding.MCP do
   end
 
   defp normalize_content_block(block) do
-    %{type: :text, text: Jason.encode!(block)}
+    %{type: :text, text: Formata.JSON.encode!(block)}
   end
 
   defp format_error(%Error{message: message, data: data}) when is_binary(message) do

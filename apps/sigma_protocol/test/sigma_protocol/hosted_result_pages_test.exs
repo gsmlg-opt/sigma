@@ -86,9 +86,9 @@ defmodule Sigma.Protocol.HostedResultPagesTest do
       assert byte_size(bytes) == summary["byteLength"]
       assert sha256(bytes) == summary["sha256"]
       native = source.message.metadata["openai_responses_hosted"]
-      assert Jason.decode!(bytes) == native
-      assert Enum.map(Jason.decode!(bytes)["items"], & &1["output_index"]) == [0, 1, 2]
-      assert_sorted_objects!(Jason.decode!(bytes, objects: :ordered_objects))
+      assert Formata.JSON.decode!(bytes) == native
+      assert Enum.map(Formata.JSON.decode!(bytes)["items"], & &1["output_index"]) == [0, 1, 2]
+      assert_sorted_objects!(Formata.JSON.decode!(bytes, objects: :ordered_objects))
       refute bytes =~ "private-host-value"
 
       request = read_request(descriptor, summary)
@@ -516,7 +516,7 @@ defmodule Sigma.Protocol.HostedResultPagesTest do
   defp reverse_maps(value) when is_list(value), do: Enum.map(value, &reverse_maps/1)
   defp reverse_maps(value), do: value
 
-  defp assert_sorted_objects!(%Jason.OrderedObject{values: values}) do
+  defp assert_sorted_objects!(%Formata.JSON.OrderedObject{values: values}) do
     keys = Enum.map(values, &elem(&1, 0))
     assert keys == Enum.sort(keys)
     Enum.each(values, fn {_key, value} -> assert_sorted_objects!(value) end)

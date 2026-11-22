@@ -123,8 +123,8 @@ defmodule Sigma.Agent.ProtocolAsyncReplyUploadsTest do
         ] do
       assert {:ok, bad} = Envelope.command("async_interaction.reply_chunk", @session, invalid)
       assert {:error, :invalid_async_upload} = Codec.encode(bad)
-      document = Jason.decode!(json) |> Map.put("payload", invalid)
-      assert {:error, :invalid_async_upload} = Codec.decode(Jason.encode!(document))
+      document = Formata.JSON.decode!(json) |> Map.put("payload", invalid)
+      assert {:error, :invalid_async_upload} = Codec.decode(Formata.JSON.encode!(document))
     end
 
     assert {:ok, ordinary} =
@@ -155,7 +155,7 @@ defmodule Sigma.Agent.ProtocolAsyncReplyUploadsTest do
     }
 
     assert {:ok, expected} = AsyncInteractions.reply(answer, item)
-    bytes = Jason.encode!(answer)
+    bytes = Formata.JSON.encode!(answer)
     assert byte_size(bytes) > 65_536
     before = journal(ctx.writer)
     {request, complete} = stage!(ctx.context, item["item_id"], leaf, bytes)
@@ -196,7 +196,7 @@ defmodule Sigma.Agent.ProtocolAsyncReplyUploadsTest do
 
   test "chunk retry and fresh branch fences cannot change staged identity or reply scope", ctx do
     {item, leaf} = notice!(ctx.writer)
-    bytes = Jason.encode!(%{"replyId" => "one", "text" => "answer"})
+    bytes = Formata.JSON.encode!(%{"replyId" => "one", "text" => "answer"})
     request = metadata(item, leaf, bytes)
 
     chunk =
@@ -281,7 +281,7 @@ defmodule Sigma.Agent.ProtocolAsyncReplyUploadsTest do
     }
 
     assert {:ok, expected} = AsyncInteractions.reply(reply, item)
-    bytes = Jason.encode!(reply)
+    bytes = Formata.JSON.encode!(reply)
     assert byte_size(bytes) > 65_536
     {request, _} = stage!(ctx.context, item["item_id"], leaf, bytes)
     assert {:ok, accepted} = execute(ctx.context, "async_interaction.reply_commit", request)
@@ -322,7 +322,7 @@ defmodule Sigma.Agent.ProtocolAsyncReplyUploadsTest do
     end
 
     before = journal(ctx.writer)
-    stage!(ctx.context, item_id, leaf, Jason.encode!(payload))
+    stage!(ctx.context, item_id, leaf, Formata.JSON.encode!(payload))
     assert journal(ctx.writer) == before
     assert {:ok, %{items: [unchanged]}} = AsyncDelivery.snapshot(ctx.writer)
     assert unchanged["status"] == "dispatching"
@@ -335,8 +335,8 @@ defmodule Sigma.Agent.ProtocolAsyncReplyUploadsTest do
 
     for {bytes, id} <- [
           {"not json", "bad-json"},
-          {Jason.encode!(%{"replyId" => "wrong", "answers" => []}), "wrong-kind"},
-          {Jason.encode!(%{"replyId" => "bad", "text" => " ", "extra" => true}), "extra"}
+          {Formata.JSON.encode!(%{"replyId" => "wrong", "answers" => []}), "wrong-kind"},
+          {Formata.JSON.encode!(%{"replyId" => "bad", "text" => " ", "extra" => true}), "extra"}
         ] do
       {request, _} = stage!(ctx.context, item, leaf, bytes, id)
       assert {:error, _} = execute(ctx.context, "async_interaction.reply_commit", request)
@@ -348,7 +348,7 @@ defmodule Sigma.Agent.ProtocolAsyncReplyUploadsTest do
         ctx.context,
         item,
         leaf,
-        Jason.encode!(%{"replyId" => "branch", "text" => "reply"}),
+        Formata.JSON.encode!(%{"replyId" => "branch", "text" => "reply"}),
         "branch"
       )
 
@@ -372,7 +372,7 @@ defmodule Sigma.Agent.ProtocolAsyncReplyUploadsTest do
         ctx.context,
         item,
         leaf,
-        Jason.encode!(%{"replyId" => "refresh-failure", "text" => "reply"})
+        Formata.JSON.encode!(%{"replyId" => "refresh-failure", "text" => "reply"})
       )
 
     context =
@@ -394,7 +394,7 @@ defmodule Sigma.Agent.ProtocolAsyncReplyUploadsTest do
 
       request =
         if @reply_type == "async_interaction.reply_commit" do
-          {request, _} = stage!(ctx.context, item, leaf, Jason.encode!(reply))
+          {request, _} = stage!(ctx.context, item, leaf, Formata.JSON.encode!(reply))
           request
         else
           %{
@@ -448,7 +448,7 @@ defmodule Sigma.Agent.ProtocolAsyncReplyUploadsTest do
   test "unknown origin without a saved reply cannot acknowledge an invented answer", ctx do
     {item_id, leaf} = notice!(ctx.writer)
     reply = %{"replyId" => "invented", "text" => "answer"}
-    {request, _} = stage!(ctx.context, item_id, leaf, Jason.encode!(reply))
+    {request, _} = stage!(ctx.context, item_id, leaf, Formata.JSON.encode!(reply))
     assert {:ok, %{items: [item]}} = AsyncDelivery.snapshot(ctx.writer)
 
     assert :ok =
@@ -476,7 +476,7 @@ defmodule Sigma.Agent.ProtocolAsyncReplyUploadsTest do
   test "Agent restart discards staged bytes and reupload reuses the durable consumed receipt",
        ctx do
     {item, leaf} = notice!(ctx.writer)
-    bytes = Jason.encode!(%{"replyId" => "restart", "text" => "  原文\n"})
+    bytes = Formata.JSON.encode!(%{"replyId" => "restart", "text" => "  原文\n"})
     {request, _} = stage!(ctx.context, item, leaf, bytes)
     before = journal(ctx.writer)
     restart!(ctx.context)

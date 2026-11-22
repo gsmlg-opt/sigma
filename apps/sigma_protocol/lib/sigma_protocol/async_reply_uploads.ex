@@ -153,7 +153,7 @@ defmodule Sigma.Protocol.AsyncReplyUploads do
   end
 
   defp decode_reply(bytes) do
-    case Jason.decode(bytes) do
+    case Formata.JSON.decode(bytes) do
       {:ok, reply} when is_map(reply) -> {:ok, reply}
       _ -> {:error, :async_upload_invalid_json}
     end

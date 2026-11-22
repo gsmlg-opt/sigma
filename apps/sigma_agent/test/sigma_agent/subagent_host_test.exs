@@ -1161,7 +1161,7 @@ defmodule Sigma.Agent.SubagentHostTest do
     message = Enum.find(Enum.reverse(params.context.messages), &(Map.get(&1, :tool_name) == tool))
     assert message
     assert [%{type: :text, text: text}] = message.content
-    assert Jason.decode!(text)[key] == value
+    assert Formata.JSON.decode!(text)[key] == value
   end
 
   defp finish(pid), do: send(pid, {:host_response, [%{type: :text, text: "done"}]})

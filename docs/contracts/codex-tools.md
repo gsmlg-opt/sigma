@@ -2624,7 +2624,7 @@ JSON value to the model and takes precedence over display content, matching the
 comparison checkout's Codex `CallToolResult.as_function_call_output_payload`
 behavior (`9a8a85bc539325f2819dd0717f88b6ba6286495e`). The old
 empty-content fallback emitted Elixir syntax and truncated arrays/strings; a
-nonempty text summary hid structured output entirely. Jason encoding retains
+nonempty text summary hid structured output entirely. Formata JSON encoding retains
 complete data, while result metadata keeps the original MCP envelope and
 `isError` keeps its ordinary tool-error meaning. Results without structured output
 retain existing text/image projection. Embedded resources, resource links and

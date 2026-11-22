@@ -405,7 +405,10 @@ defmodule Sigma.Agent.BackplaneGoalHost51FunctionalTest do
 
     executor = Sigma.Coding.MCP.hook_executor(%{clients: clients})
     assert {:ok, %{exit: 0}} = executor.("hooks", "veto", %{}, 5_000)
-    requests = log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+
+    requests =
+      log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
+
     assert Enum.count(requests, &(&1["method"] == "initialize")) == 1
     calls = Enum.filter(requests, &(&1["method"] == "tools/call"))
     assert length(calls) == 2

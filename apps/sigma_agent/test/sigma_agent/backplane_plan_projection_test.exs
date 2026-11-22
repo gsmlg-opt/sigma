@@ -14,7 +14,7 @@ defmodule Sigma.Agent.BackplanePlanProjectionTest do
     assert snapshot["revision"] == 2
     assert snapshot["version"] == 1
     assert snapshot["explanation"] == nil
-    assert snapshot == snapshot |> Jason.encode!() |> Jason.decode!()
+    assert snapshot == snapshot |> Formata.JSON.encode!() |> Formata.JSON.decode!()
   end
 
   test "unknown, failed and malformed effects never become confirmed plans" do
@@ -90,10 +90,13 @@ defmodule Sigma.Agent.BackplanePlanProjectionTest do
     {:ok, snapshot} = PlanProjection.capture(invocation(), receipt())
     msg = struct(Message, message(snapshot))
     assert {:ok, entry} = EntryEncoder.encode({:message_end, msg}, nil, true)
-    assert {:ok, reloaded} = entry |> Jason.encode!() |> Jason.decode!() |> EntryDecoder.message()
+
+    assert {:ok, reloaded} =
+             entry |> Formata.JSON.encode!() |> Formata.JSON.decode!() |> EntryDecoder.message()
+
     assert PlanProjection.latest([reloaded]) == snapshot
 
-    old = %{msg | metadata: %{}, content: [%{type: :text, text: Jason.encode!(receipt())}]}
+    old = %{msg | metadata: %{}, content: [%{type: :text, text: Formata.JSON.encode!(receipt())}]}
     assert PlanProjection.latest([old]) == nil
   end
 

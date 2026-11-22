@@ -214,7 +214,7 @@ defmodule Sigma.Agent.BackplaneMcpEventsFunctionalTest do
         else
           call!(c.root, "exec", """
           let failure;
-          try { await tools.mcp_events(#{Jason.encode!(%{server: "events", cursor: cursor})}); }
+          try { await tools.mcp_events(#{Formata.JSON.encode!(%{server: "events", cursor: cursor})}); }
           catch (error) { failure = error.message; }
           if (!failure) throw new Error('Expected an Events error');
           return {failure, page: await tools.mcp_events({server:'events'})};
@@ -233,7 +233,7 @@ defmodule Sigma.Agent.BackplaneMcpEventsFunctionalTest do
           _ -> false
         end)
 
-      error = native.error |> Error.to_map() |> Jason.encode!() |> Jason.decode!()
+      error = native.error |> Error.to_map() |> Formata.JSON.encode!() |> Formata.JSON.decode!()
       assert error["class"] == "execution_failure"
       assert error["details"]["server"] == "events"
 
@@ -460,7 +460,8 @@ defmodule Sigma.Agent.BackplaneMcpEventsFunctionalTest do
   defp pending!(c), do: await_wire!(c, &(&1["event"] == "pending"))
 
   defp wires(c),
-    do: c.log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    do:
+      c.log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
 
   defp await_wire!(c, predicate, attempts \\ 400)
 
@@ -524,7 +525,12 @@ defmodule Sigma.Agent.BackplaneMcpEventsFunctionalTest do
 
   defp send_events(provider, :deno, cursor) do
     arguments = Map.reject(%{server: "events", cursor: cursor}, fn {_, v} -> is_nil(v) end)
-    send_call(provider, "exec", "return await tools.mcp_events(#{Jason.encode!(arguments)});")
+
+    send_call(
+      provider,
+      "exec",
+      "return await tools.mcp_events(#{Formata.JSON.encode!(arguments)});"
+    )
   end
 
   defp call_events!(provider, mode, cursor) do
@@ -542,7 +548,7 @@ defmodule Sigma.Agent.BackplaneMcpEventsFunctionalTest do
   defp decode!(message),
     do:
       Map.get(message, :metadata, %{})[:structured_result] ||
-        Jason.decode!(hd(message.content).text)
+        Formata.JSON.decode!(hd(message.content).text)
 
   defp value!(provider, name) do
     result = result!(provider, name)

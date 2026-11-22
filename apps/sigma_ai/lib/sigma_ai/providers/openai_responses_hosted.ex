@@ -588,7 +588,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses.Hosted do
         else
           unless is_binary(item["arguments"]), do: fail!(kind, :hosted_history_call)
 
-          case Jason.decode(item["arguments"]) do
+          case Formata.JSON.decode(item["arguments"]) do
             {:ok, arguments} when is_map(arguments) ->
               {item["call_id"], name, :function, arguments}
 
@@ -687,21 +687,21 @@ defmodule Sigma.Ai.Providers.OpenAIResponses.Hosted do
 
   defp charge!(state, value) do
     unless state.prepared.enabled, do: malformed!(:unsolicited_hosted_output)
-    bytes = state.bytes + byte_size(Jason.encode!(value))
+    bytes = state.bytes + byte_size(Formata.JSON.encode!(value))
     if bytes > @max_bytes, do: malformed!(:hosted_output_limit)
     %{state | bytes: bytes}
   end
 
   defp bounded!(value, kind) do
-    case Jason.encode(value) do
+    case Sigma.Ai.JSON.encode(value) do
       {:ok, encoded} when byte_size(encoded) <= @max_bytes -> :ok
       _ -> fail!(kind, :hosted_output_limit)
     end
   end
 
   defp json!(value, kind) do
-    case Jason.encode(value) do
-      {:ok, encoded} when byte_size(encoded) <= @max_bytes -> Jason.decode!(encoded)
+    case Sigma.Ai.JSON.encode(value) do
+      {:ok, encoded} when byte_size(encoded) <= @max_bytes -> Formata.JSON.decode!(encoded)
       _ -> fail!(kind, :hosted_configuration)
     end
   end

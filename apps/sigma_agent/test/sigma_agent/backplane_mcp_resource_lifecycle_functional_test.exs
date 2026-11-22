@@ -309,7 +309,7 @@ defmodule Sigma.Agent.BackplaneMcpResourceLifecycleFunctionalTest do
     path
     |> File.read!()
     |> String.split("\n", trim: true)
-    |> Enum.map(&Jason.decode!/1)
+    |> Enum.map(&Formata.JSON.decode!/1)
   end
 
   defp provider!(session) do
@@ -354,7 +354,7 @@ defmodule Sigma.Agent.BackplaneMcpResourceLifecycleFunctionalTest do
 
   defp value!(message) do
     assert [%{type: :text, text: json}] = message.content
-    Jason.decode!(json)
+    Formata.JSON.decode!(json)
   end
 
   defp finish!(provider),

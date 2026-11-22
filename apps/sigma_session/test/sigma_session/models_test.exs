@@ -15,7 +15,7 @@ defmodule Sigma.Session.ModelsTest do
 
     File.write!(
       Path.join(dir, "models.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "extra" => true,
         "providers" => %{
           "p" => %{
@@ -34,7 +34,7 @@ defmodule Sigma.Session.ModelsTest do
   test "only explicit collection operations add models and preserve metadata" do
     File.write!(
       Path.join(ConfigManager.agent_dir(), "settings.json"),
-      Jason.encode!(%{"defaultProvider" => "p", "defaultModel" => "ghost"})
+      Formata.JSON.encode!(%{"defaultProvider" => "p", "defaultModel" => "ghost"})
     )
 
     assert ConfigManager.get_config()["providers"]["p"]["model"] == ""
@@ -70,14 +70,19 @@ defmodule Sigma.Session.ModelsTest do
     assert {:ok, _} = Models.remove("p", "new")
     assert ConfigManager.get_config()["active_provider_id"] == ""
     assert {:error, :model_unavailable} = ConfigManager.set_active_provider("p")
-    saved = Path.join(ConfigManager.agent_dir(), "models.json") |> File.read!() |> Jason.decode!()
+
+    saved =
+      Path.join(ConfigManager.agent_dir(), "models.json")
+      |> File.read!()
+      |> Formata.JSON.decode!()
+
     assert saved["providers"]["p"]["vendor"] == %{"keep" => true}
     assert saved["extra"]
   end
 
   test "a saved Chat Completions model is unavailable for sessions and can be removed" do
     path = Path.join(ConfigManager.agent_dir(), "models.json")
-    config = path |> File.read!() |> Jason.decode!()
+    config = path |> File.read!() |> Formata.JSON.decode!()
 
     config =
       put_in(config, ["providers", "retired"], %{
@@ -85,7 +90,7 @@ defmodule Sigma.Session.ModelsTest do
         "models" => [%{"id" => "old-model"}]
       })
 
-    File.write!(path, Jason.encode!(config))
+    File.write!(path, Formata.JSON.encode!(config))
 
     assert {:error, :model_unavailable} = Models.resolve("retired", "old-model")
     assert {:error, :model_unavailable} = Models.set_default("retired", "old-model")

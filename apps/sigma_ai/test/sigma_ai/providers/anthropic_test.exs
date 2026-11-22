@@ -143,7 +143,7 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
           },
           %{"type" => "message_stop"}
         ],
-        fn event -> "data: " <> Jason.encode!(event) <> "\n\n" end
+        fn event -> "data: " <> Formata.JSON.encode!(event) <> "\n\n" end
       )
 
     with_capture_server(sse, fn base_url, _captured ->
@@ -435,7 +435,7 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
 
   test "raises provider error details for non-streaming error responses" do
     body =
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "error" => %{
           "type" => "invalid_request_error",
           "message" => "max_tokens is too large"
@@ -543,7 +543,7 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
 
     test "decodes streamed custom and namespaced calls to canonical identities" do
       raw = "  *** Begin Patch\r\n+héllo ✓ wörld\n*** End Patch \n"
-      wrapper = Jason.encode!(%{"input" => raw})
+      wrapper = Formata.JSON.encode!(%{"input" => raw})
       {first, rest} = String.split_at(wrapper, 7)
       alias_name = wire_alias("history::search_contents")
 
@@ -609,7 +609,7 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
             },
             %{"type" => "message_stop"}
           ],
-          fn event -> "data: " <> Jason.encode!(event) <> "\n\n" end
+          fn event -> "data: " <> Formata.JSON.encode!(event) <> "\n\n" end
         )
 
       with_capture_server(sse, fn base_url, _captured ->
@@ -791,7 +791,7 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
               }
             }
           ],
-          fn event -> "data: " <> Jason.encode!(event) <> "\n\n" end
+          fn event -> "data: " <> Formata.JSON.encode!(event) <> "\n\n" end
         )
 
       with_capture_server(sse, fn base_url, _captured ->
@@ -832,7 +832,7 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
             },
             %{"type" => "content_block_stop", "index" => 0}
           ],
-          fn event -> "data: " <> Jason.encode!(event) <> "\n\n" end
+          fn event -> "data: " <> Formata.JSON.encode!(event) <> "\n\n" end
         )
 
       with_capture_server(sse, fn base_url, _captured ->
@@ -986,7 +986,7 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
 
         request
         |> request_body()
-        |> Jason.decode!()
+        |> Formata.JSON.decode!()
         |> then(&Agent.update(captured, fn _ -> &1 end))
 
         body = IO.iodata_to_binary(chunks)
@@ -1062,7 +1062,7 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
         Agent.update(captured, fn _ ->
           %{
             headers: request_headers(request),
-            body: request |> request_body() |> Jason.decode!()
+            body: request |> request_body() |> Formata.JSON.decode!()
           }
         end)
 

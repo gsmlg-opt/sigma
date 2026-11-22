@@ -287,7 +287,7 @@ defmodule Sigma.Session.SessionFiles do
   end
 
   defp encode_metadata(metadata) do
-    case Jason.encode(metadata) do
+    case Sigma.Ai.JSON.encode(metadata) do
       {:ok, encoded} -> {:ok, encoded}
       {:error, reason} -> {:error, {:metadata_encode_failed, reason}}
     end
@@ -458,7 +458,7 @@ defmodule Sigma.Session.SessionFiles do
   end
 
   defp decode_metadata(content) do
-    case Jason.decode(content) do
+    case Formata.JSON.decode(content) do
       {:ok, metadata} when is_map(metadata) -> metadata
       _ -> nil
     end
@@ -468,11 +468,11 @@ defmodule Sigma.Session.SessionFiles do
     do: {:error, :invalid_session_metadata}
 
   defp adopted_metadata(%{data: data}, replacement_cwd) when is_map(data) do
-    Jason.encode(Map.put(data, "cwd", replacement_cwd), pretty: true)
+    Sigma.Ai.JSON.encode(Map.put(data, "cwd", replacement_cwd), pretty: true)
   end
 
   defp adopted_metadata(%{exists?: false}, replacement_cwd) do
-    Jason.encode(%{"cwd" => replacement_cwd}, pretty: true)
+    Sigma.Ai.JSON.encode(%{"cwd" => replacement_cwd}, pretty: true)
   end
 
   defp adopt_in_place(meta_path, metadata_content, opts) do
@@ -740,7 +740,7 @@ defmodule Sigma.Session.SessionFiles do
       updates ->
         write_file_no_overwrite(
           target_meta_path,
-          Jason.encode!(updates, pretty: true),
+          Formata.JSON.encode!(updates, pretty: true),
           :before_meta_publish
         )
     end
@@ -753,7 +753,7 @@ defmodule Sigma.Session.SessionFiles do
       if map_size(updates) == 0 do
         raw
       else
-        Jason.encode!(Map.merge(data || %{}, updates), pretty: true)
+        Formata.JSON.encode!(Map.merge(data || %{}, updates), pretty: true)
       end
 
     write_file_no_overwrite(target_meta_path, content, :before_meta_publish)

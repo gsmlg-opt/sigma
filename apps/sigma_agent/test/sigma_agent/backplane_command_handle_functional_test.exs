@@ -266,7 +266,7 @@ defmodule Sigma.Agent.BackplaneCommandHandleFunctionalTest do
 
   defp value!(message) do
     assert [%{type: :text, text: json}] = message.content
-    Jason.decode!(json)
+    Formata.JSON.decode!(json)
   end
 
   defp finish!(provider),

@@ -171,7 +171,7 @@ defmodule Sigma.Agent.Backplane.AsyncInbox do
         origin["invocation_id"],
         origin["tool_call_id"]
       ]
-      |> Jason.encode!()
+      |> Formata.JSON.encode!()
       |> then(&:crypto.hash(:sha256, &1))
       |> Base.url_encode64(padding: false)
 

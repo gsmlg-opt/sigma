@@ -539,7 +539,7 @@ defmodule Sigma.Session.SessionFilesTest do
     with_session_file_hook(
       fn
         :before_meta_move, %{target: target} ->
-          File.write!(target, Jason.encode!(%{"cwd" => "/tmp/raced"}))
+          File.write!(target, Formata.JSON.encode!(%{"cwd" => "/tmp/raced"}))
 
         _event, _paths ->
           :ok
@@ -563,7 +563,7 @@ defmodule Sigma.Session.SessionFilesTest do
       fn
         :before_meta_move, %{target: target} ->
           File.write!(jsonl_path(tmp_dir, "old"), "racing owner\n")
-          File.write!(target, Jason.encode!(%{"cwd" => "/tmp/raced"}))
+          File.write!(target, Formata.JSON.encode!(%{"cwd" => "/tmp/raced"}))
 
         _event, _paths ->
           :ok
@@ -663,7 +663,7 @@ defmodule Sigma.Session.SessionFilesTest do
     with_session_file_hook(
       fn
         :before_meta_publish, %{target: target} ->
-          File.write!(target, Jason.encode!(%{"cwd" => "/tmp/raced"}))
+          File.write!(target, Formata.JSON.encode!(%{"cwd" => "/tmp/raced"}))
 
         _event, _paths ->
           :ok
@@ -845,7 +845,11 @@ defmodule Sigma.Session.SessionFilesTest do
 
     File.write!(
       meta_path,
-      Jason.encode!(%{"cwd" => "/path/to/project", "title" => "Old Title", "branch" => "main"})
+      Formata.JSON.encode!(%{
+        "cwd" => "/path/to/project",
+        "title" => "Old Title",
+        "branch" => "main"
+      })
     )
 
     assert :ok = SessionFiles.update_metadata(tmp_dir, "test-update", %{"title" => "New Title"})
@@ -916,7 +920,7 @@ defmodule Sigma.Session.SessionFilesTest do
   defp meta_path(dir, id), do: Path.join(dir, "#{id}.meta.json")
 
   defp write_meta!(dir, id, metadata) do
-    File.write!(meta_path(dir, id), Jason.encode!(metadata))
+    File.write!(meta_path(dir, id), Formata.JSON.encode!(metadata))
   end
 
   defp write_session!(dir, id) do
@@ -947,6 +951,6 @@ defmodule Sigma.Session.SessionFilesTest do
     dir
     |> meta_path(id)
     |> File.read!()
-    |> Jason.decode!()
+    |> Formata.JSON.decode!()
   end
 end

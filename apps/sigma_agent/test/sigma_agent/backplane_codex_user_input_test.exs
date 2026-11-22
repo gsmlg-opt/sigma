@@ -26,7 +26,7 @@ defmodule Sigma.Agent.BackplaneCodexUserInputTest do
       end
     end
 
-    defp json(value), do: value |> Jason.encode!() |> Jason.decode!()
+    defp json(value), do: value |> Formata.JSON.encode!() |> Formata.JSON.decode!()
 
     defp tool(id, name, arguments) do
       [

@@ -8,7 +8,7 @@ defmodule Sigma.Web.HooksConfig do
   defdelegate events(), to: Sigma.Coding.Hooks.Catalog
 
   def decode(json) when is_binary(json) do
-    case Jason.decode(json) do
+    case Formata.JSON.decode(json) do
       {:ok, data} when is_map(data) ->
         if valid_hooks?(Map.get(data, "hooks", %{})),
           do: {:ok, data},
@@ -241,6 +241,6 @@ defmodule Sigma.Web.HooksConfig do
 
   defp encode_event(data, event, groups) do
     hooks = Map.get(data, "hooks", %{}) |> Map.put(event, groups)
-    {:ok, Jason.encode!(Map.put(data, "hooks", hooks), pretty: true)}
+    {:ok, Formata.JSON.encode!(Map.put(data, "hooks", hooks), pretty: true)}
   end
 end

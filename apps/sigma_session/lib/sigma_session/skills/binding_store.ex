@@ -39,7 +39,7 @@ defmodule Sigma.Session.Skills.BindingStore do
              key(ref.source_id, ref.skill_id),
              Map.put(encode(ref), "access_scope", access_scope)
            ),
-         {:ok, json} <- Jason.encode(content),
+         {:ok, json} <- Sigma.Ai.JSON.encode(content),
          :ok <- atomic_write(path, json) do
       :ok
     else
@@ -54,7 +54,7 @@ defmodule Sigma.Session.Skills.BindingStore do
   defp read(path) do
     case File.read(path) do
       {:ok, content} ->
-        case Jason.decode(content) do
+        case Formata.JSON.decode(content) do
           {:ok, value} when is_map(value) -> {:ok, value}
           _ -> error(:invalid_bundle, "remote Skill binding store is invalid")
         end

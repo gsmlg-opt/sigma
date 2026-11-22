@@ -110,7 +110,7 @@ defmodule Sigma.Agent.Backplane.MessageBoardResources do
 
     id =
       [post["message_id"], intent["recipient_id"]]
-      |> Jason.encode!()
+      |> Formata.JSON.encode!()
       |> then(&:crypto.hash(:sha256, &1))
       |> Base.url_encode64(padding: false)
 
@@ -118,7 +118,7 @@ defmodule Sigma.Agent.Backplane.MessageBoardResources do
       id: "board-" <> id,
       text:
         "<agent_message_board_notification>\n" <>
-          Jason.encode!(post) <>
+          Formata.JSON.encode!(post) <>
           "\n</agent_message_board_notification>",
       metadata: %{"message_board" => post}
     }

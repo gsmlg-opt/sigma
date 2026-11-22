@@ -397,17 +397,17 @@ defmodule Sigma.Agent.BackplaneCodexCodeModeTest do
     }
 
   defp assert_roundtrip(message) do
-    canonical = message.result |> Jason.encode!() |> Jason.decode!()
+    canonical = message.result |> Formata.JSON.encode!() |> Formata.JSON.decode!()
     refute Map.has_key?(canonical, "handle")
     refute Map.has_key?(canonical, "token")
     [normalized] = Provider.normalize_messages([message])
     refute normalized.is_error
     assert normalized.metadata.structured_result == canonical
     assert {:ok, entry} = EntryEncoder.encode({:message_end, normalized}, nil, true)
-    encoded = Jason.encode!(entry)
+    encoded = Formata.JSON.encode!(entry)
     refute encoded =~ "#PID<"
     refute encoded =~ "#Reference<"
-    assert {:ok, restored} = encoded |> Jason.decode!() |> EntryDecoder.message()
+    assert {:ok, restored} = encoded |> Formata.JSON.decode!() |> EntryDecoder.message()
     assert restored.metadata["structured_result"] == canonical
     assert restored.content == normalized.content
   end

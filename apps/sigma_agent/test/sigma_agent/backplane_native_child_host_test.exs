@@ -101,7 +101,7 @@ defmodule Sigma.Agent.BackplaneNativeChildHostTest do
     child =
       call!(child, "exec", """
       const names = ALL_TOOLS.map(tool => tool.tool_name);
-      const result = await tools.apply_patch(#{Jason.encode!(patch)});
+      const result = await tools.apply_patch(#{Formata.JSON.encode!(patch)});
       return {result, names};
       """)
 
@@ -843,7 +843,7 @@ defmodule Sigma.Agent.BackplaneNativeChildHostTest do
 
   defp structured!(provider, name) do
     assert [%{type: :text, text: json}] = result!(provider, name).content
-    Jason.decode!(json)
+    Formata.JSON.decode!(json)
   end
 
   defp assert_uncertain_handle_refusal(host, session_id) do

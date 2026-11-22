@@ -803,13 +803,13 @@ defmodule Sigma.Session.ConfigManager do
 
   @doc "Validates and writes hooks JSON to the given path. Returns :ok or {:error, reason}."
   def save_hooks_json(path, json_text) do
-    case Jason.decode(json_text) do
+    case Formata.JSON.decode(json_text) do
       {:ok, _} ->
         File.mkdir_p!(Path.dirname(path))
         File.write!(path, json_text)
         :ok
 
-      {:error, %Jason.DecodeError{} = err} ->
+      {:error, [%Formata.Error{} = err | _]} ->
         {:error, "Invalid JSON: #{Exception.message(err)}"}
     end
   end
@@ -969,7 +969,7 @@ defmodule Sigma.Session.ConfigManager do
       if File.exists?(path) do
         case File.read(path) do
           {:ok, content} ->
-            case Jason.decode(content) do
+            case Formata.JSON.decode(content) do
               {:ok, data} -> data
               {:error, _} -> default
             end
@@ -986,7 +986,7 @@ defmodule Sigma.Session.ConfigManager do
   defp save_json(filename, data) do
     path = Path.join(get_config_dir(), filename)
     File.mkdir_p!(Path.dirname(path))
-    File.write!(path, Jason.encode!(data, pretty: true))
+    File.write!(path, Formata.JSON.encode!(data, pretty: true))
   end
 
   defp permission_settings(settings) do

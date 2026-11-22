@@ -11,7 +11,7 @@ defmodule Sigma.LifetimeRecoveryProbe do
     def stream(params) do
       File.write!(
         params.options[:request_log],
-        Jason.encode!(Map.take(params, [:session_id, :turn_id])) <> "\n",
+        Formata.JSON.encode!(Map.take(params, [:session_id, :turn_id])) <> "\n",
         [:append]
       )
 
@@ -80,7 +80,7 @@ defmodule Sigma.LifetimeRecoveryProbe do
     await(fn -> Sigma.Agent.status(handle.agent).phase == :completed end)
 
     [%{"turn_id" => next_run}] =
-      log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+      log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Formata.JSON.decode!/1)
 
     true = next_run != original_run
     # Join the ordinary Goal idle calculation before closing the owned tree.

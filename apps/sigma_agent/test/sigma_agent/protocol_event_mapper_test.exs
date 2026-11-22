@@ -378,7 +378,7 @@ defmodule Sigma.Agent.ProtocolEventMapperTest do
 
       assert {history, true} = ProtocolEventMapper.history(messages, limit: 50, max_bytes: 40_000)
       assert List.last(history)["id"] == "u20"
-      assert byte_size(Jason.encode!(history)) <= 40_000
+      assert byte_size(Formata.JSON.encode!(history)) <= 40_000
 
       for entry <- history do
         assert entry["truncated"] == true

@@ -30,7 +30,7 @@ defmodule Sigma.Protocol.CodecTest do
 
   test "rejects unknown versions and types without creating atoms" do
     unknown_version =
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "version" => 999,
         "id" => "request-1",
         "sessionId" => "session-1",
@@ -119,7 +119,12 @@ defmodule Sigma.Protocol.CodecTest do
         assert {:error, :invalid_provider_hosted_page} =
                  Codec.encode(%{command | payload: invalid})
 
-        document = encoded |> Jason.decode!() |> Map.put("payload", invalid) |> Jason.encode!()
+        document =
+          encoded
+          |> Formata.JSON.decode!()
+          |> Map.put("payload", invalid)
+          |> Formata.JSON.encode!()
+
         assert {:error, :invalid_provider_hosted_page} = Codec.decode(document)
       end
     end
@@ -181,8 +186,10 @@ defmodule Sigma.Protocol.CodecTest do
                Envelope.command("async_interaction.reply", "session", invalid)
 
       assert {:error, :invalid_async_interaction_command} = Codec.encode(invalid_command)
-      document = Jason.decode!(json) |> Map.put("payload", invalid)
-      assert {:error, :invalid_async_interaction_command} = Codec.decode(Jason.encode!(document))
+      document = Formata.JSON.decode!(json) |> Map.put("payload", invalid)
+
+      assert {:error, :invalid_async_interaction_command} =
+               Codec.decode(Formata.JSON.encode!(document))
     end
 
     assert {:ok, dismiss} =

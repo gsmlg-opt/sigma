@@ -26,10 +26,10 @@ defmodule Sigma.Web.ProtocolSessionOptionsTest do
   test "protocol sessions use the selected model's complete hosted configuration", %{tmp_dir: tmp} do
     with_config(tmp, fn ->
       path = Path.join([tmp, "agent", "models.json"])
-      config = Jason.decode!(File.read!(path))
+      config = Formata.JSON.decode!(File.read!(path))
       enabled = %{"webSearch" => %{"supported" => true, "enabled" => true, "mode" => "cached"}}
       config = put_in(config, ["providers", "p", "hostedTools"], enabled)
-      File.write!(path, Jason.encode!(config))
+      File.write!(path, Formata.JSON.encode!(config))
       snapshot = %{cwd: tmp, mcp_server_ids: [], provider_id: "p", model_id: "kept"}
 
       opts = ProtocolSessionOptions.resolve(snapshot, tmp, tmp, "hosted")
@@ -43,7 +43,7 @@ defmodule Sigma.Web.ProtocolSessionOptionsTest do
       config =
         put_in(config, ["providers", "p", "models"], [%{"id" => "kept", "hostedTools" => %{}}])
 
-      File.write!(path, Jason.encode!(config))
+      File.write!(path, Formata.JSON.encode!(config))
       opts = ProtocolSessionOptions.resolve(snapshot, tmp, tmp, "hosted")
       assert is_nil(opts[:options][:hosted_web_search])
     end)
@@ -54,7 +54,7 @@ defmodule Sigma.Web.ProtocolSessionOptionsTest do
     with_config(tmp, fn ->
       agent_dir = Path.join(tmp, "agent")
       path = Path.join(agent_dir, "models.json")
-      config = Jason.decode!(File.read!(path))
+      config = Formata.JSON.decode!(File.read!(path))
 
       provider =
         Map.merge(config["providers"]["p"], %{
@@ -63,19 +63,19 @@ defmodule Sigma.Web.ProtocolSessionOptionsTest do
           "codexHistoryNotes" => true
         })
 
-      File.write!(path, Jason.encode!(put_in(config, ["providers", "p"], provider)))
+      File.write!(path, Formata.JSON.encode!(put_in(config, ["providers", "p"], provider)))
 
       File.write!(
         Path.join(agent_dir, "auth.json"),
-        Jason.encode!(%{"p" => %{"type" => "api_key", "key" => "fixture-token"}})
+        Formata.JSON.encode!(%{"p" => %{"type" => "api_key", "key" => "fixture-token"}})
       )
 
       settings = Path.join(agent_dir, "settings.json")
-      current_settings = Jason.decode!(File.read!(settings))
+      current_settings = Formata.JSON.decode!(File.read!(settings))
 
       File.write!(
         settings,
-        Jason.encode!(Map.put(current_settings, "remoteHistoryNotesProvider", "p"))
+        Formata.JSON.encode!(Map.put(current_settings, "remoteHistoryNotesProvider", "p"))
       )
 
       snapshot = %{cwd: tmp, mcp_server_ids: [], provider_id: "p", model_id: "kept"}
@@ -131,7 +131,7 @@ defmodule Sigma.Web.ProtocolSessionOptionsTest do
 
       File.write!(
         Path.join(tmp, "legacy.meta.json"),
-        Jason.encode!(%{"provider_id" => "p", "model_id" => "removed"})
+        Formata.JSON.encode!(%{"provider_id" => "p", "model_id" => "removed"})
       )
 
       assert [] ==
@@ -152,7 +152,12 @@ defmodule Sigma.Web.ProtocolSessionOptionsTest do
 
       opts = ProtocolSessionOptions.resolve(snapshot, tmp, tmp, "legacy")
       assert opts[:context_limit] == 256_000
-      File.write!(Path.join(tmp, "custom.meta.json"), Jason.encode!(%{"context_limit" => 65_536}))
+
+      File.write!(
+        Path.join(tmp, "custom.meta.json"),
+        Formata.JSON.encode!(%{"context_limit" => 65_536})
+      )
+
       opts = ProtocolSessionOptions.resolve(snapshot, tmp, tmp, "custom")
       assert opts[:context_limit] == 65_536
     end)
@@ -166,7 +171,7 @@ defmodule Sigma.Web.ProtocolSessionOptionsTest do
 
     File.write!(
       Path.join(dir, "models.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "providers" => %{
           "p" => %{
             "api" => "openai",
@@ -179,7 +184,7 @@ defmodule Sigma.Web.ProtocolSessionOptionsTest do
 
     File.write!(
       Path.join(dir, "settings.json"),
-      Jason.encode!(%{"defaultProvider" => "p", "defaultModel" => "kept"})
+      Formata.JSON.encode!(%{"defaultProvider" => "p", "defaultModel" => "kept"})
     )
 
     try do

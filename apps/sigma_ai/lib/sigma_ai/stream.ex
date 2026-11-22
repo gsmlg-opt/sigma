@@ -43,7 +43,7 @@ defmodule Sigma.Ai.Stream do
       list ->
         json = Enum.join(list)
 
-        case Jason.decode(json) do
+        case Formata.JSON.decode(json) do
           {:ok, decoded} -> decoded
           {:error, _} -> nil
         end

@@ -139,7 +139,7 @@ defmodule Sigma.Agent.Backplane.PluginResources do
 
         id =
           "plugin-request-" <>
-            Base.url_encode64(:crypto.hash(:sha256, Jason.encode!([registry | identity])),
+            Base.url_encode64(:crypto.hash(:sha256, Formata.JSON.encode!([registry | identity])),
               padding: false
             )
 
@@ -425,7 +425,7 @@ defmodule Sigma.Agent.Backplane.PluginResources do
   defp load(path) do
     case File.read(path) do
       {:ok, bytes} ->
-        case Jason.decode(bytes) do
+        case Formata.JSON.decode(bytes) do
           {:ok, %{"version" => 1, "requests" => requests}} when is_list(requests) ->
             if Enum.all?(requests, &stored_request?/1),
               do: {:ok, requests},
@@ -458,7 +458,7 @@ defmodule Sigma.Agent.Backplane.PluginResources do
   defp stored_request?(_request), do: false
 
   defp save(path, requests) do
-    with {:ok, bytes} <- Jason.encode(%{version: 1, requests: requests}),
+    with {:ok, bytes} <- Sigma.Ai.JSON.encode(%{version: 1, requests: requests}),
          :ok <- File.mkdir_p(Path.dirname(path)),
          :ok <- FileSystem.write_atomic(path, bytes) do
       :ok

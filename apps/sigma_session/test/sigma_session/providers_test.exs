@@ -14,12 +14,12 @@ defmodule Sigma.Session.ProvidersTest do
 
     File.write!(
       Path.join(dir, "auth.json"),
-      Jason.encode!(%{"key" => %{"type" => "api_key", "key" => "secret"}})
+      Formata.JSON.encode!(%{"key" => %{"type" => "api_key", "key" => "secret"}})
     )
 
     File.write!(
       Path.join(dir, "models.json"),
-      Jason.encode!(%{
+      Formata.JSON.encode!(%{
         "providers" => %{
           "bp" => %{
             "kind" => "backplane",

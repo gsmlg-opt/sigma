@@ -73,7 +73,7 @@ defmodule Sigma.Agent.Backplane.ToolPreparation do
         tool_call: Map.take(call, [:id, :name, :arguments])
       }
 
-      with {:ok, _encoded} <- Jason.encode(payload),
+      with {:ok, _encoded} <- Sigma.Ai.JSON.encode(payload),
            {:ok, answer} <- interact.(payload) do
         answer
       else

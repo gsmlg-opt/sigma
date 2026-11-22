@@ -769,7 +769,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     end
   end
 
-  defp function_json!(arguments) when is_map(arguments), do: Jason.encode!(arguments)
+  defp function_json!(arguments) when is_map(arguments), do: Formata.JSON.encode!(arguments)
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
@@ -993,7 +993,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   # Let the public protocol codec validate tool identity, input kind, completion
   # status, ordering, accumulated bytes and duplicates. Text/reasoning stay host-owned.
   defp process_tool_frame(frame, acc, codec) do
-    bytes = "data: " <> Jason.encode!(frame) <> "\n\n"
+    bytes = "data: " <> Formata.JSON.encode!(frame) <> "\n\n"
 
     case Codec.stream_feed(:openai_responses, codec, bytes) do
       {:ok, codec, observations} ->
@@ -1048,7 +1048,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
        ) do
     index = response_tool_index(acc.content, event.native_id, event.call_id)
     {kind, input} = call.raw_arguments
-    arguments = if kind == :custom, do: input, else: Jason.decode!(input)
+    arguments = if kind == :custom, do: input, else: Formata.JSON.decode!(input)
 
     tool = %{
       type: :tool_call,
@@ -1581,7 +1581,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   defp provider_error_message(error), do: "AI provider error: #{inspect(error)}"
 
   defp http_error_message(status, body) do
-    case Jason.decode(body) do
+    case Formata.JSON.decode(body) do
       {:ok, %{"error" => error}} ->
         provider_error_message(error)
 
@@ -1595,7 +1595,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
   defp http_provider_error(status, body, headers) do
     error =
-      case Jason.decode(body) do
+      case Formata.JSON.decode(body) do
         {:ok, %{"error" => error}} -> error
         {:ok, error} -> error
         {:error, _reason} -> %{"message" => http_error_message(status, body)}

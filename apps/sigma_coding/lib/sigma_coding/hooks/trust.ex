@@ -136,7 +136,7 @@ defmodule Sigma.Coding.Hooks.Trust do
     path = trust_store_path()
 
     with {:ok, bytes} <- File.read(path),
-         {:ok, map} when is_map(map) <- Jason.decode(bytes) do
+         {:ok, map} when is_map(map) <- Formata.JSON.decode(bytes) do
       map
     else
       _ -> %{}
@@ -146,6 +146,6 @@ defmodule Sigma.Coding.Hooks.Trust do
   defp save_store(store) do
     path = trust_store_path()
     File.mkdir_p!(Path.dirname(path))
-    File.write!(path, Jason.encode!(store, pretty: true))
+    File.write!(path, Formata.JSON.encode!(store, pretty: true))
   end
 end

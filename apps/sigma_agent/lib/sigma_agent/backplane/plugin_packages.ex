@@ -66,7 +66,11 @@ defmodule Sigma.Agent.Backplane.PluginPackages do
         "content_digest" => Archive.digest(canonical),
         "root" => Path.join([root, "packages", digest]),
         "data_dir" =>
-          Path.join([root, "data", Archive.digest(Jason.encode!([request["registry_url"], id]))]),
+          Path.join([
+            root,
+            "data",
+            Archive.digest(Formata.JSON.encode!([request["registry_url"], id]))
+          ]),
         "status" => "installing",
         "started_at" => System.system_time(:microsecond)
       }
@@ -167,7 +171,7 @@ defmodule Sigma.Agent.Backplane.PluginPackages do
   defp load(root) do
     case File.read(Path.join(root, "installations.json")) do
       {:ok, bytes} ->
-        case Jason.decode(bytes) do
+        case Formata.JSON.decode(bytes) do
           {:ok, %{"version" => 1, "installations" => records}} when is_list(records) ->
             if Enum.all?(records, &record?/1) and
                  length(Enum.uniq_by(records, & &1["request_id"])) == length(records),
@@ -198,7 +202,7 @@ defmodule Sigma.Agent.Backplane.PluginPackages do
   defp record?(_), do: false
 
   defp save(root, records) do
-    with {:ok, bytes} <- Jason.encode(%{version: 1, installations: records}),
+    with {:ok, bytes} <- Sigma.Ai.JSON.encode(%{version: 1, installations: records}),
          :ok <- File.mkdir_p(root),
          :ok <- FileSystem.write_atomic(Path.join(root, "installations.json"), bytes) do
       :ok

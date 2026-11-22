@@ -51,7 +51,7 @@ defmodule Sigma.Agent.Backplane.PluginSkills do
   defp entries(record, skills) do
     source_id =
       Archive.digest(
-        Jason.encode!([
+        Formata.JSON.encode!([
           record["registry_url"],
           record["plugin_id"],
           record["release_id"],

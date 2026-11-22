@@ -13,7 +13,7 @@ defmodule Sigma.Session.RepoManager do
     if File.exists?(path) do
       path
       |> File.stream!()
-      |> Enum.map(&Jason.decode!/1)
+      |> Enum.map(&Formata.JSON.decode!/1)
       |> Enum.sort_by(fn r -> r["path"] end)
       |> Enum.uniq_by(fn r -> r["path"] end)
     else
@@ -46,7 +46,7 @@ defmodule Sigma.Session.RepoManager do
     existing = list_repos()
 
     if !Enum.any?(existing, fn r -> r["path"] == path end) do
-      File.write!(repo_path, Jason.encode!(entry) <> "\n", [:append])
+      File.write!(repo_path, Formata.JSON.encode!(entry) <> "\n", [:append])
     end
 
     {:ok, entry}
@@ -108,7 +108,7 @@ defmodule Sigma.Session.RepoManager do
         repo_path
         |> File.stream!()
         |> Enum.reject(fn line ->
-          r = Jason.decode!(line)
+          r = Formata.JSON.decode!(line)
           r["path"] == path
         end)
         |> Enum.join("")
@@ -165,7 +165,7 @@ defmodule Sigma.Session.RepoManager do
     root = get_repos_root()
     File.mkdir_p!(root)
     repo_path = Path.join(root, @repo_file)
-    contents = repos |> Enum.map(&(Jason.encode!(&1) <> "\n")) |> IO.iodata_to_binary()
+    contents = repos |> Enum.map(&(Formata.JSON.encode!(&1) <> "\n")) |> IO.iodata_to_binary()
     File.write!(repo_path, contents)
   end
 

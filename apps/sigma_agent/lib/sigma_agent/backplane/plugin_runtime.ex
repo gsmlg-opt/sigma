@@ -242,7 +242,7 @@ defmodule Sigma.Agent.Backplane.PluginRuntime do
   defp source_id(record) do
     "plugin:" <>
       Archive.digest(
-        Jason.encode!(
+        Formata.JSON.encode!(
           Enum.map(
             ~w(registry_url plugin_id release_id artifact_digest content_digest),
             &record[&1]

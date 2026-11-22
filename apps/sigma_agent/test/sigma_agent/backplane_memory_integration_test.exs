@@ -292,7 +292,7 @@ defmodule Sigma.Agent.BackplaneMemoryIntegrationTest do
       |> Enum.find(&(&1.role == :tool_result and &1.tool_name == "memories::read"))
 
     [%{type: :text, text: json}] = message.content
-    Jason.decode!(json)
+    Formata.JSON.decode!(json)
   end
 
   defp result!(agent) do

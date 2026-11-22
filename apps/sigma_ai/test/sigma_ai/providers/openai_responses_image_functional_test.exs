@@ -210,7 +210,12 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesImageFunctionalTest do
         envelope = message.metadata["openai_responses_hosted"]
         assert Enum.map(envelope["items"], & &1["item"]) == [reasoning, item]
         assert envelope["codex_history_notes"] == "local"
-        message = %{message | metadata: Jason.decode!(Jason.encode!(message.metadata))}
+
+        message = %{
+          message
+          | metadata: Formata.JSON.decode!(Formata.JSON.encode!(message.metadata))
+        }
+
         assert Hosted.project_metadata(message) == {:ok, envelope}
 
         replay =
@@ -310,7 +315,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesImageFunctionalTest do
         try do
           request = receive_request(socket, "")
           [_, body] = String.split(request, "\r\n\r\n", parts: 2)
-          Agent.update(capture, fn _ -> Jason.decode!(body) end)
+          Agent.update(capture, fn _ -> Formata.JSON.decode!(body) end)
 
           terminal = %{
             "type" => "response.completed",
@@ -318,7 +323,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesImageFunctionalTest do
           }
 
           frames = if events == [], do: [terminal], else: events
-          response = Enum.map_join(frames, &("data: " <> Jason.encode!(&1) <> "\n\n"))
+          response = Enum.map_join(frames, &("data: " <> Formata.JSON.encode!(&1) <> "\n\n"))
 
           :ok =
             :gen_tcp.send(socket, [

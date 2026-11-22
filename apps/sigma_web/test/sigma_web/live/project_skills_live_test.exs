@@ -65,7 +65,7 @@ defmodule Sigma.Web.ProjectSkillsLiveTest do
 
       File.write!(
         Path.join([tmp_dir, "agent", "settings.json"]),
-        Jason.encode!(%{
+        Formata.JSON.encode!(%{
           "skillSources" => %{
             "remote-one" => %{
               "kind" => "backplane",
@@ -80,7 +80,7 @@ defmodule Sigma.Web.ProjectSkillsLiveTest do
 
       File.write!(
         Path.join([tmp_dir, "agent", "auth.json"]),
-        Jason.encode!(%{"remote-token" => %{"type" => "api_key", "key" => "token"}})
+        Formata.JSON.encode!(%{"remote-token" => %{"type" => "api_key", "key" => "token"}})
       )
 
       {:ok, _repo} = RepoManager.add_repo(workdir, name: "Repo")

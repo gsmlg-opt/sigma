@@ -20,7 +20,7 @@ defmodule Sigma.Session.SkillInvocationRecoveryFunctionalTest do
 
     for {bytes, expected} <- [
           {"[\r\n]\n", []},
-          {Jason.encode!(records, pretty: true) <> "\r\n", records}
+          {Formata.JSON.encode!(records, pretty: true) <> "\r\n", records}
         ] do
       File.write!(path, bytes)
       before = snapshot(path)
@@ -37,7 +37,7 @@ defmodule Sigma.Session.SkillInvocationRecoveryFunctionalTest do
   } do
     path = ledger_path(root)
     records = Enum.map(~w(completed preparing queued running cancelled), &record/1)
-    File.write!(path, Jason.encode!(records))
+    File.write!(path, Formata.JSON.encode!(records))
 
     expected =
       Enum.map(records, fn record ->
