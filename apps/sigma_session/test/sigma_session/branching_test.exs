@@ -148,6 +148,13 @@ defmodule Sigma.Session.BranchingTest do
     assert metrics.inherited_usage.request_count == 1
     assert Map.has_key?(child_snapshot.metrics.requests, "request-1")
     refute Map.has_key?(child_snapshot.metrics.requests, "request-2")
+
+    prompt_target = Path.join(tmp_dir, "prompt-fork.jsonl")
+    assert {:ok, _} = Log.fork_at_message(source, prompt_target, "u2", "/fork")
+    assert {:ok, prompt_snapshot} = Log.snapshot(prompt_target)
+    assert Enum.map(prompt_snapshot.messages, & &1.id) == ["u1", "a1", "u2"]
+    assert Map.has_key?(prompt_snapshot.metrics.requests, "request-1")
+    refute Map.has_key?(prompt_snapshot.metrics.requests, "request-2")
   end
 
   @tag :tmp_dir

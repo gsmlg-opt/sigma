@@ -805,7 +805,8 @@ button.btn:focus-visible {
 .sigma-session-shell .sigma-plan li[data-status="in_progress"]::before { content: "◐ "; }
 .sigma-session-shell .sigma-plan li[data-status="completed"] { color: var(--color-on-surface-variant); text-decoration: line-through; }
 .sigma-session-shell .sigma-plan li[data-status="completed"]::before { content: "☑ "; }
-.sigma-session-shell .sigma-message-actions { align-items: center; font-size: 0.75rem; }
+.sigma-session-shell .sigma-message-actions { color: var(--color-on-surface-variant); }
+.sigma-session-shell .sigma-chat-user .sigma-message-actions { justify-content: flex-end; }
 .sigma-session-shell .sigma-message-time { color: var(--color-on-surface-variant); font-size: 0.75rem; }
 .sigma-session-shell .sigma-message-role { color: var(--color-on-surface-variant); font-size: 0.75rem; }
 .sigma-session-shell .chat-work-body { gap: 0.125rem; padding-block: 0.5rem; }
@@ -818,4 +819,3 @@ button.btn:focus-visible {
 .sigma-session-shell .chat-work-body .chat-reasoning > div { padding: 0 0 0.5rem 1rem; }
 .sigma-session-shell .chat-work-body .chat-tool-header { font-family: inherit; font-weight: 400; }
 .sigma-session-shell .chat-work-body .sigma-tool-detail { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.sigma-session-shell .sigma-message-actions button { min-height: 1.75rem; padding-block: 0; font-size: 0.75rem; }

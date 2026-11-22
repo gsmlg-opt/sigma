@@ -239,17 +239,62 @@ function Sources({ sources }) {
       h("li", { key: source.url }, h(Typography.Link, { href: source.url, target: "_blank", rel: "noopener noreferrer", className: "break-words" }, source.title)))))
 }
 
+const actionIcons = {
+  copy: "content-copy", edit_message: "pencil-outline", fork_at: "source-branch",
+  prepare_retry: "refresh", retry_message: "refresh", continue_session: "play-outline"
+}
+
+function MessageTime({ timestamp }) {
+  const time = new Date(timestamp)
+  return h("time", { dateTime: time.toISOString(), className: "sigma-message-time" },
+    time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }))
+}
+
+function ActionButton({ action, label, title = label, ...props }) {
+  return h(Button, {
+    ...props, type: "button", appearance: "ghost", shape: "square", size: "sm",
+    title, "aria-label": label
+  }, h("svg", { width: 20, height: 20, viewBox: "0 0 24 24", "aria-hidden": true },
+    h("use", { href: `#message-icon-${actionIcons[action]}` })))
+}
+
 function Actions({ message, bridge, active, connected, synchronizing, admission, setNotice }) {
-  const time = new Date(message.metadata?.timestamp)
-  return h(Chat.Actions, { hover: true, className: "sigma-message-actions" },
-    h("time", { dateTime: time.toISOString(), className: "sigma-message-time" }, time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })),
-    h(Button, { type: "button", appearance: "ghost", onClick: () => navigator.clipboard.writeText(message.content || "").then(() => setNotice("Copied")).catch(() => setNotice("Copy failed")) }, "Copy"),
-    ...(message.actions || []).map((action) => h(Button, {
-      key: action.id, id: action.domId, type: "button", appearance: "ghost",
-      title: action.id === "retry_message" ? RESEND_HINT : undefined,
+  const actions = message.actions || []
+  async function copy() {
+    try {
+      const text = message.content || ""
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(text)
+      } else {
+        // The dev server is also used over plain HTTP on the local network.
+        const write = (event) => {
+          event.clipboardData.setData("text/plain", text)
+          event.preventDefault()
+        }
+        document.addEventListener("copy", write)
+        try {
+          if (!document.execCommand("copy")) throw new Error("Copy failed")
+        } finally {
+          document.removeEventListener("copy", write)
+        }
+      }
+      setNotice("Copied")
+    } catch {
+      setNotice("Copy failed")
+    }
+  }
+
+  return h(Chat.Actions, { className: "sigma-message-actions", role: "group", "aria-label": "Message actions" },
+    message.role !== "user" && h(MessageTime, { timestamp: message.metadata.timestamp }),
+    h(ActionButton, { action: "copy", label: "Copy", onClick: copy }),
+    ...actions.map((action) => h(ActionButton, {
+      key: action.id, id: action.domId, action: action.id, label: action.label,
+      title: action.id === "retry_message" ? `Retry · ${RESEND_HINT}` : action.label,
       disabled: !connected || synchronizing || admission.canSubmit === false || active,
       onClick: () => bridge.send("action", { message_id: action.messageId || message.id, action: action.id }).catch((error) => setNotice(error.message))
-    }, action.label)))
+    })),
+    message.role === "assistant" && !actions.some((action) => action.id === "continue_session") &&
+      h(ActionButton, { action: "continue_session", label: "Continue", disabled: true, title: "Continue from the latest reply" }))
 }
 
 function Message(props) {
@@ -265,6 +310,7 @@ function Message(props) {
 
   if (message.role === "user") {
     return h(Chat, { id: targetId, placement: "end", role: "article", className: "sigma-chat-user mx-auto w-full max-w-4xl", "data-message-id": message.id },
+      h(Chat.Header, null, message.author, " ", h(MessageTime, { timestamp: metadata.timestamp })),
       h(Chat.Bubble, { color: "secondary", collapsible: true },
         message.content && h(Markdown, { markdown: message.content, className: "chat-bubble-content" }), ...images),
       h(Chat.Footer, null, ...footer))

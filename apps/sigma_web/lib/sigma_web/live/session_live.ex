@@ -710,6 +710,11 @@ defmodule Sigma.Web.SessionLive do
           </div>
         </header>
 
+        <svg width="0" height="0" aria-hidden="true" class="absolute pointer-events-none">
+          <defs>
+            <.dm_mdi :for={icon <- ~w(content-copy pencil-outline source-branch refresh play-outline)} id={"message-icon-#{icon}"} name={icon} width="24" height="24" />
+          </defs>
+        </svg>
         <.dm_react_chat
           id="messages"
           hook="SigmaReactChat"
@@ -864,6 +869,25 @@ defmodule Sigma.Web.SessionLive do
         </div>
       </aside>
       <button id="session-panels-backdrop" type="button" data-session-panel-backdrop hidden class="sigma-session-panel-backdrop absolute inset-0 z-20 bg-scrim/40" aria-label="Close open session panel" />
+
+      <.dm_modal :if={@pending_edit} id="edit-message-modal" phx-hook="ModalHook">
+        <:title>Edit message</:title>
+        <:body>
+          <form id="edit-message-form" phx-submit="submit_edit" class="space-y-3">
+            <.dm_textarea id="edit-message-text" name="text" label="Message" value={@pending_edit.text} rows={5} />
+            <img :for={src <- user_images(@pending_edit.images)} src={src} alt="Attached image" class="max-h-24 rounded" />
+            <p class="text-sm text-on-surface-variant">
+              {if @pending_edit.checkpoint,
+                do: "Send from this checkpoint. The original branch stays in history.",
+                else: "Send the edited message as a new turn."}
+            </p>
+            <div class="flex justify-end gap-2">
+              <.dm_btn type="button" phx-click="cancel_edit" variant="ghost">Cancel</.dm_btn>
+              <.dm_btn type="submit" variant="primary" phx-disable-with="Sending…">Send</.dm_btn>
+            </div>
+          </form>
+        </:body>
+      </.dm_modal>
 
       <.dm_modal :if={@pending_retry} id="retry-turn-modal" phx-hook="ModalHook">
         <:title>
@@ -1324,15 +1348,7 @@ defmodule Sigma.Web.SessionLive do
     payloads = Enum.map(group, &chat_message(socket, &1))
     requests = Enum.flat_map(group, &request_metrics_for(&1, socket.assigns.session_metrics))
 
-    summary =
-      Enum.find_value(
-        group,
-        &turn_summary_for(
-          &1,
-          socket.assigns.session_metrics,
-          socket.assigns.turn_last_message_ids
-        )
-      )
+    summary = Enum.find_value(group, &turn_summary_for(&1, socket))
 
     footer =
       [SessionObservability.requests_footer(%{__changed__: nil, requests: requests})] ++
@@ -1376,12 +1392,7 @@ defmodule Sigma.Web.SessionLive do
       end)
 
   defp chat_message(socket, message) do
-    summary =
-      turn_summary_for(
-        message,
-        socket.assigns.session_metrics,
-        socket.assigns.turn_last_message_ids
-      )
+    summary = turn_summary_for(message, socket)
 
     requests =
       if message.role == :assistant,
@@ -1419,24 +1430,25 @@ defmodule Sigma.Web.SessionLive do
         do: ordered_blocks(socket, message, blocks, turn_status),
         else: []
 
+    fork = %{id: "fork_at", label: "Fork", domId: "fork-at-#{message.id}"}
+
     actions =
       case message.role do
         :user ->
-          checkpoint =
+          retry =
             if retryable_message?(message),
-              do: [%{id: "prepare_retry", label: "Retry", domId: "retry-turn-#{message.id}"}],
-              else: []
+              do: %{id: "prepare_retry", label: "Retry", domId: "retry-turn-#{message.id}"},
+              else: %{id: "retry_message", label: "Retry", domId: "retry-#{message.id}"}
 
-          checkpoint ++ [%{id: "retry_message", label: "Resend", domId: "retry-#{message.id}"}]
+          [%{id: "edit_message", label: "Edit", domId: "edit-#{message.id}"}, fork, retry]
 
         :assistant ->
-          fork = [%{id: "fork_at", label: "Fork", domId: "fork-at-#{message.id}"}]
-
           if message.id == socket.assigns.last_assistant_message_id,
-            do:
-              fork ++
-                [%{id: "continue_session", label: "Continue", domId: "continue-at-#{message.id}"}],
-            else: fork
+            do: [
+              fork,
+              %{id: "continue_session", label: "Continue", domId: "continue-at-#{message.id}"}
+            ],
+            else: [fork]
 
         _ ->
           []
@@ -1705,17 +1717,41 @@ defmodule Sigma.Web.SessionLive do
 
   defp assistant_content_blocks(content) when is_list(content), do: content
 
-  defp turn_summary_for(message, session_metrics, turn_last_message_ids)
-       when is_map(session_metrics) and is_map(turn_last_message_ids) do
+  defp turn_summary_for(message, socket) do
     turn_id = message_turn_id(message)
-    turns = session_metrics[:turns] || session_metrics["turns"] || %{}
 
-    if Map.get(turn_last_message_ids, turn_id) == message.id,
-      do: Map.get(turns, turn_id),
-      else: nil
+    if socket.assigns.turn_last_message_ids[turn_id] == message.id do
+      metrics = socket.assigns.session_metrics
+
+      turns = metrics[:turns] || metrics["turns"] || %{}
+
+      case turns[turn_id] do
+        %{status: :failed, terminal_reason: reason, request_ids: ids} = summary
+        when is_binary(reason) and is_list(ids) ->
+          requests = metrics[:requests] || metrics["requests"] || %{}
+
+          failed_providers =
+            for id <- ids,
+                %{status: :failed, provider: provider} <- [requests[id]],
+                uniq: true,
+                do: provider
+
+          case failed_providers do
+            [provider] -> Map.put(summary, :provider, provider_label(socket, provider))
+            _ -> summary
+          end
+
+        summary ->
+          summary
+      end
+    end
   end
 
-  defp turn_summary_for(_message, _session_metrics, _turn_last_message_ids), do: nil
+  defp provider_label(socket, provider_id) do
+    Enum.find_value(socket.assigns.model_options, provider_id, fn model ->
+      if model.provider_id == provider_id, do: model.provider_name
+    end)
+  end
 
   defp message_turn_id(%{metadata: metadata}) when is_map(metadata),
     do: metadata[:turn_id] || metadata["turn_id"]
@@ -2169,6 +2205,7 @@ defmodule Sigma.Web.SessionLive do
       %{
         value: model_option_value(model.provider_id, model.model_id),
         label: "#{model.provider_name}: #{model.name}",
+        provider_name: model.provider_name,
         provider_id: model.provider_id,
         model_id: model.model_id
       }
@@ -2398,6 +2435,10 @@ defmodule Sigma.Web.SessionLive do
       {:error, %{error: %{code: "prompt_rejected", details: %{"reason" => "turn_mismatch"}}}} ->
         {:rejected, :turn_mismatch}
 
+      {:error, %{error: %{code: "prompt_rejected", details: %{"message" => message}}}}
+      when is_binary(message) ->
+        {:rejected, {:runtime_message, message}}
+
       {:error, %{error: error}} ->
         {:rejected, error.code}
 
@@ -2411,11 +2452,70 @@ defmodule Sigma.Web.SessionLive do
          "messageId" => message_id,
          "turnId" => turn_id
        })
-       when status in ["accepted", "queued_as_steering", "queued_as_follow_up"] do
+       when status in [
+              "accepted",
+              "already_admitted",
+              "queued_as_steering",
+              "queued_as_follow_up"
+            ] do
     {String.to_existing_atom(status), %{message_id: message_id, turn_id: turn_id}}
   end
 
   defp protocol_admission(_payload), do: {:rejected, :invalid_protocol_admission}
+
+  defp edit_checkpoint(socket, message) do
+    if retryable_message?(message), do: pending_checkpoint(socket, message.id), else: {:ok, nil}
+  end
+
+  defp pending_checkpoint(socket, message_id) do
+    with {:ok, checkpoint} <-
+           Sigma.Session.Log.retry_checkpoint(socket.assigns.storage_path, message_id) do
+      {:ok,
+       %{
+         message_id: message_id,
+         operation_id: new_operation_id("retry"),
+         expected_source_revision: checkpoint.source_revision,
+         expected_source_leaf: checkpoint.source_leaf_id
+       }}
+    end
+  end
+
+  defp start_checkpoint_retry(socket, pending, opts) do
+    result =
+      with :ok <- Sigma.Web.ProtocolSessionOptions.validate_agent_model(socket.assigns.agent) do
+        Sigma.Agent.Runtime.retry_turn(
+          socket.assigns.workdir,
+          socket.assigns.session_id,
+          socket.assigns.sessions_dir,
+          pending.message_id,
+          opts ++
+            [
+              prompt_opts:
+                Sigma.Agent.PublicRuntime.prompt_opts(
+                  interactive_prompt_context(socket),
+                  socket.assigns.agent
+                ),
+              operation_id: pending.operation_id,
+              expected_source_revision: pending.expected_source_revision,
+              expected_source_leaf: pending.expected_source_leaf
+            ]
+        )
+      end
+
+    case result do
+      {:ok, _retry} ->
+        {:noreply,
+         socket
+         |> assign(pending_retry: nil, pending_edit: nil)
+         |> put_flash(:info, "Started a new turn from the selected checkpoint.")}
+
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> assign(:pending_retry, nil)
+         |> put_flash(:error, retry_error_message(reason))}
+    end
+  end
 
   defp retry_message(socket, msg_id) do
     with {:ok, messages} <- Sigma.Session.Log.replay(socket.assigns.storage_path),
@@ -2890,7 +2990,12 @@ defmodule Sigma.Web.SessionLive do
           "Continue the current task from where it stopped, using the existing conversation context. " <>
             "Check any uncertain tool outcomes before repeating actions."
 
-        context = interactive_prompt_context(socket)
+        message = socket.assigns.display_messages[msg_id]
+        source = if message, do: message_turn_id(message)
+
+        context =
+          Map.put(interactive_prompt_context(socket), :prompt_opts, continuation_source: source)
+
         agent = socket.assigns.agent
         session_id = socket.assigns.session_id
 
@@ -2918,6 +3023,58 @@ defmodule Sigma.Web.SessionLive do
     end
   end
 
+  def handle_event("edit_message", %{"msg-id" => id}, socket) do
+    with true <- session_ready?(socket) and not socket.assigns.turn_in_flight,
+         %{role: :user} = message <- socket.assigns.display_messages[id],
+         {:ok, checkpoint} <- edit_checkpoint(socket, message) do
+      edit = %{
+        checkpoint: checkpoint,
+        text: message.content |> user_content() |> prompt_text(),
+        images: Enum.filter(List.wrap(message.content), &match?(%{type: :image}, &1))
+      }
+
+      {:noreply, assign(socket, :pending_edit, edit)}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, retry_error_message(reason))}
+      _ -> {:noreply, put_flash(socket, :info, "Message editing is unavailable.")}
+    end
+  end
+
+  def handle_event("cancel_edit", _params, socket),
+    do: {:noreply, assign(socket, :pending_edit, nil)}
+
+  def handle_event("submit_edit", %{"text" => text}, %{assigns: %{pending_edit: edit}} = socket)
+      when is_map(edit) and is_binary(text) do
+    socket = assign(socket, :pending_edit, %{edit | text: text})
+    images = Enum.map(edit.images, &%{"mime_type" => &1[:mime_type], "data" => &1[:data]})
+
+    case ImageAttachments.normalize(text, images) do
+      {:ok, :empty} ->
+        {:noreply, put_flash(socket, :error, "Enter a message.")}
+
+      {:ok, content} ->
+        cond do
+          not session_ready?(socket) or socket.assigns.turn_in_flight or
+              socket.assigns.pending_compaction ->
+            {:noreply, put_flash(socket, :info, "Agent is still working.")}
+
+          edit.checkpoint ->
+            start_checkpoint_retry(socket, edit.checkpoint, replacement_content: content)
+
+          true ->
+            case prompt_admission(socket, submit_prompt(socket, content)) do
+              {:accepted, _status, socket} -> {:noreply, assign(socket, :pending_edit, nil)}
+              {:rejected, socket} -> {:noreply, socket}
+            end
+        end
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, ImageAttachments.error_message(reason))}
+    end
+  end
+
+  def handle_event("submit_edit", _params, socket), do: {:noreply, socket}
+
   @impl true
   def handle_event("prepare_retry", %{"msg-id" => msg_id}, socket) do
     cond do
@@ -2928,15 +3085,8 @@ defmodule Sigma.Web.SessionLive do
         {:noreply, put_flash(socket, :info, "Agent is still working.")}
 
       true ->
-        case Sigma.Session.Log.retry_checkpoint(socket.assigns.storage_path, msg_id) do
-          {:ok, checkpoint} ->
-            pending = %{
-              message_id: msg_id,
-              operation_id: new_operation_id("retry"),
-              expected_source_revision: checkpoint.source_revision,
-              expected_source_leaf: checkpoint.source_leaf_id
-            }
-
+        case pending_checkpoint(socket, msg_id) do
+          {:ok, pending} ->
             {:noreply, assign(socket, :pending_retry, pending)}
 
           {:error, reason} ->
@@ -2954,39 +3104,7 @@ defmodule Sigma.Web.SessionLive do
   end
 
   def handle_event("confirm_retry", _params, socket) do
-    pending = socket.assigns.pending_retry
-
-    result =
-      with :ok <- Sigma.Web.ProtocolSessionOptions.validate_agent_model(socket.assigns.agent) do
-        Sigma.Agent.Runtime.retry_turn(
-          socket.assigns.workdir,
-          socket.assigns.session_id,
-          socket.assigns.sessions_dir,
-          pending.message_id,
-          prompt_opts:
-            Sigma.Agent.PublicRuntime.prompt_opts(
-              interactive_prompt_context(socket),
-              socket.assigns.agent
-            ),
-          operation_id: pending.operation_id,
-          expected_source_revision: pending.expected_source_revision,
-          expected_source_leaf: pending.expected_source_leaf
-        )
-      end
-
-    case result do
-      {:ok, _retry} ->
-        {:noreply,
-         socket
-         |> assign(:pending_retry, nil)
-         |> put_flash(:info, "Retry started from the selected checkpoint.")}
-
-      {:error, reason} ->
-        {:noreply,
-         socket
-         |> assign(:pending_retry, nil)
-         |> put_flash(:error, retry_error_message(reason))}
-    end
+    start_checkpoint_retry(socket, socket.assigns.pending_retry, [])
   end
 
   @impl true
@@ -3494,6 +3612,10 @@ defmodule Sigma.Web.SessionLive do
      socket |> assign(turn_in_flight: true, turn_id: id) |> refresh_continue_button()}
   end
 
+  defp prompt_admission(socket, {:already_admitted, _info}) do
+    {:accepted, "already_admitted", put_flash(socket, :info, "This continuation already exists.")}
+  end
+
   defp prompt_admission(socket, {:queued_as_steering, _info}) do
     {:accepted, "queued_as_steering",
      socket
@@ -3519,6 +3641,10 @@ defmodule Sigma.Web.SessionLive do
        :error,
        "That turn is no longer active. Review your draft and send it again."
      )}
+  end
+
+  defp prompt_admission(socket, {:rejected, {:runtime_message, message}}) do
+    {:rejected, put_flash(socket, :error, message)}
   end
 
   defp prompt_admission(socket, {:rejected, reason}) do
@@ -3618,6 +3744,12 @@ defmodule Sigma.Web.SessionLive do
         binary when is_binary(binary) -> binary
         other -> inspect(other)
       end
+
+    msg =
+      Sigma.Ai.ProviderError.display_message(
+        msg,
+        provider_label(socket, socket.assigns.active_provider_id)
+      )
 
     {:noreply,
      socket
@@ -4678,6 +4810,7 @@ defmodule Sigma.Web.SessionLive do
     |> assign(:sessions, [])
     |> assign(:renaming_session, nil)
     |> assign(:pending_retry, nil)
+    |> assign(:pending_edit, nil)
     |> assign(:pending_fork, nil)
     |> assign(:pending_compaction, false)
     |> assign(:parent_session_id, nil)
@@ -5086,6 +5219,7 @@ defmodule Sigma.Web.SessionLive do
     api_type = config["api_type"] || "anthropic"
 
     [
+      provider_name: config["name"],
       api_key: config["resolved_key"] || "",
       base_url: config["base_url"] || "",
       auth_type: config["auth_type"] || default_auth_type(api_type),

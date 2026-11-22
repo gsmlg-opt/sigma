@@ -92,6 +92,36 @@ defmodule Sigma.Web.SessionLiveTest do
     end
   end
 
+  defmodule FailingTurnProvider do
+    @behaviour Sigma.Ai.Provider
+
+    @impl true
+    def stream(params) do
+      send(Application.fetch_env!(:sigma_web, :capture_provider_pid), {:provider_params, params})
+      latest = params.context.messages |> List.last() |> Map.fetch!(:content)
+
+      fail? =
+        Enum.any?(List.wrap(latest), fn
+          %{type: :text, text: text} -> String.contains?(text, "fail upstream")
+          text when is_binary(text) -> String.contains?(text, "fail upstream")
+          _ -> false
+        end)
+
+      if fail? do
+        error =
+          Sigma.Ai.CreationRequest.http_error(
+            500,
+            "<!DOCTYPE html><html><head><title>CompileError</title></head></html>",
+            nil
+          )
+
+        [{:provider_error, error}]
+      else
+        Sigma.Web.MockProvider.stream(params)
+      end
+    end
+  end
+
   defmodule AsyncToolsProvider do
     @behaviour Sigma.Ai.Provider
 
@@ -2455,6 +2485,46 @@ defmodule Sigma.Web.SessionLiveTest do
     assert_receive {:message_start, %{role: :user, content: "try again"}}, 2000
   end
 
+  test "continues the same session after an actual provider failure without retrying it", %{
+    conn: conn
+  } do
+    with_capture_provider_pid(self(), fn ->
+      with_mock_provider(FailingTurnProvider, fn ->
+        session_id = unique_session_id("continue-provider-error")
+        Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+        {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+        render_submit(view, "send_prompt", %{"value" => "start", "images" => []})
+        assert_receive {:provider_params, _}, 3_000
+        assert_receive {:turn_completed, _}, 3_000
+        assistant = Enum.find(chat_snapshot(view).messages, &(&1.role == :assistant))
+
+        render_submit(view, "send_prompt", %{"value" => "fail upstream", "images" => []})
+        assert_receive {:provider_params, failed}, 3_000
+        assert_receive {:turn_failed, _}, 3_000
+
+        assert_eventually(fn ->
+          render(view) =~ "Upstream compilation failed (CompileError)." and
+            not chat_snapshot(view).runtime.active
+        end)
+
+        refute_receive {:provider_params, _}, 100
+        journal = File.read!(session_storage_path(session_id))
+        chat_action(view, assistant.id, "continue_session")
+        assert_receive {:provider_params, fresh}, 3_000
+        assert_receive {:turn_completed, _}, 3_000
+
+        assert fresh.session_id == failed.session_id
+        assert fresh.turn_id != failed.turn_id
+
+        assert List.last(fresh.context.messages).content =~ "Continue"
+
+        assert String.starts_with?(File.read!(session_storage_path(session_id)), journal)
+        assert_eventually(fn -> not chat_snapshot(view).runtime.active end)
+        refute_receive {:provider_params, _}, 100
+      end)
+    end)
+  end
+
   for terminal_event <- [{:turn_failed, "failed-turn"}, {:turn_cancelled}] do
     @terminal_event terminal_event
     test "continues the current history after #{inspect(terminal_event)}", %{conn: conn} do
@@ -3036,7 +3106,7 @@ defmodule Sigma.Web.SessionLiveTest do
     assert has_element?(view, "#session-plan", "1 of 1 completed")
   end
 
-  test "publishes user content and Resend actions", %{conn: conn} do
+  test "publishes edit, fork and retry for a user message without a checkpoint", %{conn: conn} do
     {:ok, view, _html} = live_loaded(conn, session_path(unique_session_id("user_left")))
 
     message = %Sigma.Agent.Message{
@@ -3051,7 +3121,9 @@ defmodule Sigma.Web.SessionLiveTest do
     message = Enum.find(chat_snapshot(view).messages, &(&1.id == "msg_user_left"))
     assert message.role == :user
     assert message.content == "hello"
-    assert [%{id: "retry_message", label: "Resend"}] = message.actions
+
+    assert Enum.map(message.actions, &{&1.id, &1.label}) ==
+             [{"edit_message", "Edit"}, {"fork_at", "Fork"}, {"retry_message", "Retry"}]
   end
 
   test "renders persisted text and image content safely", %{conn: conn} do
@@ -3525,6 +3597,56 @@ defmodule Sigma.Web.SessionLiveTest do
     refute footer =~ "open="
   end
 
+  test "shows an upstream compilation failure in the live flash and restored turn details", %{
+    conn: conn
+  } do
+    session_id = unique_session_id("provider-html")
+    path = session_storage_path(session_id)
+    File.mkdir_p!(Path.dirname(path))
+    user = %{Message.user("prompt", "hello") | metadata: %{turn_id: "failed-turn"}}
+
+    reason =
+      "AI provider HTTP 500: <!DOCTYPE html><html><head><title>CompileError</title><style>body-css"
+
+    for event <- [
+          {:agent_start, @workdir},
+          {:message_end, user},
+          {:metrics, :request_finished,
+           %{
+             request_id: "failed-request",
+             turn_id: "failed-turn",
+             session_id: session_id,
+             provider: "original-provider",
+             status: :failed,
+             revision: 1
+           }},
+          {:metrics, :turn_finished,
+           %{
+             turn_id: "failed-turn",
+             session_id: session_id,
+             reason: reason,
+             status: :failed,
+             revision: 1
+           }}
+        ] do
+      :ok = Log.persist_event(path, event)
+    end
+
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    footer = chat_footer_html(view, user.id)
+
+    assert footer =~
+             "AI provider original-provider returned HTTP 500. Upstream compilation failed (CompileError)."
+
+    refute footer =~ "body-css"
+
+    send(view.pid, {:turn_error, reason})
+    flash = view |> element("#flash-error .toast-message") |> render()
+    assert flash =~ "Upstream compilation failed (CompileError)."
+    refute flash =~ "body-css"
+    assert File.read!(path) =~ "body-css"
+  end
+
   test "retains a tool-only summary on failure and cancellation without final answer text", %{
     conn: conn
   } do
@@ -3654,7 +3776,7 @@ defmodule Sigma.Web.SessionLiveTest do
     refute html =~ "inherited: 100 tokens"
   end
 
-  test "offers checkpoint Retry separately from Resend and requires confirmation", %{conn: conn} do
+  test "uses checkpoint Retry when available and requires confirmation", %{conn: conn} do
     session_id = unique_session_id("retry_confirmation")
     storage_path = session_storage_path(session_id)
     File.mkdir_p!(Path.dirname(storage_path))
@@ -3671,7 +3793,7 @@ defmodule Sigma.Web.SessionLiveTest do
 
     {:ok, view, _html} = live_loaded(conn, session_path(session_id))
     assert chat_has_action?(view, "retry-user", "prepare_retry")
-    assert chat_has_action?(view, "retry-user", "retry_message")
+    refute chat_has_action?(view, "retry-user", "retry_message")
 
     modal_html = render_click(view, "prepare_retry", %{"msg-id" => "retry-user"})
     assert modal_html =~ ~s(id="retry-turn-modal")
@@ -3712,6 +3834,67 @@ defmodule Sigma.Web.SessionLiveTest do
 
       assert Formata.JSON.decode!(File.read!(meta_path))["title"] == "Alternative investigation"
     end)
+  end
+
+  test "the user message Fork ends the new session at the selected prompt", %{conn: conn} do
+    session_id = unique_session_id("fork-prompt")
+    target = unique_session_id("forked-prompt")
+    path = session_storage_path(session_id)
+    File.mkdir_p!(Path.dirname(path))
+    :ok = Log.persist_event(path, {:agent_start, @workdir})
+    :ok = Log.persist_event(path, {:message_end, Message.user("prompt", "original")})
+
+    :ok =
+      Log.persist_event(path, {:message_end, Message.assistant("later", %{content: "answer"})})
+
+    with_fork_id_generator([target], fn ->
+      {:ok, view, _} = live_loaded(conn, session_path(session_id))
+      chat_action(view, "prompt", "fork_at")
+      assert has_element?(view, "#fork-session-form")
+      render_submit(view, "confirm_fork", %{"title" => "Prompt fork", "switch" => "false"})
+      assert {:ok, snapshot} = Log.snapshot(session_storage_path(target))
+      assert Enum.map(snapshot.messages, & &1.id) == ["prompt"]
+    end)
+  end
+
+  test "editing a checkpoint sends the revised text and original image on a new branch", %{
+    conn: conn
+  } do
+    session_id = unique_session_id("edit-prompt")
+    path = session_storage_path(session_id)
+    image = %{type: :image, mime_type: "image/png", data: @png_data}
+    original = Message.user("prompt", [%{type: :text, text: "original"}, image])
+    File.mkdir_p!(Path.dirname(path))
+    :ok = Log.persist_event(path, {:agent_start, @workdir})
+    :ok = Log.persist_event(path, {:message_end, %{original | metadata: %{turn_id: "turn-1"}}})
+
+    :ok =
+      Log.persist_event(
+        path,
+        {:message_end, Message.assistant("answer", %{content: "first answer"})}
+      )
+
+    {:ok, view, _} = live_loaded(conn, session_path(session_id))
+    chat_action(view, "prompt", "edit_message")
+    assert has_element?(view, "#edit-message-form textarea", "original")
+    assert has_element?(view, "#edit-message-form img")
+    view |> element("#edit-message-form button", "Cancel") |> render_click()
+    refute has_element?(view, "#edit-message-form")
+    chat_action(view, "prompt", "edit_message")
+    view |> form("#edit-message-form", text: "revised") |> render_submit()
+
+    assert [%{role: :user, content: "revised", metadata: %{images: [_]}} | _] =
+             chat_snapshot(view).messages
+
+    assert_eventually(fn ->
+      {:ok, snapshot} = Log.snapshot(path)
+      users = Enum.filter(snapshot.messages, &(&1.role == :user))
+      match?([%{content: [%{type: :text, text: "revised"}, ^image]}], users)
+    end)
+
+    assert {:ok, entries} = Sigma.Session.Storage.JsonlFile.read(path)
+    assert Enum.any?(entries, &(get_in(&1, ["message", "id"]) == "answer"))
+    assert_eventually(fn -> not chat_snapshot(view).runtime.active end)
   end
 
   test "retry keeps the replacement prompt visible while the provider is waiting", %{conn: conn} do
@@ -4248,6 +4431,7 @@ defmodule Sigma.Web.SessionLiveTest do
         pending_compaction: false,
         pending_fork: nil,
         pending_retry: nil,
+        pending_edit: nil,
         subagents: Sigma.Session.Subagents.snapshot(Sigma.Session.Subagents.new()),
         subagents_available: false,
         subagent_filter: "all",

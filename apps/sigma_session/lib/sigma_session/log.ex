@@ -631,7 +631,7 @@ defmodule Sigma.Session.Log do
     with {:ok, entries, storage_diagnostics} <- read_entries(source_storage_id, storage_mod),
          {:ok, index} <- fork_index(entries, storage_diagnostics),
          {:ok, nodes} <- branch_for_message(index, message_id),
-         :ok <- validate_fork_boundary(nodes),
+         :ok <- validate_fork_boundary(nodes, message_id),
          {:ok, header} <- fresh_fork_header(index.header, cwd),
          fork_entries = fork_entries(entries, nodes),
          :ok <-
@@ -703,10 +703,10 @@ defmodule Sigma.Session.Log do
     end
   end
 
-  defp validate_fork_boundary(nodes) do
+  defp validate_fork_boundary(nodes, selected_id \\ nil) do
     with {:ok, messages} <- decode_branch_messages(nodes),
          :ok <- validate_tool_pairs(messages),
-         :ok <- validate_completed_turn(messages) do
+         :ok <- validate_fork_message(List.last(messages), selected_id) do
       :ok
     end
   end
@@ -774,14 +774,12 @@ defmodule Sigma.Session.Log do
   defp tool_call_id(%{"type" => "tool_call", "id" => id}), do: id
   defp tool_call_id(_item), do: nil
 
-  defp validate_completed_turn([]), do: :ok
+  defp validate_fork_message(nil, _selected_id), do: :ok
+  defp validate_fork_message(%{role: :assistant}, _selected_id), do: :ok
+  defp validate_fork_message(%{role: :user, id: id}, id) when is_binary(id), do: :ok
 
-  defp validate_completed_turn(messages) do
-    case List.last(messages) do
-      %{role: :assistant} -> :ok
-      _message -> {:error, {:invalid_fork_boundary, :turn_not_completed}}
-    end
-  end
+  defp validate_fork_message(_message, _selected_id),
+    do: {:error, {:invalid_fork_boundary, :turn_not_completed}}
 
   defp fork_entries(entries, nodes) do
     selected_entries = nodes |> Enum.filter(&conversation_node?/1) |> Enum.map(& &1.entry)
@@ -798,6 +796,17 @@ defmodule Sigma.Session.Log do
       |> Enum.map(&get_in(&1, ["message", "metadata", "turn_id"]))
       |> Enum.reject(&is_nil/1)
       |> MapSet.new()
+
+    # A prompt fork ends before the response and its usage, even when both
+    # share a turn id. Completed-answer forks can include late usage records.
+    entries =
+      case List.last(selected_entries) do
+        %{"id" => id, "message" => %{"role" => "user"}} = prompt ->
+          Enum.take_while(entries, &(&1["id"] != id)) ++ [prompt]
+
+        _ ->
+          entries
+      end
 
     related_request_ids =
       entries

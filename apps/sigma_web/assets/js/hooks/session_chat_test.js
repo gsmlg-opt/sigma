@@ -48,3 +48,36 @@ for (const [turnStatus, workLabel, detailsLabel] of [
     expect(markup.match(/more output/g)).toHaveLength(1)
   })
 }
+
+for (const [role, actions, expected] of [
+  ["user", [["edit_message", "Edit"], ["fork_at", "Fork"], ["prepare_retry", "Retry"]], ["Copy", "Edit", "Fork", "Retry"]],
+  ["assistant", [["fork_at", "Fork"], ["continue_session", "Continue"]], ["Copy", "Fork", "Continue"]]
+]) {
+  test(`${role} actions are labeled icon buttons in order`, async () => {
+    const message = {
+      id: "item", role, content: "message", metadata: { timestamp: 1000 },
+      actions: actions.map(([id, label]) => ({ id, label }))
+    }
+    const markup = renderToStaticMarkup(createElement(SigmaReactChat.renderMessage, {
+      message, connected: true, admission: {}
+    }))
+    const labels = []
+    const icons = []
+    const visibleText = []
+    const rewriter = new HTMLRewriter()
+      .on(".sigma-message-actions button", {
+        element(el) {
+          labels.push(el.getAttribute("aria-label"))
+          expect(el.getAttribute("title")).toBeTruthy()
+        },
+        text(chunk) { if (chunk.text.trim()) visibleText.push(chunk.text) }
+      })
+      .on(".sigma-message-actions button svg[aria-hidden=true] use", {
+        element(el) { icons.push(el.getAttribute("href")) }
+      })
+    await rewriter.transform(new Response(markup)).text()
+    expect(labels).toEqual(expected)
+    expect(new Set(icons).size).toBe(expected.length)
+    expect(visibleText).toEqual([])
+  })
+}
