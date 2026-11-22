@@ -176,6 +176,33 @@ defmodule Sigma.Agent.BackplaneRecoveryJournalFunctionalTest do
     assert :ok = Store.retire(reopened)
   end
 
+  test "large repeated image content survives a commit from a legacy ETF and a cold reopen",
+       %{tmp_dir: dir} do
+    {:ok, store} = Store.open(path: dir)
+    run = run("image-history")
+    image = :crypto.strong_rand_bytes(768 * 1024) |> Base.encode64()
+    images = List.duplicate(image, 12)
+    input = %{state: :running, images: images}
+    assert {:ok, _} = RuntimeStore.store(Store, store, run, %{command: {:admit, 10, input}})
+    assert {:ok, before} = Store.load(store, run.run_id)
+    assert {:ok, [admit]} = Store.recovery_journal(store, run.run_id)
+    assert admit["input"]["images"] == images
+
+    [path] = Path.wildcard(Path.join(dir, "*.runtime"))
+    frame = File.read!(path)
+    assert byte_size(frame) < 2 * byte_size(image)
+    raw = frame |> :zstd.decompress() |> IO.iodata_to_binary() |> :erlang.binary_to_term([:safe])
+    File.write!(path, :erlang.term_to_binary(raw, compressed: 6))
+    assert {:ok, ^before} = Store.load(store, run.run_id)
+    assert {:ok, %{revision: 2}} = Store.fence(store, run.run_id, 1, 1, 2)
+    assert :ok = Store.retire(store)
+
+    {:ok, reopened} = Store.open(path: dir)
+    assert {:ok, %{revision: 2}} = Store.load(reopened, run.run_id)
+    assert {:ok, [^admit, %{"kind" => "fence"}]} = Store.recovery_journal(reopened, run.run_id)
+    assert :ok = Store.retire(reopened)
+  end
+
   defp run(id) do
     %{
       run_id: id,

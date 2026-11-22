@@ -2522,7 +2522,23 @@ defmodule Sigma.Web.SessionLiveTest do
 
     with_mock_provider(BlockingTurnProvider, fn ->
       {:ok, view, _html} = live_loaded(conn, session_path(session_id))
-      chat_action(view, "busy-answer", "continue_session")
+
+      {:ok, {agent, _policy}} =
+        Sigma.Web.SessionManager.get_agent(session_id, repo_path: @workdir)
+
+      :ok = :sys.suspend(agent)
+
+      try do
+        chat_action(view, "busy-answer", "continue_session")
+        assert_reply(view, %{status: "ok"})
+        refute chat_snapshot(view).admission.canSubmit
+
+        assert render_click(view, "continue_session", %{"msg-id" => "busy-answer"}) =~
+                 "Agent is still working."
+      after
+        :ok = :sys.resume(agent)
+      end
+
       assert_receive {:web_provider_waiting, provider, _}, 2_000
       assert_receive {:message_start, %{role: :user}}, 2_000
       assert chat_snapshot(view).runtime.active
@@ -3564,6 +3580,37 @@ defmodule Sigma.Web.SessionLiveTest do
       assert Enum.find(chat_snapshot(view).messages, &(&1.id == "tool_answer")).tools
              |> Enum.any?(&(&1.result == "File unavailable"))
     end
+  end
+
+  test "explains a runtime commit timeout and marks an unsettled tool result unconfirmed", %{
+    conn: conn
+  } do
+    session_id = unique_session_id("commit-timeout")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    turn = "failed-commit"
+    error = Backplane.AgentRuntime.Error.new(:timeout, "commit acknowledgement timed out")
+
+    message =
+      Message.assistant("incomplete", %{
+        content: [%{type: :tool_call, id: "call", name: "exec_command", arguments: %{}}]
+      })
+
+    send(view.pid, {:message_start, %{message | metadata: %{turn_id: turn}}})
+    send(view.pid, {:turn_error, error})
+
+    send(
+      view.pid,
+      {:metrics, :turn_finished,
+       %{turn_id: turn, revision: 1, status: :failed, terminal_reason: inspect(error)}}
+    )
+
+    assert render(view) =~ "Sigma timed out waiting for the session state to be saved."
+
+    assert chat_footer_html(view, "incomplete") =~
+             "Check the last tool results before continuing."
+
+    assert [%{tools: [%{status: "pending", statusLabel: "result unconfirmed"}]}] =
+             chat_snapshot(view).messages
   end
 
   test "restores persisted usage as owned by the logical route session", %{conn: conn} do

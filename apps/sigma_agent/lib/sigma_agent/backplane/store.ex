@@ -30,6 +30,7 @@ defmodule Sigma.Agent.Backplane.Store do
   @behaviour RuntimeStore
 
   @record_keys [:run, :revision, :transition, :effects, :outbox, :incarnation]
+  @large_record_bytes 1024 * 1024
   @record_applications [
     :backplane_agent_runtime,
     :backplane_ai_protocol,
@@ -712,7 +713,7 @@ defmodule Sigma.Agent.Backplane.Store do
   defp read_record(state, run_id) do
     case fs(state.filesystem, :read, [record_path(state.path, run_id)]) do
       {:ok, bytes} ->
-        with {:ok, raw} <- decode_snapshot(bytes, run_id),
+        with {:ok, raw} <- decode_snapshot(bytes),
              journal = Map.get(raw, :recovery_journal),
              snapshot = Map.delete(raw, :recovery_journal),
              {:ok, snapshot} <- validate_snapshot(snapshot, run_id),
@@ -726,7 +727,17 @@ defmodule Sigma.Agent.Backplane.Store do
     end
   end
 
-  defp decode_snapshot(bytes, _run_id) do
+  # Larger records use a Zstandard frame around the same external term. Old
+  # compressed and uncompressed ETF records can still be read in place.
+  defp decode_snapshot(<<0x28, 0xB5, 0x2F, 0xFD, _::binary>> = frame) do
+    frame |> :zstd.decompress() |> IO.iodata_to_binary() |> decode_term()
+  rescue
+    _error in [ErlangError, ArgumentError] -> malformed_record()
+  end
+
+  defp decode_snapshot(bytes), do: decode_term(bytes)
+
+  defp decode_term(bytes) do
     try do
       case :erlang.binary_to_term(bytes, [:safe]) do
         snapshot when is_map(snapshot) ->
@@ -795,7 +806,17 @@ defmodule Sigma.Agent.Backplane.Store do
     snapshot = if journal, do: Map.put(snapshot, :recovery_journal, journal), else: snapshot
 
     with :ok <- validate_serializable(snapshot) do
-      bytes = :erlang.term_to_binary(snapshot, compressed: 6)
+      # A multi-MiB inline image can recur in both Runtime and journal history.
+      # ETF's DEFLATE window cannot reference its previous occurrence.
+      bytes =
+        if :erlang.external_size(snapshot) >= @large_record_bytes do
+          snapshot
+          |> :erlang.term_to_iovec()
+          |> :zstd.compress(%{compressionLevel: 1, windowLog: 24, checksumFlag: true})
+          |> IO.iodata_to_binary()
+        else
+          :erlang.term_to_binary(snapshot, compressed: 6)
+        end
 
       case fs(state.filesystem, :write_atomic, [record_path(state.path, run_id), bytes]) do
         :ok -> :ok

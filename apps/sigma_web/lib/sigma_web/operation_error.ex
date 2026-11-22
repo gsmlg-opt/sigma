@@ -3,6 +3,23 @@ defmodule Sigma.Web.OperationError do
 
   alias Sigma.Agent.Terminals.Error
 
+  @commit_timeout "Sigma timed out waiting for the session state to be saved. Check the last tool results before continuing."
+  def turn_message(reason)
+      when reason in [
+             "commit acknowledgement timed out",
+             "timeout: commit acknowledgement timed out"
+           ],
+      do: @commit_timeout
+
+  # Older transcripts persisted the inspected Backplane error as the turn reason.
+  def turn_message(
+        "%Backplane.AgentRuntime.Error{class: :timeout, message: \"commit acknowledgement timed out\"" <>
+          _
+      ),
+      do: @commit_timeout
+
+  def turn_message(reason), do: reason
+
   @spec message(term()) :: String.t()
   def message(%Error{code: code}), do: terminal_message(code)
 

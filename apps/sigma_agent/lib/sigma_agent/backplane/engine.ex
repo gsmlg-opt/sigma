@@ -1270,6 +1270,11 @@ defmodule Sigma.Agent.Backplane.Engine do
   defp normalize_error(%Sigma.Ai.ProviderError{} = error), do: error
 
   defp normalize_error(
+         %Error{class: :timeout, message: "commit acknowledgement timed out"} = error
+       ),
+       do: error
+
+  defp normalize_error(
          %Error{
            class: :resource_conflict,
            message: "provider output limit exceeded",

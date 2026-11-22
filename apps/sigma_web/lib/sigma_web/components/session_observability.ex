@@ -84,7 +84,7 @@ defmodule Sigma.Web.SessionObservability do
         {status_label(value(@summary, :status))}
       </span>
       <span :if={value(@summary, :terminal_reason)} class="ml-2 text-error">
-        {display(value(@summary, :terminal_reason), "")}
+        {Sigma.Web.OperationError.turn_message(display(value(@summary, :terminal_reason), ""))}
       </span>
     </section>
     """

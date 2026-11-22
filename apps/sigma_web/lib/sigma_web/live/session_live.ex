@@ -415,6 +415,33 @@ defmodule Sigma.Web.SessionLive do
 
   def handle_async(:agent_status, _result, socket), do: {:noreply, socket}
 
+  # The action receipt acknowledges the click. The Agent publishes the actual
+  # turn state, which may already be terminal when the admission task returns.
+  def handle_async(:continue_session, result, socket) do
+    socket = socket |> assign(:pending_continue, false) |> queue_chat_state()
+
+    case result do
+      {:ok, {:accepted, _}} ->
+        {:noreply, socket}
+
+      {:ok, {:rejected, _} = admission} ->
+        {:rejected, socket} = prompt_admission(socket, admission)
+        {:noreply, socket}
+
+      {:ok, admission} ->
+        {:accepted, _status, socket} = prompt_admission(socket, admission)
+        {:noreply, socket}
+
+      {:exit, _reason} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Could not confirm continuation. Check the session before trying again."
+         )}
+    end
+  end
+
   def handle_async(:retry_branches, {:ok, {:ok, branches}}, socket),
     do: {:noreply, assign(socket, :branch_summaries, branches)}
 
@@ -1216,7 +1243,9 @@ defmodule Sigma.Web.SessionLive do
 
   defp chat_admission(socket) do
     %{
-      canSubmit: session_ready?(socket) and not socket.assigns.pending_compaction,
+      canSubmit:
+        session_ready?(socket) and not socket.assigns.pending_compaction and
+          socket.assigns[:pending_continue] != true,
       allowWhileStreaming: true
     }
   end
@@ -1450,7 +1479,12 @@ defmodule Sigma.Web.SessionLive do
       result: text,
       images: if(result, do: elem(result, 2), else: []),
       status: status,
-      statusLabel: if(status == "pending", do: "turn cancelled", else: status),
+      statusLabel:
+        case {status, turn_status} do
+          {"pending", :cancelled} -> "turn cancelled"
+          {"pending", :failed} -> "result unconfirmed"
+          _ -> status
+        end,
       # Codex-style one-line row: "Ran git status", plus parsed command output.
       title: title,
       detail: detail,
@@ -1715,7 +1749,7 @@ defmodule Sigma.Web.SessionLive do
 
   defp tool_call_status(tool_results, tool_call_id, turn_status) do
     case Map.get(tool_results, tool_call_id) do
-      nil when turn_status == :cancelled -> "pending"
+      nil when turn_status in [:cancelled, :failed] -> "pending"
       nil -> "running"
       {_, true, _} -> "error"
       _ -> "success"
@@ -2342,19 +2376,23 @@ defmodule Sigma.Web.SessionLive do
     }
   end
 
-  defp submit_prompt(socket, prompt, {type, payload}, prompt_opts) do
-    with :ok <- Sigma.Web.ProtocolSessionOptions.validate_agent_model(socket.assigns.agent),
+  defp submit_prompt(socket, prompt, delivery, prompt_opts) do
+    context = Map.put(interactive_prompt_context(socket), :prompt_opts, prompt_opts)
+
+    submit_agent_prompt(
+      socket.assigns.agent,
+      socket.assigns.session_id,
+      context,
+      prompt,
+      delivery
+    )
+  end
+
+  defp submit_agent_prompt(agent, session_id, context, prompt, {type, payload}) do
+    with :ok <- Sigma.Web.ProtocolSessionOptions.validate_agent_model(agent),
          {:ok, command} <-
-           Sigma.Protocol.Envelope.command(
-             type,
-             socket.assigns.session_id,
-             Map.put(payload, "content", prompt)
-           ),
-         {:ok, %{payload: payload}} <-
-           Sigma.Agent.PublicRuntime.execute(
-             command,
-             Map.put(interactive_prompt_context(socket), :prompt_opts, prompt_opts)
-           ) do
+           Sigma.Protocol.Envelope.command(type, session_id, Map.put(payload, "content", prompt)),
+         {:ok, %{payload: payload}} <- Sigma.Agent.PublicRuntime.execute(command, context) do
       protocol_admission(payload)
     else
       {:error, %{error: %{code: "prompt_rejected", details: %{"reason" => "turn_mismatch"}}}} ->
@@ -2840,7 +2878,8 @@ defmodule Sigma.Web.SessionLive do
       not session_ready?(socket) ->
         {:noreply, put_flash(socket, :info, "Session is still loading.")}
 
-      socket.assigns.turn_in_flight or socket.assigns.pending_compaction ->
+      socket.assigns.turn_in_flight or socket.assigns.pending_compaction or
+          socket.assigns[:pending_continue] == true ->
         {:noreply, put_flash(socket, :info, "Agent is still working.")}
 
       msg_id != socket.assigns.last_assistant_message_id ->
@@ -2851,10 +2890,17 @@ defmodule Sigma.Web.SessionLive do
           "Continue the current task from where it stopped, using the existing conversation context. " <>
             "Check any uncertain tool outcomes before repeating actions."
 
-        case prompt_admission(socket, submit_prompt(socket, prompt)) do
-          {:accepted, _status, socket} -> {:noreply, socket}
-          {:rejected, socket} -> {:noreply, socket}
-        end
+        context = interactive_prompt_context(socket)
+        agent = socket.assigns.agent
+        session_id = socket.assigns.session_id
+
+        {:noreply,
+         socket
+         |> assign(:pending_continue, true)
+         |> queue_chat_state()
+         |> start_async(:continue_session, fn ->
+           submit_agent_prompt(agent, session_id, context, prompt, {"prompt.submit", %{}})
+         end)}
     end
   end
 
@@ -3575,7 +3621,7 @@ defmodule Sigma.Web.SessionLive do
 
     {:noreply,
      socket
-     |> put_flash(:error, "Turn failed: #{msg}")
+     |> put_flash(:error, "Turn failed: #{Sigma.Web.OperationError.turn_message(msg)}")
      |> assign(turn_in_flight: false, streaming_message_id: nil, runtime_status: :failed)
      |> refresh_continue_button()}
   end
@@ -4858,6 +4904,20 @@ defmodule Sigma.Web.SessionLive do
       _ -> reason
     end
   end
+
+  defp format_load_error(
+         {:shutdown, {:failed_to_start_child, :agent, %Backplane.AgentRuntime.Error{} = error}}
+       ),
+       do: format_load_error(error)
+
+  defp format_load_error(%Backplane.AgentRuntime.Error{
+         message: "root recovery requires all host retirement receipts"
+       }),
+       do:
+         "Sigma could not confirm that the previous session host finished shutting down. Its execution state is still unconfirmed."
+
+  defp format_load_error(%Backplane.AgentRuntime.Error{message: message}) when is_binary(message),
+    do: message
 
   defp format_load_error(reason) when is_binary(reason), do: reason
   defp format_load_error(reason), do: inspect(reason)

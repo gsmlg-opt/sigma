@@ -53,6 +53,67 @@ defmodule Sigma.Agent.BackplaneOutputErrorTest do
     end
   end
 
+  defmodule PausedProvider do
+    @behaviour Sigma.Ai.Provider
+
+    def stream(params) do
+      send(
+        params.options[:observer],
+        {:provider_waiting, self(), List.last(params.context.messages).content}
+      )
+
+      receive do
+        :release -> SnapshotProvider.stream(params)
+      end
+    end
+  end
+
+  @tag :tmp_dir
+  test "a commit timeout stays a runtime error and the same Agent completes the next image-context turn",
+       %{tmp_dir: dir} do
+    {:ok, store} = Sigma.Agent.Backplane.Store.open(path: dir)
+
+    {:ok, agent} =
+      start_supervised(
+        {Sigma.Agent,
+         backplane_store: store,
+         model: %{id: "mock-model", api: "mock-api", provider: "mock-provider"},
+         provider: PausedProvider,
+         options: [observer: self(), text: "continued"]}
+      )
+
+    :ok = Sigma.Agent.subscribe(agent)
+
+    image = %{
+      type: :image,
+      mime_type: "image/png",
+      data: Base.encode64(:crypto.strong_rand_bytes(1024 * 1024))
+    }
+
+    assert {:accepted, _} = Sigma.Agent.prompt(agent, [image])
+    assert_receive {:provider_waiting, provider, _}, 5_000
+    :ok = :sys.suspend(store)
+
+    try do
+      send(provider, :release)
+
+      assert_receive {:turn_error,
+                      %Error{class: :timeout, message: "commit acknowledgement timed out"}},
+                     8_000
+    after
+      :ok = :sys.resume(store)
+    end
+
+    assert_receive {:turn_failed, _}, 5_000
+    assert {:accepted, _} = Sigma.Agent.prompt(agent, "Continue")
+    assert_receive {:provider_waiting, next, "Continue"}, 5_000
+    send(next, :release)
+    assert_receive {:turn_completed, _}, 5_000
+    assert Enum.any?(Sigma.Agent.messages(agent), &(&1.role == :user and &1.content == [image]))
+    refute_receive {:provider_waiting, _, _}, 0
+    :ok = Sigma.Agent.Backplane.Store.retire(store)
+  end
+
   for {name, size, chunk_bytes} <- [
         {"repeated snapshots of a small response", 20_000, 100},
         {"streamed content above the former 1 MiB limit", 1_100_000, 50_000},
