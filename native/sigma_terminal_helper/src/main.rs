@@ -845,7 +845,7 @@ mod tests {
         );
         terminal.checkpoint().unwrap();
         assert_eq!(terminal.parser.callbacks().pending.len(), 5);
-        terminal.process(&vec![b'X'; 40]);
+        terminal.process(&[b'X'; 40]);
         let (row, col) = terminal.screen().cursor_position();
         terminal.process(b"\x1b[6n");
         assert_eq!(
