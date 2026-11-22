@@ -196,12 +196,43 @@ defmodule Sigma.Agent.ContextCompactionFunctionalTest do
     assert estimate.next_request_estimated_input_tokens + @model.max_output_tokens <= 4096
   end
 
+  test "an image prompt reaches the provider intact even when its transport bytes exceed the budget",
+       c do
+    agent = start_agent(c)
+    # A real PNG with a large ancillary text chunk. Its encoded size changes
+    # independently of the pixels the model sees.
+    png =
+      Base.decode64!(
+        "iVBORw0KGgoAAAANSUhEUgAAAEEAAAAhAQMAAAC8zVRcAAAAA1BMVEX/AAAZ4gk3AAAADUlEQVQY02NgGAXUAQABSgAB5p5tAwAAAABJRU5ErkJggg=="
+      )
+
+    <<body::binary-size(byte_size(png) - 12), iend::binary>> = png
+    chunk = "tEXt" <> "Comment" <> <<0>> <> String.duplicate("x", 32_768)
+
+    bytes =
+      <<body::binary, byte_size(chunk) - 4::32, chunk::binary, :erlang.crc32(chunk)::32,
+        iend::binary>>
+
+    image = %{type: :image, mime_type: "image/png", data: Base.encode64(bytes)}
+    content = [%{type: :text, text: "Describe this image"}, image]
+    assert {:accepted, _} = Sigma.Agent.prompt(agent, content)
+    assert_receive {:agent_end, _}, 5000
+    assert_received {:compact_provider, %{purpose: :turn, context: %{messages: messages}}}
+    assert List.last(messages).content == content
+    refute_received {:compact_provider, %{purpose: :compaction}}
+    refute_received {:turn_error, _}
+  end
+
   test "an oversized newest prompt fails without trying to summarize its instructions", c do
     agent = start_agent(c)
     assert {:accepted, _} = Sigma.Agent.prompt(agent, String.duplicate("new instruction ", 2000))
     assert_receive {:turn_error, %Sigma.Ai.ProviderError{kind: :context_limit}}, 3000
     assert_receive {:agent_end, _}, 3000
     refute_received {:compact_provider, _}
+    status = Sigma.Agent.status(agent)
+    assert status.context_snapshot.next_request_estimated_input_tokens > @model.context_window
+    assert status.context_policy.overflow == :hard_overflow
+    refute status.context_snapshot.stale
   end
 
   test "summary failure retains the completed tool and fails without replaying it", c do

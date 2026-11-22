@@ -5,7 +5,10 @@ defmodule Sigma.Ai.Providers.ProtocolRequest do
   # providers that delegate native tool identity to the public protocol codec.
   # The protocol package deliberately does not own HTTP transport or credentials.
 
-  alias Backplane.AiProtocol.Request
+  alias Backplane.AiProtocol.{Request, Validation}
+
+  # Native tool images can contain 10 MiB of decoded data, optionally in a data URI.
+  @max_image_string_bytes 4 * div(10 * 1024 * 1024 + 2, 3) + byte_size("data:image/jpeg;base64,")
 
   @doc """
   Builds a validated `Backplane.AiProtocol.Request`.
@@ -20,12 +23,36 @@ defmodule Sigma.Ai.Providers.ProtocolRequest do
       |> Enum.reject(&is_nil/1)
       |> Enum.map(&message(&1, opts))
 
-    Request.new(%{
-      model: model.id,
-      input: input,
-      tools: Enum.map(context[:tools] || [], &tool(&1, opts)),
-      settings: %{}
-    })
+    Request.new(
+      %{
+        model: model.id,
+        input: input,
+        tools: Enum.map(context[:tools] || [], &tool(&1, opts)),
+        settings: %{}
+      },
+      limits: image_request_limits(input)
+    )
+  end
+
+  defp image_request_limits(input) do
+    defaults = Validation.default_limits()
+
+    sizes =
+      for %{content: blocks} <- input,
+          %{type: :image, data: %{"data" => data}} <- blocks,
+          is_binary(data),
+          do: byte_size(data)
+
+    case Enum.max(sizes, fn -> 0 end) do
+      size when size > defaults.max_string_bytes ->
+        limit = min(size, @max_image_string_bytes)
+        # Allow the extra transport bytes in the structural budget as well.
+        extra = limit - defaults.max_string_bytes
+        %{max_string_bytes: limit, max_bytes: defaults.max_bytes + extra}
+
+      _ ->
+        %{}
+    end
   end
 
   @doc "True when a context declares or replays native custom/namespaced/output-schema tools."

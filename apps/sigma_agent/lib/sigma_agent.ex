@@ -4445,17 +4445,9 @@ defmodule Sigma.Agent do
 
     context = build.(state)
 
-    snapshot =
-      ContextPolicy.snapshot(system: context.system, messages: context.messages, tools: tools)
-
-    policy =
-      context_policy(
-        snapshot,
-        state.provider,
-        state.model,
-        state.provider_options,
-        state.context_limit
-      )
+    state = refresh_context_from_assembly(state, context)
+    snapshot = state.context_snapshot
+    policy = state.context_policy
 
     overhead =
       (snapshot.estimate_components[:system] || 0) +
@@ -4477,9 +4469,15 @@ defmodule Sigma.Agent do
              keep_budget: retention_budget,
              summary_output_limit: min(1024, retention_budget)
            ) do
-        {state, {:ok, _}} -> {state, {:ok, build.(state)}}
-        {state, {:error, :nothing_to_compact}} -> {state, {:ok, context}}
-        {state, {:error, reason}} -> {state, {:error, ProviderError.from_exception(reason)}}
+        {state, {:ok, _}} ->
+          context = build.(state)
+          {refresh_context_from_assembly(state, context), {:ok, context}}
+
+        {state, {:error, :nothing_to_compact}} ->
+          {state, {:ok, context}}
+
+        {state, {:error, reason}} ->
+          {state, {:error, ProviderError.from_exception(reason)}}
       end
     else
       {state, {:ok, context}}
@@ -4516,10 +4514,9 @@ defmodule Sigma.Agent do
   end
 
   @doc false
-  def __backplane_request_started__(state, request, context) do
+  def __backplane_request_started__(state, request) do
     set_turn_phase(state, request.turn_id, :streaming_provider)
     emit(state, {:turn_start})
-    state = refresh_context_from_assembly(state, context)
     set_current_request(state, request.turn_id, request.request_id)
     emit(state, {:metrics, :request_started, request_fact(request)})
     %{state | current_request_id: request.request_id, backplane_request: request}

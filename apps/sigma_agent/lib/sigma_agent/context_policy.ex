@@ -7,6 +7,16 @@ defmodule Sigma.Agent.ContextPolicy do
   runtime and clients can use the same values and provenance.
   """
 
+  # Codex core/context_manager/history.rs estimates model-visible bytes before
+  # converting them to tokens. Only original-detail images use 32px patches.
+  @image_bytes 7_373
+  @image_formats %{
+    "image/png" => :png,
+    "image/jpeg" => :jpeg,
+    "image/webp" => :webp,
+    "image/gif" => :gif
+  }
+
   @default_threshold 90_000
   @default_ratio 0.9
 
@@ -160,8 +170,7 @@ defmodule Sigma.Agent.ContextPolicy do
   defp estimate_components(opts) do
     %{
       system: count_part(get(opts, :system), get(opts, :system_tokens)),
-      messages:
-        count_part(message_estimate_parts(get(opts, :messages)), get(opts, :message_tokens)),
+      messages: count_messages(get(opts, :messages), get(opts, :message_tokens)),
       tools: count_part(get(opts, :tools), get(opts, :tool_tokens)),
       skills: count_part(get(opts, :skills), get(opts, :skill_tokens)),
       attachments: count_part(get(opts, :attachments), get(opts, :attachment_tokens)),
@@ -175,10 +184,52 @@ defmodule Sigma.Agent.ContextPolicy do
   defp count_part(value, _explicit) when is_list(value), do: structured_token_estimate(value)
   defp count_part(_value, _explicit), do: nil
 
-  defp message_estimate_parts(messages) when is_list(messages),
-    do: Enum.map(messages, &message_estimate_part/1)
+  defp count_messages(_messages, explicit) when is_integer(explicit) and explicit >= 0,
+    do: explicit
 
-  defp message_estimate_parts(messages), do: messages
+  defp count_messages(messages, _explicit) when is_list(messages) do
+    messages
+    |> list_bytes(&message_bytes/1)
+    |> bytes_to_tokens()
+  end
+
+  defp count_messages(messages, explicit), do: count_part(messages, explicit)
+
+  defp message_bytes(%{role: role, content: blocks} = message)
+       when role in [:user, :tool_result] and is_list(blocks) do
+    # Tool result metadata can contain another copy of the image for history.
+    # The provider receives the projected content blocks.
+    envelope = Map.put(message, :content, [])
+
+    envelope =
+      if role == :tool_result and is_map(Map.get(envelope, :metadata)) and
+           Enum.any?(blocks, &match?(%{type: :image}, &1)) do
+        Map.update!(envelope, :metadata, &Map.drop(&1, [:structured_result, "structured_result"]))
+      else
+        envelope
+      end
+
+    Enum.reduce(blocks, structured_bytes(envelope), fn block, bytes ->
+      bytes + content_bytes(block) + 2
+    end)
+  end
+
+  defp message_bytes(message), do: message |> message_estimate_part() |> structured_bytes()
+
+  defp content_bytes(%{type: :image, data: data, mime_type: mime, detail: "original"})
+       when is_binary(data) and is_binary(mime) do
+    with {:ok, format} <- Map.fetch(@image_formats, mime),
+         {:ok, bytes} <- Base.decode64(String.replace_prefix(data, "data:#{mime};base64,", "")),
+         {^mime, width, height, _} when width > 0 and height > 0 <-
+           ExImageInfo.info(bytes, format) do
+      4 * min(10_000, div(width + 31, 32) * div(height + 31, 32))
+    else
+      _ -> @image_bytes
+    end
+  end
+
+  defp content_bytes(%{type: :image, data: data}) when is_binary(data), do: @image_bytes
+  defp content_bytes(block), do: structured_bytes(block)
 
   defp message_estimate_part(
          %{
@@ -202,23 +253,15 @@ defmodule Sigma.Agent.ContextPolicy do
 
   defp message_estimate_part(message), do: message
 
-  defp token_estimate(value), do: max(1, div(byte_size(to_string(value)) + 3, 4))
-
-  defp structured_token_estimate(value) do
-    value
-    |> structured_bytes()
-    |> Kernel.+(3)
-    |> div(4)
-    |> max(1)
-  end
+  defp token_estimate(value), do: value |> byte_size() |> bytes_to_tokens()
+  defp structured_token_estimate(value), do: value |> structured_bytes() |> bytes_to_tokens()
+  defp bytes_to_tokens(bytes), do: max(1, div(bytes + 3, 4))
 
   defp structured_bytes(value) when is_binary(value), do: byte_size(value)
   defp structured_bytes(value) when is_atom(value), do: value |> Atom.to_string() |> byte_size()
   defp structured_bytes(value) when is_number(value), do: value |> to_string() |> byte_size()
 
-  defp structured_bytes(value) when is_list(value) do
-    Enum.reduce(value, 2, fn item, total -> total + structured_bytes(item) + 2 end)
-  end
+  defp structured_bytes(value) when is_list(value), do: list_bytes(value, &structured_bytes/1)
 
   defp structured_bytes(%_struct{} = value), do: value |> Map.from_struct() |> structured_bytes()
 
@@ -229,6 +272,9 @@ defmodule Sigma.Agent.ContextPolicy do
   end
 
   defp structured_bytes(value), do: value |> inspect() |> byte_size()
+
+  defp list_bytes(items, size),
+    do: Enum.reduce(items, 2, fn item, acc -> acc + size.(item) + 2 end)
 
   defp coverage(parts),
     do: if(Enum.any?(Map.values(parts), &is_nil/1), do: :partial, else: :complete)

@@ -21,6 +21,28 @@ defmodule Sigma.Ai.Providers.OpenAIResponsesImageFunctionalTest do
     end)
   end
 
+  test "large inline user images reach Responses as image data" do
+    encoded = Base.encode64(:binary.copy(<<0>>, 800_000))
+    image = %{type: :image, mime_type: "image/png", data: encoded}
+    messages = [%{role: :user, content: [%{type: :text, text: "Look"}, image]}]
+
+    with_server(fn url, capture ->
+      assert_finished!(url, messages)
+
+      assert [
+               %{
+                 "content" => [
+                   %{"text" => "Look"},
+                   %{"type" => "input_image", "image_url" => uri}
+                 ]
+               }
+             ] =
+               Agent.get(capture, & &1["input"])
+
+      assert uri == "data:image/png;base64," <> encoded
+    end)
+  end
+
   test "actual HTTP preserves ordered function and custom image outputs through the public codec" do
     content =
       [%{type: :text, text: "  image caption 中文\r\n"}] ++

@@ -91,6 +91,57 @@ defmodule Sigma.Agent.ContextPolicyTest do
     assert long.next_request_estimated_input_tokens > short.next_request_estimated_input_tokens
   end
 
+  test "only model-visible image blocks use the visual estimate" do
+    data = String.duplicate("abcd", 12_000)
+    block = %{type: :image, mime_type: "image/png", data: data}
+    user = %{role: :user, content: [block]}
+
+    estimate = fn message ->
+      ContextPolicy.snapshot(messages: [message]).estimate_components.messages
+    end
+
+    for detail <- ~w(low high auto) do
+      assert estimate.(user) == estimate.(%{user | content: [Map.put(block, :detail, detail)]})
+    end
+
+    assert estimate.(user) in 1_844..1_860
+    assert (estimate.(%{user | content: [block, block]}) - estimate.(user)) in 1_843..1_845
+    assert estimate.(%{user | content: [%{type: :text, text: data}]}) > 12_000
+
+    call = %{type: :tool_call, arguments: %{input: block}}
+    assert estimate.(%{role: :assistant, content: [call]}) > 12_000
+
+    tool = %{role: :tool_result, content: [block], metadata: %{}}
+
+    assert estimate.(tool) ==
+             estimate.(%{tool | metadata: %{"structured_result" => %{"image_url" => data}}})
+  end
+
+  test "original detail counts 32px patches from raw base64 and data URLs, with a bounded fallback" do
+    # A 65 x 33 PNG spans three columns and two rows.
+    png =
+      "iVBORw0KGgoAAAANSUhEUgAAAEEAAAAhAQMAAAC8zVRcAAAAA1BMVEX/AAAZ4gk3AAAADUlEQVQY02NgGAXUAQABSgAB5p5tAwAAAABJRU5ErkJggg=="
+
+    estimate = fn data, detail ->
+      image = %{type: :image, mime_type: "image/png", detail: detail, data: data}
+
+      ContextPolicy.snapshot(messages: [%{role: :user, content: [image]}]).estimate_components.messages
+    end
+
+    assert estimate.(png, "original") == estimate.("data:image/png;base64," <> png, "original")
+    # ContextPolicy rounds only after adding the message framing.
+    framing =
+      ContextPolicy.snapshot(messages: [%{role: :user, content: [""]}]).estimate_components.messages
+
+    assert estimate.(png, "original") == framing + 6
+    assert estimate.("bad base64", "original") == estimate.(png, "auto")
+
+    # The estimator reads dimensions from the header, without rasterizing the pixels.
+    <<prefix::binary-size(16), _dimensions::64, rest::binary>> = Base.decode64!(png)
+    huge = Base.encode64(<<prefix::binary, 32_000::32, 32_000::32, rest::binary>>)
+    assert estimate.(huge, "original") - estimate.(png, "original") == 10_000 - 6
+  end
+
   test "hosted replay actions and citations contribute to the next request estimate" do
     short = hosted_message("answer", "query", "source")
 

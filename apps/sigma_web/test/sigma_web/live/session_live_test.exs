@@ -589,6 +589,30 @@ defmodule Sigma.Web.SessionLiveTest do
     end)
   end
 
+  test "rejected prompt displays the assembled estimate in the context sidebar", %{conn: conn} do
+    session_id = unique_session_id("overflow-estimate")
+    {:ok, view, _} = live_loaded(conn, session_path(session_id))
+
+    view
+    |> element("#custom-context-limit-form")
+    |> render_submit(%{"context_limit" => "1024"})
+
+    render_submit(view, "send_prompt", %{
+      "value" => String.duplicate("large prompt ", 800),
+      "images" => []
+    })
+
+    assert_eventually(fn ->
+      agent = Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent)
+      status = Sigma.Agent.status(agent)
+      estimate = status.context_snapshot.next_request_estimated_input_tokens
+
+      status.phase == :failed and estimate > 1024 and
+        has_element?(view, "#session-context-details progress[value='#{estimate}']") and
+        not has_element?(view, "#session-context-details", "estimate stale")
+    end)
+  end
+
   test "context limit defaults, synchronizes between views and survives runtime restart", %{
     conn: conn
   } do

@@ -799,7 +799,7 @@ defmodule Sigma.Agent.Backplane.Engine do
           backplane_catalog_revision: context.catalog_revision
       }
 
-      state = Sigma.Agent.__backplane_request_started__(state, request, context)
+      state = Sigma.Agent.__backplane_request_started__(state, request)
       Sigma.Agent.__backplane_acknowledge__(state)
       if is_pid(state.control_pid), do: Sigma.Agent.status(state.control_pid)
       send(worker, {:backplane_request_ready, ref, :ok})
