@@ -181,6 +181,8 @@ defmodule Sigma.Ai.Providers.Anthropic do
   end
 
   defp build_inner_stream(model, body, headers, base_url, options, codec) do
+    provider_name = options[:provider_name] || model.provider
+
     Elixir.Stream.resource(
       fn ->
         resp =
@@ -218,7 +220,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
 
             req_message ->
               {processed_events, new_message, new_buffer, status} =
-                handle_async_message(resp, req_message, message, buffer)
+                handle_async_message(resp, req_message, message, buffer, provider_name)
 
               {processed_events, {new_message, new_buffer, status, resp}}
           after
@@ -241,11 +243,11 @@ defmodule Sigma.Ai.Providers.Anthropic do
     end
   end
 
-  defp handle_async_message(resp, req_message, message, buffer) do
+  defp handle_async_message(resp, req_message, message, buffer, provider_name) do
     case Sigma.Ai.HTTP.parse_message(resp, req_message) do
       {:ok, chunks} ->
         if resp.status >= 300 do
-          handle_error_chunks(resp, chunks, message, buffer)
+          handle_error_chunks(resp, chunks, message, buffer, provider_name)
         else
           handle_stream_chunks(chunks, message, buffer)
         end
@@ -284,13 +286,13 @@ defmodule Sigma.Ai.Providers.Anthropic do
     end)
   end
 
-  defp handle_error_chunks(resp, chunks, message, buffer) do
+  defp handle_error_chunks(resp, chunks, message, buffer, provider_name) do
     Enum.reduce(chunks, {[], message, buffer, :streaming}, fn
       {:data, chunk}, {acc_events, acc_message, {acc_buffer, codec}, _status} ->
         {acc_events, acc_message, {acc_buffer <> chunk, codec}, :streaming}
 
       :done, {_acc_events, _acc_message, {acc_buffer, _codec}, _status} ->
-        raise http_provider_error(resp.status, acc_buffer, resp.headers)
+        raise Sigma.Ai.CreationRequest.http_error(resp, acc_buffer, provider_name)
 
       _chunk, acc ->
         acc
@@ -829,39 +831,4 @@ defmodule Sigma.Ai.Providers.Anthropic do
   end
 
   defp provider_error_message(error), do: "AI provider error: #{inspect(error)}"
-
-  defp http_error_message(status, body) do
-    case Formata.JSON.decode(body) do
-      {:ok, %{"error" => error}} ->
-        provider_error_message(error)
-
-      {:ok, error} ->
-        provider_error_message(error)
-
-      {:error, _} ->
-        "AI provider HTTP #{status}: #{String.slice(String.trim(body), 0, 500)}"
-    end
-  end
-
-  defp http_provider_error(status, body, headers) do
-    error =
-      case Formata.JSON.decode(body) do
-        {:ok, %{"error" => error}} -> error
-        {:ok, error} -> error
-        {:error, _reason} -> %{"message" => http_error_message(status, body)}
-      end
-
-    Sigma.Ai.CreationRequest.http_error(status, error, retry_after(headers))
-  end
-
-  defp retry_after(headers) when is_map(headers),
-    do: Map.get(headers, "retry-after") || Map.get(headers, "Retry-After")
-
-  defp retry_after(headers) when is_list(headers) do
-    Enum.find_value(headers, fn {name, value} ->
-      if String.downcase(to_string(name)) == "retry-after", do: value
-    end)
-  end
-
-  defp retry_after(_headers), do: nil
 end

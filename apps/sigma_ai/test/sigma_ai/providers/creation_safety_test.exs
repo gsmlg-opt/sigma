@@ -55,6 +55,31 @@ defmodule Sigma.Ai.Providers.CreationSafetyTest do
         )
       end
     end
+
+    test "#{provider} identifies an upstream HTML failure without exposing the error page" do
+      body = """
+      <!DOCTYPE html><html><head><title>CompileError</title>
+      <style>body { color: red; }</style></head>
+      <body>request headers include Bearer upstream-secret</body></html>
+      """
+
+      with_server(fn socket -> respond(socket, 500, body) end, fn url ->
+        error =
+          assert_raise ProviderError, fn ->
+            collect(@provider, url, %{}, provider_name: "backplane")
+          end
+
+        assert error.kind == :server_error
+        assert error.status == 500
+
+        assert error.message ==
+                 "AI provider backplane returned HTTP 500. Upstream compilation failed (CompileError)."
+
+        refute error.retryable
+        refute inspect(error) =~ "upstream-secret"
+        refute inspect(error) =~ "<html>"
+      end)
+    end
   end
 
   test "Responses rejects partial text, reasoning, item completion, and bare DONE as completion" do

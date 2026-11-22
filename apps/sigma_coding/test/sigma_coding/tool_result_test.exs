@@ -23,6 +23,15 @@ defmodule Sigma.Coding.ToolResultTest do
 
       assert {:error, %ToolError{message: "Send Failure"}} = ToolResult.normalize(marker)
     end
+
+    test "keeps a nested connection failure readable across the JSON boundary" do
+      reason = {:shutdown, {:failed_to_connect, :econnrefused}}
+      marker = {:transport_failure, "Send Failure", "echo", "hub", %{original_reason: reason}}
+
+      assert {:error, %ToolError{details: details}} = ToolResult.normalize(marker)
+      assert details.data.original_reason == inspect(reason)
+      assert {:ok, _} = Sigma.Ai.JSON.encode(details)
+    end
   end
 
   describe "normalize/1 fall-through" do

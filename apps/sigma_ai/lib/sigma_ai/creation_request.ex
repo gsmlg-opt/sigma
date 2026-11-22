@@ -51,8 +51,21 @@ defmodule Sigma.Ai.CreationRequest do
     }
   end
 
-  def http_error(status, body, retry_after) do
-    error = ProviderError.from_http(status, body, retry_after: retry_after)
+  def http_error(%Sigma.Ai.HTTP.Response{} = resp, body, provider) do
+    opts = [
+      provider: provider,
+      content_type: List.first(List.wrap(resp.headers["content-type"])),
+      retry_after: List.first(List.wrap(resp.headers["retry-after"]))
+    ]
+
+    classify_http_error(resp.status, body, opts)
+  end
+
+  def http_error(status, body, retry_after),
+    do: classify_http_error(status, body, retry_after: retry_after)
+
+  defp classify_http_error(status, body, opts) do
+    error = ProviderError.from_http(status, body, opts)
     # Status alone does not prove a gateway/upstream did not accept the POST.
     %{error | retryable: false}
   end

@@ -197,6 +197,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
          native_transport?,
          codec_options
        ) do
+    provider_name = options[:provider_name] || model.provider
+
     Elixir.Stream.resource(
       fn ->
         :telemetry.execute(
@@ -272,7 +274,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
             req_message ->
               {processed_events, new_message, new_state, status} =
-                handle_async_message(resp, req_message, message, state)
+                handle_async_message(resp, req_message, message, state, provider_name)
 
               {processed_events, {new_message, new_state, status, resp}}
           after
@@ -301,11 +303,11 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     end
   end
 
-  defp handle_async_message(resp, req_message, message, state) do
+  defp handle_async_message(resp, req_message, message, state, provider_name) do
     case Sigma.Ai.HTTP.parse_message(resp, req_message) do
       {:ok, chunks} ->
         if resp.status >= 300 do
-          handle_error_chunks(resp, chunks, message, state)
+          handle_error_chunks(resp, chunks, message, state, provider_name)
         else
           handle_stream_chunks(chunks, message, state)
         end
@@ -497,14 +499,15 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   defp terminal_events?(events),
     do: Enum.any?(events, &(match?({:done, _, _}, &1) or match?({:provider_error, _}, &1)))
 
-  defp handle_error_chunks(resp, chunks, message, state) do
+  defp handle_error_chunks(resp, chunks, message, state, provider_name) do
     Enum.reduce(chunks, {[], message, state, :streaming}, fn
       {:data, chunk}, {acc_events, acc_message, acc_state, _status} ->
         {acc_events, acc_message, %{acc_state | error_body: acc_state.error_body <> chunk},
          :streaming}
 
       :done, {_acc_events, _acc_message, acc_state, _status} ->
-        error = http_provider_error(resp.status, acc_state.error_body, resp.headers)
+        error =
+          Sigma.Ai.CreationRequest.http_error(resp, acc_state.error_body, provider_name)
 
         error =
           if acc_state.recovery do
@@ -1579,39 +1582,4 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
   end
 
   defp provider_error_message(error), do: "AI provider error: #{inspect(error)}"
-
-  defp http_error_message(status, body) do
-    case Formata.JSON.decode(body) do
-      {:ok, %{"error" => error}} ->
-        provider_error_message(error)
-
-      {:ok, error} ->
-        provider_error_message(error)
-
-      {:error, _} ->
-        "AI provider HTTP #{status}: #{String.slice(String.trim(body), 0, 500)}"
-    end
-  end
-
-  defp http_provider_error(status, body, headers) do
-    error =
-      case Formata.JSON.decode(body) do
-        {:ok, %{"error" => error}} -> error
-        {:ok, error} -> error
-        {:error, _reason} -> %{"message" => http_error_message(status, body)}
-      end
-
-    Sigma.Ai.CreationRequest.http_error(status, error, retry_after(headers))
-  end
-
-  defp retry_after(headers) when is_map(headers),
-    do: Map.get(headers, "retry-after") || Map.get(headers, "Retry-After")
-
-  defp retry_after(headers) when is_list(headers) do
-    Enum.find_value(headers, fn {name, value} ->
-      if String.downcase(to_string(name)) == "retry-after", do: value
-    end)
-  end
-
-  defp retry_after(_headers), do: nil
 end

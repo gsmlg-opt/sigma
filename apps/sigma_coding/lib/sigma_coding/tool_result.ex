@@ -42,12 +42,30 @@ defmodule Sigma.Coding.ToolResult do
      %ToolError{
        kind: :transport_failure,
        message: message,
-       details: %{tool_name: tool_name, server_id: server_id, data: data}
+       details: %{tool_name: tool_name, server_id: server_id, data: transport_data(data)}
      }}
   end
 
   def normalize(nil), do: {:error, ToolError.new(:malformed_result, :empty_result)}
   def normalize(other), do: {:error, ToolError.new(:malformed_result, {:unknown_result, other})}
+
+  # The MCP client retains native transport reasons. Both provider messages and
+  # Code Mode carry this diagnostic across a JSON boundary.
+  defp transport_data(%{original_reason: {:http_error, status, body}} = data) do
+    %{data | original_reason: %{type: "http_error", status: status, body: transport_value(body)}}
+  end
+
+  defp transport_data(%{original_reason: reason} = data),
+    do: %{data | original_reason: transport_value(reason)}
+
+  defp transport_data(data), do: data
+
+  defp transport_value(value) do
+    case Sigma.Ai.JSON.encode(value) do
+      {:ok, _} -> value
+      {:error, _} -> inspect(value)
+    end
+  end
 
   def normalize_update(tool_call_id, sequence, raw_update) do
     case normalize({:ok, raw_update}) do

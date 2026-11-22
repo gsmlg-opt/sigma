@@ -3,9 +3,11 @@ defmodule Sigma.Ai.ProviderError do
 
   defexception [:kind, :message, :status, :code, :retry_after_ms, :raw, retryable: false]
 
-  def from_http(status, error, opts \\ []) do
+  def from_http(status, body, opts \\ []) do
+    error = normalize_http_error(status, body, opts)
     code = map_value(error, "code") || map_value(error, "type")
-    message = map_value(error, "message") || "Provider HTTP #{status}"
+    message = map_value(error, "message")
+    message = if is_binary(message), do: message, else: "Provider HTTP #{status}"
     kind = http_kind(status, code, message)
 
     %__MODULE__{
@@ -17,6 +19,71 @@ defmodule Sigma.Ai.ProviderError do
       retry_after_ms: retry_after_ms(Keyword.get(opts, :retry_after)),
       raw: error
     }
+  end
+
+  @doc "Formats provider failures, including HTML responses saved by older versions."
+  def display_message(message, provider \\ nil)
+
+  def display_message(message, provider) when is_binary(message) do
+    case Regex.run(~r/^(?:AI provider|Provider) HTTP (\d{3}):\s*(.*)/s, message) do
+      [_, status, body] ->
+        if html_body?(body),
+          do: html_error_message(String.to_integer(status), body, provider),
+          else: message
+
+      _ ->
+        message
+    end
+  end
+
+  def display_message(message, _provider), do: inspect(message)
+
+  defp normalize_http_error(status, body, opts) when is_binary(body) do
+    error =
+      case Formata.JSON.decode(body) do
+        {:ok, %{"error" => error}} -> error
+        {:ok, error} -> error
+        {:error, _} -> body
+      end
+
+    cond do
+      html_content_type?(opts[:content_type]) or (is_binary(error) and html_body?(error)) ->
+        %{
+          "message" => html_error_message(status, body, opts[:provider]),
+          "response_format" => "html"
+        }
+
+      is_binary(error) ->
+        %{"message" => "AI provider HTTP #{status}: #{String.slice(String.trim(error), 0, 500)}"}
+
+      true ->
+        error
+    end
+  end
+
+  defp normalize_http_error(_status, error, _opts), do: error
+
+  defp html_content_type?(value) when is_binary(value),
+    do: Regex.match?(~r/^\s*(?:text\/html|application\/xhtml\+xml)\s*(?:;|$)/i, value)
+
+  defp html_content_type?(_value), do: false
+
+  defp html_body?(body), do: Regex.match?(~r/<!doctype\s+html|<html\b|<head\b|<body\b/i, body)
+
+  defp html_error_message(status, body, provider) do
+    source =
+      if is_binary(provider) and provider != "",
+        do: "AI provider #{provider}",
+        else: "AI provider"
+
+    detail =
+      case Regex.run(~r/<title[^>]*>\s*([A-Za-z][A-Za-z0-9_.]{0,96}(?:Error|Exception))\b/i, body) do
+        [_, "CompileError"] -> "Upstream compilation failed (CompileError)."
+        [_, exception] -> "The upstream service returned an HTML error page (#{exception})."
+        _ -> "The upstream service returned an HTML error page."
+      end
+
+    "#{source} returned HTTP #{status}. #{detail}"
   end
 
   def from_reason(:timeout),
@@ -78,7 +145,10 @@ defmodule Sigma.Ai.ProviderError do
   defp http_kind(status, _code, _message) when status >= 500, do: :server_error
 
   defp http_kind(400, code, message) do
-    if String.contains?(String.downcase(to_string(code || message)), ["context", "token"]) do
+    if String.contains?(String.downcase(if(is_binary(code), do: code, else: message)), [
+         "context",
+         "token"
+       ]) do
       :context_limit
     else
       :invalid_request

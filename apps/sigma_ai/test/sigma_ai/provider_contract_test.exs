@@ -255,6 +255,41 @@ defmodule Sigma.Ai.ProviderContractTest do
              |> Enum.to_list()
   end
 
+  test "formats stored HTML failures and preserves structured and plain provider diagnostics" do
+    message =
+      "AI provider HTTP 500: <!DOCTYPE html><html><head><title>CompileError</title>" <>
+        "<script>secret</script><body>local request details</body></html>"
+
+    assert ProviderError.display_message(message, "backplane") ==
+             "AI provider backplane returned HTTP 500. Upstream compilation failed (CompileError)."
+
+    html = "<html><head><title>Proxy failure with secret</title></head></html>"
+    error = ProviderError.from_http(502, html, provider: "proxy")
+
+    assert error.message ==
+             "AI provider proxy returned HTTP 502. The upstream service returned an HTML error page."
+
+    refute inspect(error) =~ "secret"
+
+    fragment =
+      ProviderError.from_http(503, "<h1>Maintenance</h1>",
+        content_type: "text/html; charset=utf-8"
+      )
+
+    assert fragment.raw["response_format"] == "html"
+    refute fragment.message =~ "Maintenance"
+
+    json = ~s({"error":{"code":"bad_model","message":"Unknown model"}})
+
+    assert %ProviderError{code: "bad_model", message: "Unknown model"} =
+             ProviderError.from_http(400, json)
+
+    assert %ProviderError{message: "AI provider HTTP 503: temporarily unavailable"} =
+             ProviderError.from_http(503, "temporarily unavailable")
+
+    assert ProviderError.display_message("Unknown model", "proxy") == "Unknown model"
+  end
+
   test "compatibility bridge pulls only on downstream demand" do
     request =
       legacy_request()
