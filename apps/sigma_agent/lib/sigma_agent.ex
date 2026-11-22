@@ -544,6 +544,16 @@ defmodule Sigma.Agent do
     {:reply, state.messages, state}
   end
 
+  # The turn worker sends the canonical context before this call. Publish that
+  # exact branch to mounted clients before the provider can emit a response.
+  def handle_call({:publish_retry, turn_id}, _from, state) do
+    if state.turn_state.turn_id == turn_id do
+      notify_subscribers(state, {:retry_committed, turn_id, state.messages})
+    end
+
+    {:reply, :ok, state}
+  end
+
   def handle_call(:plugin_installation_config, _from, state),
     do: {:reply, state.native_plugins, state}
 
@@ -836,15 +846,16 @@ defmodule Sigma.Agent do
               |> Map.put(:retry_restore_context_window, state.context_window)
               |> Map.put(:retry_restore_context_excluded_ids, state.context_excluded_message_ids)
 
-            state = %{
-              state
-              | messages: context_messages,
-                context_window: Keyword.get(opts, :context_window),
-                context_excluded_message_ids:
-                  excluded_context_ids(context_messages, opts[:provider_context_messages])
+            # Keep the selected conversation visible until the worker commits its
+            # replacement. Only the worker starts with the checkpoint prefix.
+            checkpoint = %{
+              messages: context_messages,
+              context_window: Keyword.get(opts, :context_window),
+              context_excluded_message_ids:
+                excluded_context_ids(context_messages, opts[:provider_context_messages])
             }
 
-            state = start_turn(state, item)
+            state = start_turn(state, Map.put(item, :retry_context, checkpoint))
             info = prompt_info(item, item.turn_id)
             emit(state, {:prompt_admitted, :accepted, info})
             emit_prompt_telemetry(state, :accepted)
@@ -2453,6 +2464,8 @@ defmodule Sigma.Agent do
         turn_state: TurnState.start(item.turn_id, cancellation_ref)
     }
 
+    task_state = Map.merge(task_state, Map.get(item, :retry_context, %{}))
+
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
         try do
@@ -3028,8 +3041,12 @@ defmodule Sigma.Agent do
         state = %{state | messages: state.messages ++ [user_msg]}
         emit(state, {:message_start, user_msg})
         emit(state, {:message_end, user_msg})
-        notify_retry_admission(item, :committed)
         acknowledge_canonical(state)
+
+        if item.retry_of_turn_id do
+          :ok = GenServer.call(state.control_pid, {:publish_retry, item.turn_id}, :infinity)
+          notify_retry_admission(item, :committed)
+        end
 
         {state, outcome} = run_turn_loop(state, item.turn_id)
 

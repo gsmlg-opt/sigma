@@ -87,11 +87,19 @@ defmodule Sigma.Web.SessionRetryInteractionTest do
     } do
       Application.put_env(:sigma_web, :retry_interaction_fixture, %{
         test_pid: self(),
-        tool_name: "ask",
+        tool_name: "request_user_input",
         arguments: %{
-          "question" => "Which retry path should I use?",
-          "options" => [%{"label" => "Project", "value" => "project"}],
-          "allow_freeform" => false
+          "questions" => [
+            %{
+              "id" => "path",
+              "header" => "Path",
+              "question" => "Which retry path should I use?",
+              "options" => [
+                %{"label" => "Project", "description" => "Use the project path"},
+                %{"label" => "Session", "description" => "Use the session path"}
+              ]
+            }
+          ]
         }
       })
 
@@ -102,12 +110,13 @@ defmodule Sigma.Web.SessionRetryInteractionTest do
       assert render(view |> element("#ask-user-questions")) =~ "Which retry path should I use?"
 
       view
-      |> form("#ask-user-questions form", %{"selected_answer" => "project"})
+      |> form("#ask-user-questions form", %{"selected_answer" => "Project"})
       |> render_submit()
 
       assert_receive {:retry_tool_result, result}, 1_000
       refute result.is_error
-      assert Enum.any?(result.content, &(&1.text == "User answer: project"))
+      assert [%{type: :text, text: text}] = result.content
+      assert %{"answers" => %{"path" => %{"answers" => ["Project"]}}} = Jason.decode!(text)
       assert_completed(view, storage_path)
       refute has_element?(view, "#ask-user-questions")
     end
@@ -179,11 +188,7 @@ defmodule Sigma.Web.SessionRetryInteractionTest do
       :liveview ->
         assert render_click(view, "prepare_retry", %{"msg-id" => "retry-user"}) =~ "Retry once"
         render_click(view, "confirm_retry")
-        assert_redirect(view, path)
-
-        {:ok, retried_view, _html} = live(conn, path)
-        render_async(retried_view, 3_000)
-        {retried_view, storage_path}
+        {view, storage_path}
 
       :protocol ->
         {:ok, {agent, _policy}} =

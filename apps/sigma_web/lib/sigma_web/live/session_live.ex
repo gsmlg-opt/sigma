@@ -216,10 +216,9 @@ defmodule Sigma.Web.SessionLive do
           model_options = model_options(system_config, provider_id)
           current_model_value = model_option_value(provider_id, model_id)
 
-          {stream_messages, tool_results, tool_call_to_msg} =
-            snapshot |> live_display_messages(agent, workdir, session_id) |> split_messages()
+          transcript =
+            snapshot |> live_display_messages(agent, workdir, session_id) |> transcript_data()
 
-          {display_messages, turn_last_message_ids} = index_display_messages(stream_messages)
           session_metrics_state = ensure_metrics_session(snapshot.metrics, session_id)
           session_metrics = Sigma.Session.Metrics.snapshot(session_metrics_state)
           context_snapshot = agent_status.context_snapshot
@@ -259,11 +258,7 @@ defmodule Sigma.Web.SessionLive do
              pending_user_questions: pending_user_questions,
              pending_mcp_elicitations: load_pending_mcp_elicitations(agent),
              sessions: sessions,
-             stream_messages: stream_messages,
-             display_messages: display_messages,
-             turn_last_message_ids: turn_last_message_ids,
-             tool_call_to_msg: tool_call_to_msg,
-             tool_results: tool_results,
+             transcript: transcript,
              terminal_capability: terminal_capability
            }}
         else
@@ -336,18 +331,7 @@ defmodule Sigma.Web.SessionLive do
       |> assign(:session_ready, true)
       |> assign(:turn_id, session_data.turn_id)
       |> assign(:turn_in_flight, active_runtime_phase?(session_data.runtime_status))
-      |> assign(:tool_call_to_msg, session_data.tool_call_to_msg)
-      |> assign(:tool_results, session_data.tool_results)
-      |> assign(:display_messages, session_data.display_messages)
-      |> assign(
-        :last_assistant_message_id,
-        Enum.find_value(Enum.reverse(session_data.stream_messages), fn
-          %{role: :assistant, id: id} -> id
-          _ -> nil
-        end)
-      )
-      |> assign(:turn_last_message_ids, session_data.turn_last_message_ids)
-      |> assign(:chat_order, Enum.map(session_data.stream_messages, & &1.id))
+      |> assign(session_data.transcript)
       |> start_async(:agent_status, fn -> Sigma.Agent.status(agent) end)
 
     socket =
@@ -431,25 +415,25 @@ defmodule Sigma.Web.SessionLive do
 
   def handle_async(:agent_status, _result, socket), do: {:noreply, socket}
 
+  def handle_async(:retry_branches, {:ok, {:ok, branches}}, socket),
+    do: {:noreply, assign(socket, :branch_summaries, branches)}
+
+  def handle_async(:retry_branches, _result, socket), do: {:noreply, socket}
+
   defp refresh_loaded_transcript(session_data, storage_path, session_id, workdir) do
     # Recover messages committed between the async load and this subscription.
     case Sigma.Agent.Runtime.session_snapshot(workdir, session_id, storage_path) do
       {:ok, snapshot} ->
-        {messages, tool_results, tool_call_to_msg} =
+        transcript =
           snapshot
           |> live_display_messages(session_data.agent, workdir, session_id)
-          |> split_messages()
+          |> transcript_data()
 
-        {display_messages, turn_last_message_ids} = index_display_messages(messages)
         metrics = ensure_metrics_session(snapshot.metrics, session_id)
 
         %{
           session_data
-          | stream_messages: messages,
-            display_messages: display_messages,
-            turn_last_message_ids: turn_last_message_ids,
-            tool_results: tool_results,
-            tool_call_to_msg: tool_call_to_msg,
+          | transcript: transcript,
             session_metrics_state: metrics,
             session_metrics: Sigma.Session.Metrics.snapshot(metrics),
             subagents: snapshot.subagents,
@@ -1209,21 +1193,16 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp initialize_chat(socket) do
-    initial = %{
-      messages: chat_messages(socket),
-      metadata: %{
-        commands: slash_commands(socket.assigns.effective_cwd),
-        remoteSources: Facade.remote_sources(),
-        remoteSkillsUrl:
-          "/api/v1/skills?repositoryId=#{socket.assigns.encoded_repository}&view=remote",
-        draftKey:
-          "sigma:composer-draft:/repository/#{socket.assigns.encoded_repository}/sessions/#{socket.assigns.session_id}"
-      },
-      runtime: chat_runtime(socket),
-      admission: chat_admission(socket)
+    metadata = %{
+      commands: slash_commands(socket.assigns.effective_cwd),
+      remoteSources: Facade.remote_sources(),
+      remoteSkillsUrl:
+        "/api/v1/skills?repositoryId=#{socket.assigns.encoded_repository}&view=remote",
+      draftKey:
+        "sigma:composer-draft:/repository/#{socket.assigns.encoded_repository}/sessions/#{socket.assigns.session_id}"
     }
 
-    socket |> assign(:chat_initial, initial) |> push_chat_snapshot()
+    replace_chat_snapshot(socket, metadata)
   end
 
   defp chat_runtime(socket) do
@@ -1621,7 +1600,10 @@ defmodule Sigma.Web.SessionLive do
   defp schedule_chat_flush(socket), do: socket
 
   defp flush_chat(socket) do
-    socket = assign(socket, :chat_flush_timer, nil)
+    socket |> assign(:chat_flush_timer, nil) |> push_pending_chat()
+  end
+
+  defp push_pending_chat(socket) do
     pending = socket.assigns.chat_pending
     socket = assign(socket, :chat_pending, MapSet.new())
 
@@ -1652,17 +1634,26 @@ defmodule Sigma.Web.SessionLive do
     end
   end
 
-  defp push_chat_snapshot(socket) do
-    push_event(socket, "chat:event", %{
+  defp chat_snapshot(socket, metadata) do
+    %{
       id: "messages",
       conversation_id: socket.assigns.session_id,
       type: "chat.snapshot",
       messages: chat_messages(socket),
       sequences: socket.assigns.chat_sequences,
-      metadata: socket.assigns.chat_initial.metadata,
+      metadata: metadata,
       runtime: chat_runtime(socket),
       admission: chat_admission(socket)
-    })
+    }
+  end
+
+  defp push_chat_snapshot(socket) do
+    push_event(socket, "chat:event", chat_snapshot(socket, socket.assigns.chat_initial.metadata))
+  end
+
+  defp replace_chat_snapshot(socket, metadata) do
+    snapshot = chat_snapshot(socket, metadata)
+    socket |> assign(:chat_initial, snapshot) |> push_event("chat:event", snapshot)
   end
 
   defp finish_chat_message(socket, id) do
@@ -1855,6 +1846,24 @@ defmodule Sigma.Web.SessionLive do
       {:ok, snapshot} -> snapshot
       {:error, _} -> previous
     end
+  end
+
+  defp transcript_data(messages) do
+    {visible, tool_results, tool_call_to_msg} = split_messages(messages)
+    {display_messages, turn_last_message_ids} = index_display_messages(visible)
+
+    %{
+      chat_order: Enum.map(visible, & &1.id),
+      display_messages: display_messages,
+      turn_last_message_ids: turn_last_message_ids,
+      tool_results: tool_results,
+      tool_call_to_msg: tool_call_to_msg,
+      last_assistant_message_id:
+        Enum.find_value(Enum.reverse(visible), fn
+          %{role: :assistant, id: id} -> id
+          _ -> nil
+        end)
+    }
   end
 
   defp index_display_messages(messages) do
@@ -2924,11 +2933,7 @@ defmodule Sigma.Web.SessionLive do
         {:noreply,
          socket
          |> assign(:pending_retry, nil)
-         |> put_flash(:info, "Retry started from the selected checkpoint.")
-         |> push_navigate(
-           to:
-             ~p"/repository/#{socket.assigns.encoded_repository}/sessions/#{socket.assigns.session_id}"
-         )}
+         |> put_flash(:info, "Retry started from the selected checkpoint.")}
 
       {:error, reason} ->
         {:noreply,
@@ -3665,6 +3670,15 @@ defmodule Sigma.Web.SessionLive do
     {:noreply, socket}
   end
 
+  def handle_info({:message_start, %{role: :user, metadata: %{retry_of_turn_id: turn}}}, socket)
+      when is_binary(turn),
+      do: {:noreply, socket}
+
+  @impl true
+  def handle_info({:message_start, %{role: :user} = message}, socket) do
+    {:noreply, socket |> stream_display_message(message) |> push_pending_chat()}
+  end
+
   @impl true
   def handle_info({:message_start, message}, socket) do
     {:noreply, stream_display_message(socket, message)}
@@ -3708,6 +3722,31 @@ defmodule Sigma.Web.SessionLive do
   @impl true
   def handle_info({:message_end, %{role: :assistant} = message}, socket) do
     {:noreply, socket |> stream_display_message(message) |> finish_chat_message(message.id)}
+  end
+
+  def handle_info({:message_end, %{role: :user, metadata: %{retry_of_turn_id: turn}}}, socket)
+      when is_binary(turn),
+      do: {:noreply, socket}
+
+  # Retry changes the selected branch. Deliver the canonical Agent transcript
+  # in one update so neither a blank list nor the superseded reply is rendered.
+  def handle_info({:retry_committed, turn_id, messages}, socket) do
+    socket =
+      socket
+      |> assign(transcript_data(messages))
+      |> assign(
+        turn_id: turn_id,
+        turn_in_flight: true,
+        chat_pending: MapSet.new(),
+        streaming_message_id: nil,
+        native_plan: PlanProjection.latest(messages)
+      )
+      |> replace_chat_snapshot(socket.assigns.chat_initial.metadata)
+
+    path = socket.assigns.storage_path
+
+    {:noreply,
+     start_async(socket, :retry_branches, fn -> Sigma.Session.Log.branch_summaries(path) end)}
   end
 
   @impl true

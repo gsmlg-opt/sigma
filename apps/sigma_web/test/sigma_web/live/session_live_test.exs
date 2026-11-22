@@ -759,6 +759,18 @@ defmodule Sigma.Web.SessionLiveTest do
       render_hook(view, "chat.send", Map.put(params, "request_id", "react-first"))
       assert_reply(view, %{status: "ok", admission: "accepted"})
       assert_receive {:web_provider_waiting, first, "first"}, 5_000
+
+      assert_push_event(
+        view,
+        "chat:event",
+        %{
+          type: "chat.message",
+          message: %{id: first_id, role: :user, content: "first"}
+        },
+        1000
+      )
+
+      assert [%{id: ^first_id}] = chat_snapshot(view).messages
       %{runtime: %{active: true, turnId: turn_id}} = chat_snapshot(view)
       assert is_binary(turn_id)
 
@@ -3641,90 +3653,129 @@ defmodule Sigma.Web.SessionLiveTest do
     end)
   end
 
-  test "confirming Retry navigates and reloads the replacement branch", %{conn: conn} do
-    session_id = unique_session_id("retry_branch_reload")
-    path = session_path(session_id)
-    storage_path = session_storage_path(session_id)
-    File.mkdir_p!(Path.dirname(storage_path))
+  test "retry keeps the replacement prompt visible while the provider is waiting", %{conn: conn} do
+    Application.put_env(:sigma_web, :blocking_provider_pid, self())
+    on_exit(fn -> Application.delete_env(:sigma_web, :blocking_provider_pid) end)
 
-    first = %{Message.user("retry-first", "first prompt") | metadata: %{turn_id: "turn-first"}}
+    with_mock_provider(BlockingTurnProvider, fn ->
+      session_id = unique_session_id("retry_branch_reload")
+      path = session_path(session_id)
+      storage_path = session_storage_path(session_id)
+      File.mkdir_p!(Path.dirname(storage_path))
 
-    second = %{
-      Message.user("retry-second", "second prompt")
-      | metadata: %{turn_id: "turn-second"}
-    }
+      first = %{Message.user("retry-first", "first prompt") | metadata: %{turn_id: "turn-first"}}
 
-    assert :ok = Log.persist_event(storage_path, {:agent_start, @workdir})
-    assert :ok = Log.persist_event(storage_path, {:message_end, first})
+      second = %{
+        Message.user("retry-second", "second prompt")
+        | metadata: %{turn_id: "turn-second"}
+      }
 
-    assert :ok =
-             Log.persist_event(
-               storage_path,
-               {:message_end, Message.assistant("first-answer", %{content: "first answer"})}
-             )
+      assert :ok = Log.persist_event(storage_path, {:agent_start, @workdir})
+      prefix = Message.user("kept", "Earlier conversation")
+      assert :ok = Log.persist_event(storage_path, {:message_end, prefix})
+      assert :ok = Log.persist_event(storage_path, {:message_end, first})
 
-    assert :ok = Log.persist_event(storage_path, {:message_end, second})
+      assert :ok =
+               Log.persist_event(
+                 storage_path,
+                 {:message_end, Message.assistant("first-answer", %{content: "first answer"})}
+               )
 
-    assert :ok =
-             Log.persist_event(
-               storage_path,
-               {:message_end, Message.assistant("second-answer", %{content: "second answer"})}
-             )
+      assert :ok = Log.persist_event(storage_path, {:message_end, second})
 
-    {:ok, view, _html} = live_loaded(conn, path)
-    assert render_click(view, "prepare_retry", %{"msg-id" => "retry-first"}) =~ "Retry once"
-    render_click(view, "confirm_retry")
-    assert_redirect(view, path)
+      assert :ok =
+               Log.persist_event(
+                 storage_path,
+                 {:message_end, Message.assistant("second-answer", %{content: "second answer"})}
+               )
 
-    assert_eventually(fn ->
-      case Log.snapshot(storage_path) do
-        {:ok, snapshot} ->
-          Enum.any?(snapshot.messages, fn message ->
-            message.role == :user and
-              (message.metadata[:retry_of_turn_id] || message.metadata["retry_of_turn_id"]) ==
-                "turn-first"
-          end)
+      {:ok, view, _html} = live_loaded(conn, path)
+      {:ok, observer, _html} = live_loaded(conn, path)
+      assert Enum.any?(chat_snapshot(observer).messages, &(&1.id == first.id))
+      assert render_click(view, "prepare_retry", %{"msg-id" => "retry-first"}) =~ "Retry once"
+      render_click(view, "confirm_retry")
 
-        _ ->
-          false
-      end
+      assert_push_event(view, "chat:event", %{
+        type: "chat.snapshot",
+        messages: [%{id: "kept"}, %{id: replacement_id, role: :user, content: "first prompt"}]
+      })
+
+      refute replacement_id == first.id
+
+      assert_push_event(
+        observer,
+        "chat:event",
+        %{
+          type: "chat.snapshot",
+          messages: [%{id: "kept"}, %{id: ^replacement_id, role: :user, content: "first prompt"}]
+        },
+        1000
+      )
+
+      assert_receive {:web_provider_waiting, provider, "first prompt"}, 5000
+      {:ok, reconnected, _} = live_loaded(conn, path)
+      assert [%{id: "kept"}, %{id: ^replacement_id}] = chat_snapshot(reconnected).messages
+      {:ok, {agent, _}} = Sigma.Web.SessionManager.get_agent(session_id, repo_path: @workdir)
+      assert [%{id: "kept"}, %{id: ^replacement_id}] = Sigma.Agent.messages(agent)
+      send(provider, :release_web_provider)
+
+      assert_eventually(fn ->
+        case Log.snapshot(storage_path) do
+          {:ok, snapshot} ->
+            Enum.any?(snapshot.messages, fn message ->
+              message.role == :user and
+                (message.metadata[:retry_of_turn_id] || message.metadata["retry_of_turn_id"]) ==
+                  "turn-first"
+            end)
+
+          _ ->
+            false
+        end
+      end)
+
+      assert_eventually(fn ->
+        case Log.branch_summaries(storage_path) do
+          {:ok, [active, original]} ->
+            active.active? and active.retry_of_turn_id == "turn-first" and
+              get_in(active, [:last_assistant, :text]) == "I am a mock response." and
+              not original.active? and
+              get_in(original, [:last_assistant, :text]) == "second answer"
+
+          _other ->
+            false
+        end
+      end)
+
+      assert_eventually(fn ->
+        match?(
+          [%{id: "kept"}, %{id: ^replacement_id}, %{role: :assistant}],
+          chat_snapshot(view).messages
+        )
+      end)
+
+      {:ok, _reloaded_view, reloaded_html} = live_loaded(conn, path)
+      assert reloaded_html =~ "first prompt"
+
+      transcript_text =
+        reloaded_html
+        |> Floki.parse_document!()
+        |> Floki.find("#messages")
+        |> Floki.text()
+
+      refute transcript_text =~ "second prompt"
+      assert reloaded_html =~ "Alternative executions"
+      assert reloaded_html =~ "Original execution"
+      assert reloaded_html =~ "second answer"
+      assert reloaded_html =~ "I am a mock response."
+      assert reloaded_html =~ "turn-first"
+
+      assert {:ok, entries} = Sigma.Session.Storage.JsonlFile.read(storage_path)
+      assert Enum.any?(entries, &(get_in(&1, ["message", "id"]) == "second-answer"))
+
+      assert Enum.count(entries, fn entry ->
+               get_in(entry, ["message", "metadata", "retry_of_turn_id"]) == "turn-first"
+             end) == 1
     end)
-
-    assert_eventually(fn ->
-      case Log.branch_summaries(storage_path) do
-        {:ok, [active, original]} ->
-          active.active? and active.retry_of_turn_id == "turn-first" and
-            get_in(active, [:last_assistant, :text]) == "I am a mock response." and
-            not original.active? and
-            get_in(original, [:last_assistant, :text]) == "second answer"
-
-        _other ->
-          false
-      end
-    end)
-
-    {:ok, _reloaded_view, reloaded_html} = live_loaded(conn, path)
-    assert reloaded_html =~ "first prompt"
-
-    transcript_text =
-      reloaded_html
-      |> Floki.parse_document!()
-      |> Floki.find("#messages")
-      |> Floki.text()
-
-    refute transcript_text =~ "second prompt"
-    assert reloaded_html =~ "Alternative executions"
-    assert reloaded_html =~ "Original execution"
-    assert reloaded_html =~ "second answer"
-    assert reloaded_html =~ "I am a mock response."
-    assert reloaded_html =~ "turn-first"
-
-    assert {:ok, entries} = Sigma.Session.Storage.JsonlFile.read(storage_path)
-    assert Enum.any?(entries, &(get_in(&1, ["message", "id"]) == "second-answer"))
-
-    assert Enum.count(entries, fn entry ->
-             get_in(entry, ["message", "metadata", "retry_of_turn_id"]) == "turn-first"
-           end) == 1
   end
 
   @tag :tmp_dir
