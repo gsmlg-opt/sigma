@@ -5,6 +5,135 @@ defmodule Sigma.Agent.ContextBuilderTest do
   alias Sigma.Agent.Message, as: AgentMessage
   alias Sigma.Agent.SessionContext
 
+  @tag :tmp_dir
+  test "continuation projection removes the exact lost call across cold replay and preserves reused ids",
+       %{tmp_dir: dir} do
+    call = fn label, id ->
+      %{type: :tool_call, id: id, name: "read", arguments: %{"label" => label}}
+    end
+
+    assistant = fn attempt, turn, blocks ->
+      %{
+        AgentMessage.assistant("msg_assistant_" <> attempt, %{content: blocks})
+        | metadata: %{turn_id: turn}
+      }
+    end
+
+    result = fn id, call_id, text ->
+      AgentMessage.tool_result(id, %{
+        tool_call_id: call_id,
+        tool_name: "read",
+        content: text,
+        is_error: false
+      })
+    end
+
+    continue = %{
+      AgentMessage.user("continue", "Continue")
+      | metadata: %{
+          continuation_notice: "The earlier read outcome is unknown.",
+          continuation_tools: [
+            %{"run_id" => "source", "attempt_id" => "lost", "tool_call_id" => "reused"}
+          ]
+        }
+    }
+
+    # The lost function is between two native items. Their original indexes
+    # and the settled local call must survive both live and cold continuation.
+    native_call = fn label, id ->
+      %{
+        "type" => "function_call",
+        "name" => "read",
+        "call_id" => id,
+        "arguments" => Formata.JSON.encode!(%{"label" => label})
+      }
+    end
+
+    text_item = %{
+      "type" => "message",
+      "role" => "assistant",
+      "id" => "answer",
+      "content" => [%{"type" => "output_text", "text" => "partial answer", "annotations" => []}]
+    }
+
+    kept_call = native_call.("kept", "kept")
+
+    entries =
+      Enum.with_index(
+        [text_item, native_call.("lost", "reused"), kept_call],
+        &%{"output_index" => &2, "item" => &1}
+      )
+
+    alias Sigma.Ai.Providers.OpenAIResponses.Hosted
+    model = %{id: "model", provider: "fixture"}
+    url = "http://localhost:4580"
+    prepared = Hosted.prepare!(model, %{tools: [], messages: []}, [], url)
+
+    envelope = %{
+      "version" => 1,
+      "origin" => prepared.origin,
+      "response_id" => "r",
+      "items" => entries
+    }
+
+    messages = [
+      AgentMessage.user("first", "read"),
+      assistant.("before", "earlier", [call.("before", "reused")]),
+      result.("before-result", "reused", "before result"),
+      assistant.("lost", "source", [
+        %{type: :text, text: "partial answer"},
+        call.("lost", "reused"),
+        call.("kept", "kept")
+      ])
+      |> Map.update!(:metadata, &Map.put(&1, "openai_responses_hosted", envelope)),
+      result.("kept-result", "kept", "kept result"),
+      assistant.("other", "source", [call.("same run other attempt", "reused")]),
+      result.("other-result", "reused", "same run other result"),
+      assistant.("after", "later", [call.("after", "reused")]),
+      result.("after-result", "reused", "after result"),
+      continue
+    ]
+
+    path = Path.join(dir, "continuation.jsonl")
+
+    for message <- messages,
+        do: :ok = Sigma.Session.Log.persist_event(path, {:message_end, message})
+
+    assert {:ok, restored} = Sigma.Session.Log.replay(path)
+
+    for history <- [messages, restored] do
+      context = ContextBuilder.build(messages: history)
+
+      hosted = Enum.find(context.messages, &get_in(&1, [:metadata, "openai_responses_hosted"]))
+      assert Hosted.replay_items!(hosted, prepared) == [text_item, kept_call]
+
+      assert Enum.map(hosted.metadata["openai_responses_hosted"]["items"], & &1["output_index"]) ==
+               [0, 2]
+
+      labels =
+        for %{role: :assistant, content: blocks} <- context.messages,
+            %{type: :tool_call, arguments: %{"label" => label}} <- blocks,
+            do: label
+
+      assert labels == ["before", "kept", "same run other attempt", "after"]
+      assert Enum.count(context.messages, &(&1.role == :tool_result)) == 4
+      refute inspect(context.messages) =~ "No tool result was recorded"
+
+      assert Enum.any?(
+               context.messages,
+               &match?(
+                 [%{type: :text, text: "partial answer"}, %{type: :tool_call, id: "kept"}],
+                 &1.content
+               )
+             )
+
+      assert Enum.any?(context.messages, &(&1.content == "The earlier read outcome is unknown."))
+      assert List.last(context.messages).content == "Continue"
+    end
+
+    assert List.last(restored).content == "Continue"
+  end
+
   describe "build_messages/2 tool result completion" do
     test "completes an unresolved tool call before the next user prompt" do
       messages = [assistant_calls(["call-1"]), AgentMessage.user("continue", "继续")]

@@ -23,7 +23,8 @@ defmodule Sigma.Agent do
     AsyncInbox,
     GoalIntegration,
     HookDelivery,
-    RootRetirement
+    RootRetirement,
+    RootContinuation
   }
 
   alias Sigma.Protocol.{AsyncInteractions, AsyncReplyUploads}
@@ -869,9 +870,14 @@ defmodule Sigma.Agent do
   end
 
   @impl true
-  def handle_call({:admit_prompt, content, opts, requested_mode}, _from, state) do
+  def handle_call({:admit_prompt, content, opts, requested_mode}, from, state) do
     case admit_prompt(state, content, opts, requested_mode) do
-      {result, state} -> {:reply, result, state}
+      {{:pending_continuation, _info}, state} ->
+        pending = Map.put(state.pending_host_prompt, :reply_to, from)
+        {:noreply, %{state | pending_host_prompt: pending}}
+
+      {result, state} ->
+        {:reply, result, state}
     end
   end
 
@@ -1425,6 +1431,70 @@ defmodule Sigma.Agent do
   end
 
   def handle_info(
+        {ref, {:host_continuation, result}},
+        %{host_recovery_task: %{ref: ref}} = state
+      ) do
+    Process.demonitor(ref, [:flush])
+    state = %{state | host_recovery_task: nil}
+
+    state =
+      case result do
+        {:ok, nil} ->
+          item = Map.put(state.pending_host_prompt.item, :continuation_source, nil)
+
+          inspect_host_prompt(%{
+            state
+            | pending_host_prompt: %{state.pending_host_prompt | item: item}
+          })
+
+        {:ok, decision, _facts, context} ->
+          item = state.pending_host_prompt.item
+
+          item = %{
+            item
+            | turn_id: decision["target"]["run_id"],
+              message_id: "msg_user_" <> decision["continuation_id"],
+              metadata:
+                Map.merge(item.metadata, %{
+                  continuation_id: decision["continuation_id"],
+                  continuation_notice: decision["model_notice"],
+                  continuation_tools: decision["unresolved_tools"]
+                })
+          }
+
+          state = %{state | pending_host_prompt: %{state.pending_host_prompt | item: item}}
+
+          ready = if context, do: adopt_host(state, context), else: {:ok, state}
+
+          case ready do
+            {:ok, ready} -> start_host_prompt(ready)
+            {:error, reason, retained} -> finish_host_prompt(retained, :failed, reason)
+          end
+
+        {:already_admitted, decision} ->
+          pending = state.pending_host_prompt
+
+          info = %{
+            turn_id: decision["target"]["run_id"],
+            message_id: "msg_user_" <> decision["continuation_id"]
+          }
+
+          if pending[:reply_to], do: GenServer.reply(pending.reply_to, {:already_admitted, info})
+          release_resources(pending.item.prepared_resources)
+          %{state | pending_host_prompt: nil, turn_state: pending.previous_turn_state}
+
+        {:error, reason, facts} ->
+          state = if facts, do: %{state | host_retirement_facts: facts}, else: state
+          finish_host_prompt(state, :failed, reason)
+
+        {:error, reason} ->
+          finish_host_prompt(state, :failed, reason)
+      end
+
+    {:noreply, state}
+  end
+
+  def handle_info(
         {ref, {:host_recovery, result}},
         %{host_recovery_task: %{ref: ref}} = state
       ) do
@@ -1641,6 +1711,33 @@ defmodule Sigma.Agent do
       })
 
     {:noreply, complete_host_retirement(state, facts)}
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %{
+          host_recovery_task: %{ref: ref},
+          pending_host_prompt: %{item: %{continuation_source: source}}
+        } = state
+      )
+      when is_binary(source) do
+    error =
+      {:error,
+       Backplane.AgentRuntime.Error.new(
+         :unknown_outcome,
+         "Continuation preparation stopped before its acknowledgement",
+         cause: reason
+       )}
+
+    facts =
+      Map.merge(state.host_retirement_facts, %{
+        async_hooks: state.host_retirement_facts[:async_hooks] || error,
+        session_end: state.host_retirement_facts[:session_end] || error,
+        result: error
+      })
+
+    state = %{state | host_recovery_task: nil, host_retirement_facts: facts}
+    {:noreply, finish_host_prompt(state, :failed, elem(error, 1))}
   end
 
   def handle_info(
@@ -1886,6 +1983,18 @@ defmodule Sigma.Agent do
   defp inspect_host_prompt(%{host_recovery_task: %Task{}} = state), do: state
   defp inspect_host_prompt(%{host_retirement_task: %Task{}} = state), do: state
 
+  defp inspect_host_prompt(
+         %{pending_host_prompt: %{item: %{continuation_source: source}}} = state
+       )
+       when is_binary(source) do
+    task =
+      Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+        {:host_continuation, RootContinuation.prepare(state, source)}
+      end)
+
+    %{state | host_recovery_task: task}
+  end
+
   defp inspect_host_prompt(state) do
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
@@ -1923,8 +2032,40 @@ defmodule Sigma.Agent do
     do: finish_host_prompt(state, :cancelled, nil)
 
   defp start_host_prompt(state) do
+    state = acknowledge_continuation_prompt(state, :accepted)
     item = state.pending_host_prompt.item
     start_ready_turn(%{state | pending_host_prompt: nil}, item)
+  end
+
+  defp acknowledge_continuation_prompt(state, result) do
+    pending = state.pending_host_prompt
+    item = pending.item
+
+    if Map.get(item, :continuation_pending?, false) do
+      reply =
+        case result do
+          :accepted ->
+            info = prompt_info(item, item.turn_id)
+            emit(state, {:prompt_admitted, :accepted, info})
+            emit_prompt_telemetry(state, :accepted)
+            {:accepted, info}
+
+          {:rejected, reason} ->
+            emit(state, {:prompt_rejected, reason})
+            {:rejected, reason}
+        end
+
+      if pending[:reply_to], do: GenServer.reply(pending.reply_to, reply)
+
+      pending =
+        pending
+        |> Map.delete(:reply_to)
+        |> Map.put(:item, Map.put(item, :continuation_pending?, false))
+
+      %{state | pending_host_prompt: pending}
+    else
+      state
+    end
   end
 
   defp cancel_host_prompt(state) do
@@ -1935,6 +2076,7 @@ defmodule Sigma.Agent do
   end
 
   defp finish_host_prompt(state, outcome, reason) do
+    state = acknowledge_continuation_prompt(state, {:rejected, reason || :cancelled})
     item = state.pending_host_prompt.item
     release_resources(item.prepared_resources)
     notify_retry_admission(item, {:error, reason || :cancelled})
@@ -1982,6 +2124,8 @@ defmodule Sigma.Agent do
   end
 
   defp retire_root_on_terminate(state, reason) do
+    unresolved? = RootRetirement.capture_unresolved_shutdown?(state, reason)
+
     facts =
       case state.host_retirement_facts do
         %{result: {:ok, %{status: :confirmed}}} = confirmed ->
@@ -1993,12 +2137,19 @@ defmodule Sigma.Agent do
           # order and leave native cleanup to the Subagents owner in that case.
           idle? =
             is_nil(state.current_turn_task) and is_nil(state.goal_idle_task) and
-              root_can_retire_on_terminate?(state)
+              (unresolved? or root_can_retire_on_terminate?(state))
 
-          RootRetirement.close(state, previous, reason, native_close: idle?)
+          RootRetirement.close(state, previous, reason,
+            native_close: idle?,
+            continuation: unresolved?
+          )
       end
 
-    complete_root_on_terminate(state, facts)
+    # Preserve independently observed component shutdown for a later explicit
+    # Continue while the unknown run and partial lifetime receipt stay intact.
+    if unresolved?,
+      do: RootRetirement.report(facts),
+      else: complete_root_on_terminate(state, facts)
   end
 
   defp complete_root_on_terminate(state, facts) do
@@ -2153,14 +2304,22 @@ defmodule Sigma.Agent do
       {:ok, item} when is_nil(state.current_turn_task) ->
         state = state |> fence_goal_admission(:superseded) |> start_turn(item)
         info = prompt_info(item, item.turn_id)
-        emit(state, {:prompt_admitted, :accepted, info})
-        emit_prompt_telemetry(state, :accepted)
-        {{:accepted, info}, state}
+
+        if item.continuation_pending? and not is_nil(state.pending_host_prompt) do
+          {{:pending_continuation, info}, state}
+        else
+          emit(state, {:prompt_admitted, :accepted, info})
+          emit_prompt_telemetry(state, :accepted)
+          {{:accepted, info}, state}
+        end
 
       {:ok, item} ->
         mode = admission_mode(requested_mode, opts)
 
         cond do
+          is_binary(Keyword.get(opts, :continuation_source)) ->
+            reject_prompt(state, opts, :turn_active)
+
           Keyword.get(opts, :admission) == :reject_if_busy ->
             reject_prompt(state, opts, :turn_active)
 
@@ -2214,6 +2373,8 @@ defmodule Sigma.Agent do
            attachments: Keyword.get(opts, :attachments),
            retry_of_turn_id: Keyword.get(opts, :retry_of_turn_id),
            retry_admission_notify: Keyword.get(opts, :retry_admission_notify),
+           continuation_source: Keyword.get(opts, :continuation_source),
+           continuation_pending?: is_binary(Keyword.get(opts, :continuation_source)),
            metadata: %{},
            dispatcher_opts: Keyword.get(opts, :dispatcher_opts, []),
            prepared_resources: prepared_resources
@@ -2418,7 +2579,11 @@ defmodule Sigma.Agent do
          not is_nil(state.host_retirement) do
       state
       |> fence_goal_admission(:superseded)
-      |> Map.put(:pending_host_prompt, %{item: item, cancelled?: false})
+      |> Map.put(:pending_host_prompt, %{
+        item: item,
+        cancelled?: false,
+        previous_turn_state: state.turn_state
+      })
       |> Map.put(:turn_state, %TurnState{turn_id: item.turn_id, phase: :session_operation})
       |> inspect_host_prompt()
     else
@@ -2752,6 +2917,7 @@ defmodule Sigma.Agent do
            transcript_path: path,
            cwd: state.cwd,
            root: Path.join(path <> ".subagents", "goal"),
+           allow_pending_continuation: true,
            runtime_store: state.backplane_store,
            owner_pid: owner,
            host_context: callbacks
@@ -3260,7 +3426,8 @@ defmodule Sigma.Agent do
 
   defp run_compact(state, opts) do
     active_messages = __backplane_context_messages__(state)
-    {to_summarize, to_keep} = find_compact_boundary(state, active_messages, opts)
+    project = ContextBuilder.continuation_projection(active_messages)
+    {to_summarize, to_keep} = find_compact_boundary(state, active_messages, opts, project)
 
     case to_summarize do
       [] ->
@@ -3294,7 +3461,7 @@ defmodule Sigma.Agent do
         summary_result =
           case Outcome.control(pre_outcome) do
             {:halt, reason} -> {:error, {:hook_stopped, reason}, nil}
-            _ -> generate_summary(state, to_summarize, opts)
+            _ -> generate_summary(state, Enum.flat_map(to_summarize, project), opts)
           end
 
         case summary_result do
@@ -3470,7 +3637,7 @@ defmodule Sigma.Agent do
     ContextPolicy.snapshot(messages: messages).next_request_estimated_input_tokens
   end
 
-  defp find_compact_boundary(state, messages, opts) do
+  defp find_compact_boundary(state, messages, opts, project) do
     policy = current_context_policy(state)
     message_count = length(messages)
 
@@ -3490,15 +3657,17 @@ defmodule Sigma.Agent do
             do: [index | boundaries],
             else: boundaries
 
+        # Keep the cut anchored to the original journal message, including
+        # when its projection is empty or prepends a continuation notice.
         pending =
-          case message do
-            %{role: :assistant, content: content} when is_list(content) ->
+          case project.(message) do
+            [%{role: :assistant, content: content}] when is_list(content) ->
               Enum.reduce(content, pending, fn
                 %{type: :tool_call, id: id}, calls -> MapSet.put(calls, id)
                 _block, calls -> calls
               end)
 
-            %{role: :tool_result, tool_call_id: id} ->
+            [%{role: :tool_result, tool_call_id: id}] ->
               MapSet.delete(pending, id)
 
             _ ->
@@ -3519,8 +3688,8 @@ defmodule Sigma.Agent do
       |> Enum.reverse()
       |> Enum.filter(&(&1 >= message_count - 20))
       |> Enum.find(fn index ->
-        kept = Enum.drop(messages, index)
-        length(kept) <= 20 and compaction_token_estimate(kept) <= keep_budget
+        kept = messages |> Enum.drop(index) |> Enum.flat_map(project)
+        compaction_token_estimate(kept) <= keep_budget
       end)
 
     if boundary, do: Enum.split(messages, boundary), else: {[], messages}

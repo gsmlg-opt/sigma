@@ -131,6 +131,7 @@ defmodule Sigma.Agent.BackplaneRootRetirementFunctionalTest do
 
     try do
       assert {:error, error} = Sigma.Agent.retire_host(c.agent)
+      assert error.message =~ "Sigma could not confirm shutdown of"
       assert inspect(error) =~ "eisdir"
       assert Process.alive?(c.agent)
       refute File.exists?(process)

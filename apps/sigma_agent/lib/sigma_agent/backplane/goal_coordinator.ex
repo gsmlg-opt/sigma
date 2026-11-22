@@ -884,15 +884,25 @@ defmodule Sigma.Agent.Backplane.GoalCoordinator do
 
   defp recoverable_run(state, identity, %{run: %{state: :unknown_outcome}} = snapshot, goal_id) do
     if get_in(snapshot.run, [:context, :conversation, :goal_outbox]) not in [nil, []] and
-         recoverable_goal_id(identity, snapshot.run) != goal_id,
-       do: recovery_conflict(identity, "indexed Goal identity changed with retained receipts"),
-       else:
-         LifetimeEvidence.allow_root(
-           state.runtime_store,
-           identity,
-           snapshot,
-           state.transcript_path
-         )
+         recoverable_goal_id(identity, snapshot.run) != goal_id do
+      recovery_conflict(identity, "indexed Goal identity changed with retained receipts")
+    else
+      case LifetimeEvidence.read_continuation(state.transcript_path, identity) do
+        {:ok, _decision} ->
+          :ok
+
+        {:error, %Error{class: :not_found}} ->
+          LifetimeEvidence.allow_root(
+            state.runtime_store,
+            identity,
+            snapshot,
+            state.transcript_path
+          )
+
+        error ->
+          error
+      end
+    end
   end
 
   defp recoverable_run(_state, identity, snapshot, goal_id) do

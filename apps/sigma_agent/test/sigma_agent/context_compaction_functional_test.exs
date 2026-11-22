@@ -123,6 +123,127 @@ defmodule Sigma.Agent.ContextCompactionFunctionalTest do
     def append(path, entry), do: Sigma.Session.Storage.JsonlFile.append(path, entry)
   end
 
+  test "compaction after an accepted continuation retains a real journal boundary", c do
+    call = %{type: :tool_call, id: "lost", name: "read", arguments: %{}}
+
+    assistant =
+      Message.assistant("msg_assistant_attempt", %{content: [call], metadata: %{turn_id: "run"}})
+
+    later = for n <- 1..24, do: Message.user("later-#{n}", "Later message #{n}")
+
+    history = [
+      Message.user("first", "Original task"),
+      assistant,
+      continue_after_lost_call() | later
+    ]
+
+    agent = start_agent(c, messages: history)
+
+    assert :ok = Sigma.Agent.begin_session_operation(agent)
+    assert {:ok, _} = Sigma.Agent.compact(agent)
+    assert :ok = Sigma.Agent.end_session_operation(agent)
+
+    assert_receive {:compact, _, "later-5"}
+    assert [%{role: :compaction_summary} | kept] = Sigma.Agent.messages(agent)
+    assert kept == Enum.drop(later, 4)
+    assert_receive {:compact_provider, %{purpose: :compaction, context: %{messages: [prompt]}}}
+    [%{text: text}] = prompt.content
+    assert text =~ "The read outcome is unknown."
+    refute text =~ "tool_call"
+  end
+
+  test "a retained Continue points to its original message and projects its notice once", c do
+    continue = continue_after_lost_call()
+    kept = [continue | Enum.map(1..19, &Message.user("m#{&1}", "Message #{&1}"))]
+    agent = start_agent(c, messages: [Message.user("old", "Summarize this") | kept])
+
+    assert :ok = Sigma.Agent.begin_session_operation(agent)
+    assert {:ok, _} = Sigma.Agent.compact(agent)
+    assert :ok = Sigma.Agent.end_session_operation(agent)
+    assert_receive {:compact, _, "continue"}
+    assert [summary | ^kept] = Sigma.Agent.messages(agent)
+
+    context = Sigma.Agent.ContextBuilder.build(messages: [summary | kept])
+
+    assert Enum.count(context.messages, &(&1.content == continue.metadata.continuation_notice)) ==
+             1
+  end
+
+  test "a cold continuation sends hosted search to Responses even when all local calls were lost",
+       c do
+    frames =
+      ~s(data: {"type":"response.completed","response":{"id":"next","status":"completed","output":[]}}) <>
+        "\n\n"
+
+    with_http(frames, fn url, capture ->
+      alias Sigma.Ai.Providers.OpenAIResponses
+      prepared = OpenAIResponses.Hosted.prepare!(@model, %{messages: [], tools: []}, [], url)
+
+      search = %{
+        "type" => "web_search_call",
+        "id" => "search",
+        "status" => "completed",
+        "action" => %{"type" => "search", "query" => "example"}
+      }
+
+      lost = %{
+        "type" => "custom_tool_call",
+        "call_id" => "lost",
+        "name" => "edit",
+        "input" => "patch"
+      }
+
+      envelope = %{
+        "origin" => prepared.origin,
+        "version" => 1,
+        "response_id" => "previous",
+        "items" => Enum.with_index([search, lost], &%{"output_index" => &2, "item" => &1})
+      }
+
+      assistant =
+        Message.assistant("msg_assistant_attempt", %{
+          content: [
+            %{type: :tool_call, id: "lost", name: "edit", input_kind: :custom, arguments: "patch"}
+          ],
+          metadata: %{"openai_responses_hosted" => envelope, turn_id: "run"}
+        })
+
+      path = Path.join(c.tmp_dir, "hosted.jsonl")
+
+      for msg <- [assistant, continue_after_lost_call()],
+          do: :ok = Log.persist_event(path, {:message_end, msg})
+
+      original = File.read!(path)
+      assert {:ok, messages} = Log.replay(path)
+      context = Sigma.Agent.ContextBuilder.build(messages: messages)
+
+      events =
+        OpenAIResponses.stream(%{
+          model: @model,
+          context: context,
+          options: [api_key: "fixture", base_url: url]
+        })
+        |> Enum.to_list()
+
+      assert Enum.any?(events, &match?({:done, _, _}, &1))
+      input = Agent.get(capture, & &1["input"]) |> Enum.reject(&(&1["role"] == "system"))
+      assert [^search, %{"role" => "user"}, %{"role" => "user"}] = input
+      assert File.read!(path) == original
+    end)
+  end
+
+  defp continue_after_lost_call do
+    %{
+      Message.user("continue", "Continue")
+      | metadata: %{
+          continuation_notice: "The read outcome is unknown.",
+          continuation_tools: [
+            %{"run_id" => "run", "attempt_id" => "attempt", "tool_call_id" => "lost"}
+          ]
+        }
+    }
+  end
+
   test "manual compaction handles fewer than twenty large messages", c do
     agent = start_agent(c, messages: large_history())
     assert :ok = Sigma.Agent.begin_session_operation(agent)

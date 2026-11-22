@@ -7,7 +7,9 @@ defmodule Sigma.Agent.ContextBuilder do
   user message by `Sigma.Agent.SessionContext`.
   """
 
+  alias Sigma.Agent.Message
   alias Sigma.Agent.MessageTransformer
+  alias Sigma.Ai.Providers.OpenAIResponses.Hosted
   alias Sigma.Agent.SessionContext
 
   @cache_control %{type: :ephemeral, ttl: "1h"}
@@ -112,11 +114,82 @@ defmodule Sigma.Agent.ContextBuilder do
   @spec build_messages([map()], SessionContext.t()) :: [map()]
   def build_messages(messages, %SessionContext{} = session_context) do
     messages
+    |> continuation_messages(messages)
     |> summary_continuation()
     |> MessageTransformer.transform_context(transforms: context_transforms(session_context))
     |> MessageTransformer.convert_to_llm()
     |> MessageTransformer.complete_tool_results()
   end
+
+  @doc "Projects accepted continuation decisions into Provider context, preserving the selected journal."
+  def continuation_messages(messages, history) do
+    Enum.flat_map(messages, continuation_projection(history))
+  end
+
+  @doc "Builds the per-journal-message projection for an accepted continuation."
+  def continuation_projection(history) do
+    notices =
+      for %{role: :user, id: id, metadata: metadata} <- history,
+          is_map(metadata),
+          notice = metadata[:continuation_notice] || metadata["continuation_notice"],
+          is_binary(notice),
+          into: %{},
+          do:
+            {id, {notice, metadata[:continuation_tools] || metadata["continuation_tools"] || []}}
+
+    if map_size(notices) == 0 do
+      fn message -> [message] end
+    else
+      missing =
+        for {_id, {_notice, tools}} <- notices,
+            %{"run_id" => run, "attempt_id" => attempt, "tool_call_id" => call} <- tools,
+            is_binary(attempt),
+            reduce: %{} do
+          acc ->
+            Map.update(
+              acc,
+              {run, "msg_assistant_" <> attempt},
+              MapSet.new([call]),
+              &MapSet.put(&1, call)
+            )
+        end
+
+      &continuation_message(&1, missing, notices)
+    end
+  end
+
+  defp continuation_message(%{role: :assistant, content: blocks} = message, missing, _notices)
+       when is_list(blocks) do
+    metadata = Map.get(message, :metadata) || %{}
+    run = metadata[:turn_id] || metadata["turn_id"]
+
+    case Map.fetch(missing, {run, message.id}) do
+      :error ->
+        [message]
+
+      {:ok, calls} ->
+        content =
+          Enum.reject(blocks, fn
+            %{type: :tool_call, id: call} -> MapSet.member?(calls, call)
+            _ -> false
+          end)
+
+        case Hosted.without_tool_calls(metadata, calls) do
+          {:ok, projected} -> [%{message | content: content, metadata: projected}]
+          :none when content == [] and blocks != [] -> []
+          :none -> [%{message | content: content}]
+        end
+    end
+  end
+
+  defp continuation_message(%{role: :user, id: id} = message, _missing, notices) do
+    case notices[id] do
+      {notice, _tools} -> [Message.user("continuation_notice_" <> id, notice), message]
+      nil -> [message]
+    end
+  end
+
+  defp continuation_message(message, _missing, _notices), do: [message]
 
   defp summary_continuation(messages) do
     # A complete compaction can retain no original user message. Project its

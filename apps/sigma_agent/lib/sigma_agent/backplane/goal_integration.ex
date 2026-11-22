@@ -19,7 +19,7 @@ defmodule Sigma.Agent.Backplane.GoalIntegration do
 
   def open(opts) do
     with {:ok, coordinator} <- GoalCoordinator.start_link(opts) do
-      case ready_context(coordinator) do
+      case ready_context(coordinator, opts) do
         {:ok, context} ->
           {:ok, Map.put(context, :coordinator, coordinator)}
 
@@ -151,9 +151,19 @@ defmodule Sigma.Agent.Backplane.GoalIntegration do
       {:error, Error.new(:execution_failure, "Goal owner retirement failed", cause: reason)}
   end
 
-  defp ready_context(coordinator) do
-    with {:ok, %{status: :ready}} <- GoalCoordinator.recover(coordinator),
-         {:ok, context} <- GoalCoordinator.runtime_context(coordinator),
-         do: {:ok, context}
+  defp ready_context(coordinator, opts) do
+    case GoalCoordinator.recover(coordinator) do
+      {:ok, %{status: :ready}} ->
+        GoalCoordinator.runtime_context(coordinator)
+
+      {:error, %Error{class: :resource_conflict, details: %{reason: :missing_tool_result}}} =
+          error ->
+        if Keyword.get(opts, :allow_pending_continuation, false),
+          do: GoalCoordinator.runtime_context(coordinator),
+          else: error
+
+      {:error, _} = error ->
+        error
+    end
   end
 end

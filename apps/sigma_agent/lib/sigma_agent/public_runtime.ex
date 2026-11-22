@@ -858,7 +858,8 @@ defmodule Sigma.Agent.PublicRuntime do
   end
 
   defp admission_payload({status, info})
-       when status in [:accepted, :queued_as_steering, :queued_as_follow_up] and is_map(info) do
+       when status in [:accepted, :already_admitted, :queued_as_steering, :queued_as_follow_up] and
+              is_map(info) do
     {:ok, Atom.to_string(status), %{"messageId" => info.message_id, "turnId" => info.turn_id}}
   end
 

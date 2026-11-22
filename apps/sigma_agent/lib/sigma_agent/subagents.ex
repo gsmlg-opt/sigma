@@ -41,6 +41,13 @@ defmodule Sigma.Agent.Subagents do
   @doc "Confirms execution retirement while retaining owners needed for Goal ACK and archive export."
   def close_execution(host), do: GenServer.call(host, :close_execution, :infinity)
 
+  @doc "Closes actual native owners while retaining unresolved historical tool outcomes."
+  def close_for_continuation(host),
+    do: GenServer.call(host, :close_for_continuation, :infinity)
+
+  def release_continued_generation(host, identity, decision),
+    do: GenServer.call(host, {:release_continued_generation, identity, decision}, :infinity)
+
   @doc "Persists public export stages before orderly shutdown; does not confirm full closure."
   def stage_shutdown(host), do: GenServer.call(host, :stage_shutdown, :infinity)
 
@@ -398,6 +405,59 @@ defmodule Sigma.Agent.Subagents do
     request_close(state, :close_waiters, from)
   end
 
+  def handle_call(:close_for_continuation, from, state) do
+    if state.preparing or state.closing or map_size(state.jobs) != 0 do
+      {:reply, failure(:resource_conflict, "subagent host is busy"), state}
+    else
+      job(%{state | closing: true}, from, :continuation_close, fn ->
+        case close_generation(state) do
+          {:ok, %{status: :confirmed}} = native ->
+            retirements = retire_children(state)
+
+            result =
+              with :ok <- child_retirement_result(retirements),
+                   :ok <- LifetimeEvidence.finalize(state.lifetime_recovery, state.manager),
+                   :ok <- capture_continuation_session(state),
+                   do: native
+
+            {result, retirements}
+
+          error ->
+            {error, state.child_retirements}
+        end
+      end)
+    end
+  end
+
+  def handle_call({:release_continued_generation, identity, decision}, from, state) do
+    if state.preparing or state.closing or map_size(state.jobs) != 0 do
+      {:reply, failure(:resource_conflict, "subagent host is busy"), state}
+    else
+      with {:ok, ^decision} <-
+             LifetimeEvidence.read_continuation(state.transcript_path, identity),
+           true <- is_nil(state.root_binding) or state.root_binding.run_id == identity.run_id do
+        job(%{state | closing: true}, from, :continuation_release, fn ->
+          with :ok <- ChildArchiveEvidence.finalize(state.lifetime_recovery, state.manager),
+               :ok <- stop_continued_owners(state),
+               :ok <-
+                 if(state.lifetime_recovery,
+                   do: LifetimeRecovery.retire(state.lifetime_recovery),
+                   else: :ok
+                 ),
+               do: :ok
+        end)
+      else
+        {:error, _} = error ->
+          {:reply, error, state}
+
+        _ ->
+          {:reply,
+           failure(:resource_conflict, "continuation source differs from the current generation"),
+           state}
+      end
+    end
+  end
+
   def handle_call(:stage_shutdown, from, state) do
     state = %{state | shutdown_stage_waiters: [from | state.shutdown_stage_waiters]}
     {:noreply, drain_shutdown_stages(state)}
@@ -579,6 +639,37 @@ defmodule Sigma.Agent.Subagents do
             start_close(state)
           else
             GenServer.reply(from, reply)
+            {:noreply, state}
+          end
+
+        {{from, :continuation_close}, jobs} ->
+          Process.demonitor(ref, [:flush])
+          {ack, retirements} = result
+          GenServer.reply(from, ack)
+          {:noreply, end_continuation_job(%{state | jobs: jobs, child_retirements: retirements})}
+
+        {{from, :continuation_release}, jobs} ->
+          Process.demonitor(ref, [:flush])
+          GenServer.reply(from, result)
+          state = end_continuation_job(%{state | jobs: jobs})
+
+          if result == :ok do
+            {:noreply,
+             %{
+               state
+               | session: nil,
+                 manager: nil,
+                 codex_resources: nil,
+                 lifetime_recovery: nil,
+                 interaction_responder: nil,
+                 root_binding: nil,
+                 children: %{},
+                 child_retirements: %{},
+                 error: nil,
+                 execution_closed: false,
+                 generation_closed: false
+             }}
+          else
             {:noreply, state}
           end
 
@@ -956,6 +1047,33 @@ defmodule Sigma.Agent.Subagents do
       else: :ok
   end
 
+  defp capture_continuation_session(%{codex_resources: resources}) when is_pid(resources),
+    do:
+      resources
+      |> CodexResources.retirement_context()
+      |> LifetimeEvidence.capture_for_continuation()
+
+  defp capture_continuation_session(_state),
+    do: failure(:unknown_outcome, "continuation requires a durable native Session")
+
+  defp stop_continued_owners(state) do
+    [state.interaction_responder, state.manager, state.codex_resources, state.session]
+    |> Enum.uniq()
+    |> Enum.reduce_while(:ok, fn pid, :ok ->
+      result =
+        runtime_call(fn ->
+          if is_pid(pid) and Process.alive?(pid) do
+            Process.unlink(pid)
+            GenServer.stop(pid, :normal, :infinity)
+          else
+            :ok
+          end
+        end)
+
+      if result == :ok, do: {:cont, :ok}, else: {:halt, result}
+    end)
+  end
+
   defp capture_root_session(%{codex_resources: resources}) when is_pid(resources),
     do: resources |> CodexResources.retirement_context() |> LifetimeEvidence.capture_session()
 
@@ -1013,6 +1131,12 @@ defmodule Sigma.Agent.Subagents do
     fun.()
   catch
     :exit, _ -> failure(:unknown_outcome, "subagent owner is unavailable")
+  end
+
+  # A continuation closes its source with a partial tool receipt. A concurrent
+  # ordinary close still needs the full retirement path and its own acknowledgement.
+  defp end_continuation_job(state) do
+    reply_closes(state, failure(:resource_conflict, "a root continuation was in progress"))
   end
 
   defp reply_closes(state, result) do

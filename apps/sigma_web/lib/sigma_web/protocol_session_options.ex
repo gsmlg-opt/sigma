@@ -136,6 +136,7 @@ defmodule Sigma.Web.ProtocolSessionOptions do
     api_type = config["api_type"] || "anthropic"
 
     [
+      provider_name: config["name"],
       api_key: config["resolved_key"] || "",
       base_url: config["base_url"] || "",
       auth_type: config["auth_type"] || default_auth_type(api_type),

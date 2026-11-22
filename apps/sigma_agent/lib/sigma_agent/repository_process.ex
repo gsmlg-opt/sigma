@@ -579,7 +579,7 @@ defmodule Sigma.Agent.RepositoryProcess do
                Sigma.Agent.retry(
                  agent,
                  checkpoint.context_messages,
-                 checkpoint.content,
+                 Keyword.get(opts, :replacement_content, checkpoint.content),
                  checkpoint.retry_of_turn_id,
                  prompt_opts
                ),

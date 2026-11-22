@@ -10,7 +10,7 @@ defmodule Sigma.Agent.Backplane.RootRetirement do
   require Logger
 
   alias Backplane.AgentRuntime.{Error, Kernel}
-  alias Sigma.Agent.Backplane.{ChildIO, GoalRuns, Store}
+  alias Sigma.Agent.Backplane.{ChildIO, GoalRuns, RunRecovery, Store}
   alias Sigma.Coding.Hooks.AsyncRuntime
   alias Sigma.Session.Writer
 
@@ -153,12 +153,59 @@ defmodule Sigma.Agent.Backplane.RootRetirement do
       end)
   end
 
+  @doc "Selects actual closure capture for an idle root with a missing tool completion on orderly exit."
+  def capture_unresolved_shutdown?(
+        %{
+          current_turn_task: nil,
+          goal_idle_task: nil,
+          host_retirement: %{identity: identity},
+          backplane_store: store
+        },
+        reason
+      )
+      when is_pid(store) do
+    if orderly?(reason) do
+      with {:ok, ledger} <- Store.host_retirement(store, :all),
+           %{identity: ^identity, bindings: bindings} <- ledger.hosts[identity.host_lifetime_id] do
+        Enum.any?(bindings, fn {_key, binding} ->
+          case Store.load(store, binding.run_id) do
+            {:ok, %{run: run}} ->
+              RunRecovery.missing_tool_result?(run, %{
+                run_id: binding.run_id,
+                incarnation: binding.run_incarnation
+              })
+
+            _ ->
+              false
+          end
+        end)
+      else
+        _ -> false
+      end
+    else
+      false
+    end
+  catch
+    :exit, _ -> false
+  end
+
+  def capture_unresolved_shutdown?(_state, _reason), do: false
+
   def close(state, previous, reason, opts \\ []) do
     native =
       confirmed(previous[:native]) ||
         call(fn ->
           if Keyword.get(opts, :native_close, true) do
-            case state.subagents && Sigma.Agent.Subagents.close_execution(state.subagents) do
+            close =
+              if Keyword.get(opts, :continuation, false),
+                do: fn ->
+                  state.subagents && Sigma.Agent.Subagents.close_for_continuation(state.subagents)
+                end,
+                else: fn ->
+                  state.subagents && Sigma.Agent.Subagents.close_execution(state.subagents)
+                end
+
+            case close.() do
               nil -> {:ok, %{status: :confirmed}}
               :ok -> {:ok, %{status: :confirmed}}
               result -> result
@@ -196,11 +243,22 @@ defmodule Sigma.Agent.Backplane.RootRetirement do
          %{status: :confirmed, capture: if(state.host_retirement, do: :durable, else: :disabled)}}
       else
         _ ->
-          failure("root host components require reconciliation", %{
-            native: native,
-            async_hooks: saved_hooks,
-            session_end: saved_end
-          })
+          components = [
+            {"native tools", native},
+            {"async hooks", saved_hooks},
+            {"SessionEnd", saved_end}
+          ]
+
+          pending = for {name, result} <- components, is_nil(confirmed(result)), do: name
+
+          failure(
+            "Sigma could not confirm shutdown of #{Enum.join(pending, ", ")} for the previous session run.",
+            %{
+              native: native,
+              async_hooks: saved_hooks,
+              session_end: saved_end
+            }
+          )
       end
 
     %{native: native, async_hooks: hooks, session_end: session_end, result: result}

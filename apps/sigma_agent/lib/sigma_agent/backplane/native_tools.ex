@@ -15,6 +15,7 @@ defmodule Sigma.Agent.Backplane.NativeTools do
   @note_names ~w(notes::list_files_by_prefix notes::read_file notes::search_contents notes::append_to_file notes::write_file)
   @goal_names ~w(get_goal create_goal update_goal)
   @board_names ~w(collaboration::create_channel collaboration::get_channels collaboration::list_threads collaboration::search_posts collaboration::read_thread collaboration::read_post collaboration::subscribe collaboration::unsubscribe collaboration::post)
+  # TODO(upstream): gsmlg-opt/backplane#182 — adopt settled exec_command argument errors once released.
   @names ~w(exec_command write_stdin apply_patch update_plan view_image clock::curr_time clock::sleep exec wait request_user_input get_context_remaining new_context)
 
   def names, do: @names

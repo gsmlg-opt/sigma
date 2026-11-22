@@ -4,11 +4,12 @@ defmodule Sigma.Agent.Backplane.LifetimeEvidence do
 
   Public Registry, Session and manager manifests remain independent of historical
   outcomes. Only actual executor/Provider exits and confirmed host component facts
-  satisfy obligations. No archive is exported, imported or continued.
+  satisfy obligations. Explicit continuation preserves missing tool outcomes and
+  requires independently acknowledged closure before admitting fresh root work.
   """
 
   alias Backplane.AgentRuntime.Codex.{MultiAgent, Reconciliation, ResourceRegistry, Session}
-  alias Backplane.AgentRuntime.Codex.Reconciliation.Evidence
+  alias Backplane.AgentRuntime.Codex.Reconciliation.{Continuation, Evidence}
   alias Backplane.AgentRuntime.Error
   alias Sigma.Agent.Backplane.{LifetimeRecovery, RunRecovery, Store}
 
@@ -16,24 +17,7 @@ defmodule Sigma.Agent.Backplane.LifetimeEvidence do
   def capture_session(%{binding: nil}), do: :ok
 
   def capture_session(%{recovery: %{writer: writer}, binding: binding}) do
-    with {:ok, registry} <-
-           ResourceRegistry.recovery_manifest(binding.resource_registry, binding.owner_id),
-         {:ok, _} <-
-           ResourceRegistry.recovery_closed(binding.resource_registry, binding.owner_id),
-         {:ok, registry_receipt} <-
-           seal(writer, registry, fn _ -> {:ok, "closed", "public-registry-close"} end),
-         {:ok, registry_ack} <-
-           ResourceRegistry.reconcile_owner(
-             binding.resource_registry,
-             binding.owner_id,
-             registry_receipt["receipt_id"]
-           ),
-         :ok <-
-           LifetimeRecovery.put_evidence(
-             writer,
-             "registry_owner-ack:" <> registry_receipt["receipt_digest"],
-             registry_ack
-           ),
+    with :ok <- capture_registry(writer, binding),
          {:ok, manifest} <- Session.recovery_manifest(binding.session),
          {:ok, receipt} <- seal(writer, manifest, &observe(writer, manifest, &1)),
          {:ok, acknowledgement} <-
@@ -46,6 +30,48 @@ defmodule Sigma.Agent.Backplane.LifetimeEvidence do
            ) do
       :ok
     end
+  end
+
+  @doc "Captures actual ownership closure while leaving missing tool results unresolved."
+  def capture_for_continuation(%{recovery: %{writer: writer}, binding: binding})
+      when is_map(binding) do
+    with :ok <- capture_registry(writer, binding),
+         {:ok, manifest} <- Session.recovery_manifest(binding.session),
+         {:ok, {Store, store}} <- LifetimeRecovery.runtime_store(writer, "root"),
+         {:ok, %{run: %{state: :unknown_outcome} = run}} <- Store.load(store, binding.run_id),
+         {:ok, _receipts} <- continuation_subordinates(writer, manifest),
+         {:ok, receipt} <- continuation_receipt(writer, manifest, run),
+         true <- pending_lost_tools?(receipt, run) do
+      :ok
+    else
+      {:error, _} = error -> error
+      _ -> fail("continuation capture requires its exact unresolved root tool obligations")
+    end
+  end
+
+  def capture_for_continuation(_context),
+    do: fail("continuation capture requires the original root Session binding")
+
+  defp capture_registry(writer, binding) do
+    with {:ok, registry} <-
+           ResourceRegistry.recovery_manifest(binding.resource_registry, binding.owner_id),
+         {:ok, _} <-
+           ResourceRegistry.recovery_closed(binding.resource_registry, binding.owner_id),
+         {:ok, receipt} <-
+           seal(writer, registry, fn _ -> {:ok, "closed", "public-registry-close"} end),
+         {:ok, acknowledgement} <-
+           ResourceRegistry.reconcile_owner(
+             binding.resource_registry,
+             binding.owner_id,
+             receipt["receipt_id"]
+           ),
+         :ok <-
+           LifetimeRecovery.put_evidence(
+             writer,
+             "registry_owner-ack:" <> receipt["receipt_digest"],
+             acknowledgement
+           ),
+         do: :ok
   end
 
   def finalize(nil, _manager), do: :ok
@@ -97,6 +123,319 @@ defmodule Sigma.Agent.Backplane.LifetimeEvidence do
          {:ok, _} <- LifetimeRecovery.executor(writer, identity),
          {:ok, _} <- RunRecovery.reconcile_child(store, identity, snapshot),
          do: :ok
+  end
+
+  @doc "Prepares one explicit fresh root admission while preserving an unknown tool outcome."
+  def prepare_continuation(transcript, identity, instruction_ref) when is_binary(transcript) do
+    identity = Map.take(identity, [:thread_id, :run_id, :incarnation])
+
+    with_writer(transcript, identity.thread_id, fn writer ->
+      request_ref = "continuation-request:" <> Evidence.digest(identity)
+
+      case LifetimeRecovery.load_evidence(writer, request_ref) do
+        {:ok, request} ->
+          if request["instruction_ref"] == instruction_ref,
+            do: Continuation.prepare(LifetimeRecovery.configuration(writer), request),
+            else:
+              {:error,
+               Error.new(:resource_conflict, "another Continue instruction owns this run")}
+
+        {:error, %Error{class: :not_found}} ->
+          prepare_new_continuation(writer, identity, instruction_ref, request_ref)
+
+        error ->
+          error
+      end
+    end)
+  end
+
+  @doc "Reads an already accepted continuation without creating a decision or repeating work."
+  def read_continuation(transcript, identity) when is_binary(transcript) do
+    identity = Map.take(identity, [:thread_id, :run_id, :incarnation])
+
+    with_writer(transcript, identity.thread_id, &read_continuation_writer(&1, identity))
+  end
+
+  def read_continuation(nil, _identity),
+    do: {:error, Error.new(:not_found, "root continuation has no transcript")}
+
+  defp read_continuation_writer(writer, identity) do
+    request_ref = "continuation-request:" <> Evidence.digest(identity)
+
+    with {:ok, request} <- LifetimeRecovery.load_evidence(writer, request_ref),
+         true <-
+           request["source"] == %{
+             "store_ref" => "root",
+             "run_id" => identity.run_id,
+             "original_incarnation" => identity.incarnation
+           },
+         true <- request["subject"]["scope_id"] == identity.thread_id,
+         id =
+           "continuation_" <>
+             Evidence.digest(%{
+               subject: request["subject"],
+               source: Map.take(request["source"], ~w(run_id original_incarnation))
+             }),
+         {:ok, _decision} <- LifetimeRecovery.load_continuation(writer, id) do
+      Continuation.prepare(LifetimeRecovery.configuration(writer), request)
+    else
+      {:error, _} = error -> error
+      _ -> fail("stored continuation belongs to another original run")
+    end
+  end
+
+  defp prepare_new_continuation(writer, identity, instruction_ref, request_ref) do
+    source = %{
+      "run_id" => identity.run_id,
+      "original_incarnation" => identity.incarnation,
+      "store_ref" => "root"
+    }
+
+    with :ok <- Evidence.identifier(instruction_ref),
+         {:ok, admission} <-
+           LifetimeRecovery.load_evidence(writer, "root-admission:" <> identity.run_id),
+         true <-
+           admission ==
+             Map.put(Map.take(source, ~w(run_id store_ref)), "incarnation", identity.incarnation),
+         {:ok, %{status: :stopped, reason: ":normal"} = executor} <-
+           LifetimeRecovery.executor(writer, identity),
+         {:ok, {Store, store}} <- LifetimeRecovery.runtime_store(writer, "root"),
+         {:ok, %{run: %{state: :unknown_outcome} = run}} <- Store.load(store, identity.run_id),
+         {:ok, manifests} <- LifetimeRecovery.manifests(writer),
+         {:ok, manifest} <- root_manifest(manifests, source),
+         {:ok, hosts} <- continuation_hosts(store, identity, manifest),
+         {:ok, subordinate_receipts} <- continuation_subordinates(writer, manifest),
+         {:ok, receipt} <- continuation_receipt(writer, manifest, run),
+         true <- pending_lost_tools?(receipt, run),
+         # A normal Conversation exit joins its complete Task supervisor. Native
+         # Session and Registry acknowledgements cover registered backend and OS
+         # workers, including Code Mode's exact process cleanup. Together these
+         # observations establish cessation without inventing an effect result.
+         {:ok, local_ref} <-
+           continuation_fact(writer, "local-execution", %{
+             "executor" => executor,
+             "hosts" => hosts,
+             "registry_receipts" => subordinate_receipts
+           }),
+         {:ok, hooks_ref} <-
+           continuation_fact(
+             writer,
+             "async-hooks",
+             Enum.map(hosts, &Map.take(&1, ~w(identity async_hooks)))
+           ),
+         {:ok, end_ref} <-
+           continuation_fact(
+             writer,
+             "session-end",
+             Enum.map(hosts, &Map.take(&1, ~w(identity session_end)))
+           ),
+         closure = %{
+           "schema_version" => 1,
+           "subject" => manifest["subject"],
+           "source" => source,
+           "receipt_digest" => receipt["receipt_digest"],
+           "components" => %{
+             "root_admission" => %{
+               "status" => "admitted",
+               "source_ref" => "root-admission:" <> identity.run_id
+             },
+             "local_execution" => %{"status" => "stopped", "source_ref" => local_ref},
+             "async_hooks" => %{"status" => "closed", "source_ref" => hooks_ref},
+             "session_end" => %{"status" => "closed", "source_ref" => end_ref}
+           }
+         },
+         {:ok, closure_ref} <- continuation_fact(writer, "closure", closure),
+         request = %{
+           "schema_version" => 1,
+           "subject" => manifest["subject"],
+           "source" => source,
+           "receipt_id" => receipt["receipt_id"],
+           "closure_evidence_ref" => closure_ref,
+           "instruction_ref" => instruction_ref
+         },
+         :ok <- LifetimeRecovery.put_evidence(writer, request_ref, request) do
+      Continuation.prepare(LifetimeRecovery.configuration(writer), request)
+    else
+      {:error, _} = error ->
+        error
+
+      _ ->
+        fail(
+          "Continue requires the original execution, async-hook and SessionEnd shutdown acknowledgements"
+        )
+    end
+  end
+
+  defp root_manifest(manifests, source) do
+    matches =
+      for {_id, manifest} <- manifests,
+          manifest["subject"]["kind"] == "session" and source in manifest["run_refs"],
+          do: manifest
+
+    case matches do
+      [manifest] -> {:ok, manifest}
+      _ -> fail("Continue requires one exact original root Session manifest")
+    end
+  end
+
+  defp continuation_hosts(store, identity, manifest) do
+    with {:ok, ledger} <- Store.host_retirement(store, :all) do
+      hosts =
+        ledger.hosts
+        |> Map.values()
+        |> Enum.filter(fn host ->
+          Enum.any?(host.bindings, fn {_id, binding} ->
+            binding.run_id == identity.run_id and binding.run_incarnation == identity.incarnation
+          end)
+        end)
+
+      subject = manifest["subject"]
+
+      with true <- hosts != [] and Enum.all?(hosts, &source_host?(&1, identity, subject)),
+           [] <- hosts |> Enum.flat_map(&missing_shutdown_acks/1) |> Enum.uniq() do
+        hosts
+        |> Enum.sort_by(& &1.identity.host_lifetime_id)
+        |> Enum.map(fn host ->
+          %{
+            identity: host.identity,
+            bindings: host.bindings |> Map.values() |> Enum.sort(),
+            native:
+              host.native
+              |> Enum.map(fn {{owner, incarnation}, fact} ->
+                Map.put(fact, :incarnation, incarnation) |> Map.put(:owner_id, owner)
+              end)
+              |> Enum.sort(),
+            async_hooks: host.async_hooks,
+            session_end: host.session_end
+          }
+        end)
+        |> Evidence.public()
+      else
+        false ->
+          fail("Continue could not verify the host binding for the previous run.")
+
+        missing ->
+          fail(
+            "The previous tool result is unknown. Continue is blocked because the original run has no confirmed shutdown for #{Enum.join(missing, " and ")}."
+          )
+      end
+    end
+  end
+
+  defp source_host?(host, identity, subject) do
+    host.identity.root_header_id == identity.thread_id and
+      host.identity.transcript_header_id == identity.thread_id and
+      is_nil(host.identity.child_session_id) and subject["scope_id"] == identity.thread_id and
+      Enum.any?(host.bindings, fn {_key, binding} ->
+        binding.run_id == identity.run_id and binding.run_incarnation == identity.incarnation and
+          binding.native_owner_id == subject["owner_id"] and
+          binding.native_session_incarnation == subject["incarnation"]
+      end)
+  end
+
+  defp missing_shutdown_acks(host) do
+    native_closed? =
+      Enum.all?(host.bindings, fn {_key, binding} ->
+        host.native[{binding.native_owner_id, binding.native_session_incarnation}] ==
+          %{status: :confirmed, owner_id: binding.native_owner_id}
+      end)
+
+    for {name, false} <- [
+          {"native tools", native_closed?},
+          {"async hooks", host.async_hooks == %{status: :confirmed}},
+          {"SessionEnd", match?(%{status: :confirmed, dispatch: :completed}, host.session_end)}
+        ],
+        do: name
+  end
+
+  defp continuation_subordinates(writer, manifest) do
+    owned = Enum.filter(manifest["obligations"], &(&1["kind"] in ~w(registry_owner manager)))
+    registry = Enum.filter(owned, &(&1["kind"] == "registry_owner"))
+    managers = Enum.filter(owned, &(&1["kind"] == "manager"))
+    expected_registry = Map.put(manifest["subject"], "kind", "registry_owner")
+
+    with [%{"identity" => %{"subject" => ^expected_registry}}] <- registry,
+         [_ | _] <- managers,
+         {:ok, manifests} <- LifetimeRecovery.manifests(writer) do
+      collect(owned, fn obligation ->
+        subject = obligation["identity"]["subject"]
+
+        subordinate =
+          Enum.find_value(manifests, fn {_id, item} ->
+            if item["subject"] == subject and
+                 item["manifest_digest"] == obligation["identity"]["manifest_digest"],
+               do: item
+          end)
+
+        with true <-
+               subject["kind"] == obligation["kind"] and
+                 subject["scope_id"] == manifest["subject"]["scope_id"],
+             true <- is_map(subordinate),
+             :ok <- confirmed_tree(writer, subordinate),
+             {:ok, receipt} <- current_receipt(writer, subordinate) do
+          {:ok, receipt}
+        else
+          {:error, _} = error -> error
+          _ -> fail("continuation subordinate ownership does not match its original root Session")
+        end
+      end)
+    else
+      {:error, _} = error -> error
+      _ -> fail("Continue requires the original Registry and manager closure receipts")
+    end
+  end
+
+  defp pending_lost_tools?(receipt, run) do
+    lost = lost_tool_ids(run)
+    obligations = receipt["pending"] ++ receipt["unresolved_effects"]
+
+    obligations != [] and
+      Enum.all?(obligations, fn obligation ->
+        obligation["kind"] == "tool" and obligation["identity"]["run_id"] == run.run_id and
+          obligation["identity"]["invocation_id"] in lost
+      end)
+  end
+
+  defp lost_tool_ids(run) do
+    for %{type: :tool, status: status, operation: operation} <- Map.values(run.execution_intents),
+        status in [:started, :uncertain],
+        not Map.has_key?(run.tool_results, operation.invocation_id),
+        do: operation.invocation_id
+  end
+
+  defp continuation_receipt(writer, manifest, run) do
+    lost = lost_tool_ids(run)
+
+    result =
+      seal(writer, manifest, fn obligation ->
+        case observe(writer, manifest, obligation) do
+          {:error, %Error{class: :unknown_outcome}} = error ->
+            if obligation["kind"] == "tool" and obligation["identity"]["invocation_id"] in lost,
+              do: :pending,
+              else: error
+
+          result ->
+            result
+        end
+      end)
+
+    case result do
+      {:ok, receipt} ->
+        {:ok, receipt}
+
+      {:error, %Error{class: :unknown_outcome, details: %{receipt_id: id}}} ->
+        LifetimeRecovery.load_receipt(writer, id)
+
+      error ->
+        error
+    end
+  end
+
+  defp continuation_fact(writer, kind, fact) do
+    with {:ok, fact} <- Evidence.public(fact),
+         ref = "continuation-" <> kind <> ":" <> Evidence.digest(fact),
+         :ok <- LifetimeRecovery.put_evidence(writer, ref, fact),
+         do: {:ok, ref}
   end
 
   def allow_root(store, identity, snapshot, transcript) do
@@ -276,11 +615,64 @@ defmodule Sigma.Agent.Backplane.LifetimeEvidence do
       |> Map.values()
       |> Enum.sort_by(&manifest_order/1)
       |> Enum.reduce_while(:ok, fn manifest, :ok ->
-        case seal(writer, manifest, &observe(writer, manifest, &1)) do
+        result =
+          case continued_manifest?(writer, manifest) do
+            {:ok, true} -> {:ok, :retained_unknown_outcome}
+            {:ok, false} -> seal(writer, manifest, &observe(writer, manifest, &1))
+            error -> error
+          end
+
+        case result do
           {:ok, _} -> {:cont, :ok}
           error -> {:halt, error}
         end
       end)
+    end
+  end
+
+  # The explicit decision preserves its original partial receipt. Refreshing
+  # other lifetimes still requires their full public retirement acknowledgements.
+  defp continued_manifest?(writer, %{"subject" => %{"kind" => "session"}} = manifest) do
+    manifest["run_refs"]
+    |> Enum.filter(&(&1["store_ref"] == "root"))
+    |> Enum.reduce_while({:ok, false}, fn source, _acc ->
+      identity = %{
+        thread_id: manifest["subject"]["scope_id"],
+        run_id: source["run_id"],
+        incarnation: source["original_incarnation"]
+      }
+
+      case read_continuation_writer(writer, identity) do
+        {:ok, decision} ->
+          {:halt, retained_continuation(writer, manifest, decision)}
+
+        {:error, %Error{class: :not_found}} ->
+          {:cont, {:ok, false}}
+
+        error ->
+          {:halt, error}
+      end
+    end)
+  end
+
+  defp continued_manifest?(_writer, _manifest), do: {:ok, false}
+
+  defp retained_continuation(writer, manifest, decision) do
+    with true <- decision["subject"] == manifest["subject"],
+         {:ok, receipt} <- LifetimeRecovery.load_receipt(writer, decision["receipt_id"]),
+         {:ok, ^receipt} <- Evidence.validate_receipt(receipt),
+         true <-
+           receipt["manifest_digest"] == manifest["manifest_digest"] and
+             receipt["receipt_digest"] == decision["receipt_digest"],
+         source = decision["source"],
+         {:ok, {Store, store}} <- LifetimeRecovery.runtime_store(writer, source["store_ref"]),
+         {:ok, %{run: %{state: :unknown_outcome} = run}} <- Store.load(store, source["run_id"]),
+         true <-
+           Evidence.digest(run[:outcome]) == decision["historical_outcome"]["outcome_digest"] do
+      {:ok, true}
+    else
+      {:error, _} = error -> error
+      _ -> fail("accepted continuation source or partial lifetime receipt changed")
     end
   end
 
@@ -367,6 +759,7 @@ defmodule Sigma.Agent.Backplane.LifetimeEvidence do
            collect(manifest["obligations"], fn obligation ->
              observation(writer, obligation, observer)
            end),
+         observations = Enum.reject(observations, &is_nil/1),
          {:ok, fences} <- fences(writer, manifest),
          bundle = %{
            "schema_version" => 1,
@@ -412,23 +805,29 @@ defmodule Sigma.Agent.Backplane.LifetimeEvidence do
         {:ok, observation}
 
       {:error, %Error{class: :not_found}} ->
-        with {:ok, result, source, metadata} <- observation_result(observer.(obligation)),
-             observation = %{
-               "observation_id" => reference,
-               "observation_revision" => 1,
-               "obligation_id" => obligation["obligation_id"],
-               "identity" => obligation["identity"],
-               "result" => result,
-               "source_ref" => source,
-               "observed_at_unix_ms" => System.system_time(:millisecond)
-             },
-             observation = Map.merge(observation, metadata),
-             :ok <- LifetimeRecovery.put_evidence(writer, reference, observation) do
-          {:ok, observation}
-        end
+        persist_observation(writer, reference, obligation, observer.(obligation))
 
       {:error, _} = error ->
         error
+    end
+  end
+
+  defp persist_observation(_writer, _reference, _obligation, :pending), do: {:ok, nil}
+
+  defp persist_observation(writer, reference, obligation, result) do
+    with {:ok, result, source, metadata} <- observation_result(result),
+         observation = %{
+           "observation_id" => reference,
+           "observation_revision" => 1,
+           "obligation_id" => obligation["obligation_id"],
+           "identity" => obligation["identity"],
+           "result" => result,
+           "source_ref" => source,
+           "observed_at_unix_ms" => System.system_time(:millisecond)
+         },
+         observation = Map.merge(observation, metadata),
+         :ok <- LifetimeRecovery.put_evidence(writer, reference, observation) do
+      {:ok, observation}
     end
   end
 

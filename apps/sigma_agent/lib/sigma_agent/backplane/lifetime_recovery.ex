@@ -162,6 +162,14 @@ defmodule Sigma.Agent.Backplane.LifetimeRecovery do
     do: GenServer.call(pid, {:cas, reference, revision, next}, :infinity)
 
   @impl true
+  def load_continuation(pid, reference),
+    do: GenServer.call(pid, {:continuation, reference}, :infinity)
+
+  @impl true
+  def compare_and_create_continuation(pid, reference, decision),
+    do: GenServer.call(pid, {:create_continuation, reference, decision}, :infinity)
+
+  @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
     path = Path.join(Keyword.fetch!(opts, :transcript) <> ".subagents", "lifetime-recovery.etf")
@@ -169,17 +177,19 @@ defmodule Sigma.Agent.Backplane.LifetimeRecovery do
     root = Keyword.get(opts, :root_agent_id) || header
 
     empty = %{
-      version: 1,
+      version: 2,
       root_header_id: header,
       root_agent_id: root,
       evidence: %{},
       receipts: %{},
       manifests: %{},
       stores: %{},
-      executors: %{}
+      executors: %{},
+      continuations: %{}
     }
 
     with {:ok, data} <- read(path, empty),
+         data <- upgrade(data),
          true <-
            valid_data?(data) and data.root_header_id == header and
              (is_nil(opts[:root_agent_id]) or data.root_agent_id == root) do
@@ -449,6 +459,29 @@ defmodule Sigma.Agent.Backplane.LifetimeRecovery do
 
   def handle_call({:receipt, ref}, _from, state),
     do: {:reply, fetch(state.data.receipts, ref), state}
+
+  def handle_call({:continuation, reference}, _from, state),
+    do: {:reply, fetch(state.data.continuations, reference), state}
+
+  def handle_call({:create_continuation, reference, decision}, _from, state) do
+    with {:ok, decision} <- Evidence.public(decision),
+         :ok <- Evidence.identifier(reference),
+         :ok <- Evidence.sealed(decision, "decision_digest") do
+      if Map.has_key?(state.data.continuations, reference) do
+        {:reply, {:error, Error.new(:resource_conflict, "root continuation already exists")},
+         state}
+      else
+        data = %{
+          state.data
+          | continuations: Map.put(state.data.continuations, reference, decision)
+        }
+
+        reply_persist(state, data, {:ok, decision})
+      end
+    else
+      error -> {:reply, error, state}
+    end
+  end
 
   def handle_call({:receipt_for, subject}, _from, state) do
     receipt = state.data.receipts |> Map.values() |> Enum.find(&(&1["subject"] == subject))
@@ -756,20 +789,28 @@ defmodule Sigma.Agent.Backplane.LifetimeRecovery do
     end)
   end
 
+  # Version one predates continuation decisions. Upgrade the reader in memory,
+  # retaining the original bytes until the next acknowledged mutation.
+  defp upgrade(%{version: 1} = data) when map_size(data) == 8,
+    do: data |> Map.put(:version, 2) |> Map.put(:continuations, %{})
+
+  defp upgrade(data), do: data
+
   defp valid_data?(
          %{
-           version: 1,
+           version: 2,
            root_header_id: header,
            root_agent_id: root,
            evidence: evidence,
            receipts: receipts,
            manifests: manifests,
            stores: stores,
-           executors: executors
+           executors: executors,
+           continuations: continuations
          } = data
        ) do
-    map_size(data) == 8 and is_binary(header) and is_binary(root) and
-      Enum.all?([evidence, receipts, manifests, stores, executors], &is_map/1)
+    map_size(data) == 9 and is_binary(header) and is_binary(root) and
+      Enum.all?([evidence, receipts, manifests, stores, executors, continuations], &is_map/1)
   end
 
   defp valid_data?(_), do: false

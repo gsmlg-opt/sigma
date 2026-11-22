@@ -156,6 +156,146 @@ defmodule Sigma.Agent.BackplaneNativeProductionTest do
     finish!(agent, provider)
   end
 
+  test "the provider receives MCP transport errors directly and through real Deno in the same turn",
+       ctx do
+    body = ~s({"error":{"code":-32602,"message":"Invalid params"}})
+
+    mcp = %Sigma.Coding.MCP.Tool{
+      name: "mcp__fixture__list_notes",
+      description: "List notes",
+      schema: %{"type" => "object", "properties" => %{}},
+      server_id: "fixture",
+      server_tool_name: "list_notes",
+      call_tool: fn _, _, _ ->
+        {:error,
+         Backplane.McpProtocol.MCP.Error.transport(:send_failure, %{
+           original_reason: {:http_error, 400, body}
+         })}
+      end
+    }
+
+    agent = session!(ctx.dir, tools: [mcp])
+    prompt!(agent, "check the tool failure")
+    {provider, _} = provider!()
+    send_call(provider, mcp.name, %{})
+    {provider, request} = provider!()
+    direct = List.last(request.context.messages)
+    assert direct.is_error
+    assert [%{text: text}] = direct.content
+    assert text =~ "Invalid params"
+    result = last_result!(agent).metadata.structured_result
+
+    assert get_in(result, ~w(details error details data original_reason)) ==
+             %{"type" => "http_error", "status" => 400, "body" => body}
+
+    send_call(provider, "exec", "return await tools.mcp__fixture__list_notes({});")
+    {provider, request} = provider!()
+    nested = List.last(request.context.messages)
+    refute nested.is_error
+    assert [%{text: json}] = nested.content
+    assert %{"status" => "completed", "value" => ^result} = Formata.JSON.decode!(json)
+    finish!(agent, provider)
+    assert Sigma.Agent.status(agent).phase == :completed
+  end
+
+  test "Continue admits one fresh run after a real Deno invocation loses its result", %{dir: dir} do
+    observer = self()
+
+    mcp = %Sigma.Coding.MCP.Tool{
+      name: "mcp__fixture__read",
+      description: "Read a numbered item",
+      schema: %{
+        "type" => "object",
+        "properties" => %{"item" => %{"type" => "integer"}},
+        "required" => ["item"]
+      },
+      server_id: "fixture",
+      server_tool_name: "read",
+      call_tool: fn _, %{"item" => item}, _ ->
+        send(observer, {:read, item, self()})
+
+        receive do
+          :reject_read ->
+            {:error,
+             Backplane.McpProtocol.MCP.Error.transport(:send_failure, %{
+               original_reason: {:http_error, 400, "Invalid params"}
+             })}
+
+          :lose_completion ->
+            {:error, Sigma.Coding.ToolError.new(:unknown_outcome, "Read completion was lost")}
+        end
+      end
+    }
+
+    agent = session!(dir, tools: [mcp])
+    {:accepted, %{turn_id: source}} = prompt!(agent, "read the items")
+    {provider, _} = provider!()
+
+    send_call(provider, "exec", """
+    await tools.mcp__fixture__read({item: 1});
+    return await tools.mcp__fixture__read({item: 2});
+    """)
+
+    assert_receive {:read, 1, first}, 5_000
+    send(first, :reject_read)
+    assert_receive {:read, 2, second}, 5_000
+    send(second, :lose_completion)
+    assert_receive {:agent_end, _}, 8_000
+
+    store = :sys.get_state(agent).backplane_store
+    assert {:ok, %{run: %{state: :unknown_outcome} = run} = original} = Store.load(store, source)
+
+    assert Enum.any?(run.execution_intents, fn {_, intent} ->
+             intent.type == :tool and intent.operation.tool_name == "exec" and
+               not Map.has_key?(run.tool_results, intent.operation.invocation_id)
+           end)
+
+    refute_receive {:native_provider, _, _}, 0
+    journal = File.read!(Path.join(dir, "native.jsonl"))
+
+    assert {:accepted, %{turn_id: target} = info} =
+             Sigma.Agent.prompt(agent, "Continue", continuation_source: source)
+
+    {provider, request} = provider!()
+    assert target != source
+    assert request.turn_id == target
+
+    assert Enum.any?(request.context.messages, fn msg ->
+             is_binary(msg.content) and msg.content =~ "outcome is unknown"
+           end)
+
+    assert List.last(request.context.messages).content == "Continue"
+    refute inspect(request.context.messages) =~ "tools.mcp__fixture__read"
+    finish!(agent, provider)
+    assert Sigma.Agent.status(agent).phase == :completed
+    assert {:ok, ^original} = Store.load(store, source)
+    assert String.starts_with?(File.read!(Path.join(dir, "native.jsonl")), journal)
+
+    assert {:already_admitted, ^info} =
+             Sigma.Agent.prompt(agent, "Continue", continuation_source: source)
+
+    assert Sigma.Agent.status(agent).phase == :completed
+
+    assert :ok =
+             DynamicSupervisor.terminate_child(
+               Sigma.Agent.DynamicSupervisor,
+               Runtime.lookup(dir, :supervisor)
+             )
+
+    reopened = session!(dir, tools: [mcp])
+
+    assert {:already_admitted, ^info} =
+             Sigma.Agent.prompt(reopened, "Continue", continuation_source: source)
+
+    refute_receive {:native_provider, _, _}, 100
+    {:accepted, %{turn_id: next_id}} = prompt!(reopened, "new work after restart")
+    {provider, next_request} = provider!()
+    assert next_request.turn_id == next_id
+    finish!(reopened, provider)
+    assert {:ok, ^original} = Store.load(:sys.get_state(reopened).backplane_store, source)
+    refute_receive {:read, _, _}, 0
+  end
+
   test "a native session without connected MCP clients omits resource tools", ctx do
     agent = session!(ctx.dir)
     assert :sys.get_state(agent).mcp_session.clients == %{}

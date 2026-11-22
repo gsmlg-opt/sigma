@@ -42,12 +42,15 @@ defmodule Sigma.Agent.Backplane.RunRecovery do
 
   @doc "Validates independent provider-only retirement without rewriting a terminal unknown outcome."
   def confirm_retired_terminal_root(store, identity, snapshot),
-    do: confirm_terminal(store, identity, snapshot, fn -> retired_root(store, identity) end)
+    do:
+      confirm_terminal(:root, store, identity, snapshot, fn -> retired_root(store, identity) end)
 
   def confirm_retired_terminal_child(store, identity, snapshot),
-    do: confirm_terminal(store, identity, snapshot, fn -> retired_child(store, identity) end)
+    do:
+      confirm_terminal(:child, store, identity, snapshot, fn -> retired_child(store, identity) end)
 
   defp confirm_terminal(
+         scope,
          store,
          identity,
          %{run: %{state: :unknown_outcome} = run} = snapshot,
@@ -70,13 +73,47 @@ defmodule Sigma.Agent.Backplane.RunRecovery do
          :ok <- stopped_providers(store, run) do
       :ok
     else
-      {:error, _} = error -> error
-      _ -> conflict(identity, "terminal unknown root lacks complete provider-only retirement")
+      {:error, _} = error ->
+        error
+
+      _ ->
+        if scope == :root and missing_tool_result?(run, identity) do
+          {:error,
+           Error.new(
+             :resource_conflict,
+             "A tool from the previous turn has no recorded result. Use Continue to check whether a new turn can start.",
+             details: %{run_id: identity.run_id, reason: :missing_tool_result}
+           )}
+        else
+          conflict(identity, "terminal unknown root lacks complete provider-only retirement")
+        end
     end
   end
 
-  defp confirm_terminal(_store, identity, _snapshot, _retirement),
+  defp confirm_terminal(_scope, _store, identity, _snapshot, _retirement),
     do: conflict(identity, "run is not a terminal unknown outcome")
+
+  def missing_tool_result?(
+        %{state: :unknown_outcome, run_id: id, execution_intents: intents, tool_results: results},
+        %{run_id: id, incarnation: incarnation}
+      )
+      when is_map(intents) and is_map(results) do
+    Enum.any?(intents, fn
+      {_,
+       %{
+         type: :tool,
+         status: status,
+         operation: %{run_id: ^id, incarnation: ^incarnation, invocation_id: invocation}
+       }}
+      when status in [:started, :uncertain] ->
+        not Map.has_key?(results, invocation)
+
+      _ ->
+        false
+    end)
+  end
+
+  def missing_tool_result?(_run, _identity), do: false
 
   defp reconcile(store, identity, snapshot, run, retirement) do
     if Kernel.terminal?(run.state) do

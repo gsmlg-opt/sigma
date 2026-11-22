@@ -46,6 +46,26 @@ defmodule Sigma.Ai.Providers.OpenAIResponses.Hosted do
     _ -> {:error, :provider_hosted_payload_rejected}
   end
 
+  # Cold journal repair can already have removed the canonical call. Match the
+  # accepted call IDs against the raw replay entries independently.
+  def without_tool_calls(%{@key => %{"items" => entries} = envelope} = metadata, calls)
+      when is_list(entries) do
+    kept =
+      Enum.reject(entries, fn
+        %{"item" => %{"type" => type, "call_id" => id}}
+        when type in ["function_call", "custom_tool_call"] ->
+          MapSet.member?(calls, id)
+
+        _ ->
+          false
+      end)
+
+    {:ok, Map.put(metadata, @key, %{envelope | "items" => kept})}
+  end
+
+  def without_tool_calls(%{@key => _} = metadata, _calls), do: {:ok, metadata}
+  def without_tool_calls(_metadata, _calls), do: :none
+
   @doc false
   def project_event(%{"type" => type} = frame) do
     unless json_value?(frame), do: malformed!(:hosted_event)
