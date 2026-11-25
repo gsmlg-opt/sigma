@@ -39,6 +39,39 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     }
   end
 
+  @doc "Resolves custom tool support for a configured Responses model and endpoint."
+  def custom_tool_format(model, options) do
+    case model[:custom_tool_format] || model["customToolFormat"] do
+      format when format in [:text, "text"] -> :text
+      format when format in [:grammar, "grammar"] -> :grammar
+      nil -> default_custom_tool_format(base_url(options))
+      _ -> :none
+    end
+  end
+
+  defp default_custom_tool_format(url) do
+    case URI.parse(url) do
+      %URI{
+        scheme: "https",
+        host: "api.openai.com",
+        port: 443,
+        path: path,
+        userinfo: nil,
+        query: nil,
+        fragment: nil
+      }
+      when path in ["/v1", "/v1/"] ->
+        :grammar
+
+      _ ->
+        :none
+    end
+  end
+
+  defp base_url(options) do
+    options[:base_url] || System.get_env("OPENAI_BASE_URL") || "https://api.openai.com/v1"
+  end
+
   @impl true
   def stream(params) do
     model = params.model
@@ -53,8 +86,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
       options[:api_key] || System.get_env("OPENAI_API_KEY") ||
         System.get_env("OPENROUTER_API_KEY")
 
-    base_url =
-      options[:base_url] || System.get_env("OPENAI_BASE_URL") || "https://api.openai.com/v1"
+    base_url = base_url(options)
 
     hosted = Hosted.prepare!(model, context, options, base_url)
     native_transport? = native_tool_transport?(context) or hosted.enabled
@@ -108,7 +140,8 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
           Map.put(
             body,
             :tools,
-            transform_tools(hosted.local_tools, codec_options) ++ hosted.hosted_tools
+            transform_tools(hosted.local_tools, codec_options, custom_tool_format(model, options)) ++
+              hosted.hosted_tools
           ),
         else: body
 
@@ -716,7 +749,7 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     end
   end
 
-  defp transform_tools(tools, codec_options) do
+  defp transform_tools(tools, codec_options, custom_tool_format) do
     declarations =
       Enum.map(tools, fn tool ->
         identity = native_identity(tool.name, codec_options)
@@ -730,7 +763,12 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
 
         declaration =
           if custom?,
-            do: maybe_put(declaration, :format, tool[:format]),
+            do:
+              maybe_put(
+                declaration,
+                :format,
+                wire_custom_format(tool[:format], custom_tool_format)
+              ),
             else:
               Map.merge(declaration, %{
                 parameters: tool[:parameters] || tool[:input_schema],
@@ -764,6 +802,10 @@ defmodule Sigma.Ai.Providers.OpenAIResponses do
     end)
     |> elem(0)
   end
+
+  defp wire_custom_format(%{type: "grammar"}, :text), do: %{type: "text"}
+  defp wire_custom_format(%{"type" => "grammar"}, :text), do: %{type: "text"}
+  defp wire_custom_format(format, _custom_tool_format), do: format
 
   defp native_identity(name, codec_options) do
     case String.split(ResponsesCodec.wire_tool_name(name, codec_options), "::") do

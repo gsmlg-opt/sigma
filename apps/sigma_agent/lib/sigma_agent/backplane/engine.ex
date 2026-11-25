@@ -512,7 +512,7 @@ defmodule Sigma.Agent.Backplane.Engine do
     goals = if state.goal_integration, do: NativeTools.goal_names(), else: []
     board = if archive != [] and state.subagents, do: NativeTools.board_names(), else: []
 
-    NativeTools.names() ++
+    NativeTools.names(state.provider, state.model, state.provider_options) ++
       NativeTools.environment_names() ++
       resources ++
       discovery ++

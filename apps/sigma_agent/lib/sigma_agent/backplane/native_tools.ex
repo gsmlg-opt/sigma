@@ -3,6 +3,7 @@ defmodule Sigma.Agent.Backplane.NativeTools do
 
   alias Backplane.AgentRuntime.{Codex, Error}
   alias Sigma.Agent.Backplane.ToolPostHooks
+  alias Sigma.Ai.Providers.OpenAIResponses
 
   @discovery_names ~w(tool_search)
   @environment_names ~w(wait_for_environment)
@@ -17,8 +18,19 @@ defmodule Sigma.Agent.Backplane.NativeTools do
   @board_names ~w(collaboration::create_channel collaboration::get_channels collaboration::list_threads collaboration::search_posts collaboration::read_thread collaboration::read_post collaboration::subscribe collaboration::unsubscribe collaboration::post)
   # TODO(upstream): gsmlg-opt/backplane#182 — adopt settled exec_command argument errors once released.
   @names ~w(exec_command write_stdin apply_patch update_plan view_image clock::curr_time clock::sleep exec wait request_user_input get_context_remaining new_context)
+  @code_mode_names ~w(exec wait)
 
   def names, do: @names
+
+  def names(OpenAIResponses, model, options) do
+    case OpenAIResponses.custom_tool_format(model, options) do
+      :none -> @names -- ["apply_patch" | @code_mode_names]
+      _format -> @names
+    end
+  end
+
+  def names(_provider, _model, _options), do: @names
+
   def async_names, do: @async_names
   def resource_names, do: @mcp_names
   def plugin_names, do: @plugin_names
@@ -35,10 +47,9 @@ defmodule Sigma.Agent.Backplane.NativeTools do
   def profile(context, authority, hook_context, opts \\ []) do
     selected = Keyword.get(opts, :tools, @names)
     context = Map.put_new(context, :root?, true)
-    families = [:local, :interactive, :code_mode]
 
     with :ok <- validate_selection(selected, authority),
-         {:ok, families} <- resource_family(selected, context, families),
+         {:ok, families} <- resource_family(selected, context, local_families(selected)),
          {:ok, families} <- extension_family(selected, context, families),
          {:ok, profile} <-
            Codex.profile(:configured, context, %{authority | grants: selected},
@@ -49,6 +60,12 @@ defmodule Sigma.Agent.Backplane.NativeTools do
       |> resource_context(context)
       |> ToolPostHooks.decorate(hook_context)
     end
+  end
+
+  defp local_families(selected) do
+    if Enum.any?(@code_mode_names, &(&1 in selected)),
+      do: [:local, :interactive, :code_mode],
+      else: [:local, :interactive]
   end
 
   defp extension_family(selected, context, families) do

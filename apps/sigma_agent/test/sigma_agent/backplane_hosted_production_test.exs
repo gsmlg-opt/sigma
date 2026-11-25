@@ -21,6 +21,41 @@ defmodule Sigma.Agent.BackplaneHostedProductionTest do
     :ok
   end
 
+  test "an unrecognized Responses endpoint gets JSON tools without Code Mode",
+       %{tmp_dir: dir} do
+    with_server(fn base_url, server ->
+      handle = session!(dir, base_url, model: @model)
+      assert {:accepted, _} = Sigma.Agent.prompt(handle.agent, "Find a source")
+      tools = request!(server, 1) |> local_declarations()
+
+      assert Enum.all?(tools, &(&1["type"] == "function"))
+      assert Enum.any?(tools, &(&1["name"] == "exec_command"))
+      assert Enum.any?(tools, &(&1["name"] == "write_stdin"))
+      refute Enum.any?(tools, &(&1["name"] in ["apply_patch", "exec", "wait"]))
+      finished!(handle.agent)
+    end)
+  end
+
+  test "a Responses model can declare text custom tool support", %{tmp_dir: dir} do
+    with_server(fn base_url, server ->
+      model = Map.put(@model, "customToolFormat", "text")
+      handle = session!(dir, base_url, model: model)
+      assert {:accepted, _} = Sigma.Agent.prompt(handle.agent, "Find a source")
+
+      custom =
+        request!(server, 1)
+        |> local_declarations()
+        |> Map.new(&{&1["name"], &1})
+
+      for name <- ["apply_patch", "exec"] do
+        assert %{"type" => "custom", "format" => %{"type" => "text"}} = custom[name]
+      end
+
+      assert %{"type" => "function"} = custom["wait"]
+      finished!(handle.agent)
+    end)
+  end
+
   test "real Runtime streams hosted observations and replays persisted native history after reopen",
        %{tmp_dir: dir} do
     with_server(fn base_url, server ->
@@ -192,7 +227,7 @@ defmodule Sigma.Agent.BackplaneHostedProductionTest do
       cwd: dir,
       transcript_path: transcript_path(dir),
       provider: OpenAIResponses,
-      model: @model,
+      model: Map.put(@model, "customToolFormat", "grammar"),
       native_tools: true,
       native_memory_root: Path.join(dir, "memories"),
       tools: [],
@@ -235,14 +270,25 @@ defmodule Sigma.Agent.BackplaneHostedProductionTest do
     assert [%{"tools" => clock}] = Enum.filter(namespaces, &(&1["name"] == "clock"))
     assert Enum.any?(clock, &(&1["name"] == "curr_time" and &1["type"] == "function"))
 
-    local =
-      Enum.filter(request["tools"], &(&1["type"] in ["function", "custom"])) ++
-        Enum.flat_map(namespaces, & &1["tools"])
+    local = local_declarations(request)
 
     assert Enum.all?(local, &(&1["type"] in ["function", "custom"]))
-    assert Enum.any?(local, &(&1["name"] == "apply_patch"))
+
+    for name <- ["apply_patch", "exec"] do
+      assert %{"type" => "custom", "format" => %{"type" => "grammar", "syntax" => "lark"}} =
+               Enum.find(local, &(&1["name"] == name))
+    end
+
     refute Enum.any?(local, &(&1["name"] == "web_search"))
     refute Enum.any?(namespaces, &(&1["name"] == "web_search"))
+  end
+
+  defp local_declarations(request) do
+    Enum.flat_map(request["tools"], fn
+      %{"type" => "namespace", "tools" => tools} -> tools
+      %{"type" => type} = tool when type in ["function", "custom"] -> [tool]
+      _tool -> []
+    end)
   end
 
   defp assert_native_history(request, expected) do

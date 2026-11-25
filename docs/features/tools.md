@@ -13,6 +13,14 @@ through the public Backplane Codex protocol. Web and protocol entrypoints select
 `native_tools: true`; their legacy `tools: []` list stays empty. This describes the
 current source on `main`, not an upgrade of an already running server.
 
+OpenAI Responses sessions select their local tools before the first request.
+Unknown endpoints start with JSON function tools, including `exec_command` and
+`write_stdin`. The direct OpenAI endpoint uses grammar custom tools by default.
+A verified model on another endpoint can declare `customToolFormat` as `text`
+or `grammar` in its model metadata. That enables `apply_patch` and Code Mode
+using the declared format. Managed children resolve the same capability from
+their selected Provider and model.
+
 Tool permissions default to YOLO auto-approval through the existing settings
 format: `{"permissions":{"default":"allow","rules":{}}}`. Web and Protocol
 sessions load this policy, and managed children inherit the root policy.

@@ -846,7 +846,9 @@ defmodule Sigma.Agent.Backplane.ChildIO do
 
     plugins = if state.config[:native_plugins], do: NativeTools.plugin_names(), else: []
 
-    (NativeTools.names() ++
+    config = state.config
+
+    (NativeTools.names(config.provider, config.model, Map.get(config, :provider_options, [])) ++
        NativeTools.environment_names() ++
        plugins ++
        discovery ++
