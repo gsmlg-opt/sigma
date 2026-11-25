@@ -115,7 +115,7 @@ defmodule Sigma.Agent.RepositoryProcess do
     handle = running_session(state, source_session_id)
 
     result =
-      case acquire_operation(handle) do
+      case acquire_operation(handle, operation) do
         :ok ->
           result =
             safely_perform_operation(fn ->
@@ -242,15 +242,17 @@ defmodule Sigma.Agent.RepositoryProcess do
     end
   end
 
-  defp acquire_operation(nil), do: :ok
+  defp acquire_operation(nil, _operation), do: :ok
 
-  defp acquire_operation(%{agent: agent}) when is_pid(agent) do
-    Sigma.Agent.begin_session_operation(agent)
+  defp acquire_operation(%{agent: agent}, operation) when is_pid(agent) do
+    if elem(operation, 0) == :fork,
+      do: Sigma.Agent.begin_session_operation(agent, :fork),
+      else: Sigma.Agent.begin_session_operation(agent)
   catch
     :exit, reason -> {:error, {:session_unavailable, reason}}
   end
 
-  defp acquire_operation(_handle), do: :ok
+  defp acquire_operation(_handle, _operation), do: :ok
 
   defp release_operation(%{agent: agent}) when is_pid(agent) do
     Sigma.Agent.end_session_operation(agent)

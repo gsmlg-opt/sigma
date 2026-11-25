@@ -255,6 +255,7 @@ defmodule Sigma.Web.SessionLive do
              subagents: snapshot.subagents,
              native_plan: native_plan,
              subagents_available: snapshot.subagents_available,
+             subagents_recovery_error: Map.get(snapshot, :subagents_recovery_error),
              pending_user_questions: pending_user_questions,
              pending_mcp_elicitations: load_pending_mcp_elicitations(agent),
              sessions: sessions,
@@ -324,6 +325,7 @@ defmodule Sigma.Web.SessionLive do
       |> assign(:subagents, session_data.subagents)
       |> assign(:native_plan, session_data.native_plan)
       |> assign(:subagents_available, session_data.subagents_available)
+      |> assign(:subagents_recovery_error, session_data.subagents_recovery_error)
       |> assign(:pending_user_questions, session_data.pending_user_questions)
       |> assign(:async_interactions, load_async_interactions(agent))
       |> assign(:pending_mcp_elicitations, session_data.pending_mcp_elicitations)
@@ -466,6 +468,7 @@ defmodule Sigma.Web.SessionLive do
             subagents: snapshot.subagents,
             native_plan: refreshed_native_plan(workdir, session_id, session_data.native_plan),
             subagents_available: snapshot.subagents_available,
+            subagents_recovery_error: Map.get(snapshot, :subagents_recovery_error),
             pending_user_questions:
               load_session_questions(session_data.agent, workdir, session_id)
         }
@@ -478,6 +481,7 @@ defmodule Sigma.Web.SessionLive do
   @impl true
   def render(assigns) do
     assigns = assign_new(assigns, :goal_recovery, fn -> nil end)
+    assigns = assign_new(assigns, :subagents_recovery_error, fn -> nil end)
 
     ~H"""
     <div id="session-panels" phx-hook="SessionPanels" class="sigma-session-shell relative flex h-[calc(100vh-64px)] overflow-hidden bg-surface text-on-surface font-sans">
@@ -728,6 +732,30 @@ defmodule Sigma.Web.SessionLive do
         />
 
         <footer class="sigma-session-composer border-t border-outline-variant bg-surface px-4 py-3 md:px-6">
+          <section
+            :if={subagent_recovery_required?(@subagents_recovery_error)}
+            id="subagent-recovery"
+            role="alert"
+            class="mx-auto mb-3 max-w-4xl rounded-lg border border-error bg-error-container p-4 text-sm text-on-error-container"
+          >
+            <h2 class="font-semibold">Subagent recovery is incomplete</h2>
+            <p class="mt-1">
+              Sigma could not confirm cleanup of a previous subagent. Sending, continuing, and retrying
+              are unavailable while recovery is incomplete. Your conversation and draft are preserved.
+            </p>
+            <p class="mt-1">Fork this conversation into an independent session to continue.</p>
+            <.dm_btn
+              id="fork-recovery-session"
+              type="button"
+              variant="primary"
+              size="sm"
+              class="mt-3"
+              phx-click="fork_session"
+              disabled={not @session_ready or @turn_in_flight}
+            >
+              Fork to continue
+            </.dm_btn>
+          </section>
           <section
             :if={@goal_recovery}
             id="goal-recovery"
@@ -1269,10 +1297,18 @@ defmodule Sigma.Web.SessionLive do
     %{
       canSubmit:
         session_ready?(socket) and not socket.assigns.pending_compaction and
-          socket.assigns[:pending_continue] != true,
+          socket.assigns[:pending_continue] != true and
+          not subagent_recovery_required?(socket.assigns[:subagents_recovery_error]),
       allowWhileStreaming: true
     }
   end
+
+  defp subagent_recovery_required?(reason),
+    do: reason in [:recovery_required, :cleanup_unconfirmed]
+
+  defp subagent_recovery_message,
+    do:
+      "Subagent recovery is incomplete. This session cannot continue until recovery is confirmed."
 
   defp chat_messages(socket),
     do: socket |> chat_groups() |> Enum.map(&chat_item(socket, &1))
@@ -2591,6 +2627,27 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
+  def handle_event(
+        event,
+        _params,
+        %{assigns: %{subagents_recovery_error: reason}} = socket
+      )
+      when event in [
+             "send_prompt",
+             "continue_session",
+             "retry_message",
+             "prepare_retry",
+             "confirm_retry",
+             "submit_edit",
+             "compact_session"
+           ] and reason in [:recovery_required, :cleanup_unconfirmed] do
+    socket = put_flash(socket, :error, subagent_recovery_message())
+
+    if event == "send_prompt",
+      do: {:reply, %{status: "rejected"}, socket},
+      else: {:noreply, socket}
+  end
+
   def handle_event("chat.sync", params, socket) do
     if chat_scope?(socket, params),
       do: {:reply, %{status: "ok"}, push_chat_snapshot(socket)},
@@ -3807,11 +3864,17 @@ defmodule Sigma.Web.SessionLive do
            socket.assigns.storage_path
          ) do
       {:ok, snapshot} ->
-        {:noreply,
-         assign(socket,
-           subagents: snapshot.subagents,
-           subagents_available: snapshot.subagents_available
-         )}
+        recovery_error = Map.get(snapshot, :subagents_recovery_error)
+        changed? = recovery_error != socket.assigns[:subagents_recovery_error]
+
+        socket =
+          assign(socket,
+            subagents: snapshot.subagents,
+            subagents_available: snapshot.subagents_available,
+            subagents_recovery_error: recovery_error
+          )
+
+        {:noreply, if(changed?, do: queue_chat_state(socket), else: socket)}
 
       {:error, _reason} ->
         {:noreply, assign(socket, :subagents_available, false)}
@@ -4834,6 +4897,7 @@ defmodule Sigma.Web.SessionLive do
     |> assign(:context_trace, [])
     |> assign(:subagents, Sigma.Session.Subagents.snapshot(Sigma.Session.Subagents.new()))
     |> assign(:subagents_available, false)
+    |> assign(:subagents_recovery_error, nil)
     |> assign(:native_plan, nil)
     |> assign(:subagent_filter, "all")
     |> assign(:pending_user_questions, [])

@@ -18,6 +18,9 @@ defmodule Sigma.Agent.BackplaneLifetimeRecoveryFunctionalTest do
       send(params.options[:test_pid], {:recovery_provider, self(), params})
 
       receive do
+        {:recovery_error, error} ->
+          [{:provider_error, error}]
+
         {:recovery_response, content} ->
           reason = if Enum.any?(content, &(&1.type == :tool_call)), do: :tool_use, else: :stop
 
@@ -238,6 +241,273 @@ defmodule Sigma.Agent.BackplaneLifetimeRecoveryFunctionalTest do
            end)
   end
 
+  test "a recovered host clears its gate only after actual lifetime retirement", c do
+    {_child, _root, _admission, _io, _store, _thread} = failed_child!(c)
+
+    observer =
+      start_supervised!(
+        {Subagents,
+         writer: c.writer, repo_path: c.dir, session_id: @session, transcript_path: c.path},
+        id: :recovered_host_observer
+      )
+
+    assert {:ok, %{available: false, recovery_error: :recovery_required}} =
+             Subagents.snapshot(observer)
+
+    assert {:ok, %{error: :recovery_required}} = Subagents.archive_sources(observer)
+    set_fault(c.goal_fault, :allow)
+    cancel_failed_root!(c)
+    assert {:ok, %{status: :confirmed}} = Subagents.close_execution(c.host)
+    assert {:ok, %{status: :confirmed}} = Sigma.Agent.retire_host(c.agent)
+    assert {:ok, %{available: true, recovery_error: nil}} = Subagents.snapshot(observer)
+    assert {:ok, %{error: nil}} = Subagents.archive_sources(observer)
+    refute_receive {:recovery_provider, _, _}, 0
+  end
+
+  test "a completed parent with a Provider-failed child admits new work after cold recovery",
+       c do
+    {child, root} = detached_child!(c)
+    assert {:ok, %{available: true, recovery_error: nil}} = Subagents.snapshot(c.host)
+
+    send(
+      child.pid,
+      {:recovery_error,
+       %Sigma.Ai.ProviderError{
+         kind: :server_error,
+         message: "Our servers are currently overloaded. Please try again later."
+       }}
+    )
+
+    assert eventually(fn -> stopped_children(c.host) == 1 end)
+    assert {:ok, original} = root_snapshot(c.path, root.params.turn_id)
+    assert original.run.state == :completed
+    assert {:ok, %{admissions: admissions}} = Writer.subagent_state(c.writer)
+
+    child_run =
+      Enum.find_value(admissions, fn {_id, admission} ->
+        if admission.intent.child_session_id == child.params.session_id,
+          do: admission.intent.metadata["runtime_run_id"]
+      end)
+
+    assert is_binary(child_run)
+
+    assert {:ok, child_terminal} =
+             child_snapshot(c.path, child.params.session_id, child_run)
+
+    assert child_terminal.run.state == :failed
+    assert %{error: %Sigma.Ai.ProviderError{kind: :server_error}} = child_terminal.run.outcome
+    assert {:ok, history} = Log.snapshot(c.path)
+    assert {:ok, %{status: :confirmed}} = Subagents.close_execution(c.host)
+    assert {:ok, %{status: :confirmed}} = Sigma.Agent.retire_host(c.agent)
+
+    assert {:ok, %{available: true, recovery_error: nil}} =
+             Subagents.snapshot(c.host)
+
+    assert {:ok, ^original} = root_snapshot(c.path, root.params.turn_id)
+
+    assert {:ok, ^child_terminal} =
+             child_snapshot(c.path, child.params.session_id, child_run)
+
+    refute_receive {:recovery_provider, _, _}, 0
+
+    stop_repository!(c)
+    assert :ok = GoalStore.retire(c.goal_root)
+    before = runtime_bytes(c.path)
+    assert {:ok, saved} = Log.snapshot(c.path)
+
+    resume_options =
+      session_options(c)
+      |> Keyword.put(:messages, saved.messages)
+      |> Keyword.put(:context_messages, saved.context_messages)
+      |> Keyword.put(:context_window, saved.context_window)
+      |> Keyword.put(:active_leaf, saved.active_leaf_id)
+      |> Keyword.put(:context_revision, length(saved.branch_entry_ids))
+      |> Keyword.put(:context_source, :journal_replay)
+
+    assert {:ok, resumed} = Runtime.get_session(c.dir, @session, resume_options)
+
+    assert {:ok, %{available: true, recovery_error: nil}} =
+             Subagents.snapshot(Runtime.lookup(c.dir, @session, :subagents))
+
+    assert runtime_bytes(c.path) == before
+    assert {:ok, recovered_history} = Log.snapshot(c.path)
+    assert recovered_history.messages == history.messages
+    assert recovered_history.context_messages == history.context_messages
+    assert {:ok, ^original} = root_snapshot(c.path, root.params.turn_id)
+
+    assert {:ok, ^child_terminal} =
+             child_snapshot(c.path, child.params.session_id, child_run)
+
+    refute_receive {:recovery_provider, _, _}, 0
+    assert {:accepted, _} = Sigma.Agent.prompt(resumed.agent, "New work after failed child")
+    next = provider!(@session)
+    refute next.params.turn_id == root.params.turn_id
+    assert inspect(next.params.context.messages) =~ "Delegate work that outlives this turn"
+    respond!(next, "recovered")
+    assert eventually(fn -> Sigma.Agent.status(resumed.agent).phase == :completed end)
+    assert {:ok, ^original} = root_snapshot(c.path, root.params.turn_id)
+
+    assert {:ok, ^child_terminal} =
+             child_snapshot(c.path, child.params.session_id, child_run)
+  end
+
+  @tag :file_stage
+  test "a live recovered source can fork history without confirming its failed child lifetime",
+       c do
+    {child, root} = detached_child!(c)
+    assert {:error, :session_busy} = Sigma.Agent.begin_session_operation(c.agent, :fork)
+
+    send(
+      child.pid,
+      {:recovery_error,
+       %Sigma.Ai.ProviderError{kind: :server_error, message: "Provider overloaded"}}
+    )
+
+    assert eventually(fn -> stopped_children(c.host) == 1 end)
+    original_turn = :sys.get_state(c.agent).turn_state
+    assert original_turn.phase == :completed
+    assert :ok = Sigma.Agent.begin_session_operation(c.agent, :fork)
+    assert {:error, :session_busy} = Sigma.Agent.begin_session_operation(c.agent, :fork)
+    assert {:error, :session_busy} = Sigma.Agent.retire_host(c.agent)
+    assert :ok = Sigma.Agent.end_session_operation(c.agent)
+    assert :sys.get_state(c.agent).turn_state == original_turn
+
+    receipt =
+      Path.join([
+        c.path <> ".subagents",
+        child.params.session_id,
+        "runtime",
+        "host-retirement.etf"
+      ])
+
+    File.rename!(receipt, receipt <> ".saved")
+    File.mkdir!(receipt)
+
+    try do
+      assert {:error, error} = Subagents.close_execution(c.host)
+      assert inspect(error) =~ "eisdir"
+      assert {:ok, %{recovery_error: :cleanup_unconfirmed}} = Subagents.snapshot(c.host)
+    after
+      File.rmdir!(receipt)
+      File.rename!(receipt <> ".saved", receipt)
+    end
+
+    cold_dir = Path.join(c.dir, "cold-source")
+    File.mkdir!(cold_dir)
+    cold_path = Path.join(cold_dir, @session <> ".jsonl")
+    File.cp!(c.path, cold_path)
+    File.cp_r!(c.path <> ".runtime", cold_path <> ".runtime")
+    File.cp_r!(c.path <> ".subagents", cold_path <> ".subagents")
+    assert {:ok, history} = Log.snapshot(cold_path)
+
+    on_exit(fn ->
+      case Runtime.lookup(cold_dir, :supervisor) do
+        nil -> :ok
+        pid -> DynamicSupervisor.terminate_child(Sigma.Agent.DynamicSupervisor, pid)
+      end
+
+      GoalStore.retire(cold_path <> ".subagents/goal")
+      GoalStore.retire(Path.join(cold_dir, "fork.jsonl.subagents/goal"))
+    end)
+
+    resume_options =
+      session_options(%{c | dir: cold_dir, path: cold_path})
+      |> Keyword.put(:messages, history.messages)
+      |> Keyword.put(:context_messages, history.context_messages)
+      |> Keyword.put(:context_window, history.context_window)
+      |> Keyword.put(:context_source, :journal_replay)
+
+    assert {:ok, source} = Runtime.get_session(cold_dir, @session, resume_options)
+    host = Runtime.lookup(cold_dir, @session, :subagents)
+
+    assert {:ok, %{available: false, recovery_error: :recovery_required}} =
+             Subagents.snapshot(host)
+
+    assert {:error, :session_busy} = Sigma.Agent.begin_session_operation(source.agent)
+    previous = :sys.get_state(source.agent).turn_state
+    records = runtime_bytes(cold_path)
+    lifetime_path = cold_path <> ".subagents/lifetime-recovery.etf"
+    lifetime = File.read!(lifetime_path)
+    assert {:ok, root_record} = root_snapshot(cold_path, root.params.turn_id)
+    assert root_record.run.state == :completed
+    assert {:ok, %{admissions: admissions}} = Writer.subagent_state(source.writer)
+
+    child_run =
+      Enum.find_value(admissions, fn {_id, admission} ->
+        if admission.intent.child_session_id == child.params.session_id,
+          do: admission.intent.metadata["runtime_run_id"]
+      end)
+
+    assert {:ok, child_record} = child_snapshot(cold_path, child.params.session_id, child_run)
+    assert %{error: %Sigma.Ai.ProviderError{kind: :server_error}} = child_record.run.outcome
+
+    checkpoint = [
+      operation_id: "recovered-live-fork",
+      expected_source_revision: length(history.branch_entry_ids) + 1,
+      expected_source_leaf: history.active_leaf_id,
+      title: "Independent continuation",
+      fallback_cwd: cold_dir
+    ]
+
+    assert {:error, {:revision_conflict, _}} =
+             Runtime.fork_session(
+               cold_dir,
+               @session,
+               "stale-fork",
+               cold_dir,
+               :all,
+               Keyword.merge(checkpoint,
+                 operation_id: "stale-recovered-live-fork",
+                 expected_source_revision: 0
+               )
+             )
+
+    assert :sys.get_state(source.agent).turn_state == previous
+    assert is_nil(:sys.get_state(source.agent).fork_operation_turn_state)
+    refute File.exists?(Path.join(cold_dir, "stale-fork.jsonl"))
+
+    assert {:ok, %{session_id: "fork"}} =
+             Runtime.fork_session(cold_dir, @session, "fork", cold_dir, :all, checkpoint)
+
+    assert :sys.get_state(source.agent).turn_state == previous
+    assert is_nil(:sys.get_state(source.agent).fork_operation_turn_state)
+    assert runtime_bytes(cold_path) == records
+    assert File.read!(lifetime_path) == lifetime
+    assert {:ok, ^root_record} = root_snapshot(cold_path, root.params.turn_id)
+    assert {:ok, ^child_record} = child_snapshot(cold_path, child.params.session_id, child_run)
+
+    assert {:ok, %{available: false, recovery_error: :recovery_required}} =
+             Subagents.snapshot(host)
+
+    assert {:error, :session_busy} = Sigma.Agent.begin_session_operation(source.agent)
+
+    fork_path = Path.join(cold_dir, "fork.jsonl")
+    assert {:ok, fork_history} = Log.snapshot(fork_path)
+    assert fork_history.messages == history.messages
+    assert fork_history.context_messages == history.context_messages
+    assert fork_history.context_window == history.context_window
+    refute fork_history.header["id"] == history.header["id"]
+    refute File.exists?(fork_path <> ".subagents/lifetime-recovery.etf")
+
+    assert {:ok, fork} =
+             Runtime.get_session(
+               cold_dir,
+               "fork",
+               Keyword.put(resume_options, :transcript_path, fork_path)
+             )
+
+    assert Sigma.Agent.status(fork.agent).phase == :idle
+    assert {:ok, %{admissions: fork_admissions}} = Writer.subagent_state(fork.writer)
+    assert fork_admissions == %{}
+
+    assert {:ok, %{available: true, recovery_error: nil, subagents: %{agents: []}}} =
+             Subagents.snapshot(Runtime.lookup(cold_dir, "fork", :subagents))
+
+    refute File.exists?(fork_path <> ".subagents/lifetime-recovery.etf")
+    refute File.exists?(c.end_marker)
+    refute_receive {:recovery_provider, _, _}, 0
+  end
+
   @tag :detached_cancellation
   test "public Stop confirms detached execution before completing retained child archives", c do
     {child, root} = detached_child!(c)
@@ -363,6 +633,10 @@ defmodule Sigma.Agent.BackplaneLifetimeRecoveryFunctionalTest do
     assert :ok = GoalStore.retire(c.goal_root)
 
     assert {:ok, resumed} = Runtime.get_session(c.dir, @session, session_options(c))
+
+    assert {:ok, %{available: true, recovery_error: nil}} =
+             Subagents.snapshot(Runtime.lookup(c.dir, @session, :subagents))
+
     assert {:ok, after_goal} = Sigma.Agent.goal(resumed.agent)
     assert after_goal.goal.tokens_used == goal_before.goal.tokens_used + 13
     assert {:ok, %{coordinator: coordinator}} = GenServer.call(resumed.agent, :goal_handle)

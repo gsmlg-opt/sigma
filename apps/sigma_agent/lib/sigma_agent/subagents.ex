@@ -36,6 +36,7 @@ defmodule Sigma.Agent.Subagents do
     do: GenServer.call(host, {:message_board_context, agent_name, operation}, :infinity)
 
   def can_stop(host), do: GenServer.call(host, :can_stop)
+  def can_fork(host), do: GenServer.call(host, :can_fork)
   def close(host), do: GenServer.call(host, :close, :infinity)
 
   @doc "Confirms execution retirement while retaining owners needed for Goal ACK and archive export."
@@ -158,6 +159,8 @@ defmodule Sigma.Agent.Subagents do
 
   @impl true
   def handle_call(:archive_sources, _from, state) do
+    state = refresh_recovery_gate(state)
+
     {:reply,
      {:ok,
       %{
@@ -180,10 +183,14 @@ defmodule Sigma.Agent.Subagents do
   end
 
   def handle_call(:snapshot, _from, state) do
+    state = refresh_recovery_gate(state)
+
     {:reply,
      {:ok,
       %{
         available: state.enabled and state.writer != nil and state.error == nil,
+        recovery_error:
+          if(state.error in [:recovery_required, :cleanup_unconfirmed], do: state.error),
         subagents: state.roster
       }}, state}
   end
@@ -250,6 +257,20 @@ defmodule Sigma.Agent.Subagents do
     result =
       if active == 0 and not uncertain and not unresolved and map_size(state.pending) == 0 and
            not state.preparing and not state.closing and state.error == nil,
+         do: :ok,
+         else: {:error, :subagent_resources_active}
+
+    {:reply, result, state}
+  end
+
+  def handle_call(:can_fork, _from, state) do
+    reserved = Enum.any?(state.attempts, fn {_id, attempt} -> attempt.status == :reserved end)
+
+    result =
+      if state.roster.counts.executing + state.roster.counts.pending == 0 and not reserved and
+           map_size(state.pending) == 0 and map_size(state.jobs) == 0 and
+           not state.preparing and not state.closing and
+           state.error in [nil, :recovery_required, :cleanup_unconfirmed],
          do: :ok,
          else: {:error, :subagent_resources_active}
 
@@ -1619,7 +1640,8 @@ defmodule Sigma.Agent.Subagents do
     end
   end
 
-  defp refresh_recovery_gate(%{error: :recovery_required} = state) do
+  defp refresh_recovery_gate(%{error: error} = state)
+       when error in [:recovery_required, :cleanup_unconfirmed] do
     uncertain =
       Enum.filter(state.roster.agents, &(&1.status == :unknown_outcome or &1.closure == :unknown))
 
@@ -1630,10 +1652,18 @@ defmodule Sigma.Agent.Subagents do
              Enum.any?(state.roster.agents, &(&1.agent_id == attempt.intent.agent_id)))
       end)
 
-    if complete and uncertain != [] and
-         retired_roster?(state.writer, state.transcript_path, uncertain),
-       do: %{state | error: nil},
-       else: state
+    retired =
+      if complete and uncertain != [] do
+        Backplane.AgentRuntime.Codex.Reconciliation.bounded(fn ->
+          retired_roster?(state.writer, state.transcript_path, uncertain)
+        end)
+      else
+        false
+      end
+
+    if retired == true,
+      do: %{state | error: nil},
+      else: state
   end
 
   defp refresh_recovery_gate(state), do: state

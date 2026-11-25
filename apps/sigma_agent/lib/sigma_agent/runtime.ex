@@ -83,7 +83,10 @@ defmodule Sigma.Agent.Runtime do
 
       case lookup(repo_path, session_id, :subagents) do
         nil ->
-          {:ok, Map.put(snapshot, :subagents_available, false)}
+          {:ok,
+           snapshot
+           |> Map.put(:subagents_available, false)
+           |> Map.put(:subagents_recovery_error, nil)}
 
         host ->
           with {:ok, live} <- Sigma.Agent.Subagents.snapshot(host) do
@@ -93,7 +96,8 @@ defmodule Sigma.Agent.Runtime do
             {:ok,
              snapshot
              |> Map.put(:subagents, if(current?, do: live.subagents, else: snapshot.subagents))
-             |> Map.put(:subagents_available, current?)}
+             |> Map.put(:subagents_available, current?)
+             |> Map.put(:subagents_recovery_error, live[:recovery_error])}
           end
       end
     end

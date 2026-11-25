@@ -2463,6 +2463,93 @@ defmodule Sigma.Web.SessionLiveTest do
     refute html =~ "duskmoon-send-send"
   end
 
+  test "shows unresolved subagent recovery and rejects submissions without changing the draft" do
+    for reason <- [:recovery_required, :cleanup_unconfirmed] do
+      socket =
+        recovery_socket(
+          subagents_recovery_error: reason,
+          pending_edit: %{text: "keep this draft", images: [], checkpoint: nil},
+          pending_retry: %{message_id: "keep-this-checkpoint"}
+        )
+
+      assert render_session(socket.assigns) =~ "Subagent recovery is incomplete"
+      assert render_session(socket.assigns) =~ ~s(id="fork-recovery-session")
+      assert render_session(socket.assigns) =~ "Fork to continue"
+      refute recovery_chat_snapshot(socket).admission.canSubmit
+
+      assert {:reply, %{status: "rejected"}, rejected} =
+               Sigma.Web.SessionLive.handle_event(
+                 "send_prompt",
+                 %{"value" => "new prompt"},
+                 socket
+               )
+
+      assert rejected.assigns.flash["error"] =~ "Subagent recovery is incomplete"
+
+      assert {:reply, %{status: "error", message: message}, _rejected} =
+               Sigma.Web.SessionLive.handle_event(
+                 "chat.send",
+                 %{
+                   "id" => "messages",
+                   "conversation_id" => socket.assigns.session_id,
+                   "text" => "keep this composer draft"
+                 },
+                 socket
+               )
+
+      assert message =~ "Subagent recovery is incomplete"
+
+      for event <-
+            ~w(continue_session retry_message prepare_retry confirm_retry submit_edit compact_session) do
+        assert {:noreply, rejected} =
+                 Sigma.Web.SessionLive.handle_event(event, %{"msg-id" => "answer"}, socket)
+
+        assert rejected.assigns.flash["error"] =~ "Subagent recovery is incomplete"
+        assert rejected.assigns.pending_edit == socket.assigns.pending_edit
+        assert rejected.assigns.pending_retry == socket.assigns.pending_retry
+      end
+    end
+  end
+
+  test "clears recovery admission after an authoritative snapshot no longer reports a blocker" do
+    session_id = unique_session_id("recovery-cleared")
+    storage_path = session_storage_path(session_id)
+    File.mkdir_p!(Path.dirname(storage_path))
+    message = Message.assistant("retained-answer", %{content: "retained conversation"})
+    :ok = Log.persist_event(storage_path, {:message_end, message})
+
+    socket =
+      recovery_socket(
+        session_id: session_id,
+        storage_path: storage_path,
+        subagents_recovery_error: :cleanup_unconfirmed,
+        display_messages: %{message.id => message},
+        chat_order: [message.id],
+        last_assistant_message_id: message.id
+      )
+
+    {:noreply, recovered} = Sigma.Web.SessionLive.handle_info({:subagent, %{}}, socket)
+
+    assert recovered.assigns.subagents_recovery_error == nil
+    assert recovered.assigns.display_messages == socket.assigns.display_messages
+    assert recovered.assigns.chat_order == socket.assigns.chat_order
+    refute render_session(recovered.assigns) =~ "Subagent recovery is incomplete"
+    assert recovery_chat_snapshot(recovered).admission.canSubmit
+    assert_receive :flush_chat, 500
+  end
+
+  test "failed providers and unavailable subagents do not imply a recovery blocker" do
+    for overrides <- [
+          [runtime_status: :failed],
+          [subagents_available: false],
+          [subagents_recovery_error: :temporarily_unavailable]
+        ] do
+      socket = recovery_socket(overrides)
+      assert recovery_chat_snapshot(socket).admission.canSubmit
+      refute render_session(socket.assigns) =~ "Subagent recovery is incomplete"
+    end
+  end
+
   test "retries a persisted user message", %{conn: conn} do
     session_id = unique_session_id("retry")
     storage_path = session_storage_path(session_id)
@@ -4366,6 +4453,38 @@ defmodule Sigma.Web.SessionLiveTest do
     |> Sigma.Web.SessionLive.render()
     |> Phoenix.HTML.Safe.to_iodata()
     |> IO.iodata_to_binary()
+  end
+
+  defp recovery_socket(overrides) do
+    assigns =
+      session_render_assigns(
+        [
+          __changed__: %{},
+          flash: %{},
+          display_messages: %{},
+          chat_order: [],
+          chat_sequences: %{},
+          chat_pending: MapSet.new(),
+          chat_flush_timer: nil,
+          session_metrics:
+            Sigma.Session.Metrics.snapshot(Sigma.Session.Metrics.new("render_session")),
+          subagents_recovery_error: nil
+        ] ++ overrides
+      )
+
+    %Phoenix.LiveView.Socket{assigns: assigns, private: %{live_temp: %{}}}
+  end
+
+  defp recovery_chat_snapshot(socket) do
+    {:reply, %{status: "ok"}, socket} =
+      Sigma.Web.SessionLive.handle_event(
+        "chat.sync",
+        %{"id" => "messages", "conversation_id" => socket.assigns.session_id},
+        socket
+      )
+
+    [["chat:event", snapshot] | _] = socket.private.live_temp.push_events
+    snapshot
   end
 
   defp assert_runtime_context(view, session_id) do

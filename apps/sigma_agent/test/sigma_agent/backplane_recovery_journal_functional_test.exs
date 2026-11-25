@@ -59,11 +59,21 @@ defmodule Sigma.Agent.BackplaneRecoveryJournalFunctionalTest do
     assert :ok = Store.retire(reopened)
   end
 
-  test "public journal preserves complete host messages and raw provider stop reasons without changing the commit",
+  test "public journal preserves complete host messages and provider failures without changing the commit",
        %{tmp_dir: dir} do
     {:ok, store} = Store.open(path: dir)
     run = run("host-values")
     stop = %Sigma.Ai.ProviderStopReason{reason: :stop, raw: "end_turn"}
+
+    error = %Sigma.Ai.ProviderError{
+      kind: :server_error,
+      message: "overloaded",
+      status: 503,
+      code: "server_error",
+      retry_after_ms: 1_000,
+      retryable: true,
+      raw: %{"detail" => [nil, false, 0, "  中文\r\n"]}
+    }
 
     message = %Sigma.Agent.Message{
       id: "original-message",
@@ -75,7 +85,7 @@ defmodule Sigma.Agent.BackplaneRecoveryJournalFunctionalTest do
 
     input = %{
       context: %{conversation: %{messages: [message]}},
-      result: %{terminal: %{stop_reason: stop}}
+      result: %{terminal: %{stop_reason: stop}, error: error}
     }
 
     assert {:ok, _} =
@@ -97,6 +107,16 @@ defmodule Sigma.Agent.BackplaneRecoveryJournalFunctionalTest do
 
     assert get_in(completed, ["input", "result", "terminal", "stop_reason"]) ==
              projected["stop_reason"]
+
+    projected_error = get_in(completed, ["input", "result", "error"])
+    assert map_size(projected_error) == map_size(Map.from_struct(error))
+    assert projected_error["kind"] == "server_error"
+    assert projected_error["message"] == "overloaded"
+    assert projected_error["status"] == 503
+    assert projected_error["code"] == "server_error"
+    assert projected_error["retry_after_ms"] == 1_000
+    assert projected_error["retryable"] == true
+    assert projected_error["raw"] === error.raw
 
     assert files(dir) == bytes
     assert :ok = Store.retire(store)

@@ -34,12 +34,15 @@ defmodule Sigma.Agent.Backplane.RecoveryJournal do
   end
 
   # The journal commits the original command. Only its public read projection
-  # converts these two host-owned value types, preserving every field. Runtime
+  # converts these host-owned value types, preserving every field. Runtime
   # Error normalization and rejection of other structs remain with Evidence.
   defp host_values(%Sigma.Agent.Message{} = value),
     do: value |> Map.from_struct() |> host_values()
 
   defp host_values(%Sigma.Ai.ProviderStopReason{} = value),
+    do: value |> Map.from_struct() |> host_values()
+
+  defp host_values(%Sigma.Ai.ProviderError{} = value),
     do: value |> Map.from_struct() |> host_values()
 
   defp host_values(%_{} = value), do: value

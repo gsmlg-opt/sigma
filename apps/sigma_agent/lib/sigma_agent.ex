@@ -85,6 +85,7 @@ defmodule Sigma.Agent do
     :goal_executor_settlement,
     :pending_goal_result,
     :goal_idle_task,
+    :fork_operation_turn_state,
     goal_generation: 0,
     goal_idle_generation: 0,
     goal_resume_pending: false,
@@ -244,6 +245,10 @@ defmodule Sigma.Agent do
   end
 
   def begin_session_operation(pid), do: GenServer.call(pid, :begin_session_operation)
+
+  def begin_session_operation(pid, :fork),
+    do: GenServer.call(pid, {:begin_session_operation, :fork})
+
   def end_session_operation(pid), do: GenServer.call(pid, :end_session_operation, :infinity)
   def compact(pid, opts \\ []), do: GenServer.call(pid, {:compact, opts}, :infinity)
 
@@ -608,6 +613,9 @@ defmodule Sigma.Agent do
     end
   end
 
+  def handle_call(:retire_host, _from, %{fork_operation_turn_state: %TurnState{}} = state),
+    do: {:reply, {:error, :session_busy}, state}
+
   def handle_call(:retire_host, _from, %{native_tools: false} = state),
     do: {:reply, :ok, state}
 
@@ -783,6 +791,24 @@ defmodule Sigma.Agent do
   end
 
   @impl true
+  def handle_call({:begin_session_operation, :fork}, _from, state) do
+    if is_nil(state.current_turn_task) and not TurnState.active?(state.turn_state) and
+         is_nil(state.fork_operation_turn_state) and is_nil(state.goal_idle_task) and
+         is_nil(state.pending_host_prompt) and is_nil(state.host_retirement_task) and
+         is_nil(state.host_recovery_task) and
+         not match?(%{status: :reserved}, state.goal_admission) and subagents_can_fork?(state) do
+      {:reply, :ok,
+       %{
+         state
+         | fork_operation_turn_state: state.turn_state,
+           turn_state: TurnState.transition(state.turn_state, :session_operation)
+       }}
+    else
+      {:reply, {:error, :session_busy}, state}
+    end
+  end
+
+  @impl true
   def handle_call(:begin_session_operation, _from, state) do
     if is_nil(state.current_turn_task) and state.turn_state.phase != :session_operation and
          is_nil(state.goal_idle_task) and subagents_can_stop?(state) do
@@ -794,6 +820,14 @@ defmodule Sigma.Agent do
   end
 
   @impl true
+  def handle_call(
+        :end_session_operation,
+        _from,
+        %{fork_operation_turn_state: %TurnState{} = previous} = state
+      ) do
+    {:reply, :ok, %{state | turn_state: previous, fork_operation_turn_state: nil}}
+  end
+
   def handle_call(:end_session_operation, from, state) do
     cond do
       state.host_retirement_task || state.pending_host_prompt ->
@@ -4791,6 +4825,9 @@ defmodule Sigma.Agent do
 
   defp subagents_can_stop?(%{subagents: nil}), do: true
   defp subagents_can_stop?(state), do: Sigma.Agent.Subagents.can_stop(state.subagents) == :ok
+
+  defp subagents_can_fork?(%{subagents: nil}), do: true
+  defp subagents_can_fork?(state), do: Sigma.Agent.Subagents.can_fork(state.subagents) == :ok
 
   defp init_backplane_store(opts) do
     case Keyword.get(opts, :backplane_store) do
