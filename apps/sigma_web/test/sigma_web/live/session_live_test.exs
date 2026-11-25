@@ -1661,33 +1661,26 @@ defmodule Sigma.Web.SessionLiveTest do
 
       {:ok, view, html} = live_loaded(conn, session_path(session_id))
 
-      options = Floki.parse_document!(html) |> Floki.find("#model-select option")
+      setting = composer_model(view)
 
-      assert html =~ ~s(id="model-select")
+      assert chat_config(html)["actions"]["setting"] == "chat.setting"
 
-      assert Enum.map(options, &option_text/1) == [
-               "openai: fast",
-               "openai: smart",
-               "anthropic: claude",
-               "anthropic: opus"
+      assert Enum.map(setting.choices, &{&1.description, &1.label}) == [
+               {"openai", "fast"},
+               {"openai", "smart"},
+               {"anthropic", "claude"},
+               {"anthropic", "opus"}
              ]
 
-      selected_value =
-        options
-        |> Enum.find(&selected?/1)
-        |> Floki.attribute("value")
-        |> List.first()
-
       assert {:ok, %{"provider_id" => "openai", "model_id" => "smart"}} =
-               Formata.JSON.decode(selected_value)
+               Formata.JSON.decode(setting.value)
 
       anthropic_value =
-        options
-        |> Enum.find(&(option_text(&1) == "anthropic: opus"))
-        |> Floki.attribute("value")
-        |> List.first()
+        Enum.find(setting.choices, &(&1.description == "anthropic" and &1.label == "opus")).value
 
-      render_change(view, "select_model", %{"model" => anthropic_value})
+      request_composer_setting(view, "model", anthropic_value)
+      assert_reply(view, %{status: "ok", value: ^anthropic_value, revision: 1})
+      assert composer_model(view).value == anthropic_value
 
       settings =
         Sigma.Session.ConfigManager.agent_dir()
@@ -1718,12 +1711,17 @@ defmodule Sigma.Web.SessionLiveTest do
       before_log = if File.exists?(storage_path), do: File.read!(storage_path)
 
       value = Formata.JSON.encode!(%{"provider_id" => "openai", "model_id" => "unadded"})
-      assert render_change(view, "select_model", %{"model" => value}) =~ "Unknown model selection"
+      request_composer_setting(view, "model", value)
+      assert_reply(view, %{status: "error", message: "Unknown model selection."})
       assert File.read!(Path.join(ConfigManager.agent_dir(), "models.json")) == before_config
       assert if(File.exists?(storage_path), do: File.read!(storage_path)) == before_log
 
       assert {:ok, _} = Sigma.Session.Models.remove("openai", "smart")
-      assert_eventually(fn -> not has_element?(view, "#model-select option", "openai: smart") end)
+
+      assert_eventually(fn ->
+        Enum.all?(composer_model(view).choices, &(&1.label != "smart"))
+      end)
+
       assert render(view) =~ "Model unavailable"
 
       html = render_hook(view, "send_prompt", %{"value" => "Do not run", "images" => []})
@@ -1731,7 +1729,8 @@ defmodule Sigma.Web.SessionLiveTest do
       assert if(File.exists?(storage_path), do: File.read!(storage_path)) == before_log
 
       selected = Formata.JSON.encode!(%{"provider_id" => "openai", "model_id" => "fast"})
-      render_change(view, "select_model", %{"model" => selected})
+      request_composer_setting(view, "model", selected)
+      assert_reply(view, %{status: "ok", value: ^selected})
       refute render(view) =~ "Model unavailable"
     end)
   end
@@ -1752,7 +1751,7 @@ defmodule Sigma.Web.SessionLiveTest do
       {:ok, view, html} = live_loaded(conn, session_path(session_id))
       assert html =~ "Model unavailable"
       assert has_element?(view, "a[href='/settings/models']")
-      refute has_element?(view, "#model-select option[value*='removed']")
+      refute Enum.any?(composer_model(view).choices, &(&1.label == "removed"))
       assert is_nil(Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent))
       assert File.read!(path) == before_log
     end)
@@ -1779,29 +1778,19 @@ defmodule Sigma.Web.SessionLiveTest do
       File.write!(meta_path, meta_bytes)
       assert :ok = Log.persist_event(storage_path, {:agent_start, @workdir})
 
-      {:ok, view, html} = live_loaded(conn, session_path(session_id))
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+      setting = composer_model(view)
 
       anthropic_value =
-        html
-        |> Floki.parse_document!()
-        |> Floki.find("#model-select option")
-        |> Enum.find(&(option_text(&1) == "anthropic: opus"))
-        |> Floki.attribute("value")
-        |> List.first()
+        Enum.find(setting.choices, &(&1.description == "anthropic" and &1.label == "opus")).value
 
       File.write!(storage_path, "{torn", [:append])
+      request_composer_setting(view, "model", anthropic_value)
+      assert_reply(view, %{status: "error", message: "Could not persist model selection."})
+      assert composer_model(view).value == setting.value
+      assert chat_snapshot(view).metadata.settings_revision == 0
 
-      html = render_change(view, "select_model", %{"model" => anthropic_value})
-
-      assert html =~ "Could not persist model selection."
-
-      selected_option =
-        html
-        |> Floki.parse_document!()
-        |> Floki.find("#model-select option")
-        |> Enum.find(&selected?/1)
-
-      assert option_text(selected_option) == "openai: smart"
       assert File.read!(meta_path) == meta_bytes
 
       settings =
@@ -1843,26 +1832,20 @@ defmodule Sigma.Web.SessionLiveTest do
 
       File.write!(meta_path, meta_bytes)
 
-      {:ok, view, html} = live_loaded(conn, session_path(session_id))
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
-      selected_option =
-        html
-        |> Floki.parse_document!()
-        |> Floki.find("#model-select option")
-        |> Enum.find(&selected?/1)
+      setting = composer_model(view)
 
-      assert option_text(selected_option) == "anthropic: opus"
+      assert %{"provider_id" => "anthropic", "model_id" => "opus"} =
+               Formata.JSON.decode!(setting.value)
+
       assert File.read!(meta_path) == meta_bytes
 
       openai_value =
-        html
-        |> Floki.parse_document!()
-        |> Floki.find("#model-select option")
-        |> Enum.find(&(option_text(&1) == "openai: smart"))
-        |> Floki.attribute("value")
-        |> List.first()
+        Enum.find(setting.choices, &(&1.description == "openai" and &1.label == "smart")).value
 
-      render_change(view, "select_model", %{"model" => openai_value})
+      request_composer_setting(view, "model", openai_value)
+      assert_reply(view, %{status: "ok", value: ^openai_value})
 
       log_path = Path.join(sessions_dir, "#{session_id}.jsonl")
       assert {:ok, snapshot} = Log.snapshot(log_path)
@@ -1904,15 +1887,11 @@ defmodule Sigma.Web.SessionLiveTest do
       assert {:ok, _entry_id} = Log.append_model_change(log_path, "anthropic", "opus")
       log_bytes = File.read!(log_path)
 
-      {:ok, _view, html} = live_loaded(conn, session_path(session_id))
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
-      selected_option =
-        html
-        |> Floki.parse_document!()
-        |> Floki.find("#model-select option")
-        |> Enum.find(&selected?/1)
+      assert %{"provider_id" => "anthropic", "model_id" => "opus"} =
+               Formata.JSON.decode!(composer_model(view).value)
 
-      assert option_text(selected_option) == "anthropic: opus"
       assert File.read!(meta_path) == meta_bytes
       assert File.read!(log_path) == log_bytes
 
@@ -1964,15 +1943,10 @@ defmodule Sigma.Web.SessionLiveTest do
                  "model" => "invalid"
                })
 
-      {:ok, _view, html} = live_loaded(conn, session_path(session_id))
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
-      selected_option =
-        html
-        |> Floki.parse_document!()
-        |> Floki.find("#model-select option")
-        |> Enum.find(&selected?/1)
-
-      assert option_text(selected_option) == "openai: smart"
+      assert %{"provider_id" => "openai", "model_id" => "smart"} =
+               Formata.JSON.decode!(composer_model(view).value)
     end)
   end
 
@@ -1992,17 +1966,16 @@ defmodule Sigma.Web.SessionLiveTest do
           File.mkdir_p!(sessions_dir)
           assert :ok = Log.persist_event(storage_path, {:agent_start, @workdir})
 
-          {:ok, view, html} = live_loaded(conn, session_path(session_id))
+          {:ok, view, _html} = live_loaded(conn, session_path(session_id))
 
           minimax_value =
-            html
-            |> Floki.parse_document!()
-            |> Floki.find("#model-select option")
-            |> Enum.find(&(option_text(&1) == "MiniMax: MiniMax-M3"))
-            |> Floki.attribute("value")
-            |> List.first()
+            Enum.find(
+              composer_model(view).choices,
+              &(&1.description == "MiniMax" and &1.label == "MiniMax-M3")
+            ).value
 
-          render_change(view, "select_model", %{"model" => minimax_value})
+          request_composer_setting(view, "model", minimax_value)
+          assert_reply(view, %{status: "ok", value: ^minimax_value})
           render_submit(view, "send_prompt", %{"value" => "hello"})
 
           assert_receive {:provider_params, %{model: %{id: "MiniMax-M3"}, options: options}},
@@ -2456,9 +2429,15 @@ defmodule Sigma.Web.SessionLiveTest do
     end)
   end
 
-  test "renders the chat input without generic send handling", %{conn: conn} do
-    {:ok, _view, html} = live_loaded(conn, session_path(unique_session_id("chat-input")))
+  test "renders session model selection alongside the chat input", %{conn: conn} do
+    {:ok, view, html} = live_loaded(conn, session_path(unique_session_id("chat-input")))
 
+    assert has_element?(view, ".sigma-session-composer #chat-input-area[phx-update=ignore]")
+    assert chat_config(html)["actions"]["setting"] == "chat.setting"
+    assert chat_snapshot(view).metadata.cwd == @workdir
+    assert is_binary(chat_snapshot(view).metadata.host)
+    assert composer_model(view).id == "model"
+    refute has_element?(view, "#model-select-form")
     refute html =~ ~s(clear-on-send="true")
     refute html =~ "duskmoon-send-send"
   end
@@ -4417,6 +4396,26 @@ defmodule Sigma.Web.SessionLiveTest do
     snapshot
   end
 
+  defp composer_model(view) do
+    view
+    |> chat_snapshot()
+    |> Map.fetch!(:metadata)
+    |> Map.fetch!(:settings)
+    |> Enum.find(&(&1.id == "model"))
+  end
+
+  defp request_composer_setting(view, setting_id, value) do
+    snapshot = chat_snapshot(view)
+
+    render_hook(view, "chat.setting", %{
+      "id" => "messages",
+      "conversation_id" => snapshot.conversation_id,
+      "settingId" => setting_id,
+      "value" => value,
+      "expectedRevision" => snapshot.metadata.settings_revision
+    })
+  end
+
   defp drain_chat_snapshots(ref) do
     receive do
       {^ref, {:push_event, "chat:event", %{type: "chat.snapshot"}}} -> drain_chat_snapshots(ref)
@@ -4865,12 +4864,6 @@ defmodule Sigma.Web.SessionLiveTest do
     }
   end
 
-  defp option_text(option) do
-    option
-    |> Floki.text()
-    |> String.trim()
-  end
-
   defp terminal_ids(html) do
     html
     |> Floki.parse_document!()
@@ -4905,11 +4898,4 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   defp attr(node, name), do: node |> Floki.attribute(name) |> List.first()
-
-  defp selected?({_tag, attrs, _children}) do
-    Enum.any?(attrs, fn
-      {"selected", value} -> value in ["", "true", "selected"]
-      _ -> false
-    end)
-  end
 end

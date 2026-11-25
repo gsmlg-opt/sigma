@@ -167,10 +167,18 @@ button.btn:focus-visible {
 }
 
 .sigma-session-composer {
-  max-height: calc((100dvh - 64px) * 0.35);
+  --composer-height: calc((100dvh - 64px) * 0.35);
+  max-height: var(--composer-height);
   min-height: 0;
   overflow-y: auto;
   padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
+}
+
+/* Reserve room for the session context and toolbar as multiline drafts grow. */
+#chat-input-area .chat-composer-editor {
+  max-height: max(2lh, calc(var(--composer-height) - 8.5rem - env(safe-area-inset-bottom, 0px)));
+  /* DuskMoon's inline autosize uses the row limit, before the viewport cap. */
+  overflow-y: auto !important;
 }
 
 .sigma-session-chip {
@@ -189,10 +197,6 @@ button.btn:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.sigma-session-model-select {
-  width: min(18rem, 38vw);
 }
 
 .sigma-session-status-dot {
@@ -270,10 +274,6 @@ button.btn:focus-visible {
 }
 
 @media (max-width: 900px) {
-  .sigma-session-model-select {
-    width: min(16rem, 50vw);
-  }
-
   .sigma-context-gauge {
     min-width: 0;
   }
@@ -287,10 +287,6 @@ button.btn:focus-visible {
   .sigma-session-header {
     padding-left: 0.75rem;
     padding-right: 0.75rem;
-  }
-
-  .sigma-session-model-select {
-    width: min(100%, 17rem);
   }
 }
 
@@ -713,7 +709,6 @@ button.btn:focus-visible {
 .sigma-session-header h1 { font-size: 1rem; }
 .sigma-session-shell .sigma-message-metrics { font-size: 0.75rem; }
 .sigma-session-shell .sigma-turn-summary { line-height: 1.8; }
-.sigma-session-shell .sigma-session-model-select { width: min(16rem, 100%); }
 .sigma-session-shell .sigma-session-overview { gap: 1rem; }
 .sigma-session-shell .sigma-context-budget { border-radius: 0.75rem; }
 
@@ -742,7 +737,6 @@ button.btn:focus-visible {
     background: var(--color-surface-container-high);
   }
   .sigma-session-header { padding: 0.5rem 0.75rem; }
-  .sigma-session-shell .sigma-session-model-select { width: min(13rem, 55vw); }
 }
 .sigma-session-header > div > div:last-child {
   flex: 0 0 auto;

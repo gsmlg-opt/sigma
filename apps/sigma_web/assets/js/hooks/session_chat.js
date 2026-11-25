@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
-import { Chat } from "@duskmoon-dev/components/chat"
+import { Chat, ComposerSettings } from "@duskmoon-dev/components/chat"
 import { Markdown } from "@duskmoon-dev/components/markdown"
 import { Button } from "@duskmoon-dev/components/button"
 import { Typography } from "@duskmoon-dev/components/typography"
@@ -12,6 +12,74 @@ const h = React.createElement
 const attachmentDrafts = new Map()
 const deliveryLabels = { send: "Send", steer: "Steer current turn", follow_up: "Queue for next turn" }
 const attachmentErrors = { slash_command: "Images cannot be combined with slash commands.", too_many: "Attach no more than four images.", too_large: "Each image must be at most 5 MiB; total at most 10 MiB.", unsupported_type: "Attach PNG, JPEG, GIF or WebP images." }
+
+function ComposerIcon({ kind }) {
+  const paths = {
+    folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z",
+    laptop: "M4 4h16v13H4ZM2 20h20",
+    shield: "m12 3 8 4v5c0 5-8 9-8 9s-8-4-8-9V7ZM12 8v5M12 16h.01"
+  }
+  return h("svg", {
+    width: 18, height: 18, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
+    strokeWidth: 1.75, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true
+  }, h("path", { d: paths[kind] }))
+}
+
+function ComposerContext({ metadata, connected, synchronizing, active, label, queue }) {
+  const cwd = metadata.cwd
+  const project = cwd?.split("/").filter(Boolean).at(-1) || cwd
+  return h(Chat.ComposerContext, { "data-session-context": true },
+    project && h(Chat.ComposerContextItem, { icon: h(ComposerIcon, { kind: "folder" }), title: cwd }, project),
+    h(Chat.ComposerContextItem, { icon: h(ComposerIcon, { kind: "laptop" }) }, "Local"),
+    active && h(Chat.ComposerContextItem, { role: "status" }, label),
+    queue,
+    h(Chat.ComposerContextEnd, null,
+      metadata.host && h(Chat.ComposerContextItem, { title: metadata.host }, metadata.host),
+      h(Chat.ComposerConnection, {
+        state: synchronizing ? "connecting" : connected ? "connected" : "disconnected",
+        label: synchronizing ? "Synchronizing" : connected ? "Connected" : "Not connected"
+      })))
+}
+
+function Settings({ metadata, bridge, conversationId, disabled }) {
+  const settings = (metadata.settings || []).filter((setting) => ["model", "effort"].includes(setting.id))
+    .map((setting) => {
+      if (setting.id !== "model" || setting.choices.some((choice) => choice.value === setting.value)) return setting
+      const value = setting.value || ""
+      return {
+        ...setting, value,
+        choices: [{ value, label: "Choose a model", unavailableReason: "Select a configured model." }, ...setting.choices]
+      }
+    })
+    .map((setting) => disabled ? { ...setting, unavailableReason: "Available when the session is connected and idle." } : setting)
+  const groups = []
+  if (metadata.accessLabel) {
+    settings.unshift({
+      id: "access", label: "Access", value: metadata.accessLabel,
+      choices: [{ value: metadata.accessLabel, label: metadata.accessLabel, description: metadata.accessDescription, tone: "warning" }]
+    })
+    groups.push({ id: "access", label: "Access", settingIds: ["access"], appearance: "access", icon: h(ComposerIcon, { kind: "shield" }) })
+  }
+  if (settings.some((setting) => setting.id === "model")) {
+    groups.push({ id: "model", label: "Model settings", settingIds: ["model", "effort"], nestedSettingIds: ["model"], appearance: "model" })
+  }
+  if (!settings.length) return null
+
+  async function onRequest({ requestId, scopeKey, settingId, value, expectedRevision }) {
+    try {
+      const reply = await bridge.send("setting", { settingId, value, expectedRevision })
+      return { requestId, scopeKey, settingId, revision: reply.revision, outcome: "accepted", value: reply.value }
+    } catch (error) {
+      if (!error.response) throw error
+      return { requestId, scopeKey, settingId, revision: expectedRevision, outcome: "rejected", message: error.message }
+    }
+  }
+
+  return h(ComposerSettings, {
+    variant: "menu", groups, settings, scopeKey: conversationId,
+    revision: metadata.settings_revision || 0, onRequest, onAcknowledged: () => {}
+  })
+}
 
 function Attachment({ file, remove, disabled }) {
   const [url, setUrl] = useState(null)
@@ -111,54 +179,56 @@ function Composer(props) {
 
   const host = document.getElementById("chat-input-area")
   if (!host) return null
-  return createPortal(h(React.Fragment, null,
-    active && h(Chat.Status, null,
-      h(Chat.StatusItem, { role: "status" }, props.runtime.label),
-      turnId && !slashCommand && h(Button, {
+  return createPortal(h(Chat.Composer, {
+    className: "chat-composer-ghost rounded-3xl sigma-chat-composer",
+    context: h(ComposerContext, {
+      metadata, connected, synchronizing, active, label: props.runtime.label,
+      queue: turnId && !slashCommand && h(Button, {
         type: "button", size: "sm", appearance: "ghost", disabled: busy || !connected || synchronizing,
         "aria-pressed": followUp, onClick: () => setQueuedTurn(followUp ? null : turnId)
-      }, "Queue for next turn")),
-    h(Chat.Composer, {
-      id: "prompt-input", value, onValueChange: changeValue,
-      attachments: files, onAttachmentsChange: changeFiles, renderAttachment: (file, context) => h(Attachment, { file, ...context }),
-      accept: "image/png,image/jpeg,image/gif,image/webp", allowAttachmentOnly: true,
-      generating: active, canSubmit: canSubmit && (!active || Boolean(turnId)), sendLabel, busy,
-      disabled: !connected || synchronizing, error: error || notice || undefined,
-      completion, minRows: 1, maxRows: 6, compact: true,
-      textareaProps: {
-        placeholder: active ? sendLabel : "Ask ∑ anything…", "aria-label": "Message",
-        onPaste: (event) => {
-          const images = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"))
-          if (images.length) { event.preventDefault(); addFiles(images) }
-        }
-      },
-      onDragOver: (event) => {
-        if (Array.from(event.dataTransfer.types).includes("Files")) event.preventDefault()
-      },
-      onDrop: (event) => {
-        if (event.dataTransfer.files.length) {
-          event.preventDefault()
-          if (connected && !synchronizing) addFiles(Array.from(event.dataTransfer.files))
-        }
-      },
-      onStop: () => bridge.send("stop", {}).catch((error) => setError(error.message)),
-      onSubmitError: (error) => setError(error.message),
-      onSubmit: async ({ value, files }) => {
-        setError("")
-        const code = files.length && value.trim().startsWith("/") ? "slash_command" : validateImageFiles(files)
-        if (code) {
-          setError(attachmentErrors[code])
-          return false
-        }
-        const result = await encodeImageFiles(files)
-        if (!result.ok) { setError("Could not read the attached images."); return false }
-        const delivery = intent === "steer" ? { intent, target_turn_id: turnId } : { intent }
-        try { await submit({ text: value, images: result.images, ...delivery }); return true }
-        catch { return false }
-      },
-      children: (!connected || synchronizing) && h("span", { role: "status" }, "Draft preserved")
-    })
-  ), host)
+      }, "Queue for next turn")
+    }),
+    id: "prompt-input", value, onValueChange: changeValue,
+    attachments: files, onAttachmentsChange: changeFiles, renderAttachment: (file, context) => h(Attachment, { file, ...context }),
+    accept: "image/png,image/jpeg,image/gif,image/webp", allowAttachmentOnly: true,
+    generating: active, canSubmit: canSubmit && (!active || Boolean(turnId)), sendLabel, busy,
+    disabled: !connected || synchronizing, error: error || notice || undefined,
+    completion, minRows: 2, maxRows: 12, compact: true,
+    textareaProps: {
+      placeholder: active ? sendLabel : "Do anything", "aria-label": "Message",
+      onPaste: (event) => {
+        const images = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"))
+        if (images.length) { event.preventDefault(); addFiles(images) }
+      }
+    },
+    onDragOver: (event) => {
+      if (Array.from(event.dataTransfer.types).includes("Files")) event.preventDefault()
+    },
+    onDrop: (event) => {
+      if (event.dataTransfer.files.length) {
+        event.preventDefault()
+        if (connected && !synchronizing) addFiles(Array.from(event.dataTransfer.files))
+      }
+    },
+    onStop: () => bridge.send("stop", {}).catch((error) => setError(error.message)),
+    onSubmitError: (error) => setError(error.message),
+    onSubmit: async ({ value, files }) => {
+      setError("")
+      const code = files.length && value.trim().startsWith("/") ? "slash_command" : validateImageFiles(files)
+      if (code) {
+        setError(attachmentErrors[code])
+        return false
+      }
+      const result = await encodeImageFiles(files)
+      if (!result.ok) { setError("Could not read the attached images."); return false }
+      const delivery = intent === "steer" ? { intent, target_turn_id: turnId } : { intent }
+      try { await submit({ text: value, images: result.images, ...delivery }); return true }
+      catch { return false }
+    },
+    children: h(React.Fragment, null,
+      h(Settings, { metadata, bridge, conversationId: props.state.conversationId, disabled: active || !connected || synchronizing }),
+      (!connected || synchronizing) && h("span", { role: "status", className: "sr-only" }, "Draft preserved"))
+  }), host)
 }
 
 // This HTML comes only from Sigma's escaped observability components, never model HTML.

@@ -1,6 +1,7 @@
 defmodule Sigma.Web.SessionLive do
   use Sigma.Web, :live_view
 
+  alias Sigma.Ai.ReasoningEffort
   alias Sigma.Agent.SessionContext
   alias Sigma.Agent.Backplane.PlanProjection
   alias Sigma.Session.ConfigManager
@@ -13,6 +14,7 @@ defmodule Sigma.Web.SessionLive do
   alias Sigma.Session.Skills.Facade
   alias Sigma.Web.ImageAttachments
   alias Sigma.Web.Session.TerminalBinding
+  alias Sigma.Web.SessionComposerEffort
   alias Sigma.Web.SessionObservability
   alias Sigma.Web.SessionPlan
   alias Sigma.Web.SessionSubagents
@@ -179,6 +181,15 @@ defmodule Sigma.Web.SessionLive do
 
       {:ok, {provider_mod, model_id, provider_id, provider_options}} ->
         selected_agent_model = agent_model(config, provider_id, model_id)
+
+        provider_options =
+          ReasoningEffort.options(
+            provider_mod,
+            selected_agent_model,
+            snapshot.reasoning_level,
+            provider_options
+          )
+
         initial_messages = snapshot.messages
 
         terminal_capability = TerminalBinding.capability()
@@ -247,6 +258,12 @@ defmodule Sigma.Web.SessionLive do
                ),
              current_model: model_id,
              current_model_value: current_model_value,
+             effort_setting:
+               SessionComposerEffort.setting(
+                 provider_mod,
+                 selected_agent_model,
+                 agent_status.reasoning_effort
+               ),
              context_diagnostics: context_discovery.diagnostics,
              context_trace: context_discovery.trace,
              effective_cwd: effective_cwd,
@@ -313,6 +330,7 @@ defmodule Sigma.Web.SessionLive do
       |> assign(:runtime_status, session_data.runtime_status)
       |> assign(:current_model, session_data.current_model)
       |> assign(:current_model_value, session_data.current_model_value)
+      |> assign(:effort_setting, session_data.effort_setting)
       |> assign(:context_diagnostics, session_data.context_diagnostics)
       |> assign(:context_trace, session_data.context_trace)
       |> assign(:effective_cwd, session_data.effective_cwd)
@@ -349,6 +367,7 @@ defmodule Sigma.Web.SessionLive do
      socket
      |> assign(:session_load, AsyncResult.failed(socket.assigns.session_load, :model_unavailable))
      |> assign(:model_unavailable, true)
+     |> initialize_chat()
      |> put_flash(:error, "Model unavailable. Restore this session's model in Models settings.")}
   end
 
@@ -649,26 +668,6 @@ defmodule Sigma.Web.SessionLive do
             </div>
 
             <div class="flex min-w-0 flex-wrap items-center justify-end gap-2">
-              <form id="model-select-form" phx-change="select_model" class="sigma-session-model-select">
-                <.dm_select
-                  id="model-select"
-                  name="model"
-                  value={if(@model_unavailable, do: "", else: @current_model_value)}
-                  size="xs"
-                  disabled={not @session_ready or @turn_in_flight}
-                >
-                  <option :if={@model_unavailable} value="" selected disabled>Choose a configured model</option>
-                  <option
-                    :for={option <- @model_options}
-                    value={option.value}
-                    selected={option.value == @current_model_value}
-                  >{option.label}</option>
-                </.dm_select>
-              </form>
-              <span :if={@model_unavailable} id="session-model-unavailable" class="text-xs text-error" role="status">
-                Model unavailable. <.link navigate={~p"/settings/models"} class="underline">Models settings</.link>
-              </span>
-
               <button
                 id="session-subagents-open-btn"
                 type="button"
@@ -725,13 +724,14 @@ defmodule Sigma.Web.SessionLive do
           conversation_id={@session_id}
           messages={@chat_initial.messages}
           metadata={@chat_initial.metadata}
+          actions={%{setting: "chat.setting"}}
           runtime={@chat_initial.runtime}
           admission={@chat_initial.admission}
           label="Session conversation"
           class="sigma-session-transcript min-h-0 overflow-hidden px-4 py-5 md:px-6"
         />
 
-        <footer class="sigma-session-composer border-t border-outline-variant bg-surface px-4 py-3 md:px-6">
+        <footer class="sigma-session-composer px-4 py-3 md:px-6">
           <section
             :if={subagent_recovery_required?(@subagents_recovery_error)}
             id="subagent-recovery"
@@ -775,7 +775,7 @@ defmodule Sigma.Web.SessionLive do
               Discard and reload
             </.dm_btn>
           </section>
-          <div class="relative mx-auto max-w-4xl">
+          <div class="relative">
             <div :if={not @session_ready and is_nil(@session_load.failed)} class="mb-3 flex items-center gap-3 text-sm text-on-surface-variant">
               <.dm_loading_spinner size="sm" />
               <span>Loading session...</span>
@@ -806,14 +806,11 @@ defmodule Sigma.Web.SessionLive do
               </details>
             </details>
 
+            <p :if={@model_unavailable} id="session-model-unavailable" class="mb-2 text-xs text-error" role="status">
+              Model unavailable. <.link navigate={~p"/settings/models"} class="underline">Models settings</.link>
+            </p>
             <div id="chat-input-area" phx-update="ignore" class="relative">
               <div id="prompt-input" aria-label="Message">Loading composer…</div>
-            </div>
-
-            <div class="mt-3 flex items-center justify-end text-[11px] text-on-surface-variant">
-              <p class="opacity-60 text-right">
-                ∑ is an AI agent. Review its work carefully.
-              </p>
             </div>
           </div>
         </footer>
@@ -1272,7 +1269,23 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp initialize_chat(socket) do
+    full_access? = ConfigManager.get_permissions() == %{default: :allow, rules: %{}}
+
     metadata = %{
+      cwd: socket.assigns.effective_cwd,
+      host:
+        case :inet.gethostname() do
+          {:ok, hostname} -> List.to_string(hostname)
+          _ -> nil
+        end,
+      accessLabel: if(full_access?, do: "Full access", else: "Configured access"),
+      accessDescription:
+        if(full_access?,
+          do: "Runs commands without asking.",
+          else: "Uses the configured tool rules."
+        ),
+      settings: composer_settings(socket.assigns),
+      settings_revision: 0,
       commands: slash_commands(socket.assigns.effective_cwd),
       remoteSources: Facade.remote_sources(),
       remoteSkillsUrl:
@@ -1282,6 +1295,39 @@ defmodule Sigma.Web.SessionLive do
     }
 
     replace_chat_snapshot(socket, metadata)
+  end
+
+  defp composer_settings(assigns) do
+    choices = Enum.map(assigns.model_options, &Map.take(&1, [:value, :label, :description]))
+
+    model = %{
+      id: "model",
+      label: "Model",
+      value: if(assigns.model_unavailable, do: "", else: assigns.current_model_value),
+      choices: choices
+    }
+
+    model =
+      if choices == [],
+        do: Map.put(model, :unavailableReason, "No configured models"),
+        else: model
+
+    [model | List.wrap(if !assigns.model_unavailable, do: assigns.effort_setting)]
+  end
+
+  defp refresh_composer_settings(socket) do
+    metadata = socket.assigns.chat_initial.metadata
+    settings = composer_settings(socket.assigns)
+
+    if Map.has_key?(metadata, :settings) and metadata.settings != settings do
+      replace_chat_snapshot(socket, %{
+        metadata
+        | settings: settings,
+          settings_revision: metadata.settings_revision + 1
+      })
+    else
+      socket
+    end
   end
 
   defp chat_runtime(socket) do
@@ -2240,7 +2286,8 @@ defmodule Sigma.Web.SessionLive do
     |> Enum.map(fn model ->
       %{
         value: model_option_value(model.provider_id, model.model_id),
-        label: "#{model.provider_name}: #{model.name}",
+        label: model.name,
+        description: model.provider_name,
         provider_name: model.provider_name,
         provider_id: model.provider_id,
         model_id: model.model_id
@@ -3559,49 +3606,100 @@ defmodule Sigma.Web.SessionLive do
   end
 
   @impl true
-  def handle_event("select_model", %{"model" => selected}, socket) do
-    if session_ready?(socket) do
-      select_model(selected, socket)
+  def handle_event("chat.setting", params, socket) do
+    with true <- chat_scope?(socket, params) and session_ready?(socket),
+         false <- socket.assigns.turn_in_flight,
+         %{settings_revision: revision} <- socket.assigns.chat_initial.metadata,
+         true <- params["expectedRevision"] == revision,
+         {:ok, socket} <- change_composer_setting(params["settingId"], params["value"], socket) do
+      socket = refresh_composer_settings(socket)
+
+      {:reply,
+       %{
+         status: "ok",
+         value: params["value"],
+         revision: socket.assigns.chat_initial.metadata.settings_revision
+       }, socket}
     else
-      {:noreply, put_flash(socket, :info, "Session is still loading.")}
+      {:error, message} ->
+        {:reply, %{status: "error", message: message}, socket}
+
+      _ ->
+        {:reply,
+         %{
+           status: "error",
+           message: "Session settings changed or are unavailable. Review the current settings."
+         }, socket}
     end
   end
 
-  defp select_model(selected, socket) do
+  defp change_composer_setting("model", selected, socket) do
     with {:ok, provider_id, model_id} <- parse_model_option_value(selected),
          {:ok, selected_config} <- Models.resolve(provider_id, model_id),
-         selected_agent_model = agent_model(selected_config, provider_id, model_id),
-         {:ok, {provider_mod, _model_id, _provider_id, provider_options}} <-
-           resolve_provider(selected_config),
+         model = agent_model(selected_config, provider_id, model_id),
+         {:ok, {provider, _model_id, _provider_id, options}} <- resolve_provider(selected_config),
+         options =
+           ReasoningEffort.options(
+             provider,
+             model,
+             get_in(socket.assigns, [:effort_setting, :value]),
+             options
+           ),
          {:ok, _entry_id} <-
            persist_selected_model(
              socket,
              provider_id,
              model_id,
-             provider_mod,
-             selected_agent_model,
-             provider_options
+             provider,
+             model,
+             Keyword.put_new(options, :reasoning_effort, nil)
            ) do
-      socket =
-        assign(socket,
-          active_provider_id: provider_id,
-          current_model: model_id,
-          current_model_value: selected,
-          model_unavailable: false,
-          context_window: model_context_window(selected_agent_model),
-          context_token_count: nil
-        )
+      selection = [
+        active_provider_id: provider_id,
+        current_model: model_id,
+        current_model_value: selected,
+        model_unavailable: false,
+        effort_setting:
+          SessionComposerEffort.setting(provider, model, options[:reasoning_effort]),
+        context_window: model_context_window(model),
+        context_token_count: nil
+      ]
 
-      agent = socket.assigns.agent
-      {:noreply, start_async(socket, :agent_status, fn -> Sigma.Agent.status(agent) end)}
+      Phoenix.PubSub.broadcast_from(
+        Sigma.Web.PubSub,
+        self(),
+        session_topic(socket.assigns.encoded_repository, socket.assigns.session_id),
+        {:session_model_selected, selection}
+      )
+
+      {:ok, assign(socket, selection)}
     else
       {:error, {:model_change_persistence_failed, _reason}} ->
-        {:noreply, put_flash(socket, :error, "Could not persist model selection.")}
+        {:error, "Could not persist model selection."}
 
       _ ->
-        {:noreply, put_flash(socket, :error, "Unknown model selection.")}
+        {:error, "Unknown model selection."}
     end
   end
+
+  defp change_composer_setting("effort", value, socket) when is_binary(value) do
+    with false <- socket.assigns.model_unavailable,
+         %{choices: choices} = setting <- socket.assigns.effort_setting,
+         true <- Enum.any?(choices, &(&1.value == value)),
+         result when result == :ok or elem(result, 0) == :ok <-
+           Sigma.Agent.Runtime.change_reasoning_effort(
+             socket.assigns.workdir,
+             socket.assigns.session_id,
+             if(value != "", do: value)
+           ) do
+      {:ok, assign(socket, :effort_setting, %{setting | value: value})}
+    else
+      {:error, _reason} -> {:error, "Could not change reasoning effort."}
+      _ -> {:error, "Unknown reasoning effort."}
+    end
+  end
+
+  defp change_composer_setting(_, _, _), do: {:error, "Unknown session setting."}
 
   defp persist_selected_model(
          socket,
@@ -3712,12 +3810,28 @@ defmodule Sigma.Web.SessionLive do
   def handle_info({:models_changed, _agent_dir}, socket) do
     options = model_options(ConfigManager.get_config(), socket.assigns.active_provider_id)
 
+    socket =
+      assign(socket,
+        model_options: options,
+        model_unavailable:
+          not configured_model?(socket.assigns.active_provider_id, socket.assigns.current_model)
+      )
+
+    {:noreply, refresh_composer_settings(socket)}
+  end
+
+  def handle_info({:session_model_selected, selection}, socket) do
+    {:noreply, socket |> assign(selection) |> refresh_composer_settings()}
+  end
+
+  def handle_info(
+        {:reasoning_effort_changed, effort},
+        %{assigns: %{effort_setting: %{} = setting}} = socket
+      ) do
     {:noreply,
-     assign(socket,
-       model_options: options,
-       model_unavailable:
-         not configured_model?(socket.assigns.active_provider_id, socket.assigns.current_model)
-     )}
+     socket
+     |> assign(:effort_setting, %{setting | value: effort || ""})
+     |> refresh_composer_settings()}
   end
 
   @impl true
@@ -4882,6 +4996,7 @@ defmodule Sigma.Web.SessionLive do
     |> assign(:current_model, nil)
     |> assign(:current_model_value, nil)
     |> assign(:model_options, [])
+    |> assign(:effort_setting, nil)
     |> assign(:model_unavailable, false)
     |> assign(:goal_recovery, nil)
     |> assign(:context_token_count, nil)
