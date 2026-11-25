@@ -3789,7 +3789,7 @@ defmodule Sigma.Agent do
   defp split_summary_chunk(text, size) when byte_size(text) <= size, do: {text, ""}
 
   defp split_summary_chunk(text, size) do
-    <<chunk::binary-size(size), rest::binary>> = text
+    <<chunk::binary-size(^size), rest::binary>> = text
     if String.valid?(chunk), do: {chunk, rest}, else: split_summary_chunk(text, size - 1)
   end
 
