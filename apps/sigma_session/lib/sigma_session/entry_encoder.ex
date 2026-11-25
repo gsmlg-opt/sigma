@@ -56,6 +56,13 @@ defmodule Sigma.Session.EntryEncoder do
     {:ok, entry("model_change", parent_id, %{"model" => "#{provider_id}/#{model_id}"})}
   end
 
+  def encode({:model_change, provider_id, model_id, effort}, parent_id, header?)
+      when is_binary(effort) or is_nil(effort) do
+    with {:ok, entry} <- encode({:model_change, provider_id, model_id}, parent_id, header?) do
+      {:ok, Map.put(entry, "reasoningEffort", effort)}
+    end
+  end
+
   def encode({:thinking_level_change, level, configured}, parent_id, _header?)
       when (is_binary(level) or is_nil(level)) and
              (is_binary(configured) or is_nil(configured)) do

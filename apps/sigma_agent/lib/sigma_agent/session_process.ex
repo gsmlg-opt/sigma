@@ -55,6 +55,10 @@ defmodule Sigma.Agent.SessionProcess do
     await_status(pid_or_name, :hibernating, deadline)
   end
 
+  def change_reasoning_effort(pid_or_name, agent, effort) when is_pid(agent) do
+    GenServer.call(pid_or_name, {:change_reasoning_effort, agent, effort}, :infinity)
+  end
+
   @impl true
   def init(opts) do
     now = System.monotonic_time(:millisecond)
@@ -101,7 +105,10 @@ defmodule Sigma.Agent.SessionProcess do
         _from,
         state
       ) do
-    event = {:model_change, provider_id, model_id}
+    event =
+      if Keyword.has_key?(options, :reasoning_effort),
+        do: {:model_change, provider_id, model_id, options[:reasoning_effort]},
+        else: {:model_change, provider_id, model_id}
 
     case state_change_persist(state, event) do
       {:ok, persist} ->
@@ -127,6 +134,19 @@ defmodule Sigma.Agent.SessionProcess do
   def handle_call({:record_event, event, on_event}, _from, state) do
     case persist_recorded_event(state, event, on_event) do
       :ok -> {:reply, :ok, apply_recorded_event(state, event)}
+      {:error, _reason} = error -> {:reply, error, state}
+    end
+  end
+
+  def handle_call({:change_reasoning_effort, agent, effort}, _from, state) do
+    effort = if effort == "", do: nil, else: effort
+    event = {:thinking_level_change, effort, effort}
+
+    with {:ok, persist} <- state_change_persist(state, event),
+         result when result == :ok or elem(result, 0) == :ok <-
+           safely(fn -> Sigma.Agent.change_reasoning_effort(agent, effort, persist) end) do
+      {:reply, result, apply_recorded_event(state, event)}
+    else
       {:error, _reason} = error -> {:reply, error, state}
     end
   end

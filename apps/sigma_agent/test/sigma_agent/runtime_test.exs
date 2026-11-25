@@ -36,6 +36,20 @@ defmodule Sigma.Agent.RuntimeTest do
     end
   end
 
+  defmodule ReasoningProvider do
+    @behaviour Sigma.Ai.Provider
+
+    @impl true
+    def capabilities(_model),
+      do: %Sigma.Ai.ProviderCapabilities{supported_options: [:reasoning_effort]}
+
+    @impl true
+    def stream(params) do
+      send(params.options[:test_pid], {:reasoning_options, params.options})
+      []
+    end
+  end
+
   defmodule ManualCompactionProvider do
     @behaviour Sigma.Ai.Provider
 
@@ -389,6 +403,94 @@ defmodule Sigma.Agent.RuntimeTest do
 
     assert %{event_count: 0} = Sigma.Agent.SessionProcess.status(handle.session)
     assert %{model: %{id: "mock-model"}} = :sys.get_state(handle.agent)
+  end
+
+  test "reasoning effort is durable and reaches the next provider request", context do
+    repo = tmp_repo!(context, "repo-reasoning")
+    path = Path.join(repo, "reasoning.jsonl")
+    :ok = Sigma.Session.Log.persist_event(path, {:agent_start, repo})
+
+    {:ok, handle} =
+      Sigma.Agent.Runtime.get_session(
+        repo,
+        "reasoning",
+        session_opts(
+          cwd: repo,
+          transcript_path: path,
+          provider: ReasoningProvider,
+          options: [test_pid: self()]
+        )
+      )
+
+    assert {:ok, _entry_id} =
+             Sigma.Agent.Runtime.change_reasoning_effort(repo, "reasoning", "high")
+
+    assert %{reasoning_effort: "high"} = Sigma.Agent.status(handle.agent)
+    assert {:ok, %{reasoning_level: "high"}} = Sigma.Session.Log.snapshot(path)
+    assert {:accepted, _} = Sigma.Agent.prompt(handle.agent, "use selected effort")
+    assert_receive {:reasoning_options, options}, 2_000
+    assert options[:reasoning_effort] == "high"
+  end
+
+  test "effort persistence failures and unsupported values preserve the live choice", context do
+    repo = tmp_repo!(context, "repo-reasoning-failure")
+
+    {:ok, handle} =
+      Sigma.Agent.Runtime.get_session(
+        repo,
+        "reasoning-failure",
+        session_opts(
+          cwd: repo,
+          provider: ReasoningProvider,
+          options: [reasoning_effort: "low"],
+          on_state_change: fn _event -> {:error, :disk_full} end
+        )
+      )
+
+    assert {:error, :disk_full} =
+             Sigma.Agent.Runtime.change_reasoning_effort(repo, "reasoning-failure", "high")
+
+    assert {:error, :invalid_reasoning_effort} =
+             Sigma.Agent.Runtime.change_reasoning_effort(repo, "reasoning-failure", "ultra")
+
+    assert %{reasoning_effort: "low"} = Sigma.Agent.status(handle.agent)
+    assert %{event_count: 0} = Sigma.Agent.SessionProcess.status(handle.session)
+  end
+
+  test "model changes atomically persist an explicit reasoning reset", context do
+    repo = tmp_repo!(context, "repo-reasoning-model")
+    path = Path.join(repo, "reasoning-model.jsonl")
+    :ok = Sigma.Session.Log.persist_event(path, {:agent_start, repo})
+
+    {:ok, handle} =
+      Sigma.Agent.Runtime.get_session(
+        repo,
+        "reasoning-model",
+        session_opts(cwd: repo, transcript_path: path, provider: ReasoningProvider)
+      )
+
+    assert {:ok, _} = Sigma.Agent.Runtime.change_reasoning_effort(repo, "reasoning-model", "high")
+
+    assert {:ok, _} =
+             Sigma.Agent.Runtime.change_model(
+               repo,
+               "reasoning-model",
+               "openai",
+               "new-model",
+               ReasoningProvider,
+               %{id: "new-model", provider: "openai"},
+               reasoning_effort: nil,
+               test_pid: self()
+             )
+
+    assert %{reasoning_effort: nil} = Sigma.Agent.status(handle.agent)
+
+    assert {:ok, %{model_id: "new-model", reasoning_level: nil}} =
+             Sigma.Session.Log.snapshot(path)
+
+    assert {:accepted, _} = Sigma.Agent.prompt(handle.agent, "provider default effort")
+    assert_receive {:reasoning_options, options}, 2_000
+    assert options[:reasoning_effort] == nil
   end
 
   test "session process contains persistence callback failures and rolls back", context do
@@ -1432,6 +1534,9 @@ defmodule Sigma.Agent.RuntimeTest do
 
     assert_receive {:transition_locked, owner}, 5_000
     assert {:rejected, :session_busy} = Sigma.Agent.prompt(handle.agent, "must not race")
+
+    assert {:error, :session_busy} =
+             Sigma.Agent.Runtime.change_reasoning_effort(repo, "source", "high")
 
     assert {:error, :session_busy} =
              Sigma.Agent.Runtime.change_model(

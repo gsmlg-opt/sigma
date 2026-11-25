@@ -347,6 +347,10 @@ defmodule Sigma.Agent do
     GenServer.call(pid, {:change_provider, provider, model, options, persist}, :infinity)
   end
 
+  def change_reasoning_effort(pid, effort, persist) when is_function(persist, 0) do
+    GenServer.call(pid, {:change_reasoning_effort, effort, persist}, :infinity)
+  end
+
   def get_policy(pid) do
     GenServer.call(pid, :get_policy)
   end
@@ -1234,6 +1238,28 @@ defmodule Sigma.Agent do
 
       {:error, _reason} = error ->
         {:reply, error, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:change_reasoning_effort, effort, persist}, _from, state) do
+    with false <- TurnState.active?(state.turn_state) or not is_nil(state.current_turn_task),
+         {:ok, effort} <- Sigma.Ai.ReasoningEffort.validate(state.provider, state.model, effort),
+         result when result == :ok or elem(result, 0) == :ok <- run_state_change(persist) do
+      options =
+        Sigma.Ai.ReasoningEffort.options(
+          state.provider,
+          state.model,
+          effort,
+          state.provider_options
+        )
+
+      state = %{state | provider_options: options}
+      notify_subscribers(state, {:reasoning_effort_changed, effort})
+      {:reply, result, state}
+    else
+      true -> {:reply, {:error, :session_busy}, state}
+      {:error, _reason} = error -> {:reply, error, state}
     end
   end
 
@@ -2311,6 +2337,7 @@ defmodule Sigma.Agent do
       phase: state.turn_state.phase,
       turn_id: state.turn_state.turn_id,
       current_request_id: state.current_request_id,
+      reasoning_effort: state.provider_options[:reasoning_effort],
       context_snapshot: state.context_snapshot,
       context_policy: current_context_policy(state),
       steering_queue_count: counts.steering,

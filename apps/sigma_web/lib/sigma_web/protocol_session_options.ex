@@ -77,11 +77,21 @@ defmodule Sigma.Web.ProtocolSessionOptions do
           current_date: Date.utc_today()
         )
 
+      model = agent_model(config, model_id)
+
+      options =
+        Sigma.Ai.ReasoningEffort.options(
+          provider,
+          model,
+          Map.get(snapshot, :reasoning_level),
+          provider_options(config)
+        )
+
       [
-        model: agent_model(config, model_id),
+        model: model,
         context_limit: existing_context_limit(metadata),
         provider: provider,
-        options: provider_options(config),
+        options: options,
         system_prompt: nil,
         session_context: session_context,
         permission_config: ConfigManager.get_permissions(),

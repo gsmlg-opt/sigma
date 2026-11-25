@@ -313,6 +313,19 @@ defmodule Sigma.Agent.Runtime do
     |> Path.absname()
   end
 
+  @doc "Persists and applies the reasoning effort used by subsequent turns."
+  def change_reasoning_effort(repo_path, session_id, effort)
+      when is_binary(repo_path) and is_binary(session_id) do
+    with session_process when is_pid(session_process) <- lookup(repo_path, session_id, :session),
+         agent when is_pid(agent) <- lookup(repo_path, session_id, :agent) do
+      Sigma.Agent.SessionProcess.change_reasoning_effort(session_process, agent, effort)
+    else
+      nil -> {:error, :session_not_running}
+    end
+  catch
+    :exit, reason -> {:error, {:session_unavailable, reason}}
+  end
+
   defp session_operation(repo_path, source_session_id, operation) do
     with {:ok, %{repository: repository}} <- ensure_repository(repo_path) do
       Sigma.Agent.RepositoryProcess.session_operation(repository, source_session_id, operation)

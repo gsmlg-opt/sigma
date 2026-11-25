@@ -105,7 +105,18 @@ defmodule Sigma.Session.Journal do
     update_snapshot(acc, node, fn snapshot ->
       case {Map.get(entry, "role", "default"), split_model(entry["model"])} do
         {role, {:ok, provider_id, model_id}} when role in [nil, "default"] ->
-          {:ok, %{snapshot | provider_id: provider_id, model_id: model_id}}
+          snapshot = %{snapshot | provider_id: provider_id, model_id: model_id}
+
+          case Map.fetch(entry, "reasoningEffort") do
+            :error ->
+              {:ok, snapshot}
+
+            {:ok, effort} when is_binary(effort) or is_nil(effort) ->
+              {:ok, %{snapshot | reasoning_level: effort, configured_reasoning_level: effort}}
+
+            {:ok, _invalid} ->
+              {:error, :invalid_reasoning_level}
+          end
 
         {role, {:ok, _provider_id, _model_id}} when is_binary(role) ->
           {:ok, snapshot}

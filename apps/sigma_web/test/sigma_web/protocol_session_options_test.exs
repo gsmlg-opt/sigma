@@ -11,10 +11,12 @@ defmodule Sigma.Web.ProtocolSessionOptionsTest do
         mcp_server_ids: [],
         provider_id: "p",
         model_id: "kept",
-        model_source: :journal
+        model_source: :journal,
+        reasoning_level: "high"
       }
 
       opts = ProtocolSessionOptions.resolve(snapshot, tmp, tmp, "retired-tools")
+      assert opts[:options][:reasoning_effort] == "high"
       assert opts[:provider] == Sigma.Ai.Providers.OpenAIResponses
       assert opts[:tools] == []
       assert opts[:native_tools]
