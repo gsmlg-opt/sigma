@@ -54,8 +54,13 @@ defmodule Sigma.Agent.Backplane.GoalCoordinator do
   def clear(coordinator, instruction),
     do: GenServer.call(coordinator, {:clear, instruction}, :infinity)
 
-  def fork(coordinator, target_writer, cwd, target_transcript),
-    do: GenServer.call(coordinator, {:fork, target_writer, cwd, target_transcript}, :infinity)
+  def fork(coordinator, target_writer, cwd, target_transcript, opts \\ []),
+    do:
+      GenServer.call(
+        coordinator,
+        {:fork, target_writer, cwd, target_transcript, Keyword.get(opts, :recovery) == true},
+        :infinity
+      )
 
   def recover(coordinator), do: GenServer.call(coordinator, :recover, :infinity)
 
@@ -322,8 +327,12 @@ defmodule Sigma.Agent.Backplane.GoalCoordinator do
   def handle_call({:clear, _instruction}, _from, %{status: :recovery_required} = state),
     do: {:reply, recovery_required(), state}
 
-  def handle_call({:fork, _writer, _cwd, _path}, _from, %{status: :recovery_required} = state),
-    do: {:reply, recovery_required(), state}
+  def handle_call(
+        {:fork, _writer, _cwd, _path, false},
+        _from,
+        %{status: :recovery_required} = state
+      ),
+      do: {:reply, recovery_required(), state}
 
   def handle_call({:set, mutation, instruction}, _from, state),
     do: {:reply, Goal.set(state.goal, mutation, instruction), state}
@@ -331,7 +340,7 @@ defmodule Sigma.Agent.Backplane.GoalCoordinator do
   def handle_call({:clear, instruction}, _from, state),
     do: {:reply, Goal.clear(state.goal, instruction), state}
 
-  def handle_call({:fork, writer, cwd, target_transcript}, _from, state) do
+  def handle_call({:fork, writer, cwd, target_transcript, _recovery}, _from, state) do
     result =
       with {:ok, writer} <- resolve_writer(writer),
            {:ok, thread_id} <- journal_identity(writer, cwd),

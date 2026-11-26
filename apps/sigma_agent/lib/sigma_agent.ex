@@ -173,9 +173,9 @@ defmodule Sigma.Agent do
          do: GoalIntegration.clear(handle, instruction)
   end
 
-  def fork_goal(pid, target_writer, cwd, target_transcript) do
+  def fork_goal(pid, target_writer, cwd, target_transcript, opts \\ []) do
     with {:ok, handle} <- GenServer.call(pid, :goal_operation_handle),
-         do: GoalIntegration.fork(handle, target_writer, cwd, target_transcript)
+         do: GoalIntegration.fork(handle, target_writer, cwd, target_transcript, opts)
   end
 
   def retire_goal(pid), do: GenServer.call(pid, :retire_goal, :infinity)

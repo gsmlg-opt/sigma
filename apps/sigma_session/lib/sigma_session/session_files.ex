@@ -91,7 +91,14 @@ defmodule Sigma.Session.SessionFiles do
          {:ok, metadata} <- read_metadata(source_meta_path),
          {:ok, cwd} <- fork_cwd(metadata, source_jsonl_path, opts),
          {:ok, new_session_id} <-
-           Log.fork_at_message(source_jsonl_path, target_jsonl_path, message_id, cwd),
+           Log.fork_at_message(
+             source_jsonl_path,
+             target_jsonl_path,
+             message_id,
+             cwd,
+             JsonlFile,
+             opts
+           ),
          :ok <-
            write_fork_metadata_or_cleanup(metadata, target_meta_path, target_jsonl_path, opts) do
       {:ok, new_session_id}

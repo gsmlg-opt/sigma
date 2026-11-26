@@ -270,6 +270,92 @@ defmodule Sigma.Agent.BackplaneGoalAdmissionRecoveryFunctionalTest do
     refute_receive {:admission_provider, _, _}, 0
   end
 
+  @tag :recovery_goal_fork
+  test "recovery fork preserves an indexed Goal without settling its missing Runtime run", c do
+    source = Path.join(c.dir, "recovery-source.jsonl")
+    root = Path.join(source <> ".subagents", "goal")
+    target = Path.join(c.dir, "recovery-fork.jsonl")
+    target_root = Path.join(target <> ".subagents", "goal")
+
+    source_writer =
+      start_supervised!(
+        {Writer, storage_id: source, session_id: "recovery-source", cwd: c.dir},
+        id: :recovery_source_writer
+      )
+
+    assert {:ok, _} = Writer.append(source_writer, {:agent_start, c.dir})
+    assert {:ok, %{entries: [%{"id" => thread}]}} = Writer.selected_journal(source_writer)
+    source_store = start_supervised!({GoalStore, path: root}, id: :recovery_source_store)
+
+    opts = [
+      writer: source_writer,
+      cwd: c.dir,
+      root: root,
+      transcript_path: source,
+      runtime_store: c.store,
+      host_context: %{record_instruction: fn _thread, _instruction -> :ok end}
+    ]
+
+    first =
+      start_supervised!({GoalCoordinator, opts}, id: :recovery_source_first, restart: :temporary)
+
+    assert {:ok, _} =
+             GoalCoordinator.set(first, %{objective: "Preserve this requested work"}, %{
+               text: "Continue independently after interruption"
+             })
+
+    assert :ok = GenServer.stop(first, :normal)
+
+    assert :ok =
+             GoalRuns.record(root, thread, %{
+               thread_id: thread,
+               run_id: "missing-recovery-run",
+               incarnation: 1,
+               mode: :execution,
+               usage_authoritative: true,
+               goal_id: nil
+             })
+
+    coordinator = start_supervised!({GoalCoordinator, opts}, id: :recovery_source_reopened)
+    handle = %{coordinator: coordinator}
+    assert {:ok, before_record} = GoalStore.load(source_store, thread)
+    assert {:ok, before_index} = GoalRuns.list(root, thread)
+    assert {:ok, before_state} = GoalCoordinator.identity(coordinator)
+    source_bytes = File.read!(source)
+
+    target_writer =
+      start_supervised!(
+        {Writer, storage_id: target, session_id: "recovery-fork", cwd: c.dir},
+        id: :recovery_target_writer
+      )
+
+    assert {:error, %Error{class: :resource_conflict} = original} =
+             GoalIntegration.fork(handle, target_writer, c.dir, target)
+
+    assert {:ok, %{thread_id: target_thread, snapshot: snapshot}} =
+             GoalIntegration.fork(handle, target_writer, c.dir, target, recovery: true)
+
+    assert snapshot.goal == %{before_record.goal | thread_id: target_thread}
+    assert snapshot.admission_settlements == %{}
+    assert snapshot.runtime_receipt_counts == %{}
+    refute target_thread == thread
+    assert {:ok, target_store} = GoalStore.open(path: target_root)
+    assert {:ok, ^snapshot} = GoalStore.load(target_store, target_thread)
+    assert {:ok, []} = GoalRuns.list(target_root, target_thread)
+
+    assert {:ok, ^before_record} = GoalStore.load(source_store, thread)
+    assert {:ok, ^before_index} = GoalRuns.list(root, thread)
+    assert {:ok, ^before_state} = GoalCoordinator.identity(coordinator)
+    assert File.read!(source) == source_bytes
+    assert {:error, %Error{class: :not_found}} = Store.load(c.store, "missing-recovery-run")
+
+    assert {:error, ^original} =
+             GoalIntegration.fork(handle, target_writer, c.dir, target)
+
+    assert :ok = GoalStore.retire(target_root)
+    refute_receive {:admission_provider, _, _}, 0
+  end
+
   defp failed_settlement!(c) do
     root = prompt!(c.agent, "Create a Goal and keep working")
     root = call!(root, "create_goal", %{"objective" => "Finish the requested recovery work"})

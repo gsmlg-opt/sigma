@@ -2490,6 +2490,97 @@ defmodule Sigma.Web.SessionLiveTest do
     end
   end
 
+  @tag :recovery_fork_ui
+  test "recovery Fork confirmation preserves unfinished calls without starting a model request",
+       %{
+         conn: conn
+       } do
+    {agent_dir, 0} = System.cmd("pwd", ["-P"], cd: ConfigManager.agent_dir())
+    Application.put_env(:sigma_session, :agent_dir, String.trim(agent_dir))
+    session_id = unique_session_id("recovery-fork-source")
+    target_id = unique_session_id("recovery-fork-target")
+    sessions_dir = ConfigManager.sessions_dir(@workdir)
+    source_path = session_storage_path(session_id)
+    File.mkdir_p!(sessions_dir)
+
+    unfinished =
+      Message.assistant("unfinished-call", %{
+        content: [
+          %{type: :text, text: "Inspect the workspace"},
+          %{type: :tool_call, id: "unsettled-call", name: "exec_command", arguments: %{}}
+        ]
+      })
+
+    assert :ok = Log.persist_event(source_path, {:agent_start, @workdir})
+    assert :ok = Log.persist_event(source_path, {:message_end, Message.user("prompt", "inspect")})
+    assert :ok = Log.persist_event(source_path, {:message_end, unfinished})
+    assert {:ok, source} = Log.snapshot(source_path)
+    source_bytes = File.read!(source_path)
+
+    socket =
+      recovery_socket(
+        session_id: session_id,
+        storage_path: source_path,
+        sessions_dir: sessions_dir,
+        subagents_recovery_error: :cleanup_unconfirmed
+      )
+
+    with_capture_provider_pid(self(), fn ->
+      with_mock_provider(CaptureProvider, fn ->
+        with_fork_id_generator([target_id], fn ->
+          assert {:noreply, prepared} =
+                   Sigma.Web.SessionLive.handle_event("fork_session", %{}, socket)
+
+          assert {:noreply, confirmed} =
+                   Sigma.Web.SessionLive.handle_event(
+                     "confirm_fork",
+                     %{"title" => "Independent recovery", "switch" => "false"},
+                     prepared
+                   )
+
+          assert confirmed.assigns.flash["info"] ==
+                   "Fork created without starting a model request."
+
+          assert prepared.assigns.pending_fork.recovery
+          assert is_nil(confirmed.assigns.pending_fork)
+          assert File.read!(source_path) == source_bytes
+
+          target_path = session_storage_path(target_id)
+          assert {:ok, raw} = Sigma.Session.Storage.JsonlFile.read(target_path)
+
+          assert Enum.any?(raw, fn entry ->
+                   entry
+                   |> get_in(["message", "content"])
+                   |> List.wrap()
+                   |> Enum.any?(fn
+                     %{"type" => "tool_call", "id" => "unsettled-call"} -> true
+                     _ -> false
+                   end)
+                 end)
+
+          assert {:ok, snapshot} = Log.snapshot(target_path)
+          refute snapshot.header["id"] == source.header["id"]
+          assert snapshot.parent_session_id == source.header["id"]
+
+          refute Enum.any?(snapshot.context_messages, fn message ->
+                   message.role == :tool_result or
+                     Enum.any?(List.wrap(message.content), &match?(%{type: :tool_call}, &1))
+                 end)
+
+          refute File.exists?(target_path <> ".runtime")
+          refute File.exists?(target_path <> ".subagents/lifetime-recovery.etf")
+          assert Sigma.Agent.Runtime.lookup(@workdir, target_id, :agent) == nil
+
+          {:ok, target, _html} = live_loaded(conn, session_path(target_id))
+          assert chat_snapshot(target).admission.canSubmit
+          refute chat_snapshot(target).runtime.active
+          refute has_element?(target, "#subagent-recovery")
+          refute_receive {:provider_params, _}, 0
+        end)
+      end)
+    end)
+  end
+
   test "clears recovery admission after an authoritative snapshot no longer reports a blocker" do
     session_id = unique_session_id("recovery-cleared")
     storage_path = session_storage_path(session_id)

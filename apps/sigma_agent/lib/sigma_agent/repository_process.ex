@@ -476,14 +476,14 @@ defmodule Sigma.Agent.RepositoryProcess do
 
   defp retire_runtime_store(_handle), do: :ok
 
-  defp fork_goal(handle, source_id, {:fork, target_id, sessions_dir, _message_id, _opts}) do
+  defp fork_goal(handle, source_id, {:fork, target_id, sessions_dir, _message_id, opts}) do
     with {:ok, source} <-
            apply(Sigma.Session.SessionFiles, :jsonl_path, [sessions_dir, source_id]),
          {:ok, target} <-
            apply(Sigma.Session.SessionFiles, :jsonl_path, [sessions_dir, target_id]) do
       if File.dir?(goal_root(source)) do
         with_goal_writer(target, target_id, fn target_writer, cwd ->
-          fork_session_goal(handle, source, source_id, target_writer, target, cwd)
+          fork_session_goal(handle, source, source_id, target_writer, target, cwd, opts)
         end)
       else
         :ok
@@ -493,26 +493,27 @@ defmodule Sigma.Agent.RepositoryProcess do
 
   defp fork_goal(_handle, _source_id, _operation), do: :ok
 
-  defp fork_session_goal(%{agent: agent}, _source, _source_id, writer, target, cwd)
+  defp fork_session_goal(%{agent: agent}, _source, _source_id, writer, target, cwd, opts)
        when is_pid(agent) do
-    case Sigma.Agent.fork_goal(agent, writer, cwd, target) do
+    case Sigma.Agent.fork_goal(agent, writer, cwd, target, opts) do
       {:ok, _} -> :ok
       {:error, _} = error -> error
     end
   end
 
-  defp fork_session_goal(_handle, source, source_id, writer, target, cwd) do
+  defp fork_session_goal(_handle, source, source_id, writer, target, cwd, opts) do
     with_goal_writer(source, source_id, fn source_writer, source_cwd ->
       case Sigma.Agent.Backplane.GoalIntegration.open(
              writer: source_writer,
              cwd: source_cwd,
              root: goal_root(source),
              transcript_path: source,
+             recovery_fork: Keyword.get(opts, :recovery) == true,
              runtime_store_path: source <> ".runtime"
            ) do
         {:ok, goal} ->
           try do
-            case Sigma.Agent.Backplane.GoalIntegration.fork(goal, writer, cwd, target) do
+            case Sigma.Agent.Backplane.GoalIntegration.fork(goal, writer, cwd, target, opts) do
               {:ok, _} -> :ok
               {:error, _} = error -> error
             end
@@ -905,12 +906,15 @@ defmodule Sigma.Agent.RepositoryProcess do
   defp operation_fingerprint({:switch, target, sessions_dir, _opts}),
     do: :erlang.phash2({:switch, target, sessions_dir})
 
-  defp operation_fingerprint({:fork, target, sessions_dir, message_id, opts}),
-    do:
-      :erlang.phash2(
-        {:fork, target, sessions_dir, message_id, Keyword.get(opts, :expected_source_revision),
-         Keyword.get(opts, :expected_source_leaf)}
-      )
+  defp operation_fingerprint({:fork, target, sessions_dir, message_id, opts}) do
+    fingerprint =
+      {:fork, target, sessions_dir, message_id, Keyword.get(opts, :expected_source_revision),
+       Keyword.get(opts, :expected_source_leaf)}
+
+    if Keyword.get(opts, :recovery) == true,
+      do: :erlang.phash2({fingerprint, :recovery}),
+      else: :erlang.phash2(fingerprint)
+  end
 
   defp operation_fingerprint({:retry, sessions_dir, message_id, opts}),
     do:

@@ -352,7 +352,7 @@ defmodule Sigma.Agent.BackplaneLifetimeRecoveryFunctionalTest do
   end
 
   @tag :file_stage
-  test "a live recovered source can fork history without confirming its failed child lifetime",
+  test "a live recovered source can fork unfinished history without confirming its failed child lifetime",
        c do
     {child, root} = detached_child!(c)
     assert {:error, :session_busy} = Sigma.Agent.begin_session_operation(c.agent, :fork)
@@ -398,6 +398,30 @@ defmodule Sigma.Agent.BackplaneLifetimeRecoveryFunctionalTest do
     File.cp!(c.path, cold_path)
     File.cp_r!(c.path <> ".runtime", cold_path <> ".runtime")
     File.cp_r!(c.path <> ".subagents", cold_path <> ".subagents")
+
+    assert :ok =
+             Log.persist_event(
+               cold_path,
+               {:message_end,
+                Sigma.Agent.Message.user("unfinished-user", "Interrupted tool work")}
+             )
+
+    assert :ok =
+             Log.persist_event(
+               cold_path,
+               {:message_end,
+                Sigma.Agent.Message.assistant("unfinished-assistant", %{
+                  content: [
+                    %{
+                      type: :tool_call,
+                      id: "unfinished-call",
+                      name: "exec_command",
+                      arguments: %{"cmd" => "must-not-execute"}
+                    }
+                  ]
+                })}
+             )
+
     assert {:ok, history} = Log.snapshot(cold_path)
 
     on_exit(fn ->
@@ -446,8 +470,23 @@ defmodule Sigma.Agent.BackplaneLifetimeRecoveryFunctionalTest do
       expected_source_revision: length(history.branch_entry_ids) + 1,
       expected_source_leaf: history.active_leaf_id,
       title: "Independent continuation",
-      fallback_cwd: cold_dir
+      fallback_cwd: cold_dir,
+      recovery: true
     ]
+
+    assert {:error, {:invalid_fork_boundary, {:unpaired_tool_call, "unfinished-call"}}} =
+             Runtime.fork_session(
+               cold_dir,
+               @session,
+               "ordinary-fork",
+               cold_dir,
+               :all,
+               checkpoint
+               |> Keyword.delete(:recovery)
+               |> Keyword.put(:operation_id, "ordinary-live-fork")
+             )
+
+    refute File.exists?(Path.join(cold_dir, "ordinary-fork.jsonl"))
 
     assert {:error, {:revision_conflict, _}} =
              Runtime.fork_session(
@@ -486,6 +525,21 @@ defmodule Sigma.Agent.BackplaneLifetimeRecoveryFunctionalTest do
     assert fork_history.messages == history.messages
     assert fork_history.context_messages == history.context_messages
     assert fork_history.context_window == history.context_window
+    assert {:ok, fork_entries} = Sigma.Session.Storage.JsonlFile.read(fork_path)
+
+    assert Enum.any?(fork_entries, fn entry ->
+             get_in(entry, ["message", "id"]) == "unfinished-assistant" and
+               Enum.any?(get_in(entry, ["message", "content"]) || [], fn part ->
+                 part["id"] == "unfinished-call"
+               end)
+           end)
+
+    refute Enum.any?(fork_history.context_messages, fn message ->
+             Enum.any?(List.wrap(message.content), fn part ->
+               match?(%{type: :tool_call, id: "unfinished-call"}, part)
+             end)
+           end)
+
     refute fork_history.header["id"] == history.header["id"]
     refute File.exists?(fork_path <> ".subagents/lifetime-recovery.etf")
 
@@ -506,6 +560,20 @@ defmodule Sigma.Agent.BackplaneLifetimeRecoveryFunctionalTest do
     refute File.exists?(fork_path <> ".subagents/lifetime-recovery.etf")
     refute File.exists?(c.end_marker)
     refute_receive {:recovery_provider, _, _}, 0
+
+    assert {:accepted, _} = Sigma.Agent.prompt(fork.agent, "Continue independently")
+    continuation = provider!("fork")
+
+    refute Enum.any?(continuation.params.context.messages, fn message ->
+             Enum.any?(List.wrap(message.content), fn part ->
+               match?(%{type: :tool_call, id: "unfinished-call"}, part)
+             end)
+           end)
+
+    respond!(continuation, "Independent continuation completed")
+    assert eventually(fn -> Sigma.Agent.status(fork.agent).phase == :completed end)
+    assert runtime_bytes(cold_path) == records
+    assert File.read!(lifetime_path) == lifetime
   end
 
   @tag :detached_cancellation

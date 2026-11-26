@@ -2788,6 +2788,7 @@ defmodule Sigma.Web.SessionLive do
         operation_id: pending.operation_id,
         expected_source_revision: pending.expected_source_revision,
         expected_source_leaf: pending.expected_source_leaf,
+        recovery: pending[:recovery] == true,
         title: title
       ]
 
@@ -4356,6 +4357,9 @@ defmodule Sigma.Web.SessionLive do
           pending = %{
             source_session_id: source_session_id,
             message_id: message_id,
+            recovery:
+              message_id == :all and source_session_id == socket.assigns.session_id and
+                subagent_recovery_required?(socket.assigns[:subagents_recovery_error]),
             boundary_turn_id: boundary_turn_id,
             target_title: "Fork of #{source_session_id}",
             provider_id: snapshot.provider_id,

@@ -19,7 +19,12 @@ defmodule Sigma.Agent.Backplane.GoalIntegration do
 
   def open(opts) do
     with {:ok, coordinator} <- GoalCoordinator.start_link(opts) do
-      case ready_context(coordinator, opts) do
+      context =
+        if Keyword.get(opts, :recovery_fork) == true,
+          do: GoalCoordinator.runtime_context(coordinator),
+          else: ready_context(coordinator, opts)
+
+      case context do
         {:ok, context} ->
           {:ok, Map.put(context, :coordinator, coordinator)}
 
@@ -136,9 +141,13 @@ defmodule Sigma.Agent.Backplane.GoalIntegration do
     do: GoalCoordinator.unbind(handle.coordinator, binding)
 
   @doc "Copies Goal state to the new Writer's actual header without starting work."
-  def fork(handle, target_writer, cwd, target_transcript) do
-    with {:ok, %{status: :ready}} <- prepare_admission(handle),
-         do: GoalCoordinator.fork(handle.coordinator, target_writer, cwd, target_transcript)
+  def fork(handle, target_writer, cwd, target_transcript, opts \\ []) do
+    if Keyword.get(opts, :recovery) == true do
+      GoalCoordinator.fork(handle.coordinator, target_writer, cwd, target_transcript, opts)
+    else
+      with {:ok, %{status: :ready}} <- prepare_admission(handle),
+           do: GoalCoordinator.fork(handle.coordinator, target_writer, cwd, target_transcript)
+    end
   end
 
   @doc "Retires the owner before moving, adopting or deleting the owning session files."

@@ -620,18 +620,22 @@ defmodule Sigma.Session.Log do
   @doc """
   Forks a session at the message with the given ID (inclusive), or forks all messages
   when `:all` is passed as the message_id.
+
+  `recovery: true` permits a full-history fork of an interrupted exchange. Raw
+  entries remain unchanged; replay excludes unpaired tool frames from context.
   """
   def fork_at_message(
         source_storage_id,
         target_storage_id,
         message_id,
         cwd,
-        storage_mod \\ JsonlFile
+        storage_mod \\ JsonlFile,
+        opts \\ []
       ) do
     with {:ok, entries, storage_diagnostics} <- read_entries(source_storage_id, storage_mod),
          {:ok, index} <- fork_index(entries, storage_diagnostics),
          {:ok, nodes} <- branch_for_message(index, message_id),
-         :ok <- validate_fork_boundary(nodes, message_id),
+         :ok <- validate_fork_boundary(nodes, message_id, opts),
          {:ok, header} <- fresh_fork_header(index.header, cwd),
          fork_entries = fork_entries(entries, nodes),
          :ok <-
@@ -703,11 +707,16 @@ defmodule Sigma.Session.Log do
     end
   end
 
-  defp validate_fork_boundary(nodes, selected_id \\ nil) do
-    with {:ok, messages} <- decode_branch_messages(nodes),
-         :ok <- validate_tool_pairs(messages),
-         :ok <- validate_fork_message(List.last(messages), selected_id) do
-      :ok
+  defp validate_fork_boundary(nodes, selected_id \\ nil, opts \\ []) do
+    with {:ok, messages} <- decode_branch_messages(nodes) do
+      if selected_id == :all and Keyword.get(opts, :recovery) == true do
+        :ok
+      else
+        with :ok <- validate_tool_pairs(messages),
+             :ok <- validate_fork_message(List.last(messages), selected_id) do
+          :ok
+        end
+      end
     end
   end
 

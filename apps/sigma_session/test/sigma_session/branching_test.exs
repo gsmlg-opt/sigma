@@ -348,6 +348,43 @@ defmodule Sigma.Session.BranchingTest do
     refute File.exists?(target)
   end
 
+  @tag :tmp_dir
+  test "recovery forks preserve unfinished history without allowing an incomplete message cut",
+       %{tmp_dir: tmp_dir} do
+    source = Path.join(tmp_dir, "source.jsonl")
+    target = Path.join(tmp_dir, "recovered.jsonl")
+    cut = Path.join(tmp_dir, "cut.jsonl")
+
+    assistant =
+      Message.assistant("unfinished", %{
+        content: [%{type: :tool_call, id: "pending", name: "exec_command", arguments: %{}}]
+      })
+
+    assert :ok = Log.persist_event(source, {:agent_start, tmp_dir})
+    assert :ok = Log.persist_event(source, {:message_end, Message.user("user", "inspect")})
+    assert :ok = Log.persist_event(source, {:message_end, assistant})
+    original = File.read!(source)
+
+    assert {:error, {:invalid_fork_boundary, {:unpaired_tool_call, "pending"}}} =
+             Log.fork_at_message(source, cut, "unfinished", tmp_dir, JsonlFile, recovery: true)
+
+    refute File.exists?(cut)
+
+    assert {:ok, _} =
+             Log.fork_at_message(source, target, :all, tmp_dir, JsonlFile, recovery: true)
+
+    assert File.read!(source) == original
+    assert {:ok, source_entries} = JsonlFile.read(source)
+    assert {:ok, target_entries} = JsonlFile.read(target)
+    assert tl(target_entries) == tl(source_entries)
+    assert {:ok, snapshot} = Log.snapshot(target)
+    assert Enum.all?(snapshot.context_messages, &(&1.role != :tool_result))
+
+    refute Enum.any?(snapshot.context_messages, fn message ->
+             Enum.any?(List.wrap(message.content), &match?(%{type: :tool_call}, &1))
+           end)
+  end
+
   defp journal_message(entry_id, parent_id, message_id, content, role \\ "user") do
     %{
       "type" => "message",
