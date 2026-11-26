@@ -86,7 +86,7 @@ defmodule Sigma.Agent.BackplaneChildMcpDiscoveryTest do
   end
 
   @tag :child_deferred_mcp_functional
-  test "published MCP functions execute in a managed child and its real Deno followup", c do
+  test "published MCP functions execute in a managed child and its real Code Mode followup", c do
     root = prompt!(c.agent)
     root = call!(root, "tool_search", %{"query" => "encrypted credential"})
     {child, root} = spawn!(root)
@@ -244,7 +244,7 @@ defmodule Sigma.Agent.BackplaneChildMcpDiscoveryTest do
 
   @tag :child_deferred_mcp_functional
   @tag :child_mcp_unsearched_functional
-  test "a real child Deno cell reads resources through its inherited connected client", c do
+  test "a real child Code Mode cell reads resources through its inherited connected client", c do
     root = prompt!(c.agent)
     {child, root} = spawn!(root)
 

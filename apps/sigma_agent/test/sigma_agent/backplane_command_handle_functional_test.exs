@@ -84,8 +84,9 @@ defmodule Sigma.Agent.BackplaneCommandHandleFunctionalTest do
   end
 
   @tag timeout: 60_000
-  test "real Deno settles both nested calls and continues after a completed handle error", c do
-    assert is_binary(System.find_executable("deno"))
+  test "real QuickBEAM settles both nested calls and continues after a completed handle error",
+       c do
+    Sigma.Agent.TestCodeMode.assert_available!()
     {provider, handle} = completed_handle!(c.provider)
 
     code = """
@@ -117,8 +118,8 @@ defmodule Sigma.Agent.BackplaneCommandHandleFunctionalTest do
     assert Sigma.Agent.status(c.agent).phase == :completed
   end
 
-  test "a real child continues after direct and Deno completed-handle errors", c do
-    assert is_binary(System.find_executable("deno"))
+  test "a real child continues after direct and QuickBEAM completed-handle errors", c do
+    Sigma.Agent.TestCodeMode.assert_available!()
 
     send_call(c.provider, "spawn_agent", %{
       "task_name" => "completed_handle_child",

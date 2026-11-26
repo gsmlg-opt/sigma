@@ -101,7 +101,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
     }
   end
 
-  test "configured root catalogs and requests retain complete direct and real Deno results across turns and reopening",
+  test "configured root catalogs and requests retain complete direct and real Code Mode results across turns and reopening",
        c do
     package!(c)
     agent = session!(c)
@@ -163,7 +163,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
     assert Enum.count(http_requests(c), &(&1["path"] == "/plugin-protocol/v1/catalog")) == 4
   end
 
-  test "actual managed children retain the configured plugin host on followup and use real Deno",
+  test "actual managed children retain the configured plugin host on followup and use real Code Mode",
        c do
     package!(c)
     agent = session!(c)
@@ -398,7 +398,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
 
   # Exact retirement of the observer preserves the unknown installation outcome;
   # late installation and the next binding remain independent effects.
-  for mode <- [:direct, :deno], post_hooks <- [false, true] do
+  for mode <- [:direct, :code_mode], post_hooks <- [false, true] do
     @tag :plugin_cancellation
     @tag plugin_post_hook_cancellation: post_hooks
     test "real Engine cancellation rejects late #{mode} plugin completion and admits a fresh binding#{if post_hooks, do: " with PostToolUse", else: ""}",
@@ -430,7 +430,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
           :direct ->
             {@request, args}
 
-          :deno ->
+          :code_mode ->
             {"exec", "return await tools.request_plugin_install(#{Formata.JSON.encode!(args)});"}
         end
 
@@ -492,7 +492,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
     end
   end
 
-  for mode <- [:direct, :deno] do
+  for mode <- [:direct, :code_mode] do
     @tag :plugin_child_cancellation
     test "managed child #{mode} plugin wait retires its exact proof before a fresh archived followup",
          c do
@@ -518,7 +518,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
           :direct ->
             {@request, args}
 
-          :deno ->
+          :code_mode ->
             {"exec", "return await tools.request_plugin_install(#{Formata.JSON.encode!(args)});"}
         end
 
@@ -1399,7 +1399,7 @@ defmodule Sigma.Agent.BackplanePluginsFunctionalTest do
           assert [%{"report" => plugin, "effect_down" => true}] = evidence
           {plugin, []}
 
-        :deno ->
+        :code_mode ->
           assert [
                    %{
                      "nested" => [%{"report" => plugin, "effect_down" => true}],

@@ -185,13 +185,13 @@ defmodule Sigma.Agent.BackplaneMcpResourceLifecycleFunctionalTest do
     end
   end
 
-  for mode <- [:direct, :deno] do
+  for mode <- [:direct, :code_mode] do
     @tag :resource_scope_pagination
     @tag :resource_scope_full_retirement
     @tag resource_pagination: true, resource_execution: mode
     test "managed child #{mode} pagination retires earlier pages before cancelling its exact pending page",
          c do
-      if c.resource_execution == :deno, do: assert(is_binary(System.find_executable("deno")))
+      if c.resource_execution == :code_mode, do: Sigma.Agent.TestCodeMode.assert_available!()
 
       send_call(c.root, "spawn_agent", %{
         "task_name" => "paginated_child",
@@ -205,7 +205,7 @@ defmodule Sigma.Agent.BackplaneMcpResourceLifecycleFunctionalTest do
 
       case c.resource_execution do
         :direct -> send_call(child, "list_mcp_resources", %{})
-        :deno -> send_call(child, "exec", "return await tools.list_mcp_resources({});")
+        :code_mode -> send_call(child, "exec", "return await tools.list_mcp_resources({});")
       end
 
       completed =

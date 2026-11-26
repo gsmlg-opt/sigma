@@ -86,8 +86,8 @@ defmodule Sigma.Agent.BackplaneNativeProductionTest do
     finish!(agent, provider)
   end
 
-  test "real Deno root dispatch applies a raw patch", ctx do
-    assert is_binary(System.find_executable("deno"))
+  test "real QuickBEAM root dispatch applies a raw patch", ctx do
+    Sigma.Agent.TestCodeMode.assert_available!()
     agent = session!(ctx.dir)
     prompt!(agent, "nested raw patch")
     {provider, _} = provider!()
@@ -156,7 +156,7 @@ defmodule Sigma.Agent.BackplaneNativeProductionTest do
     finish!(agent, provider)
   end
 
-  test "the provider receives MCP transport errors directly and through real Deno in the same turn",
+  test "the provider receives MCP transport errors directly and through real QuickBEAM in the same turn",
        ctx do
     body = ~s({"error":{"code":-32602,"message":"Invalid params"}})
 
@@ -198,7 +198,9 @@ defmodule Sigma.Agent.BackplaneNativeProductionTest do
     assert Sigma.Agent.status(agent).phase == :completed
   end
 
-  test "Continue admits one fresh run after a real Deno invocation loses its result", %{dir: dir} do
+  test "Continue admits one fresh run after a real QuickBEAM invocation loses its result", %{
+    dir: dir
+  } do
     observer = self()
 
     mcp = %Sigma.Coding.MCP.Tool{

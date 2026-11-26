@@ -80,7 +80,7 @@ defmodule Sigma.Agent.BackplaneMessageBoardProductionFunctionalTest do
     }
   end
 
-  test "root exposes all nine tools and retains complete direct and Deno results through turns and read-only journal recovery",
+  test "root exposes all nine tools and retains complete direct and Code Mode results through turns and read-only journal recovery",
        c do
     root = prompt!(c.agent)
     assert_board_tools!(root)
@@ -155,7 +155,7 @@ defmodule Sigma.Agent.BackplaneMessageBoardProductionFunctionalTest do
     refute_receive {:board_provider, _, _}, 0
   end
 
-  test "real child shares the board and expires only unconsumed active notices while retaining queued messages and Deno history",
+  test "real child shares the board and expires only unconsumed active notices while retaining queued messages and Code Mode history",
        c do
     root = prompt!(c.agent)
     root = board!(root, "create_channel", %{"channel_name" => "shared", "subscribe" => false})

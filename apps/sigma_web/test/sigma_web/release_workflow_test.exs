@@ -65,6 +65,27 @@ defmodule Sigma.Web.ReleaseWorkflowTest do
     assert source =~ "mix compile --force --warnings-as-errors"
   end
 
+  test "packages and exercises the standalone Code Mode runner on every release target" do
+    source = File.read!(@workflow_path)
+    project = File.read!(Path.join(@repo_root, "mix.exs"))
+
+    assert project =~
+             "steps: [&prepare_process_helper/1, :assemble, &assemble_code_mode_runner/1]"
+
+    assert project =~ ~S|Path.join(release.path, "backplane_code_mode_runner")|
+    assert project =~ ~S|["--output", output, "--no-compile"]|
+    assert source =~ "sigma/backplane_code_mode_runner/bin/backplane-code-mode-runner"
+    assert source =~ "sigma/backplane_code_mode_runner/erts-"
+    assert source =~ "priv/lib/Elixir.QuickBEAM.Native.so"
+    assert source =~ "priv/codex/code_mode_quickbeam.js"
+
+    [_, smoke] = String.split(source, "- name: Verify Code Mode from installed archive", parts: 2)
+    [smoke | _] = String.split(smoke, "- name: Verify terminal helper from installed archive")
+    assert smoke =~ "verify-release-code-mode-smoke.py"
+    assert smoke =~ ~S|sigma-v${VERSION}-${OS}-${ARCH}.tar.gz|
+    refute smoke =~ "if:"
+  end
+
   test "freezes web dependencies and configures the tag identity" do
     source = File.read!(@workflow_path)
 
@@ -112,7 +133,10 @@ defmodule Sigma.Web.ReleaseWorkflowTest do
     source = File.read!(@workflow_path)
 
     assert source =~ "bun test apps/sigma_web/assets/js/hooks/session_terminals_test.js"
-    assert source =~ "apps/sigma_agent/test/sigma_agent/terminals/native_stream_integration_test.exs"
+
+    assert source =~
+             "apps/sigma_agent/test/sigma_agent/terminals/native_stream_integration_test.exs"
+
     assert source =~ "apps/sigma_web/test/sigma_web/session/terminal_binding_test.exs"
     assert source =~ "--test native --test pty_output"
     refute source =~ ~r/run: mix test\s*\n/

@@ -256,6 +256,7 @@ jobs:
         run: |
           rm -rf _build/prod/rel/sigma
           mix release sigma --overwrite
+          test -x _build/prod/rel/sigma/backplane_code_mode_runner/bin/backplane-code-mode-runner
           for binary in sigma-terminal-helper sigma-sandbox-launcher sigma-setsid; do
             test -x "$(
               find _build/prod/rel/sigma/lib \
@@ -314,6 +315,13 @@ jobs:
           for binary in sigma-terminal-helper sigma-sandbox-launcher sigma-setsid; do
             grep -Eq "^sigma/lib/sigma_agent-[^/]+/priv/native/${binary}$" "dist/${archive}.contents"
           done
+          grep -Fxq 'sigma/backplane_code_mode_runner/bin/backplane-code-mode-runner' "dist/${archive}.contents"
+          grep -Eq '^sigma/backplane_code_mode_runner/erts-[^/]+/bin/erlexec$' "dist/${archive}.contents"
+          grep -Eq '^sigma/backplane_code_mode_runner/lib/duskmoon_quickbeam-[^/]+/priv/lib/Elixir.QuickBEAM.Native.so$' "dist/${archive}.contents"
+          grep -Eq '^sigma/backplane_code_mode_runner/lib/backplane_agent_runtime-[^/]+/priv/codex/code_mode_quickbeam.js$' "dist/${archive}.contents"
+          if [[ "$OS" == macos ]]; then
+            grep -Eq '^sigma/lib/backplane_agent_runtime-[^/]+/priv/bin/backplane-local-command-session$' "dist/${archive}.contents"
+          fi
           rm "dist/${archive}.contents"
 
           cd dist
@@ -322,6 +330,18 @@ jobs:
           else
             shasum -a 256 "$archive" > "${archive}.sha256"
           fi
+
+      - name: Verify Code Mode from installed archive
+        timeout-minutes: 2
+        env:
+          ARCH: ${{ matrix.arch }}
+          OS: ${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          code_mode_smoke_root="$(mktemp -d "${RUNNER_TEMP:?}/sigma-code-mode-install.XXXXXXXX")"
+          trap 'rm -rf "$code_mode_smoke_root"' EXIT
+          tar -xzf "dist/sigma-v${VERSION}-${OS}-${ARCH}.tar.gz" -C "$code_mode_smoke_root"
+          python3 scripts/verify-release-code-mode-smoke.py "$code_mode_smoke_root/sigma"
 
       - name: Verify terminal helper from installed archive
         if: matrix.os == 'linux' && matrix.arch == 'amd64'

@@ -173,9 +173,9 @@ defmodule Sigma.Agent.BackplaneMcpEventsFunctionalTest do
     assert Map.delete(decode!(first), "is_error") == page()
     assert decode!(second)["events"] == []
 
-    assert {:accepted, _} = Sigma.Agent.prompt(c.agent, "Read one MRTR page through real Deno")
+    assert {:accepted, _} = Sigma.Agent.prompt(c.agent, "Read one MRTR page through Code Mode")
     root = provider!("events")
-    root = call_events!(root, :deno, "mrtr")
+    root = call_events!(root, :code_mode, "mrtr")
     assert value!(root, "exec")["value"] |> Map.delete("is_error") == page()
     mrtr = Enum.filter(wires(c), &(get_in(&1, ["params", "cursor"]) == "mrtr"))
     assert [first_wire, second_wire] = mrtr
@@ -200,13 +200,13 @@ defmodule Sigma.Agent.BackplaneMcpEventsFunctionalTest do
     assert decode!(nested)["value"] |> Map.delete("is_error") == page()
   end
 
-  for mode <- [:direct, :deno], kind <- [:rpc, :domain] do
+  for mode <- [:direct, :code_mode], kind <- [:rpc, :domain] do
     @tag :events_error_fidelity
     @tag events_mode: mode, events_error_kind: kind
     test "an actual #{kind} Events error retains complete #{mode} details and permits a fresh page",
          c do
       cursor = if c.events_error_kind == :rpc, do: "error", else: "domain-error"
-      name = if c.events_mode == :deno, do: "exec", else: "mcp_events"
+      name = if c.events_mode == :code_mode, do: "exec", else: "mcp_events"
 
       root =
         if c.events_mode == :direct do
@@ -253,7 +253,10 @@ defmodule Sigma.Agent.BackplaneMcpEventsFunctionalTest do
 
       root = call_events!(root, c.events_mode, nil)
       value = value!(root, name)
-      value = if c.events_mode == :deno, do: Map.delete(value["value"], "is_error"), else: value
+
+      value =
+        if c.events_mode == :code_mode, do: Map.delete(value["value"], "is_error"), else: value
+
       assert value == page()
       finish!(root, c.agent)
       retire!(c)
@@ -273,7 +276,7 @@ defmodule Sigma.Agent.BackplaneMcpEventsFunctionalTest do
     end
   end
 
-  for mode <- [:direct, :deno] do
+  for mode <- [:direct, :code_mode] do
     @tag events_mode: mode
     test "root #{mode} cancellation retires both MRTR wires and preserves an independent caller",
          c do
@@ -342,9 +345,12 @@ defmodule Sigma.Agent.BackplaneMcpEventsFunctionalTest do
       refute result!(root, "followup_task").is_error
       refute next.params.turn_id == child.params.turn_id
       next = call_events!(next, c.events_mode, nil)
-      name = if c.events_mode == :deno, do: "exec", else: "mcp_events"
+      name = if c.events_mode == :code_mode, do: "exec", else: "mcp_events"
       value = value!(next, name)
-      value = if c.events_mode == :deno, do: Map.delete(value["value"], "is_error"), else: value
+
+      value =
+        if c.events_mode == :code_mode, do: Map.delete(value["value"], "is_error"), else: value
+
       assert value == page()
       send(next.pid, {:events_response, [%{type: :text, text: "Child Events completed"}]})
       root = call!(root, "wait_agent", %{"timeout_ms" => 10_000})
@@ -421,7 +427,7 @@ defmodule Sigma.Agent.BackplaneMcpEventsFunctionalTest do
     cancelled = Enum.filter(wires(c), &(&1["method"] == "notifications/cancelled"))
     assert Enum.map(cancelled, & &1["params"]["requestId"]) == [pending["id"]]
 
-    if mode == :deno do
+    if mode == :code_mode do
       assert [outer] = Enum.filter(records, &(&1["record_type"] == "code_mode_retirement"))
       assert Enum.any?(outer["nested"], &(&1["evidence_digest"] == event["retirement_digest"]))
     end
@@ -523,7 +529,7 @@ defmodule Sigma.Agent.BackplaneMcpEventsFunctionalTest do
         Map.reject(%{"server" => "events", "cursor" => cursor}, fn {_, v} -> is_nil(v) end)
       )
 
-  defp send_events(provider, :deno, cursor) do
+  defp send_events(provider, :code_mode, cursor) do
     arguments = Map.reject(%{server: "events", cursor: cursor}, fn {_, v} -> is_nil(v) end)
 
     send_call(

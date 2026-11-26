@@ -70,6 +70,22 @@ defmodule Sigma.Web.SamgitaHost.LoopbackTest do
     end
   end
 
+  defmodule CodeModeProvider do
+    @behaviour Sigma.Ai.Provider
+
+    @impl true
+    def stream(params) do
+      send(:samgita_loopback_test, {:code_mode_provider, self(), params})
+
+      receive do
+        {:code_mode_response, content} ->
+          reason = if Enum.any?(content, &(&1.type == :tool_call)), do: :tool_use, else: :stop
+          message = %{LoopProvider.message("") | content: content, stop_reason: reason}
+          [{:start, %{message | content: []}}, {:done, reason, message}]
+      end
+    end
+  end
+
   defmodule Endpoint do
     use Phoenix.Endpoint, otp_app: :sigma_web
 
@@ -80,11 +96,22 @@ defmodule Sigma.Web.SamgitaHost.LoopbackTest do
   end
 
   setup context do
-    root =
-      Path.join(
-        System.tmp_dir!(),
-        "sigma-samgita-loopback-#{context.test}-#{System.unique_integer([:positive])}"
-      )
+    tmp_dir = System.tmp_dir!()
+
+    tmp_dir =
+      if context[:code_mode] do
+        {path, 0} = System.cmd("/bin/pwd", ["-P"], cd: tmp_dir)
+        String.trim(path)
+      else
+        tmp_dir
+      end
+
+    prefix =
+      if context[:code_mode],
+        do: "sigma-code-mode",
+        else: "sigma-samgita-loopback-#{context.test}"
+
+    root = Path.join(tmp_dir, "#{prefix}-#{System.unique_integer([:positive])}")
 
     repo = Path.join(root, "repo")
     agent_dir = Path.join(root, "agent")
@@ -96,12 +123,25 @@ defmodule Sigma.Web.SamgitaHost.LoopbackTest do
     Application.put_env(:sigma_session, :agent_dir, agent_dir)
     Application.put_env(:sigma_web, :protocol_token, token)
 
-    # Explicit runtime options keep these sessions on the plain mock provider path;
-    # native-tool profiles are outside this host's scope.
-    Application.put_env(:sigma_web, :protocol_session_opts,
+    session_opts = [
       model: %{id: "mock-model", api: "mock", provider: "mock"},
       provider: context[:provider] || LoopProvider
-    )
+    ]
+
+    session_opts =
+      if context[:code_mode] do
+        Keyword.merge(session_opts,
+          native_tools: true,
+          tools: [],
+          hook_specs: [],
+          mcp_servers: %{},
+          native_memory_root: Path.join(root, "memories")
+        )
+      else
+        session_opts
+      end
+
+    Application.put_env(:sigma_web, :protocol_session_opts, session_opts)
 
     write_provider_config!(agent_dir)
     {:ok, _repo} = RepoManager.add_repo(repo, name: "Samgita Loopback Repo")
@@ -291,6 +331,58 @@ defmodule Sigma.Web.SamgitaHost.LoopbackTest do
 
     assert {:ok, %{"status" => "interrupted"}} = mutate(client, "turn/interrupt", interrupt)
     refute_client_errors(client)
+  end
+
+  @tag provider: CodeModeProvider, code_mode: true
+  test "real Code Mode stops through WebSocket and a new prompt executes a fresh cell", context do
+    client = connect!(context)
+    thread_id = start_thread!(client, context)
+    assert {:ok, %{"turn_id" => turn_id}} = start_turn(client, thread_id, "run until Stop")
+    assert_receive {:code_mode_provider, first, _request}, 5_000
+
+    send(
+      first,
+      {:code_mode_response, [code_mode_call("loop", "notify('runner-active'); while (true) {}")]}
+    )
+
+    receive_code_mode_output(client, "runner-active")
+
+    assert {:ok, %{"status" => "requested"}} =
+             mutate(client, "turn/interrupt", %{"thread_id" => thread_id, "turn_id" => turn_id})
+
+    assert %{"params" => %{"status" => "interrupted"}} = List.last(receive_turn(client))
+    assert {:ok, %{"turn_id" => next_turn}} = start_turn(client, thread_id, "new prompt")
+    refute next_turn == turn_id
+    assert_receive {:code_mode_provider, second, _request}, 5_000
+    send(second, {:code_mode_response, [code_mode_call("fresh", "return 'after-stop';")]})
+    assert_receive {:code_mode_provider, final, request}, 5_000
+
+    assert %{content: [%{type: :text, text: json}]} =
+             Enum.find(
+               request.context.messages,
+               &match?(
+                 %{role: :tool_result, tool_name: "exec", tool_call_id: "fresh", is_error: false},
+                 &1
+               )
+             )
+
+    assert %{"status" => "completed", "value" => "after-stop"} = JSON.decode!(json)
+
+    send(final, {:code_mode_response, [%{type: :text, text: "fresh work completed"}]})
+
+    assert %{"params" => %{"status" => "completed", "turn_id" => ^next_turn}} =
+             List.last(receive_turn(client))
+
+    refute_client_errors(client)
+  end
+
+  defp code_mode_call(id, source),
+    do: %{type: :tool_call, id: id, name: "exec", input_kind: :custom, arguments: source}
+
+  defp receive_code_mode_output(client, text) do
+    message = receive_notification(client)
+    refute message["method"] == "turn/completed", inspect(message)
+    unless inspect(message) =~ text, do: receive_code_mode_output(client, text)
   end
 
   test "replaying a command_id returns the original turn without a second turn", context do

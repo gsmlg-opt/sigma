@@ -37,7 +37,7 @@ defmodule Sigma.Agent.BackplaneChildArchivesFunctionalTest do
   test "normal child archives survive Runtime rename without replay or an old Store directory", %{
     tmp_dir: dir
   } do
-    assert is_binary(System.find_executable("deno"))
+    Sigma.Agent.TestCodeMode.assert_available!()
     repo = Path.join(dir, "repo")
     sessions = Path.join(repo, "sessions")
     path = Path.join(sessions, "source.jsonl")

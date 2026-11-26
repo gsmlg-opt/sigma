@@ -67,3 +67,16 @@ defmodule Sigma.Agent.TestTools.HostInput do
     end
   end
 end
+
+defmodule Sigma.Agent.TestCodeMode do
+  @moduledoc false
+  import ExUnit.Assertions
+
+  def assert_available! do
+    contracts =
+      Backplane.AgentRuntime.Codex.CodeMode.contracts(%{resource_registry: self()})
+
+    assert Enum.map(contracts, & &1.name) == ["exec", "wait"],
+           "Code Mode requires the built QuickBEAM runner and verified process lifecycle support"
+  end
+end

@@ -2,7 +2,7 @@ defmodule Sigma.ReleaseSmokeProvider do
   @behaviour Sigma.Ai.Provider
 
   @impl true
-  def stream(_params) do
+  def stream(params) do
     started = %{
       role: :assistant,
       content: [],
@@ -14,18 +14,28 @@ defmodule Sigma.ReleaseSmokeProvider do
       timestamp: System.system_time(:millisecond)
     }
 
-    completed = %{
-      started
-      | content: [%{type: :text, text: "release smoke response"}],
-        usage: usage(1),
-        stop_reason: :stop
-    }
+    executed? =
+      Enum.any?(params.context.messages, fn message ->
+        Map.get(message, :role) == :tool_result and Map.get(message, :tool_name) == "exec"
+      end)
 
-    [
-      {:start, started},
-      {:text_delta, 0, "release smoke response", completed},
-      {:done, :stop, completed}
-    ]
+    content =
+      if executed? do
+        [%{type: :text, text: "release smoke response"}]
+      else
+        [
+          %{
+            type: :tool_call,
+            id: "release-code-mode",
+            name: "exec",
+            arguments: "text('packaged native Code Mode'); return 42;"
+          }
+        ]
+      end
+
+    reason = if executed?, do: :stop, else: :tool_use
+    completed = %{started | content: content, usage: usage(1), stop_reason: reason}
+    [{:start, started}, {:done, reason, completed}]
   end
 
   defp usage(output) do
@@ -42,7 +52,7 @@ end
 
 smoke_root =
   Path.join(
-    System.tmp_dir!(),
+    File.cd!(System.tmp_dir!(), &File.cwd!/0),
     "sigma-release-agent-smoke-#{System.unique_integer([:positive])}"
   )
 
@@ -59,6 +69,11 @@ try do
       backplane_runtime_path: Path.join(smoke_root, "runtime"),
       model: %{id: "release-smoke-model", api: "fake", provider: "release-smoke"},
       provider: Sigma.ReleaseSmokeProvider,
+      native_tools: true,
+      tools: [],
+      mcp_servers: %{},
+      hook_specs: [],
+      native_memory_root: Path.join(smoke_root, "memories"),
       idle_timeout_ms: 5_000
     )
 
@@ -66,10 +81,23 @@ try do
   {:accepted, %{turn_id: turn_id}} = Sigma.Agent.prompt(handle.agent, "release smoke prompt")
 
   receive do
+    {:turn_error, error} ->
+      raise "release native Code Mode turn failed: #{inspect(error)}"
+
     {:agent_end, messages} ->
       case List.last(messages) do
         %{role: :assistant, content: [%{type: :text, text: "release smoke response"}]} ->
-          %{event_count: event_count, message_count: 2} =
+          [result] = Enum.filter(messages, &(Map.get(&1, :tool_name) == "exec"))
+          false = result.is_error
+
+          %{
+            "status" => "completed",
+            "value" => 42,
+            "output" => [%{"type" => "text", "text" => "packaged native Code Mode"}]
+          } =
+            result.metadata.structured_result
+
+          %{event_count: event_count, message_count: 4} =
             Sigma.Agent.SessionProcess.status(handle.session)
 
           true = event_count > 0

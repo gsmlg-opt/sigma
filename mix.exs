@@ -8,7 +8,12 @@ defmodule Sigma.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
-      releases: [sigma: [applications: [sigma_web: :permanent]]],
+      releases: [
+        sigma: [
+          applications: [sigma_web: :permanent],
+          steps: [&prepare_process_helper/1, :assemble, &assemble_code_mode_runner/1]
+        ]
+      ],
       listeners: [Phoenix.CodeReloader]
     ]
   end
@@ -23,7 +28,13 @@ defmodule Sigma.MixProject do
   defp aliases do
     [
       # macOS LocalCommand requires Backplane's packaged session helper.
-      setup: ["deps.get", "backplane.command.build", "assets.setup", "assets.build"],
+      setup: [
+        "deps.get",
+        "backplane.command.build",
+        &build_code_mode_runner/1,
+        "assets.setup",
+        "assets.build"
+      ],
       "sigma.run": ["phx.server"],
       "sigma.rel-build": ["assets.build", &build_release/1],
       "sigma.rel-run": ["sigma.rel-build", &run_release/1],
@@ -41,6 +52,31 @@ defmodule Sigma.MixProject do
         "phx.digest"
       ]
     ]
+  end
+
+  # TODO(upstream): gsmlg-opt/backplane#187 Publish the QuickBEAM runner task before releasing Sigma.
+  defp build_code_mode_runner([]) do
+    output = Path.join(Mix.Project.build_path(), "backplane_code_mode_runner")
+    File.rm_rf!(output)
+    Mix.Task.reenable("backplane.code_mode.build")
+    Mix.Task.run("backplane.code_mode.build", ["--output", output])
+  end
+
+  defp prepare_process_helper(release) do
+    if :os.type() == {:unix, :darwin} do
+      Mix.Task.reenable("backplane.command.build")
+      Mix.Task.run("backplane.command.build")
+    end
+
+    release
+  end
+
+  defp assemble_code_mode_runner(release) do
+    output = Path.join(release.path, "backplane_code_mode_runner")
+    File.rm_rf!(output)
+    Mix.Task.reenable("backplane.code_mode.build")
+    Mix.Task.run("backplane.code_mode.build", ["--output", output, "--no-compile"])
+    release
   end
 
   defp build_release([]) do

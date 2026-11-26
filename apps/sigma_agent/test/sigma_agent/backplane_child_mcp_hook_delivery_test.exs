@@ -181,8 +181,8 @@ defmodule Sigma.Agent.BackplaneChildMcpHookDeliveryTest do
     assert length(mcp_calls(c)) == 1
   end
 
-  test "real Deno nested MCP calls retain their own public operation identity", c do
-    assert is_binary(System.find_executable("deno")), "nested MCP hook integration requires Deno"
+  test "real QuickBEAM nested MCP calls retain their own public operation identity", c do
+    Sigma.Agent.TestCodeMode.assert_available!()
     child = child!(c, grants: [@tool, "exec", "wait"])
     conversation = start_run!(child, child.identity, :nested)
     {provider, _} = provider!()

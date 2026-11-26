@@ -216,7 +216,7 @@ defmodule Sigma.Agent.BackplaneHookDeliveryTest do
     finish!(provider)
   end
 
-  test "a real Deno nested operation has its own settled origin and delivers once", ctx do
+  test "a real Code Mode nested operation has its own settled origin and delivers once", ctx do
     agent = session!(ctx.tmp_dir)
     assert {:accepted, _} = Sigma.Agent.prompt(agent, "Use Code Mode")
     {provider, _} = provider!()

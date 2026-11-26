@@ -232,7 +232,8 @@ defmodule Sigma.Agent.BackplaneGoalProductionFunctionalTest do
     refute_receive {:goal_provider, _, _}, 50
   end
 
-  test "real Deno Goal3 uses the current root binding and persists the exact completed Goal", c do
+  test "real Code Mode Goal3 uses the current root binding and persists the exact completed Goal",
+       c do
     root = prompt!(c.agent, "Create, inspect and complete the requested Goal through Code Mode")
 
     root =

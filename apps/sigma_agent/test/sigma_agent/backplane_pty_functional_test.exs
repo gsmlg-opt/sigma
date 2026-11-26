@@ -93,8 +93,9 @@ defmodule Sigma.Agent.BackplanePtyFunctionalTest do
   end
 
   @tag timeout: 60_000
-  test "real Deno receives a complete native PTY result including a nonzero command exit", c do
-    assert is_binary(System.find_executable("deno"))
+  test "real QuickBEAM receives a complete native PTY result including a nonzero command exit",
+       c do
+    Sigma.Agent.TestCodeMode.assert_available!()
     provider = prompt!(c.agent)
 
     args = %{
@@ -119,8 +120,8 @@ defmodule Sigma.Agent.BackplanePtyFunctionalTest do
   end
 
   @tag timeout: 60_000
-  test "a managed child resumes its retained PTY through real Deno in a later followup", c do
-    assert is_binary(System.find_executable("deno"))
+  test "a managed child resumes its retained PTY through real QuickBEAM in a later followup", c do
+    Sigma.Agent.TestCodeMode.assert_available!()
     root = prompt!(c.agent)
     host = Runtime.lookup(c.tmp_dir, "pty-root", :subagents)
 

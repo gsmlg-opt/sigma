@@ -95,7 +95,7 @@ defmodule Sigma.Agent.BackplaneMcpStructuredFunctionalTest do
     }
   end
 
-  test "root direct and real Deno results retain complete structured JSON through another turn and journal reopen",
+  test "root direct and real Code Mode results retain complete structured JSON through another turn and journal reopen",
        c do
     root = prompt!(c.agent)
     root = discover!(root)
@@ -118,7 +118,7 @@ defmodule Sigma.Agent.BackplaneMcpStructuredFunctionalTest do
     refute_receive {:structured_provider, _, _}, 0
   end
 
-  test "actual managed-child direct and real Deno results retain complete structured JSON through followup and journal reopen",
+  test "actual managed-child direct and real Code Mode results retain complete structured JSON through followup and journal reopen",
        c do
     root = c.agent |> prompt!() |> discover!()
 
@@ -164,7 +164,7 @@ defmodule Sigma.Agent.BackplaneMcpStructuredFunctionalTest do
 
   @tag :mcp_unknown_functional
   @tag mcp_structured_functional: false
-  test "root unknown MCP content retains complete ordered JSON through direct Deno another turn and journal reads",
+  test "root unknown MCP content retains complete ordered JSON through direct Code Mode another turn and journal reads",
        c do
     root = c.agent |> prompt!() |> discover!() |> exercise_unknown_results!(c.payload)
     previous = Enum.find(root.params.context.messages, &(&1[:tool_name] == @tool))
@@ -185,7 +185,7 @@ defmodule Sigma.Agent.BackplaneMcpStructuredFunctionalTest do
 
   @tag :mcp_unknown_functional
   @tag mcp_structured_functional: false
-  test "actual managed-child unknown MCP content retains complete ordered JSON through direct Deno followup and journal reads",
+  test "actual managed-child unknown MCP content retains complete ordered JSON through direct Code Mode followup and journal reads",
        c do
     root = c.agent |> prompt!() |> discover!()
 
@@ -229,7 +229,7 @@ defmodule Sigma.Agent.BackplaneMcpStructuredFunctionalTest do
 
   @tag :mcp_nested_error_functional
   @tag mcp_structured_functional: false
-  test "root real Deno MCP error fulfills its promise and preserves the following call through another turn and journal reads",
+  test "root real Code Mode MCP error fulfills its promise and preserves the following call through another turn and journal reads",
        c do
     root = c.agent |> prompt!() |> discover!() |> exercise_nested_error!(c.payload)
     previous = result!(root, "exec")
@@ -251,7 +251,7 @@ defmodule Sigma.Agent.BackplaneMcpStructuredFunctionalTest do
 
   @tag :mcp_nested_error_functional
   @tag mcp_structured_functional: false
-  test "actual managed-child real Deno MCP error fulfills its promise and preserves the following call through followup and journal reads",
+  test "actual managed-child real Code Mode MCP error fulfills its promise and preserves the following call through followup and journal reads",
        c do
     root = c.agent |> prompt!() |> discover!()
 

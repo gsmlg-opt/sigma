@@ -45,9 +45,32 @@ mix setup
 mix phx.server
 ```
 
-`mix setup` runs `deps.get`, `backplane.command.build`, `assets.setup`, and `assets.build`. `backplane.command.build` compiles Backplane's packaged LocalCommand session helper into the dependency's `priv/bin` (required on macOS); it does not otherwise modify dependency source. `mix sigma.run` is an alias for `mix phx.server`.
+`mix setup` runs `deps.get`, `backplane.command.build`, the public `backplane.code_mode.build` task, `assets.setup`, and `assets.build`. `backplane.command.build` compiles Backplane's packaged LocalCommand session helper into the dependency's `priv/bin` (required on macOS); it does not otherwise modify dependency source. `mix sigma.run` is an alias for `mix phx.server`.
 
 `mix sigma.rel-run` builds the frontend assets, overwrites the `sigma` release for the current Mix environment, and runs it in the foreground.
+
+The QuickBEAM migration build hooks require the corresponding Runtime release.
+Local verification uses an unpublished Hex-format candidate; tracked dependency
+adoption remains pending publication.
+
+Code Mode uses Backplane's standalone QuickBEAM runner. Setup builds it under
+`_build/<env>/backplane_code_mode_runner`; every `mix release sigma` builds a
+separate runner under the assembled release root. macOS release assembly also
+builds the host process-observation helper before copying application files. Keep
+the whole runner directory, including ERTS, bootstrap and native libraries, when
+moving an installation. Deno, Mix
+and a system Elixir installation are not required by the packaged runner. After
+updating Runtime, rerun `mix setup` or assemble a fresh release so the runner and
+host package match. For a test build, run
+`MIX_ENV=test mix backplane.code_mode.build` after removing the previous generated
+`_build/test/backplane_code_mode_runner` directory.
+
+Root and managed-child sessions use Runtime's same packaged runner lookup and
+start independent OS processes for their cells. A yielded cell survives turns
+only within the running host; reopening saved history never restarts JavaScript
+or replays tool effects. Drain or close active cells before replacing an installed
+release. `python3 scripts/verify-release-code-mode-smoke.py /path/to/sigma` checks
+a relocated runner with an empty `PATH`, including yield/resume and EOF shutdown.
 
 Open <http://localhost:4580>.
 

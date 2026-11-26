@@ -31,7 +31,7 @@ defmodule Sigma.Agent.BackplaneCodexCodeModeTest do
     assert {:ok, context} = CodexResources.context(resources, binding)
 
     for unavailable <- [
-          Map.put(context, :deno_path, nil),
+          Map.put(context, :code_mode_runner, Path.join(dir, "missing-runner")),
           Map.put(context, :process_lifecycle_capability, :unsupported)
         ] do
       assert CodeMode.contracts(unavailable) == []
@@ -97,6 +97,7 @@ defmodule Sigma.Agent.BackplaneCodexCodeModeTest do
 
     code = """
     yield "ready";
+    await new Promise(resolve => setTimeout(resolve, 150));
     text("before");
     yield "first";
     text("between");
@@ -111,20 +112,13 @@ defmodule Sigma.Agent.BackplaneCodexCodeModeTest do
     worker = worker!(context, binding, cell_id)
     monitor = Process.monitor(worker)
     assert {:ok, identity} = CodeMode.Worker.os_identity(worker)
-    assert {_, 0} = System.cmd("kill", ["-STOP", to_string(identity.pid)])
 
-    provider =
-      try do
-        {slice, next_provider} =
-          call!(provider, "wait", %{"cell_id" => cell_id, "yield_time_ms" => 0})
+    {slice, provider} =
+      call!(provider, "wait", %{"cell_id" => cell_id, "yield_time_ms" => 0})
 
-        assert slice.status == :yielded
-        refute Map.has_key?(slice, :value)
-        assert :sys.get_state(worker).from == nil
-        next_provider
-      after
-        System.cmd("kill", ["-CONT", to_string(identity.pid)])
-      end
+    assert slice.status == :yielded
+    refute Map.has_key?(slice, :value)
+    assert :sys.get_state(worker).from == nil
 
     await_generator(worker, System.monotonic_time(:millisecond) + 2_000)
     assert {:ok, %{revision: 1}} = Plan.read(context.plan)
@@ -192,7 +186,9 @@ defmodule Sigma.Agent.BackplaneCodexCodeModeTest do
     assert {:ok, %{status: :confirmed}} = CodexResources.close(resources)
   end
 
-  test "wait termination withdraws a yielded cell and stops its Deno process", %{tmp_dir: dir} do
+  test "wait termination withdraws a yielded cell and stops its QuickBEAM process", %{
+    tmp_dir: dir
+  } do
     resources = resources!(dir)
     {conversation, binding, context, provider} = conversation!(resources, "terminate", [])
     {yielded, provider} = call!(provider, "exec", "yield 'checkpoint'; return 'unreachable';")
@@ -294,8 +290,7 @@ defmodule Sigma.Agent.BackplaneCodexCodeModeTest do
     }
 
   defp conversation!(resources, id, targets) do
-    deno = System.find_executable("deno")
-    assert is_binary(deno), "real Code Mode integration requires Deno in the project shell"
+    Sigma.Agent.TestCodeMode.assert_available!()
     assert CodeMode.lifecycle_capability(%{}) == :verified
     authority = authority(id, targets)
     assert {:ok, binding} = CodexResources.bind(resources, authority)
@@ -311,7 +306,7 @@ defmodule Sigma.Agent.BackplaneCodexCodeModeTest do
         name in targets
       end)
 
-    context = Map.merge(context, %{deno_path: deno, code_mode_contracts: contracts})
+    context = Map.put(context, :code_mode_contracts, contracts)
     assert {:ok, profile} = Codex.profile(:code_mode_only, context, authority)
     assert Enum.sort(Enum.map(profile.tools, & &1.name)) == ["exec", "wait"]
     assert {:ok, store} = EphemeralStore.new(1)
@@ -413,12 +408,16 @@ defmodule Sigma.Agent.BackplaneCodexCodeModeTest do
   end
 
   defp assert_os_stopped(identity) do
-    case File.read("/proc/#{identity.pid}/stat") do
-      {:error, :enoent} ->
+    case System.cmd("ps", ["-o", "stat=", "-p", to_string(identity.pid)]) do
+      {state, 0} ->
+        assert String.trim(state) =~ ~r/^[ZX]/,
+               "QuickBEAM runner is still running after cleanup: #{inspect(state)}"
+
+      {_, 1} ->
         :ok
 
-      {:ok, stat} ->
-        assert Regex.match?(~r/\) [ZX] /, stat), "Deno process is still running after cleanup"
+      result ->
+        flunk("could not observe runner process after cleanup: #{inspect(result)}")
     end
   end
 

@@ -163,7 +163,7 @@ defmodule Sigma.Agent.BackplaneClockWaitFunctionalTest do
     assert_effect_once!(effect, c)
   end
 
-  for mode <- [:direct, :deno] do
+  for mode <- [:direct, :code_mode] do
     @tag clock_mode: mode
     test "root #{mode} clock cancellation preserves its exact proof through a fresh turn and retirement",
          c do
@@ -345,7 +345,7 @@ defmodule Sigma.Agent.BackplaneClockWaitFunctionalTest do
     assert cancellation["waiter_down"] == true
     assert cancellation["local_cleanup"] == "confirmed"
 
-    if mode == :deno do
+    if mode == :code_mode do
       assert [outer] = Enum.filter(records, &(&1["record_type"] == "code_mode_retirement"))
       assert outer["identity"]["tool_name"] == "exec"
       assert identity["enclosing_invocation_id"] == outer["identity"]["invocation_id"]
@@ -417,21 +417,21 @@ defmodule Sigma.Agent.BackplaneClockWaitFunctionalTest do
     do: path |> File.stat!(time: :posix) |> Map.take([:size, :mtime, :inode])
 
   defp assert_no_sleep_result!(messages, mode) do
-    name = if mode == :deno, do: "exec", else: "clock::sleep"
+    name = if mode == :code_mode, do: "exec", else: "clock::sleep"
     refute Enum.any?(messages, &(Map.get(&1, :tool_name) == name))
   end
 
   defp send_sleep(provider, :direct),
     do: send_call(provider, "clock::sleep", %{"duration_ms" => 60_000})
 
-  defp send_sleep(provider, :deno) do
-    assert is_binary(System.find_executable("deno"))
+  defp send_sleep(provider, :code_mode) do
+    Sigma.Agent.TestCodeMode.assert_available!()
     send_call(provider, "exec", "return await tools.clock__sleep({duration_ms:60000});")
   end
 
   defp current_time!(provider, mode) do
     {name, args} =
-      if mode == :deno,
+      if mode == :code_mode,
         do: {"exec", "return await tools.clock__curr_time({});"},
         else: {"clock::curr_time", %{}}
 
@@ -440,7 +440,7 @@ defmodule Sigma.Agent.BackplaneClockWaitFunctionalTest do
     refute result.is_error
     assert [%{type: :text, text: json}] = result.content
     value = Formata.JSON.decode!(json)
-    value = if mode == :deno, do: value["value"], else: value
+    value = if mode == :code_mode, do: value["value"], else: value
     assert value["current_time"] =~ ~r/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$/
     next
   end

@@ -2006,6 +2006,22 @@ from worker/OS execution cleanup.
 
 ## Code Mode execution and continuations
 
+The QuickBEAM migration uses the existing root/managed-child public Runtime
+profile and continuation interfaces. Build the packaged runner with
+`mix backplane.code_mode.build`; Sigma setup and release assembly perform this
+step automatically. Runtime locates it under the build or release root, and
+starts an independent OS process per retained cell. Yielded JavaScript state is
+live-host state; cold history reads restore results without evaluating old code.
+The release archive smoke verifies standalone runner relocation and basic
+continuation with an empty `PATH`. Local macOS ARM64 candidate functional, extracted-package and stopped-history
+checks are recorded in the consumer notes; other platforms and actual dependency
+publication/adoption remain separate gates. See the current
+[consumer wiring notes](../agents/architecture-notes.md#quickbeam-code-mode-consumer-wiring-2026-11-26).
+
+The following paragraphs retain the historical Deno acceptance and its original
+version boundaries.
+
+
 The public `Codex.profile(:code_mode_only, context, authority)` exposes `exec`
 and `wait`. Explicitly selected native target contracts enter
 `context.code_mode_contracts`; Runtime supplies nested dispatch through the

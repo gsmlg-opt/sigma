@@ -77,8 +77,8 @@ defmodule Sigma.Agent.BackplanePatchFunctionalTest do
   end
 
   @tag timeout: 60_000
-  test "root real Deno dispatch preserves the complete native patch result", c do
-    assert is_binary(System.find_executable("deno"))
+  test "root real QuickBEAM dispatch preserves the complete native patch result", c do
+    Sigma.Agent.TestCodeMode.assert_available!()
     patch = fixture_patch!(c.dir, "nested-root")
     agent = session!(c)
     root = prompt!(agent)
@@ -100,7 +100,7 @@ defmodule Sigma.Agent.BackplanePatchFunctionalTest do
 
   @tag timeout: 60_000
   test "managed child applies raw and real nested patches and retains results on followup", c do
-    assert is_binary(System.find_executable("deno"))
+    Sigma.Agent.TestCodeMode.assert_available!()
     patch = fixture_patch!(c.dir, "child")
     agent = session!(c)
     host = Runtime.lookup(c.dir, "patch-root", :subagents)

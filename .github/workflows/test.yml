@@ -35,11 +35,6 @@ jobs:
           rustup toolchain install stable --profile minimal --no-self-update
           rustup default stable
 
-      - name: Set up Deno for native Code Mode tests
-        uses: denoland/setup-deno@v2
-        with:
-          deno-version: "v2.8.3"
-
       - name: Set up bubblewrap and verify sandbox prerequisites
         timeout-minutes: 10
         run: scripts/setup-ci-bubblewrap.sh
@@ -69,6 +64,11 @@ jobs:
 
       - name: Build MCP stdio guardian for plugin lifecycle checks
         run: mix backplane.mcp.stdio.build
+
+      - name: Build native Code Mode runner
+        run: |
+          rm -rf _build/test/backplane_code_mode_runner
+          MIX_ENV=test mix backplane.code_mode.build
 
       - name: Run unit tests
         run: mix test

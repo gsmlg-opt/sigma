@@ -19,7 +19,6 @@ in {
       lolcat
       watchman
       tailwindcss_4
-      deno
       pkg-config
       openssl
       cargo

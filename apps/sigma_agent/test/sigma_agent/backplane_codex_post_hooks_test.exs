@@ -522,10 +522,9 @@ defmodule Sigma.Agent.BackplaneCodexPostHooksTest do
 
     original =
       if opts[:code_mode] do
-        deno = System.find_executable("deno")
-        assert is_binary(deno), "real decorated Code Mode integration requires Deno"
+        Sigma.Agent.TestCodeMode.assert_available!()
         contracts = Enum.filter(Tools.contracts(context), &(&1.name == "update_plan"))
-        native_context = Map.merge(context, %{deno_path: deno, code_mode_contracts: contracts})
+        native_context = Map.put(context, :code_mode_contracts, contracts)
         assert {:ok, profile} = Codex.profile(:code_mode_only, native_context, authority)
         profile
       else

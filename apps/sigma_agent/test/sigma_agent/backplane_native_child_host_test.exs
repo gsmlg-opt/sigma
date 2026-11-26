@@ -90,8 +90,8 @@ defmodule Sigma.Agent.BackplaneNativeChildHostTest do
     finish!(root)
   end
 
-  test "real Deno managed child dispatch applies a raw patch", c do
-    assert is_binary(System.find_executable("deno"))
+  test "real QuickBEAM managed child dispatch applies a raw patch", c do
+    Sigma.Agent.TestCodeMode.assert_available!()
     root = prompt!(c.agent)
     {child, root} = spawn!(root, "a")
 
@@ -444,7 +444,7 @@ defmodule Sigma.Agent.BackplaneNativeChildHostTest do
     path = Path.join(c.dir, "child-proof.txt")
     assert File.read!(path) == "中文 \"raw\" {json}\n"
 
-    assert is_binary(System.find_executable("deno"))
+    Sigma.Agent.TestCodeMode.assert_available!()
 
     child =
       call!(child, "exec", """
@@ -497,7 +497,7 @@ defmodule Sigma.Agent.BackplaneNativeChildHostTest do
   end
 
   test "child real nested Plan persists on followup without affecting the root Plan", c do
-    assert is_binary(System.find_executable("deno"))
+    Sigma.Agent.TestCodeMode.assert_available!()
     root = prompt!(c.agent)
     {child, root} = spawn!(root, "a")
 

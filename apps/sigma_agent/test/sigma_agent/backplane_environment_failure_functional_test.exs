@@ -86,14 +86,14 @@ defmodule Sigma.Agent.BackplaneEnvironmentFailureFunctionalTest do
   end
 
   @tag timeout: 60_000
-  test "real Deno receives a startup error as a value and continues with a native plan",
+  test "real QuickBEAM receives a startup error as a value and continues with a native plan",
        %{tmp_dir: dir} do
-    assert is_binary(System.find_executable("deno"))
+    Sigma.Agent.TestCodeMode.assert_available!()
     {failed, original} = failed_startup!()
 
     code = """
     const failed = await tools.wait_for_environment({environment_id: #{Formata.JSON.encode!(failed.environment_id)}});
-    const plan = await tools.update_plan({plan: [{step: "Continue inside Deno", status: "completed"}]});
+    const plan = await tools.update_plan({plan: [{step: "Continue inside QuickBEAM", status: "completed"}]});
     return {failed, plan};
     """
 
@@ -134,7 +134,7 @@ defmodule Sigma.Agent.BackplaneEnvironmentFailureFunctionalTest do
 
     # The production resource host has no failure-injection option. This explicit
     # test host callback supplies only the failure observed from PlainCommand;
-    # native composition, Runtime, Deno, plan and persistence use public paths.
+    # native composition, Runtime, QuickBEAM, plan and persistence use public paths.
     context = Map.put(context, :environment_provider, fn _id -> failed end)
 
     assert {:ok, profile} =

@@ -1,5 +1,72 @@
 # Architecture and acceptance history
 
+## QuickBEAM Code Mode consumer wiring (2026-11-26)
+
+The migration consumer wiring uses only Backplane's public Code Mode APIs.
+`CodexResources.resource_context/2` remains the common context for root and
+managed-child profiles; Runtime discovers the same immutable packaged runner
+for both, while each cell starts its own process. Sigma does not introduce an
+executor, a nested dispatcher or another resource ledger.
+
+Setup builds the development runner with `mix backplane.code_mode.build`.
+On macOS, a pre-assembly step builds the existing host process-observation helper,
+so direct `mix release sigma` packages it as well as `sigma.rel-build`. Sigma's
+Mix release post-assembly step calls the runner task with
+`--output <release root>/backplane_code_mode_runner --no-compile`, using the
+release build's compiled artifacts. This also applies to the isolated
+`_build/<env>/sigma_rel` build used by `sigma.rel-build`; development artifacts
+are not copied into that release. Rebuilds replace only their generated runner
+directory. The full runner directory includes its own ERTS, application beams,
+NIF and JS bootstrap and moves with the enclosing release.
+
+The release workflow checks the archive inventory and executes the extracted
+runner on each existing Linux/macOS x86_64/ARM64 target. Its smoke script sets an
+empty `PATH` and a temporary working directory and home, supplies no host secrets,
+and checks ready, ordered text output, generator yield/configure/resume and EOF
+exit. On macOS it also probes the separately packaged host process helper against
+the verifier's real OS identity.
+This standalone smoke does not establish root/child dispatch, Protocol Stop,
+cold journal reads or cross-platform acceptance by itself. Functional consumer
+preflights now check public `CodeMode.contracts/1`, preserving actual execution,
+results, history and lifecycle assertions. Permission-related cases remain
+outside this migration's selected verification scope.
+
+Local macOS ARM64 acceptance used an actual unpublished Hex-format Runtime
+candidate in a disposable independent Sigma copy, with its dependency override
+confined to that copy. The tracked lockfile still selects the published Runtime;
+adopting the QuickBEAM release remains a delivery gate. The final verified
+candidate SHA256 is
+`9b991b6c142d88f8892cf5d48668419a40bbb7ffc9ef08889525156b3e25b74f`.
+
+The selected functional matrix passed 29 cases (seed 175978), covering public
+exec/wait, retained generators and incremental output, timer slices, real child
+followups, structured MCP/Unicode/error results, clock cancellation, hooks and
+archive reads. The slice fixture uses a real delayed JS timer after its initial
+yield so that a paused OS process cannot prevent the required configure ACK.
+Two additional child-history cases (`backplane_history_notes_integration_test`
+lines 197 and 335) failed on macOS with the original locked Runtime as well;
+their retirement/reused-child failures were preserved without migration fixes.
+
+Production warnings-as-errors compilation and direct `mix release sigma` passed.
+The tarred/extracted archive passed standalone empty-PATH runner and macOS host
+helper probes. The extracted Sigma host also completed an actual native Code
+Mode tool call through its controlled Provider, preserving exact output/value 42
+and a completed public Store run with four canonical messages. That host smoke
+used an isolated home and `/usr/bin:/bin` PATH without Deno, Elixir or Mix.
+The same final candidate also passed a real loopback WebSocket Stop followed by
+a fresh native Code Mode invocation in the same session (one selected case,
+seed 175978). Its fixture preserves custom-tool `input_kind` metadata in the
+journal and uses a canonical temporary path on macOS.
+A separate stopped BEAM read 31 journals produced by this final run, containing
+327 messages and 112 tool results, without starting Sigma applications; all 222
+durable/effect files retained their bytes, size, mtime and inode. Evidence is under
+`/tmp/sigma-quickbeam-acceptance-5z_3z8gn/`. These checks do not establish Linux,
+other architectures, remote CI, actual publication or deployment. The final
+macOS archive SHA256 is
+`2ee95264410b8e8bad2a1e1fda1ecc2b532f244fd5265505c7cb92b7e7ad43e6`.
+Historical versioned acceptance below retains
+the engine and limits used at that time.
+
 Moved verbatim from `AGENTS.md` on 2026-11-09 so agent context stays small. These notes record design boundaries plus historical, version-scoped acceptance evidence (Backplane versions, seeds, `/tmp` evidence paths). Check the stated version before relying on any evidence here.
 
 

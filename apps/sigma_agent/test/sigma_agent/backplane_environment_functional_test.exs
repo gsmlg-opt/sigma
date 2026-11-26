@@ -125,7 +125,7 @@ defmodule Sigma.Agent.BackplaneEnvironmentFunctionalTest do
     refute Process.alive?(local_pid)
   end
 
-  test "root Engine publishes the real environment, waits directly and through Deno, and renews only after closure",
+  test "root Engine publishes the real environment, waits directly and through Code Mode, and renews only after closure",
        %{tmp_dir: dir} do
     {agent, path} = session!(dir)
     first = prompt!(agent)
@@ -252,9 +252,10 @@ defmodule Sigma.Agent.BackplaneEnvironmentFunctionalTest do
   end
 
   @tag timeout: 60_000
-  test "managed children use their own environment and retain it through a real Deno followup", %{
-    tmp_dir: dir
-  } do
+  test "managed children use their own environment and retain it through a real Code Mode followup",
+       %{
+         tmp_dir: dir
+       } do
     {agent, path} = session!(dir)
     root = prompt!(agent)
     root_environment = environment!(root)

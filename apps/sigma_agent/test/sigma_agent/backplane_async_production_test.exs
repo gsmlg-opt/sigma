@@ -105,7 +105,7 @@ defmodule Sigma.Agent.BackplaneAsyncProductionTest do
     refute_receive {:async_provider, _, _}, 50
   end
 
-  test "real Deno async notification is recoverable and its optional answer starts a new turn",
+  test "real Code Mode async notification is recoverable and its optional answer starts a new turn",
        ctx do
     agent = session!(ctx.tmp_dir)
     assert {:accepted, _} = Sigma.Agent.prompt(agent, "Notify")

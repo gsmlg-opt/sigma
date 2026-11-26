@@ -63,7 +63,7 @@ defmodule Sigma.Agent.BackplanePostHookPresentationFunctionalTest do
   end
 
   defp assert_presentation_lifecycle(ctx, host, control, mode, reason \\ @reason) do
-    if mode == :nested, do: assert(is_binary(System.find_executable("deno")))
+    if mode == :nested, do: Sigma.Agent.TestCodeMode.assert_available!()
     specs = hook_specs(ctx.tmp_dir, control, reason)
     owner = owner!(host, ctx.tmp_dir, specs)
     run = prompt!(owner, "update the plan")

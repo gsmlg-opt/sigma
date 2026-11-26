@@ -494,7 +494,7 @@ defmodule Sigma.Agent.BackplaneHistoryNotesIntegrationTest do
   @tag timeout: 60_000
   test "real Code Mode lists model-only archive tools separately while Skills and Memory execute",
        c do
-    assert is_binary(System.find_executable("deno"))
+    Sigma.Agent.TestCodeMode.assert_available!()
     agent = session!(c)
     root = prompt!(agent, "Inspect the Code Mode tool catalog")
 
