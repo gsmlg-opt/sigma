@@ -20,7 +20,7 @@ defmodule Sigma.Ai.HTTP do
 
   defmodule TransportError do
     @moduledoc "A request that failed before a complete HTTP response."
-    defexception [:reason]
+    defexception [:reason, attempts: []]
 
     @impl true
     def message(%{reason: reason}), do: "HTTP transport error: #{inspect(reason)}"
@@ -28,7 +28,16 @@ defmodule Sigma.Ai.HTTP do
 
   defmodule Response do
     @moduledoc false
-    defstruct [:status, :body, :stream, :monitor, :promise, :controller, headers: %{}]
+    defstruct [
+      :status,
+      :body,
+      :stream,
+      :monitor,
+      :promise,
+      :controller,
+      headers: %{},
+      attempts: []
+    ]
   end
 
   @cleanup_timeout 5_000
@@ -66,36 +75,78 @@ defmodule Sigma.Ai.HTTP do
   end
 
   @doc """
-  Streams a POST, retrying only when `retry` approves a transport error (for
-  creation requests: failures before the request left this host).
+  Streams a POST, retrying transport errors or HTTP statuses approved by `retry`.
+  Retries are new submissions; `attempts` preserves their uncertain outcomes.
   Raises `TransportError` when the request cannot be started.
   """
   def post_stream!(url, opts) do
     retry = Keyword.get(opts, :retry, false)
     attempts = 1 + if(retry, do: Keyword.get(opts, :max_retries, 3), else: 0)
-    post_stream(url, opts, retry, attempts, 0)
+    post_stream(url, opts, retry, attempts, 0, [])
   end
 
-  defp post_stream(url, opts, retry, attempts, attempt) do
+  defp post_stream(url, opts, retry, attempts, attempt, history) do
+    retry_wait(opts, 0)
+
     case stream(Keyword.merge(opts, method: :post, url: url)) do
       {:ok, response} ->
-        response
+        history = history ++ [%{attempt: attempt + 1, status: response.status}]
+
+        if attempt + 1 < attempts and is_function(retry, 2) and retry.(nil, response) do
+          cancel(response)
+          retry_wait(opts, retry_after(response) || retry_delay(opts, attempt))
+          post_stream(url, opts, retry, attempts, attempt + 1, history)
+        else
+          %{response | attempts: history}
+        end
 
       {:error, error} ->
+        history =
+          history ++
+            [%{attempt: attempt + 1, reason: error.reason, outcome: :submission_uncertain}]
+
         if attempt + 1 < attempts and is_function(retry, 2) and retry.(nil, error) do
-          Process.sleep(retry_delay(opts, attempt))
-          post_stream(url, opts, retry, attempts, attempt + 1)
+          retry_wait(opts, retry_delay(opts, attempt))
+          post_stream(url, opts, retry, attempts, attempt + 1, history)
         else
-          raise error
+          raise %{error | attempts: history}
         end
+    end
+  end
+
+  defp retry_wait(opts, delay) do
+    ref = opts[:cancellation_ref]
+
+    receive do
+      {:cancel, ^ref} when not is_nil(ref) -> raise TransportError, reason: :cancelled
+    after
+      delay -> :ok
+    end
+  end
+
+  defp retry_after(response) do
+    case List.first(List.wrap(response.headers["retry-after"])) do
+      value when is_binary(value) ->
+        case HTTP.Retry.retry_after(value, DateTime.utc_now()) do
+          {:ok, delay} -> delay
+          _ -> nil
+        end
+
+      _ ->
+        nil
     end
   end
 
   defp retry_delay(opts, attempt) do
     case Keyword.get(opts, :retry_delay) do
-      fun when is_function(fun, 1) -> fun.(attempt)
-      ms when is_integer(ms) and ms >= 0 -> ms
-      _ -> Integer.pow(2, attempt) * 1_000
+      fun when is_function(fun, 1) ->
+        fun.(attempt)
+
+      ms when is_integer(ms) and ms >= 0 ->
+        ms
+
+      _ ->
+        trunc(min(Integer.pow(2, min(attempt, 9)) * 200, 60_000) * (0.9 + :rand.uniform() * 0.2))
     end
   end
 

@@ -5,6 +5,52 @@ defmodule Sigma.Ai.Providers.ResponsesRecoveryTest do
 
   @recovery %{capability: :openai_background_stream_v1, delay_ms: 0, max_attempts: 2}
 
+  test "bare DONE in background mode resumes the same ID without replacement retry classification" do
+    with_server(
+      [
+        {200, created() <> text(1, "partial") <> "data: [DONE]\n\n"},
+        {200, completed(2, "complete")}
+      ],
+      fn url, requests ->
+        request =
+          Sigma.Ai.ProviderRequest.new(%{
+            model: %{id: "test", api: "openai-responses", provider: "test"},
+            context: %{messages: [], tools: []},
+            options:
+              recovery_options() ++ [base_url: url, api_key: "fixture", receive_timeout: 500]
+          })
+
+        events = Sigma.Ai.Provider.stream(OpenAIResponses, request) |> Enum.to_list()
+        assert List.last(events).type == :response_completed
+        refute Enum.any?(events, &(&1.type == :response_failed))
+        assert ["POST", "GET"] == Enum.map(Agent.get(requests, & &1), & &1.method)
+      end
+    )
+  end
+
+  test "a truncated HTTP error during same-ID recovery cannot request replacement generation" do
+    with_server(
+      [{200, created() <> text(1, "partial")}, {503, "unavailable", :truncated_http}],
+      fn url, requests ->
+        request =
+          Sigma.Ai.ProviderRequest.new(%{
+            model: %{id: "test", api: "openai-responses", provider: "test"},
+            context: %{messages: [], tools: []},
+            options:
+              recovery_options() ++ [base_url: url, api_key: "fixture", receive_timeout: 500]
+          })
+
+        failure =
+          Sigma.Ai.Provider.stream(OpenAIResponses, request) |> Enum.to_list() |> List.last()
+
+        assert failure.type == :response_failed
+        assert failure.retry == nil
+        assert failure.error.status == 503
+        assert ["POST", "GET"] == Enum.map(Agent.get(requests, & &1), & &1.method)
+      end
+    )
+  end
+
   test "explicit capability and background creation are required before HTTP" do
     for opts <- [
           [responses_recovery: true],
@@ -204,15 +250,15 @@ defmodule Sigma.Ai.Providers.ResponsesRecoveryTest do
     end)
   end
 
-  test "recovery mode never retries a creation whose response headers were lost" do
+  test "recovery mode respects explicitly disabled creation retries when response headers were lost" do
     with_server([:drop_headers], fn url, requests ->
       error =
         assert_raise ProviderError, fn ->
-          stream(url, %{}, recovery_options()) |> Enum.to_list()
+          stream(url, %{}, recovery_options() ++ [retry: false]) |> Enum.to_list()
         end
 
       assert error.kind == :submission_uncertain
-      refute error.retryable
+      assert error.retry_class == :connection
       assert length(Agent.get(requests, & &1)) == 1
     end)
   end
@@ -282,6 +328,57 @@ defmodule Sigma.Ai.Providers.ResponsesRecoveryTest do
       assert {:provider_error, %ProviderError{kind: :cancelled}} = List.last(events)
       assert length(Agent.get(requests, & &1)) == 1
     end)
+  end
+
+  test "healthy stream time does not consume the interruption recovery window" do
+    state =
+      ResponsesRecovery.new(
+        background: true,
+        responses_recovery: Map.put(@recovery, :max_elapsed_ms, 10)
+      )
+
+    {:apply, state} =
+      ResponsesRecovery.accept(state, %{
+        "type" => "response.created",
+        "sequence_number" => 0,
+        "response" => %{"id" => "resp_resume", "background" => true}
+      })
+
+    Process.sleep(20)
+    assert {:ok, recovering} = ResponsesRecovery.next_attempt(state)
+    assert recovering.deadline > System.monotonic_time(:millisecond)
+
+    Process.sleep(20)
+
+    assert {:error, %ProviderError{raw: %{reason: :recovery_expired}}} =
+             ResponsesRecovery.next_attempt(recovering)
+  end
+
+  test "new applied output resets the recovery episode but duplicate replay does not" do
+    state = ResponsesRecovery.new(recovery_options())
+
+    event = %{
+      "type" => "response.created",
+      "sequence_number" => 0,
+      "response" => %{"id" => "resp_resume", "background" => true}
+    }
+
+    {:apply, state} = ResponsesRecovery.accept(state, event)
+    {:ok, state} = ResponsesRecovery.next_attempt(state)
+    {:ok, state} = ResponsesRecovery.next_attempt(state)
+    {:skip, duplicate} = ResponsesRecovery.accept(state, event)
+
+    assert {:error, %ProviderError{raw: %{reason: :attempts_exhausted}}} =
+             ResponsesRecovery.next_attempt(duplicate)
+
+    {:apply, progressed} =
+      ResponsesRecovery.accept(state, %{
+        "type" => "response.output_text.delta",
+        "sequence_number" => 1,
+        "delta" => "progress"
+      })
+
+    assert {:ok, %{attempts: 1}} = ResponsesRecovery.next_attempt(progressed)
   end
 
   test "worker loss does not spawn a replacement POST or a cursor-only cold resume" do

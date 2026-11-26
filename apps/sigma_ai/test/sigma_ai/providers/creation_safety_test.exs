@@ -4,21 +4,25 @@ defmodule Sigma.Ai.Providers.CreationSafetyTest do
   alias Sigma.Ai.{CreationRequest, ProviderError}
   alias Sigma.Ai.Providers.{Anthropic, OpenAIResponses}
 
-  test "only proven pre-submission failures can be retried, regardless of caller policy" do
+  test "creation transport and 5xx retries are explicit and separate from replacement generation" do
     for option <- [:transient, fn _, _ -> true end] do
       policy = CreationRequest.retry_policy(retry: option)
 
-      for reason <- [:econnrefused, :nxdomain] do
+      for reason <- [:econnrefused, :nxdomain, :closed, :econnreset, :timeout] do
         assert policy.(nil, %Sigma.Ai.HTTP.TransportError{reason: reason})
         assert CreationRequest.submission_error(%{reason: reason}).retryable
       end
 
-      for reason <- [:timeout, :closed, :econnreset] do
-        refute policy.(nil, %Sigma.Ai.HTTP.TransportError{reason: reason})
+      refute policy.(nil, %Sigma.Ai.HTTP.TransportError{reason: :cancelled})
+      refute policy.(nil, %Sigma.Ai.HTTP.TransportError{reason: {:exit, :noproc}})
+      assert CreationRequest.submission_error(%{reason: {:exit, :noproc}}).retry_class == nil
+
+      for status <- [500, 502, 503, 504] do
+        assert policy.(nil, %Sigma.Ai.HTTP.Response{status: status})
       end
 
-      for status <- [408, 429, 500, 502, 503, 504] do
-        refute policy.(nil, %{status: status})
+      for status <- [307, 408, 429] do
+        refute policy.(nil, %Sigma.Ai.HTTP.Response{status: status})
       end
     end
 
@@ -27,30 +31,29 @@ defmodule Sigma.Ai.Providers.CreationSafetyTest do
 
   for provider <- [Anthropic, OpenAIResponses] do
     @provider provider
-    test "#{provider} does not resubmit after the upstream reads the POST and drops headers" do
+    test "#{provider} with retry disabled does not resubmit after the upstream reads the POST and drops headers" do
       with_server(fn _socket -> :ok end, fn url ->
         error = assert_raise ProviderError, fn -> collect(@provider, url) end
         assert error.kind == :submission_uncertain
-        refute error.retryable
+        assert error.raw.reason in [:closed, :timeout, :await_timeout]
       end)
     end
 
-    test "#{provider} does not resubmit when accepted request headers time out" do
+    test "#{provider} with retry disabled does not resubmit when accepted request headers time out" do
       with_server(fn _socket -> Process.sleep(250) end, fn url ->
         error = assert_raise ProviderError, fn -> collect(@provider, url) end
         assert error.kind == :submission_uncertain
-        refute error.retryable
+        assert error.raw.reason in [:closed, :timeout, :await_timeout]
       end)
     end
 
-    test "#{provider} preserves HTTP failures without replaying the creation POST" do
+    test "#{provider} with retry disabled preserves HTTP failures without replaying the creation POST" do
       for status <- [307, 408, 429, 503] do
         with_server(
           fn socket -> respond(socket, status, ~s({"error":{"message":"unavailable"}})) end,
           fn url ->
             error = assert_raise ProviderError, fn -> collect(@provider, url) end
             assert error.status == status
-            refute error.retryable
           end
         )
       end
@@ -75,7 +78,7 @@ defmodule Sigma.Ai.Providers.CreationSafetyTest do
         assert error.message ==
                  "AI provider backplane returned HTTP 500. Upstream compilation failed (CompileError)."
 
-        refute error.retryable
+        assert error.retry_class == :stream
         refute inspect(error) =~ "upstream-secret"
         refute inspect(error) =~ "<html>"
       end)
@@ -95,8 +98,10 @@ defmodule Sigma.Ai.Providers.CreationSafetyTest do
         events = collect(OpenAIResponses, url)
         refute Enum.any?(events, &match?({:done, _, _}, &1))
 
-        assert [{:provider_error, %ProviderError{kind: :malformed_stream, retryable: false}}] =
+        assert [{:provider_error, %ProviderError{kind: kind}}] =
                  Enum.filter(events, &match?({:provider_error, _}, &1))
+
+        assert kind in [:malformed_stream, :stream_interrupted]
       end)
     end
   end
@@ -108,7 +113,7 @@ defmodule Sigma.Ai.Providers.CreationSafetyTest do
       error = assert_raise ProviderError, fn -> collect(OpenAIResponses, url) end
       assert error.kind == :stream_interrupted
       assert error.raw.response_id == "resp_existing"
-      refute error.retryable
+      assert error.retry_class == :stream
     end)
   end
 
@@ -171,8 +176,10 @@ defmodule Sigma.Ai.Providers.CreationSafetyTest do
         events = collect(OpenAIResponses, url, context, options)
         refute Enum.any?(events, &match?({:done, _, _}, &1))
 
-        assert [{:provider_error, %ProviderError{retryable: false}}] =
+        assert [{:provider_error, %ProviderError{kind: kind}}] =
                  Enum.filter(events, &match?({:provider_error, _}, &1))
+
+        assert kind in [:malformed_stream, :stream_interrupted]
       end)
     end
   end
@@ -200,7 +207,7 @@ defmodule Sigma.Ai.Providers.CreationSafetyTest do
                Enum.find(events, &match?({:toolcall_end, _, _, _}, &1))
 
       refute Enum.any?(events, &match?({:done, _, _}, &1))
-      assert {:provider_error, %ProviderError{kind: :malformed_stream}} = List.last(events)
+      assert {:provider_error, %ProviderError{kind: :stream_interrupted}} = List.last(events)
     end)
   end
 
@@ -214,7 +221,7 @@ defmodule Sigma.Ai.Providers.CreationSafetyTest do
             api_key: "test",
             base_url: url,
             receive_timeout: 100,
-            retry: :transient,
+            retry: false,
             retry_delay: fn _ -> 0 end
           ]
     })

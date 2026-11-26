@@ -11,6 +11,8 @@ defmodule Sigma.Ai.ProviderEvent do
     :usage,
     :stop_reason,
     :error,
+    :retry,
+    :response_id,
     :capability,
     :event
   ]

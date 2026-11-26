@@ -34,7 +34,7 @@ defmodule Sigma.Ai.Provider do
       |> provider_stream(request)
       |> Stream.flat_map(&normalize_legacy_event/1)
 
-    bridge(normalized, Keyword.get(request.options, :cancellation_ref))
+    bridge(normalized, request.options)
   end
 
   def capabilities(provider, model) do
@@ -161,7 +161,7 @@ defmodule Sigma.Ai.Provider do
     end
   end
 
-  defp bridge(stream, cancellation_ref) do
+  defp bridge(stream, options) do
     Stream.resource(
       fn ->
         consumer = self()
@@ -179,7 +179,10 @@ defmodule Sigma.Ai.Provider do
           producer: producer,
           monitor_ref: monitor_ref,
           stream_ref: stream_ref,
-          cancellation_ref: cancellation_ref,
+          cancellation_ref: options[:cancellation_ref],
+          retry?: options[:retry] != false,
+          message: nil,
+          usage: nil,
           terminal?: false
         }
       end,
@@ -245,6 +248,9 @@ defmodule Sigma.Ai.Provider do
 
     receive do
       {:provider_event, stream_ref, event} when stream_ref == state.stream_ref ->
+        state = remember_progress(state, event)
+        event = if event.type == :response_failed, do: failure_event(state, event), else: event
+
         if terminal_event?(event) do
           if Process.alive?(state.producer), do: Process.exit(state.producer, :kill)
           {[event], %{state | terminal?: true}}
@@ -253,15 +259,17 @@ defmodule Sigma.Ai.Provider do
         end
 
       {:provider_done, stream_ref} when stream_ref == state.stream_ref ->
-        error = %ProviderEvent{
-          type: :response_failed,
-          error: ProviderError.malformed(:stream_ended_without_terminal)
-        }
+        error =
+          failure_event(state, %ProviderEvent{
+            type: :response_failed,
+            error: ProviderError.malformed(:stream_ended_without_terminal)
+          })
 
         {[error], %{state | terminal?: true}}
 
       {:provider_failed, stream_ref, error} when stream_ref == state.stream_ref ->
-        {[%ProviderEvent{type: :response_failed, error: error}], %{state | terminal?: true}}
+        {[failure_event(state, %ProviderEvent{type: :response_failed, error: error})],
+         %{state | terminal?: true}}
 
       {:cancel, cancellation_ref}
       when not is_nil(cancellation_ref) and cancellation_ref == state.cancellation_ref ->
@@ -270,22 +278,61 @@ defmodule Sigma.Ai.Provider do
 
       {:DOWN, monitor_ref, :process, producer, :normal}
       when monitor_ref == state.monitor_ref and producer == state.producer ->
-        error = %ProviderEvent{
-          type: :response_failed,
-          error: ProviderError.malformed(:stream_ended_without_terminal)
-        }
+        error =
+          failure_event(state, %ProviderEvent{
+            type: :response_failed,
+            error: ProviderError.malformed(:stream_ended_without_terminal)
+          })
 
         {[error], %{state | terminal?: true}}
 
       {:DOWN, monitor_ref, :process, producer, reason}
       when monitor_ref == state.monitor_ref and producer == state.producer ->
         {[
-           %ProviderEvent{
+           failure_event(state, %ProviderEvent{
              type: :response_failed,
              error: ProviderError.from_exception(reason)
-           }
+           })
          ], %{state | terminal?: true}}
     end
+  end
+
+  defp remember_progress(state, event) do
+    message = event.message || state.message
+
+    usage =
+      event.usage || (is_map(event.message) && ProviderUsage.from_map(event.message[:usage])) ||
+        state.usage
+
+    %{state | message: message, usage: usage}
+  end
+
+  defp failure_event(state, event) do
+    error = event.error
+    raw = if is_map(error), do: Map.get(error, :raw)
+
+    retry =
+      if state.retry? do
+        event.retry ||
+          if match?(
+               %ProviderError{retry_class: class} when class in [:connection, :stream],
+               error
+             ),
+             do: %{class: error.retry_class, retry_after_ms: error.retry_after_ms}
+      end
+
+    response_id =
+      event.response_id ||
+        (is_map(raw) && Map.get(raw, :response_id)) ||
+        (is_map(state.message) && Map.get(state.message, :response_id))
+
+    %{
+      event
+      | message: event.message || state.message,
+        usage: event.usage || state.usage,
+        retry: retry,
+        response_id: response_id || nil
+    }
   end
 
   defp terminal_event?(%ProviderEvent{type: type})

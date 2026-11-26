@@ -13,6 +13,30 @@ defmodule Sigma.Ai.ProviderContractTest do
 
   alias Sigma.Ai.Providers.{Anthropic, OpenAIResponses}
 
+  defmodule StandaloneUsageFailureProvider do
+    def stream(_) do
+      [
+        {:start, %{role: :assistant, content: [], usage: %{input_tokens: 1, output_tokens: 0}}},
+        %ProviderEvent{
+          type: :usage_updated,
+          usage: %ProviderUsage{input_tokens: 10, output_tokens: 2}
+        },
+        %ProviderEvent{type: :response_activity},
+        {:provider_error, Sigma.Ai.CreationRequest.interrupted(:closed, "resp_usage")}
+      ]
+    end
+  end
+
+  test "message-less activity does not overwrite a newer usage observation on failure" do
+    request = ProviderRequest.new(%{model: %{}, context: %{}})
+
+    failure =
+      StandaloneUsageFailureProvider |> Provider.stream(request) |> Enum.to_list() |> List.last()
+
+    assert failure.usage.input_tokens == 10
+    assert failure.usage.output_tokens == 2
+  end
+
   defmodule AnthropicFixtureProvider do
     @behaviour Provider
 

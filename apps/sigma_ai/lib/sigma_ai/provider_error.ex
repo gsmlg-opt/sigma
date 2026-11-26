@@ -1,7 +1,16 @@
 defmodule Sigma.Ai.ProviderError do
   @moduledoc "Classified provider failure suitable for Agent, UI, and protocol clients."
 
-  defexception [:kind, :message, :status, :code, :retry_after_ms, :raw, retryable: false]
+  defexception [
+    :kind,
+    :message,
+    :status,
+    :code,
+    :retry_after_ms,
+    :retry_class,
+    :raw,
+    retryable: false
+  ]
 
   def from_http(status, body, opts \\ []) do
     error = normalize_http_error(status, body, opts)
@@ -160,8 +169,8 @@ defmodule Sigma.Ai.ProviderError do
   defp retry_after_ms(value) when is_integer(value) and value >= 0, do: value * 1_000
 
   defp retry_after_ms(value) when is_binary(value) do
-    case Integer.parse(value) do
-      {seconds, ""} when seconds >= 0 -> seconds * 1_000
+    case HTTP.Retry.retry_after(value, DateTime.utc_now()) do
+      {:ok, delay} -> delay
       _invalid -> nil
     end
   end

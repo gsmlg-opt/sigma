@@ -20,11 +20,10 @@ defmodule Sigma.Ai.ResponsesRecovery do
           id: nil,
           cursor: nil,
           attempts: 0,
-          max_attempts: bounded!(config, :max_attempts, 3, 1, 10),
+          max_attempts: bounded!(config, :max_attempts, 5, 1, 100),
           delay_ms: bounded!(config, :delay_ms, 250, 0, 5_000),
-          deadline:
-            System.monotonic_time(:millisecond) +
-              bounded!(config, :max_elapsed_ms, 120_000, 1, 600_000)
+          max_elapsed_ms: bounded!(config, :max_elapsed_ms, 120_000, 1, 600_000),
+          deadline: nil
         }
 
       _ ->
@@ -64,7 +63,7 @@ defmodule Sigma.Ai.ResponsesRecovery do
         {:skip, state}
 
       true ->
-        {:apply, %{state | id: state.id || id, cursor: cursor}}
+        {:apply, %{state | id: state.id || id, cursor: cursor, attempts: 0, deadline: nil}}
     end
   end
 
@@ -77,6 +76,8 @@ defmodule Sigma.Ai.ResponsesRecovery do
   def next_attempt(nil), do: {:error, :disabled}
 
   def next_attempt(state) do
+    now = System.monotonic_time(:millisecond)
+
     cond do
       is_nil(state.id) or is_nil(state.cursor) ->
         {:error, error(state, :no_checkpoint)}
@@ -84,11 +85,16 @@ defmodule Sigma.Ai.ResponsesRecovery do
       state.attempts >= state.max_attempts ->
         {:error, error(state, :attempts_exhausted)}
 
-      System.monotonic_time(:millisecond) >= state.deadline ->
+      not is_nil(state.deadline) and now >= state.deadline ->
         {:error, error(state, :recovery_expired)}
 
       true ->
-        {:ok, %{state | attempts: state.attempts + 1}}
+        {:ok,
+         %{
+           state
+           | attempts: state.attempts + 1,
+             deadline: state.deadline || now + state.max_elapsed_ms
+         }}
     end
   end
 

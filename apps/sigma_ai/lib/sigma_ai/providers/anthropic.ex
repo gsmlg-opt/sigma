@@ -191,11 +191,12 @@ defmodule Sigma.Ai.Providers.Anthropic do
               [
                 json: body,
                 headers: headers,
-                receive_timeout: options[:receive_timeout] || 120_000,
+                receive_timeout: options[:receive_timeout] || 300_000,
                 retry: Sigma.Ai.CreationRequest.retry_policy(options),
-                max_retries: Keyword.get(options, :max_retries, 3)
+                max_retries: Keyword.get(options, :max_retries, 4)
               ]
               |> maybe_put_opt(options, :retry_delay)
+              |> maybe_put_opt(options, :cancellation_ref)
 
             Sigma.Ai.HTTP.post_stream!(base_url <> "/v1/messages", req_opts)
           rescue
@@ -203,7 +204,8 @@ defmodule Sigma.Ai.Providers.Anthropic do
               reraise Sigma.Ai.CreationRequest.submission_error(e), __STACKTRACE__
           end
 
-        {_initial_assistant_message(model), {"", codec}, :streaming, resp}
+        {Map.put(_initial_assistant_message(model), :submission_attempts, resp.attempts),
+         {"", codec}, :streaming, resp}
       end,
       fn
         {message, _buffer, :done, resp} ->
@@ -224,7 +226,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
 
               {processed_events, {new_message, new_buffer, status, resp}}
           after
-            options[:receive_timeout] || 120_000 ->
+            options[:receive_timeout] || 300_000 ->
               Sigma.Ai.HTTP.cancel(resp)
               raise Sigma.Ai.CreationRequest.interrupted(:timeout, message[:response_id])
           end
@@ -267,6 +269,12 @@ defmodule Sigma.Ai.Providers.Anthropic do
         {processed_events, new_message, codec} = process_stream_events(events, acc_message, codec)
         new_buffer = {sse_buffer, codec}
 
+        processed_events =
+          if chunk != "" and
+               Enum.all?(processed_events, &(Sigma.Ai.Provider.normalize_legacy_event(&1) == [])),
+             do: processed_events ++ [%Sigma.Ai.ProviderEvent{type: :response_activity}],
+             else: processed_events
+
         status =
           if Enum.any?(processed_events, &match?({:done, _, _}, &1)),
             do: :done,
@@ -278,7 +286,7 @@ defmodule Sigma.Ai.Providers.Anthropic do
         {acc_events, acc_message, acc_buffer, :done}
 
       :done, {acc_events, acc_message, acc_buffer, _status} ->
-        error = ProviderError.malformed(:truncated_stream)
+        error = Sigma.Ai.CreationRequest.interrupted(:truncated_stream, acc_message[:response_id])
         {acc_events ++ [{:provider_error, error}], acc_message, acc_buffer, :done}
 
       _chunk, acc ->
@@ -681,7 +689,17 @@ defmodule Sigma.Ai.Providers.Anthropic do
             end
 
           new_acc = %{acc | stop_reason: stop_reason, usage: merge_delta_usage(acc.usage, usage)}
-          {nil, new_acc}
+
+          event =
+            if is_map(usage) do
+              %Sigma.Ai.ProviderEvent{
+                type: :usage_updated,
+                usage: Sigma.Ai.ProviderUsage.from_map(new_acc.usage),
+                message: new_acc
+              }
+            end
+
+          {event, new_acc}
 
         %{"type" => "message_stop"} ->
           {{:done, acc.stop_reason, acc}, acc}

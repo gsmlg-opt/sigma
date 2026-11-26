@@ -1,50 +1,60 @@
 # Provider creation and interrupted streams
 
+Current execution-policy changes and validation are tracked in
+[Codex execution policy alignment](features/codex-execution-policy-alignment.md).
+
 OpenAI Responses and Anthropic Messages create remote work with
 POST requests. A timeout, connection reset, HTTP 408 or gateway error does not
 prove that this work was never accepted. Retrying that POST can create another
 generation, with additional cost and different tool calls.
 
-`Sigma.Ai.CreationRequest` is the shared transport policy. Automatic retries are
-limited to connection refusal and DNS lookup failure (`:econnrefused` and
-`:nxdomain`), before a connection exists. They remain bounded by `max_retries`
-(default 3); `retry: false` disables them. Legacy `retry: :transient` and custom
-callbacks cannot widen this policy. No HTTP status is automatically retried,
-and redirects are disabled to prevent replaying a POST at another endpoint.
-HTTP status, provider details and Retry-After metadata remain available, but the
-creation failure is marked non-retryable. This deliberately includes 429: an
-arbitrary compatible endpoint has no verified rejection/idempotency contract.
+## Request retries and replacement generations (2026-11-26)
 
-Transport failure while waiting for headers becomes `:submission_uncertain`;
-the upstream may still be working. Transport failure after headers becomes
-`:stream_interrupted`, with the known response ID in `error.raw.response_id`.
-Neither permits automatic creation retry. Explicit user retries still create
-new work and may duplicate an earlier submission.
+`Sigma.Ai.CreationRequest` classifies request-layer retries for both adapters.
+An initial POST can be followed by four retries after transport failures or HTTP
+5xx. Delays start at 200 ms, double with jitter, and honor Retry-After delta seconds or HTTP-date.
+Redirects, HTTP 408/429 and other 4xx do not gain request-layer retries.
+`retry: false` disables automatic request and replacement retries. Each attempted
+submission remains potentially billable: no generation idempotency key or remote
+cancellation guarantee is claimed. Transport failures retain submission-attempt
+metadata; failures waiting for headers can remain `:submission_uncertain` even
+when policy allows another submission.
 
-Responses requires a response-level terminal event. Partial text, reasoning,
-completed output items, bare `[DONE]` and HTTP EOF are not completion evidence.
-Missing terminal events or malformed SSE/JSON produce a non-retryable
-`:malformed_stream` error. Event reduction stops at the first error or terminal
-event, including within a single network chunk. `response.incomplete` remains
-an explicit length-limited terminal; failed/cancelled responses report failure.
+After a request has streamed output, an interrupted connection or missing
+response terminal is a typed `:stream_interrupted` failure, with known response
+identity and partial output retained. Malformed JSON/SSE, invalid requests,
+cancellation, and explicit failed/incomplete terminal outcomes do not acquire
+generic reconnect loops. Incomplete length-limited
+responses retain their existing terminal behavior. A completed tool-call frame
+without a completed response never authorizes execution of that call.
 
-The implementation is based on Sigma `faa6581c161097d4b4a9e54bc80e8365784881c0`
-(the preceding `4daf16c` application code is unchanged by this CI-only update).
-Common failure handling runs before both the ordinary response reducer and the
-native tool Codec. The Codec continues to validate custom/namespaced calls and
-their completion; Hosted observation continues to produce native output/replay
-metadata. Image serialization, usage normalization and framing limits remain
-unchanged. Hosted replay is conversation-history replay, not interrupted-stream
-recovery. An outdated Hosted test expecting the ordinary 256 KiB SSE default was
-corrected: main explicitly configures a 16 MiB ordinary frame limit. That test
-failure was independently reproduced against the unmodified main implementation.
+The additive Runtime `provider_retry` policy handles replacement generation,
+separately from the four request retries. Sigma root and managed-child sampling
+select five ordinary stream retries and unbounded connection retries. Connection
+backoff is 5, 10, 20, 40, then 60 seconds, capped at 60 seconds. Timeout and stream
+failures use the bounded stream budget. A typed retry classification is required;
+exception-message guessing alone cannot enable replacement. Compaction remains
+bounded and does not inherit unbounded sampling retries.
 
-The agent runtime collects tool events and requires `response_completed` before
-accepting the provider result (Backplane Agent Runtime 1.10.56,
-`Conversation.stream/3`). A truncated stream must therefore never synthesize
-completion merely because it contains a finished tool item. This change does
-not provide durable exactly-once tool execution across explicit retries or
-process restarts.
+Each replacement has a fresh durable attempt identity. The failed attempt's
+actual partial output, observed usage, original error and known response ID are
+preserved. Runtime settlement, actual worker retirement and the host Writer ACK
+must succeed before a cancellable backoff can release another request. Failed
+attempt tool calls remain in the raw journal but are excluded from Provider
+input; no tool result is fabricated. Previously settled tool calls/results remain
+in context and are not re-executed. Display history and Provider context are
+separate projections.
+
+Same-ID background GET recovery below takes precedence when explicitly enabled.
+Its exhausted/failed replay does not fall through to a replacement POST. Reload,
+cold restore and history reads never restart a Provider attempt or a retry timer.
+The policy does not settle uncertain historical effects or repair an old session
+whose required lifecycle ACKs are missing.
+
+The comparison uses Codex `af71942309704997f4bdc86c020717646423c080`.
+These additions require the matching public Backplane Runtime retry contract;
+source/artifact qualification and running-service adoption are tracked in the
+[alignment document](features/codex-execution-policy-alignment.md).
 
 ## Explicit in-process background recovery
 
@@ -57,7 +67,7 @@ OpenAI's background streaming GET contract:
   background: true,
   responses_recovery: %{
     capability: :openai_background_stream_v1,
-    max_attempts: 3,
+    max_attempts: 5,
     delay_ms: 250,
     max_elapsed_ms: 120_000
   }
@@ -85,7 +95,10 @@ are replayed from the last complete event. Complete invalid JSON/SSE fails.
 Keepalive counters never advance the cursor. Events at or below the applied
 cursor are discarded before any text, tool or Hosted reducer sees them. Missing
 sequence numbers and a changed response ID fail closed. Retry delay doubles up
-to five seconds; attempts and elapsed time are bounded. GET transport failures
+to five seconds; attempts and elapsed time are bounded per interruption.
+The elapsed-time window starts with the first recovery attempt, so healthy
+streaming does not consume it. Successfully applied new sequence numbers reset
+the interruption budget; duplicate replay and keepalives do not. GET transport failures
 can consume another attempt, but HTTP errors (including expired/missing response
 or cursor errors) terminate recovery and preserve status and checkpoint details.
 No branch of recovery submits a new creation POST. Failed, cancelled, incomplete
@@ -166,7 +179,7 @@ Backplane deployment configuration or live upstream was available to verify;
 operator attestation must not be inferred from version or URL. No Backplane
 repository changes are necessary for the documented ordinary route.
 
-## Dependency update
+## Historical dependency update (1.10.55 to 1.10.56)
 
 Five Backplane packages move from 1.10.55 to 1.10.56, with four direct minima
 updated and only those five lock entries changed. Their published `lib/` trees
@@ -188,6 +201,20 @@ environment with working registry access; this is not a claim of full resolver
 or deployment validation.
 
 ## Verification
+
+The 2026-11-26 regressions in `activity_transport_test.exs` and
+`creation_retry_test.exs` use actual local TCP upstreams. They verify keepalive
+and partial-frame activity, POST/5xx retry counts, explicit opt-out, 429,
+Retry-After and cancellation, partial-output retention and observed usage.
+`creation_safety_test.exs` retains no-resubmission assertions under explicit
+`retry: false`, framing validation and terminal-response requirements. Public
+Runtime and root/child Writer checks are listed in the alignment document.
+These are controlled local checks, not online-provider or deployment acceptance.
+
+The following records describe the earlier lifecycle change and its original
+validation environment; they are not the current dependency versions or the
+new policy's acceptance gate.
+
 
 `creation_safety_test.exs` uses TCP mock upstreams which read the entire POST,
 then drop headers, delay headers, return errors/redirects, or truncate SSE. They
