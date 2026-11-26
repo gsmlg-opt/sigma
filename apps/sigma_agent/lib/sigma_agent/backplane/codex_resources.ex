@@ -675,12 +675,15 @@ defmodule Sigma.Agent.Backplane.CodexResources do
 
   defp start_resources(workspace, plugins) do
     with {:ok, command_server} <- PlainCommand.start_link(owner_pid: self(), async_start: true) do
+      # TODO(upstream): gsmlg-opt/backplane#190 — adopt the published interactive command API.
       result =
         with {:ok, command} <-
                Command.new(%{
                  adapter: PlainCommand,
                  server: command_server,
-                 allowed_environment: %{}
+                 allowed_environment: %{},
+                 deadline_limit: :infinity,
+                 output_policy: :truncate
                }),
              {:ok, plan} <- Plan.start_link(Path.expand(workspace)) do
           case DynamicRuntime.start_link(dynamic_options(plugins)) do
@@ -741,7 +744,8 @@ defmodule Sigma.Agent.Backplane.CodexResources do
          Error.new(:validation, "Codex resources require a workspace and live host owner")}
 
       :os.type() not in [{:unix, :linux}, {:unix, :darwin}] ->
-        {:error, Error.new(:unsupported_capability, "plain Codex commands require Linux or macOS")}
+        {:error,
+         Error.new(:unsupported_capability, "plain Codex commands require Linux or macOS")}
 
       true ->
         :ok

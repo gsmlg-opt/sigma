@@ -356,8 +356,11 @@ defmodule Sigma.Agent.Backplane.Engine do
       initial_message: initial_message,
       native_tool_names: native_names(state, collaboration.native_context[:plugin_tools] || []),
       context_window: fn -> ContextControls.request(self_owner, :window, turn_id) end,
-      build_context: fn messages, window, tools ->
-        prepare_context(self_owner, turn_id, messages, window, tools)
+      build_context: fn messages, window, tools, on_activity ->
+        prepare_context(self_owner, turn_id, messages, window, tools, on_activity)
+      end,
+      prepare_provider_retry: fn snapshot ->
+        prepare_provider_retry(self_owner, turn_id, snapshot)
       end,
       context_error: &Sigma.Agent.__backplane_context_error__(state, &1),
       stop_hook: &Sigma.Agent.__backplane_stop_hook__(state, turn_id, &1, &2)
@@ -400,6 +403,9 @@ defmodule Sigma.Agent.Backplane.Engine do
 
       opts =
         opts
+        |> Keyword.merge(
+          Sigma.Agent.Backplane.ExecutionPolicy.provider_options(state.provider_options)
+        )
         |> Keyword.merge(GoalIntegration.conversation_options(collaboration[:goal_context]))
         |> Keyword.put(:goal_trigger, goal_trigger(initial_message))
 
@@ -621,6 +627,15 @@ defmodule Sigma.Agent.Backplane.Engine do
         state = %{state | backplane_pending_request: {worker, ref, request, context}}
         loop(state, conversation, turn_id, users, forwarded, assistant, native_context)
 
+      {:backplane_prepare_provider_retry, worker, ref, ^turn_id, snapshot} ->
+        {state, result} = persist_provider_failure(state, snapshot)
+        send(worker, {:backplane_provider_retry_ready, ref, result})
+        loop(state, conversation, turn_id, users, forwarded, assistant, native_context)
+
+      {:backplane_prepare_provider_retry, worker, ref, _stale_turn, _snapshot} ->
+        send(worker, {:backplane_provider_retry_ready, ref, {:error, :stale_run}})
+        loop(state, conversation, turn_id, users, forwarded, assistant, native_context)
+
       {:backplane_context_control, worker, ref, kind, ^turn_id} ->
         status = Conversation.status(conversation)
 
@@ -637,7 +652,7 @@ defmodule Sigma.Agent.Backplane.Engine do
         send(worker, {:backplane_context_control, ref, nil})
         loop(state, conversation, turn_id, users, forwarded, assistant, native_context)
 
-      {:backplane_prepare_context, worker, ref, ^turn_id, messages, window, tools} ->
+      {:backplane_prepare_context, worker, ref, ^turn_id, messages, window, tools, on_activity} ->
         messages =
           Enum.map(messages, fn
             %{role: :user, id: id} = message ->
@@ -652,11 +667,13 @@ defmodule Sigma.Agent.Backplane.Engine do
               message
           end)
 
-        pending = {:context, worker, ref, turn_id, messages, window, tools, native_context}
+        pending =
+          {:context, worker, ref, turn_id, messages, window, tools, native_context, on_activity}
+
         state = %{state | backplane_pending_request: pending}
         loop(state, conversation, turn_id, users, forwarded, assistant, native_context)
 
-      {:backplane_prepare_context, worker, ref, _stale_run, _messages, _window, _tools} ->
+      {:backplane_prepare_context, worker, ref, _stale_run, _messages, _window, _tools, _activity} ->
         send(worker, {:backplane_prepared_context, ref, {:error, :stale_run}})
         loop(state, conversation, turn_id, users, forwarded, assistant, native_context)
 
@@ -742,7 +759,8 @@ defmodule Sigma.Agent.Backplane.Engine do
   defp ready_pending_request(
          %{
            backplane_pending_request:
-             {:context, worker, ref, turn_id, messages, window, tools, native_context}
+             {:context, worker, ref, turn_id, messages, window, tools, native_context,
+              on_activity}
          } = state
        ) do
     cancelled? = GenServer.call(state.control_pid, {:cancelled?, turn_id}, :infinity)
@@ -759,7 +777,8 @@ defmodule Sigma.Agent.Backplane.Engine do
             tools,
             window,
             CodexResources.environment(native_context),
-            messages
+            messages,
+            on_activity
           )
 
         cancelled? = GenServer.call(state.control_pid, {:cancelled?, turn_id}, :infinity)
@@ -937,10 +956,14 @@ defmodule Sigma.Agent.Backplane.Engine do
 
   # Conversation admits content and supplies its own message ID. Restore only
   # users recorded under that exact admission ID, including async reply metadata.
-  defp prepare_context(owner, turn_id, messages, window, tools) do
+  defp prepare_context(owner, turn_id, messages, window, tools, on_activity) do
     monitor = Process.monitor(owner)
     ref = make_ref()
-    send(owner, {:backplane_prepare_context, self(), ref, turn_id, messages, window, tools})
+
+    send(
+      owner,
+      {:backplane_prepare_context, self(), ref, turn_id, messages, window, tools, on_activity}
+    )
 
     try do
       receive do
@@ -956,6 +979,44 @@ defmodule Sigma.Agent.Backplane.Engine do
     after
       Process.demonitor(monitor, [:flush])
     end
+  end
+
+  defp prepare_provider_retry(owner, turn_id, snapshot) do
+    monitor = Process.monitor(owner)
+    ref = make_ref()
+    send(owner, {:backplane_prepare_provider_retry, self(), ref, turn_id, snapshot})
+
+    try do
+      receive do
+        {:backplane_provider_retry_ready, ^ref, result} -> result
+        {:DOWN, ^monitor, :process, ^owner, reason} -> {:error, {:backplane_owner_down, reason}}
+      end
+    after
+      Process.demonitor(monitor, [:flush])
+    end
+  end
+
+  defp persist_provider_failure(state, snapshot) do
+    case CanonicalHistory.failed_message(snapshot) do
+      nil ->
+        {state, :ok}
+
+      message ->
+        if Enum.any?(state.messages, &(&1.id == message.id)) do
+          {state, :ok}
+        else
+          Sigma.Agent.__backplane_emit__(state, {:message_end, message})
+
+          state =
+            %{state | messages: state.messages ++ [message]}
+            |> Sigma.Agent.__backplane_messages_changed__()
+
+          Sigma.Agent.__backplane_acknowledge__(state)
+          {state, :ok}
+        end
+    end
+  catch
+    kind, reason -> {state, {:error, {:provider_failure_persistence, kind, reason}}}
   end
 
   defp forward_steering_item(state, conversation, turn_id, item, users, forwarded) do
@@ -1181,10 +1242,19 @@ defmodule Sigma.Agent.Backplane.Engine do
     if state.writer,
       do: require_hook_feedback(HookDelivery.reconcile(state.writer, state.backplane_store))
 
+    status = Conversation.status(conversation)
+
+    state =
+      Enum.reduce(Map.get(status.conversation, :provider_failures, []), state, fn failure,
+                                                                                  state ->
+        {state, _result} = persist_provider_failure(state, failure)
+        state
+      end)
+
     state =
       capture_canonical(
         state,
-        CanonicalHistory.checkpoint_messages(Conversation.status(conversation))
+        CanonicalHistory.checkpoint_messages(status)
       )
 
     state =

@@ -21,6 +21,15 @@ defmodule Sigma.Agent.ContextCompactionFunctionalTest do
       send(params.options[:test_pid], {:compact_provider, params})
 
       cond do
+        params.purpose == :compaction and params.options[:summary_progress] ->
+          Stream.concat(
+            Stream.map(1..6, fn _ ->
+              Process.sleep(50)
+              %Sigma.Ai.ProviderEvent{type: :response_activity}
+            end),
+            response(params)
+          )
+
         params.purpose == :compaction and params.options[:fail_summary] ->
           [{:provider_error, Sigma.Ai.ProviderError.from_reason(:summary_failure)}]
 
@@ -41,7 +50,14 @@ defmodule Sigma.Agent.ContextCompactionFunctionalTest do
       content =
         cond do
           params.purpose == :compaction ->
-            [%{type: :text, text: "Keep working on the original task. Earlier tool completed."}]
+            [
+              %{
+                type: :text,
+                text:
+                  params.options[:summary_text] ||
+                    "Keep working on the original task. Earlier tool completed."
+              }
+            ]
 
           params.options[:large_tool] == true and
             not Enum.any?(params.context.messages, &(&1.role == :tool_result)) and
@@ -139,8 +155,11 @@ defmodule Sigma.Agent.ContextCompactionFunctionalTest do
 
     agent = start_agent(c, messages: history)
 
+    keep_budget =
+      ContextPolicy.snapshot(messages: Enum.drop(later, 4)).next_request_estimated_input_tokens
+
     assert :ok = Sigma.Agent.begin_session_operation(agent)
-    assert {:ok, _} = Sigma.Agent.compact(agent)
+    assert {:ok, _} = Sigma.Agent.compact(agent, keep_budget: keep_budget)
     assert :ok = Sigma.Agent.end_session_operation(agent)
 
     assert_receive {:compact, _, "later-5"}
@@ -253,6 +272,35 @@ defmodule Sigma.Agent.ContextCompactionFunctionalTest do
     assert_bounded_summary_requests()
   end
 
+  test "compaction retains recent messages by tokens and allows detailed summaries", c do
+    recent = for n <- 1..35, do: Message.user("recent-#{n}", "Recent task detail #{n}")
+    summary = String.duplicate("Preserve important implementation detail. ", 140)
+    model = %{@model | context_window: 65_536, max_output_tokens: 8192}
+
+    agent =
+      start_agent(c,
+        model: model,
+        messages: [Message.user("old", String.duplicate("earlier work ", 30_000)) | recent],
+        options: [test_pid: self(), max_tokens: 8192, summary_text: summary]
+      )
+
+    assert :ok = Sigma.Agent.begin_session_operation(agent)
+    assert {:ok, _} = Sigma.Agent.compact(agent)
+    assert :ok = Sigma.Agent.end_session_operation(agent)
+
+    assert [%{role: :compaction_summary, content: ^summary} | ^recent] =
+             Sigma.Agent.messages(agent)
+
+    requests = drain_summaries([])
+    assert requests != []
+
+    for request <- requests do
+      assert request.options[:max_tokens] > 1024
+      input = ContextPolicy.snapshot(messages: request.context.messages)
+      assert input.next_request_estimated_input_tokens + request.options[:max_tokens] <= 65_536
+    end
+  end
+
   test "overflowing old context is compacted before the same prompt reaches the model", c do
     agent = start_agent(c, messages: large_history())
     assert {:accepted, admission} = Sigma.Agent.prompt(agent, "Continue the original task")
@@ -271,6 +319,21 @@ defmodule Sigma.Agent.ContextCompactionFunctionalTest do
 
     assert ContextPolicy.snapshot(messages: request.context.messages).next_request_estimated_input_tokens <
              4096
+  end
+
+  test "root compaction progress outlives the provider idle allowance", c do
+    agent =
+      start_agent(c,
+        messages: large_history(),
+        options: [test_pid: self(), receive_timeout: 200, summary_progress: true]
+      )
+
+    assert {:accepted, _} = Sigma.Agent.prompt(agent, "Continue the original task")
+    assert_receive {:agent_end, messages}, 5_000
+    assert Enum.any?(messages, &(&1.role == :compaction_summary))
+    assert List.last(messages).role == :assistant
+    refute_received {:turn_error, _}
+    assert_bounded_summary_requests()
   end
 
   test "a large completed tool result is summarized and continues without replay", c do
@@ -327,7 +390,8 @@ defmodule Sigma.Agent.ContextCompactionFunctionalTest do
         "iVBORw0KGgoAAAANSUhEUgAAAEEAAAAhAQMAAAC8zVRcAAAAA1BMVEX/AAAZ4gk3AAAADUlEQVQY02NgGAXUAQABSgAB5p5tAwAAAABJRU5ErkJggg=="
       )
 
-    <<body::binary-size(byte_size(png) - 12), iend::binary>> = png
+    body_size = byte_size(png) - 12
+    <<body::binary-size(^body_size), iend::binary>> = png
     chunk = "tEXt" <> "Comment" <> <<0>> <> String.duplicate("x", 32_768)
 
     bytes =

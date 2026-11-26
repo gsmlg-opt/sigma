@@ -31,6 +31,9 @@ defmodule Sigma.Agent.BackplaneNativeChildHostTest do
           }
 
           [{:start, %{message | content: []}}, {:done, reason, message}]
+
+        {:native_error, error} ->
+          [{:provider_error, error}]
       end
     end
   end
@@ -136,6 +139,135 @@ defmodule Sigma.Agent.BackplaneNativeChildHostTest do
     assert Enum.any?(child.params.context.tools, &(&1.name == "apply_patch"))
     finish!(child)
     finish!(root)
+  end
+
+  @tag :child_compaction
+  @tag context_window: 65_536, max_tokens: 8192
+  test "managed child compacts a settled tool batch before continuation and followup", c do
+    root = prompt!(c.agent)
+    {child, root} = spawn!(root, "compact")
+    session = child.params.session_id
+    body = send_large_child_patch(child)
+
+    next = complete_child_summaries!(session, 0)
+    assert File.read!(Path.join(c.dir, "compact-child.txt")) == body
+    refute Enum.any?(next.params.context.messages, &(inspect(&1.content) =~ "*** Add File"))
+
+    assert Enum.any?(
+             next.params.context.messages,
+             &(inspect(&1.content) =~ "Created compact-child")
+           )
+
+    next = call!(next, "get_context_remaining", %{})
+    refute result!(next, "get_context_remaining").is_error
+    assert structured!(next, "get_context_remaining")["tokens_left"] > 0
+    finish!(next)
+    assert eventually(fn -> roster(c.host).counts.stopped == 1 end)
+
+    row = Enum.find(roster(c.host).agents, &(&1.child_session_id == session))
+    path = child_path(c, row)
+    assert {:ok, snapshot} = Log.snapshot(path)
+    assert {:ok, entries} = Sigma.Session.Storage.JsonlFile.read(path)
+
+    assert Enum.count(entries, fn entry ->
+             entry["type"] == "message" and get_in(entry, ["message", "role"]) == "tool_result"
+           end) == 2
+
+    assert Enum.any?(snapshot.context_messages, &(&1.role == :compaction_summary))
+    assert {:ok, %{children: children}} = Subagents.archive_sources(c.host)
+    source = Enum.find(children, &(&1.identity.child_session_id == session))
+    assert {:ok, source} = ChildIO.archive_source(source.io)
+    assert {:ok, before} = Writer.context_snapshot(source.writer)
+
+    assert {:ok, store} =
+             ChildIO.store(Enum.find(children, &(&1.identity.child_session_id == session)).io)
+
+    assert {:ok, before_record} = Store.load(store, source.identity.run_id)
+    before_bytes = File.read!(path)
+    assert {:ok, cold} = Log.snapshot(path)
+    assert cold.context_messages == before.context_messages
+    assert File.read!(path) == before_bytes
+    refute_receive {:native_provider, _, %{session_id: ^session}}, 20
+
+    send_call(root, "followup_task", %{"target" => "/root/compact", "message" => "continue"})
+    followup = provider!(session)
+    assert followup.params.purpose == :turn
+    refute Enum.any?(followup.params.context.messages, &(inspect(&1.content) =~ "*** Add File"))
+
+    assert Enum.any?(
+             followup.params.context.messages,
+             &(inspect(&1.content) =~ "Created compact-child")
+           )
+
+    root = provider!("native-root")
+    refute result!(root, "followup_task").is_error
+    finish!(followup)
+    finish!(root)
+    assert eventually(fn -> roster(c.host).counts.stopped == 1 end)
+    assert {:ok, after_followup} = Writer.context_snapshot(source.writer)
+    assert Enum.take(after_followup.messages, length(before.messages)) == before.messages
+    assert {:ok, ^before_record} = Store.load(store, source.identity.run_id)
+    assert String.starts_with?(File.read!(path), before_bytes)
+    assert File.read!(Path.join(c.dir, "compact-child.txt")) == body
+  end
+
+  @tag :child_compaction
+  @tag context_window: 65_536, max_tokens: 8192
+  test "child summary failure retains the settled tool and stops Provider continuation", c do
+    root = prompt!(c.agent)
+    {child, root} = spawn!(root, "compact")
+    session = child.params.session_id
+    body = send_large_child_patch(child)
+    summary = provider!(session)
+    assert summary.params.purpose == :compaction
+    send(summary.pid, {:native_error, Sigma.Ai.ProviderError.from_reason(:summary_failure)})
+
+    assert eventually(fn ->
+             [row] = roster(c.host).agents
+             row.status == :errored and row.closure == :closed
+           end)
+
+    [row] = roster(c.host).agents
+    path = child_path(c, row)
+    assert_child_settled_without_summary(path)
+    assert {:ok, snapshot} = Log.snapshot(path)
+    assert [%{status: :failed, failure_reason: reason}] = Map.values(snapshot.metrics.compactions)
+    assert reason =~ "summary_failure"
+    refute_receive {:native_provider, _, %{session_id: ^session}}, 20
+    assert File.read!(Path.join(c.dir, "compact-child.txt")) == body
+    finish!(root)
+    assert eventually(fn -> Sigma.Agent.status(c.agent).phase == :completed end)
+  end
+
+  @tag :child_compaction
+  @tag context_window: 65_536, max_tokens: 8192
+  test "interrupting a child during summary preserves the settled tool without a compact commit",
+       c do
+    root = prompt!(c.agent)
+    {child, root} = spawn!(root, "compact")
+    session = child.params.session_id
+    body = send_large_child_patch(child)
+    summary = provider!(session)
+    assert summary.params.purpose == :compaction
+    monitor = Process.monitor(summary.pid)
+
+    root = call!(root, "interrupt_agent", %{"target" => "/root/compact"})
+    refute result!(root, "interrupt_agent").is_error
+    assert_receive {:DOWN, ^monitor, :process, _, _}, 5_000
+
+    assert eventually(fn ->
+             [row] = roster(c.host).agents
+             row.status == :interrupted and row.closure == :closed
+           end)
+
+    # An obsolete Provider reply cannot publish a summary or release continuation.
+    finish!(summary)
+    [row] = roster(c.host).agents
+    assert_child_settled_without_summary(child_path(c, row))
+    refute_receive {:native_provider, _, %{session_id: ^session}}, 20
+    assert File.read!(Path.join(c.dir, "compact-child.txt")) == body
+    finish!(root)
+    assert eventually(fn -> Sigma.Agent.status(c.agent).phase == :completed end)
   end
 
   test "an admitted managed child raw patch creates its file", c do
@@ -873,6 +1005,51 @@ defmodule Sigma.Agent.BackplaneNativeChildHostTest do
     after
       5_000 -> flunk("provider did not start for #{session}")
     end
+  end
+
+  defp complete_child_summaries!(session, count) do
+    request = provider!(session)
+
+    if request.params.purpose == :compaction do
+      assert request.params.options[:max_tokens] > 1024
+
+      send(
+        request.pid,
+        {:native_response,
+         [%{type: :text, text: "Created compact-child.txt once. Continue the original task."}]}
+      )
+
+      complete_child_summaries!(session, count + 1)
+    else
+      assert count > 0
+      request
+    end
+  end
+
+  defp send_large_child_patch(child) do
+    body = String.duplicate("created exactly once\n", 20_000)
+
+    patch =
+      "*** Begin Patch\n*** Add File: compact-child.txt\n+" <>
+        String.replace(String.trim_trailing(body), "\n", "\n+") <>
+        "\n*** End Patch"
+
+    send_call(child, "apply_patch", patch)
+    body
+  end
+
+  defp assert_child_settled_without_summary(path) do
+    assert {:ok, entries} = Sigma.Session.Storage.JsonlFile.read(path)
+    refute Enum.any?(entries, &(&1["type"] == "compaction"))
+
+    assert Enum.count(entries, fn entry ->
+             entry["type"] == "message" and get_in(entry, ["message", "role"]) == "tool_result"
+           end) == 1
+
+    assert {:ok, snapshot} = Log.snapshot(path)
+    refute Enum.any?(snapshot.context_messages, &(&1.role == :compaction_summary))
+    assert Enum.count(snapshot.messages, &(&1.role == :tool_result)) == 1
+    assert Enum.any?(snapshot.messages, &(&1.tool_name == "apply_patch" and &1.is_error == false))
   end
 
   defp call!(provider, name, arguments) do

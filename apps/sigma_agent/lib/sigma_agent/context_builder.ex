@@ -138,7 +138,7 @@ defmodule Sigma.Agent.ContextBuilder do
             {id, {notice, metadata[:continuation_tools] || metadata["continuation_tools"] || []}}
 
     if map_size(notices) == 0 do
-      fn message -> [message] end
+      &Sigma.Agent.Backplane.CanonicalHistory.provider_messages/1
     else
       missing =
         for {_id, {_notice, tools}} <- notices,
@@ -154,7 +154,11 @@ defmodule Sigma.Agent.ContextBuilder do
             )
         end
 
-      &continuation_message(&1, missing, notices)
+      fn message ->
+        message
+        |> Sigma.Agent.Backplane.CanonicalHistory.provider_messages()
+        |> Enum.flat_map(&continuation_message(&1, missing, notices))
+      end
     end
   end
 

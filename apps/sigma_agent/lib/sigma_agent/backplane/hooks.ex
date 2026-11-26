@@ -19,6 +19,11 @@ defmodule Sigma.Agent.Backplane.Hooks do
     end
   end
 
+  defdelegate tool_effect_timeout(invocation, context),
+    to: Sigma.Agent.Backplane.ExecutionPolicy
+
+  def prepare_provider_retry(snapshot, %{host: host}), do: host.prepare_provider_retry.(snapshot)
+
   def stop(messages, %{host: host, owner: owner}) do
     active? = :atomics.get(host.stop_hook_active, 1) == 1
 

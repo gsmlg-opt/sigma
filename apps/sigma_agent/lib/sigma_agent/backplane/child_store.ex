@@ -55,7 +55,9 @@ defmodule Sigma.Agent.Backplane.ChildStore do
           messages
         end
 
-      case project(io, key, messages) do
+      failures = Map.get(conversation, :provider_failures, [])
+
+      case project(io, key, messages, failures) do
         :ok -> {:ok, result}
         {:error, reason} -> projection_failure(stage, reason)
       end
@@ -69,8 +71,16 @@ defmodule Sigma.Agent.Backplane.ChildStore do
   def fence(%{store: store}, run_id, revision, current, next),
     do: Sidecar.fence(store, run_id, revision, current, next)
 
-  defp project(io, key, messages) do
-    ChildIO.project(io, key, messages)
+  defp project(io, key, messages, failures) do
+    result =
+      Enum.reduce_while(failures, :ok, fn failure, :ok ->
+        case ChildIO.prepare_provider_retry(io, key, failure) do
+          :ok -> {:cont, :ok}
+          error -> {:halt, error}
+        end
+      end)
+
+    with :ok <- result, do: ChildIO.project(io, key, messages)
   catch
     :exit, reason -> {:error, {:child_io_unavailable, reason}}
   end

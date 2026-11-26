@@ -48,7 +48,12 @@ defmodule Sigma.Agent.Backplane.PtyJob do
            launch_from: from,
            token: make_ref(),
            terminal: nil,
-           timer: Process.send_after(self(), :deadline, request.deadline_limit),
+           timer:
+             if(request.deadline_limit == :infinity,
+               do: nil,
+               else: Process.send_after(self(), :deadline, request.deadline_limit)
+             ),
+           output_buffer: Backplane.AgentRuntime.Command.OutputBuffer.new(request.output_limit),
            output: [],
            cursor: 0,
            bytes: 0,
@@ -75,11 +80,22 @@ defmodule Sigma.Agent.Backplane.PtyJob do
   @impl true
   def handle_call({:read, invocation, job, cursor}, _from, state) do
     with :ok <- identity(state, invocation, job) do
-      output = state.output |> Enum.reverse() |> Enum.drop(cursor) |> IO.iodata_to_binary()
+      {output, next_cursor} =
+        if Map.get(state.request, :output_policy) == :truncate do
+          Backplane.AgentRuntime.Command.OutputBuffer.read(state.output_buffer, cursor)
+        else
+          {state.output |> Enum.reverse() |> Enum.drop(cursor) |> IO.iodata_to_binary(),
+           state.cursor}
+        end
 
       result = %{
         output: if(output == "", do: [], else: [output]),
-        cursor: state.cursor,
+        cursor: next_cursor,
+        omitted_output_bytes:
+          if(Map.get(state.request, :output_policy) == :truncate,
+            do: max(next_cursor - cursor - byte_size(output), 0),
+            else: 0
+          ),
         status: state.status,
         exit_status: state.exit_status,
         exit_signal: state.exit_signal,
@@ -172,6 +188,13 @@ defmodule Sigma.Agent.Backplane.PtyJob do
 
   def handle_info(
         {:terminal_backend, backend, {:output, _seq, bytes}},
+        %{backend: backend, request: %{output_policy: :truncate}} = state
+      ) do
+    {:noreply, append_output(state, bytes)}
+  end
+
+  def handle_info(
+        {:terminal_backend, backend, {:output, _seq, bytes}},
         %{backend: backend} = state
       ) do
     remaining = max(state.request.output_limit - state.bytes, 0)
@@ -198,7 +221,7 @@ defmodule Sigma.Agent.Backplane.PtyJob do
         {:terminal_backend, backend, {:shell_exit, status, signal}},
         %{backend: backend} = state
       ) do
-    Process.cancel_timer(state.timer)
+    cancel_deadline(state.timer)
     terminal_status = state.terminal_status || :completed
 
     {:noreply,
@@ -216,7 +239,7 @@ defmodule Sigma.Agent.Backplane.PtyJob do
         {:terminal_backend, backend, {:cleanup, result, evidence}},
         %{backend: backend} = state
       ) do
-    Process.cancel_timer(state.timer)
+    cancel_deadline(state.timer)
 
     state =
       case result do
@@ -320,7 +343,7 @@ defmodule Sigma.Agent.Backplane.PtyJob do
 
   @impl true
   def terminate(_reason, state) do
-    Process.cancel_timer(state.timer)
+    cancel_deadline(state.timer)
 
     if state.cleanup_status == :confirmed and Process.alive?(state.backend),
       do: GenServer.stop(state.backend, :normal)
@@ -364,7 +387,7 @@ defmodule Sigma.Agent.Backplane.PtyJob do
   defp request_close(%{close_requested?: true} = state, _status), do: state
 
   defp request_close(state, status) do
-    Process.cancel_timer(state.timer)
+    cancel_deadline(state.timer)
     owner = self()
     backend = state.backend
 
@@ -406,8 +429,16 @@ defmodule Sigma.Agent.Backplane.PtyJob do
 
   defp append_text(state, ""), do: state
 
+  defp append_text(%{request: %{output_policy: :truncate}} = state, bytes) do
+    buffer = Backplane.AgentRuntime.Command.OutputBuffer.append(state.output_buffer, bytes)
+    %{state | output_buffer: buffer}
+  end
+
   defp append_text(state, bytes),
     do: %{state | output: [bytes | state.output], cursor: state.cursor + 1}
+
+  defp cancel_deadline(nil), do: :ok
+  defp cancel_deadline(timer), do: Process.cancel_timer(timer)
 
   defp flush_output(%{utf8_pending: <<>>} = state), do: state
   defp flush_output(state), do: append_text(%{state | utf8_pending: <<>>}, "�")

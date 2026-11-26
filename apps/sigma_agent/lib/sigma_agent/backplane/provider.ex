@@ -11,7 +11,7 @@ defmodule Sigma.Agent.Backplane.Provider do
   @impl true
   def stream(request, %{host: host, owner: owner} = context) do
     case observe_worker(context[:provider_lifecycle_store], request) do
-      :ok -> stream_observed(request, host, owner)
+      :ok -> stream_observed(request, host, owner, context[:provider_emit])
       {:error, error} -> [%{type: :response_failed, error: error}]
     end
   end
@@ -33,7 +33,7 @@ defmodule Sigma.Agent.Backplane.Provider do
        )}
   end
 
-  defp stream_observed(request, host, owner) do
+  defp stream_observed(request, host, owner, provider_emit) do
     canonical =
       Enum.filter(request.messages, fn message ->
         Map.has_key?(message, :collaboration) or Map.has_key?(message, :host_feedback)
@@ -44,13 +44,28 @@ defmodule Sigma.Agent.Backplane.Provider do
 
     window = if is_function(host[:context_window], 0), do: host.context_window.()
 
-    if (is_function(host.build_context, 2) or is_function(host.build_context, 3)) and
+    if (is_function(host.build_context, 2) or is_function(host.build_context, 3) or
+          is_function(host.build_context, 4)) and
          is_nil(window) do
       raise Sigma.Ai.ProviderError.from_exception(:context_window_unavailable)
     end
 
     context =
       cond do
+        is_function(host.build_context, 4) ->
+          on_activity = fn ->
+            if is_function(provider_emit, 1),
+              do: provider_emit.(%{type: :response_activity}),
+              else: :ok
+          end
+
+          host.build_context.(
+            normalize_messages(request.messages),
+            window,
+            request.tools,
+            on_activity
+          )
+
         is_function(host.build_context, 3) ->
           host.build_context.(normalize_messages(request.messages), window, request.tools)
 
@@ -181,7 +196,11 @@ defmodule Sigma.Agent.Backplane.Provider do
     status =
       if match?(%Sigma.Ai.ProviderError{kind: :cancelled}, error), do: :cancelled, else: :failed
 
-    {event_map(event, request.message_id), %{request | status: status}}
+    usage =
+      event.usage || if(is_map(event.message), do: ProviderUsage.from_map(event.message[:usage]))
+
+    request = request |> put_usage(usage) |> Map.put(:status, status)
+    {event_map(%{event | usage: usage}, request.message_id), request}
   end
 
   defp map_event(%ProviderEvent{} = event, request),
@@ -207,7 +226,7 @@ defmodule Sigma.Agent.Backplane.Provider do
   end
 
   defp runtime_usage(%{type: type} = event)
-       when type in [:usage_updated, :response_completed] do
+       when type in [:usage_updated, :response_completed, :response_failed] do
     Map.put(event, :usage, GoalUsage.normalize(event[:usage]))
   end
 

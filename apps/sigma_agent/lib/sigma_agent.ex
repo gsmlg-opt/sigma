@@ -3700,145 +3700,37 @@ defmodule Sigma.Agent do
 
   defp find_compact_boundary(state, messages, opts, project) do
     policy = current_context_policy(state)
-    message_count = length(messages)
 
     keep_budget =
       Keyword.get(
         opts,
         :keep_budget,
-        div((policy.context_window || 100_000) - policy.output_reserve, 2)
+        min(20_000, div((policy.context_window || 100_000) - policy.output_reserve, 2))
       )
 
-    {boundaries, pending} =
-      messages
-      |> Enum.with_index()
-      |> Enum.reduce({[], MapSet.new()}, fn {message, index}, {boundaries, pending} ->
-        boundaries =
-          if index > 0 and MapSet.size(pending) == 0 and message.role != :tool_result,
-            do: [index | boundaries],
-            else: boundaries
-
-        # Keep the cut anchored to the original journal message, including
-        # when its projection is empty or prepends a continuation notice.
-        pending =
-          case project.(message) do
-            [%{role: :assistant, content: content}] when is_list(content) ->
-              Enum.reduce(content, pending, fn
-                %{type: :tool_call, id: id}, calls -> MapSet.put(calls, id)
-                _block, calls -> calls
-              end)
-
-            [%{role: :tool_result, tool_call_id: id}] ->
-              MapSet.delete(pending, id)
-
-            _ ->
-              pending
-          end
-
-        {boundaries, pending}
-      end)
-
-    boundaries =
-      if message_count > 1 and MapSet.size(pending) == 0 and
-           List.last(messages).role != :user,
-         do: [message_count | boundaries],
-         else: boundaries
-
-    boundary =
-      boundaries
-      |> Enum.reverse()
-      |> Enum.filter(&(&1 >= message_count - 20))
-      |> Enum.find(fn index ->
-        kept = messages |> Enum.drop(index) |> Enum.flat_map(project)
-        compaction_token_estimate(kept) <= keep_budget
-      end)
-
-    if boundary, do: Enum.split(messages, boundary), else: {[], messages}
+    Sigma.Agent.Compaction.split(messages, keep_budget, project)
   end
 
   defp generate_summary(state, messages, opts) do
-    transcript =
-      messages
-      |> Enum.reject(fn m -> m.role in [:status, :notification] end)
-      |> Enum.map_join("\n\n---\n\n", fn msg ->
-        label =
-          case msg.role do
-            :user -> "User"
-            :assistant -> "Assistant"
-            :tool_result -> "Tool (#{msg.tool_name})"
-            :compaction_summary -> "Previous summary"
-            r -> to_string(r)
-          end
-
-        text =
-          case msg.content do
-            s when is_binary(s) ->
-              s
-
-            blocks when is_list(blocks) ->
-              Enum.map_join(blocks, "\n", fn
-                %{type: :text, text: t} -> t
-                %{type: :thinking, thinking: t} -> "[thinking: #{t}]"
-                %{"type" => "text", "text" => t} -> t
-                b -> inspect(b)
-              end)
-
-            nil ->
-              ""
-          end
-
-        "#{label}: #{text}"
-      end)
-
-    window = current_context_policy(state).context_window || 100_000
-
-    output_limit =
-      Provider.output_token_limit(state.provider, state.model, state.provider_options)
-
-    output_limit = min(output_limit || 1024, min(1024, max(1, div(window, 8))))
-    output_limit = min(output_limit, Keyword.get(opts, :summary_output_limit, output_limit))
-    summarize_transcript(state, transcript, "", [], window, output_limit)
-  end
-
-  defp summarize_transcript(state, "", summary, request_ids, _window, _output_limit) do
-    if summary_cancelled?(state),
-      do: {:error, ProviderError.from_reason(:cancelled), request_ids},
-      else: {:ok, summary, request_ids}
-  end
-
-  defp summarize_transcript(state, transcript, summary, request_ids, window, output_limit) do
-    overhead = ContextPolicy.snapshot(messages: [summary_message("", summary)])
-    available = window - output_limit - overhead.next_request_estimated_input_tokens - 32
-
-    cond do
-      summary_cancelled?(state) ->
-        {:error, ProviderError.from_reason(:cancelled), request_ids}
-
-      available > 0 ->
-        {chunk, rest} = split_summary_chunk(transcript, available * 4)
-
-        case request_summary(state, summary_message(chunk, summary), output_limit) do
-          {:ok, result, request_id} when byte_size(result) > 0 ->
-            summarize_transcript(
-              state,
-              rest,
-              result,
-              request_ids ++ [request_id],
-              window,
-              output_limit
-            )
-
-          {:ok, _empty, request_id} ->
-            {:error, :empty_summary, request_ids ++ [request_id]}
-
-          {:error, reason, request_id} ->
-            {:error, reason, request_ids ++ [request_id]}
+    Sigma.Agent.Compaction.summarize(
+      messages,
+      %{
+        provider: state.provider,
+        model: state.model,
+        provider_options: state.provider_options,
+        session_id: state.session_id,
+        log_session_id: state.log_session_id,
+        turn_id: state.turn_state.turn_id,
+        context_window: current_context_policy(state).context_window,
+        cancelled?: fn -> summary_cancelled?(state) end,
+        emit: fn event, request, reason ->
+          fact = request_fact(request)
+          fact = if reason, do: Map.put(fact, :failure_reason, inspect(reason)), else: fact
+          emit(state, {:metrics, event, fact})
         end
-
-      true ->
-        {:error, ProviderError.from_exception("context token limit exceeded during compaction"),
-         request_ids}
-    end
+      },
+      opts
+    )
   end
 
   defp summary_cancelled?(%{control_pid: control, turn_state: %{turn_id: turn_id}})
@@ -3846,174 +3738,6 @@ defmodule Sigma.Agent do
        do: GenServer.call(control, {:cancelled?, turn_id}, :infinity)
 
   defp summary_cancelled?(_state), do: false
-
-  defp split_summary_chunk(text, size) when byte_size(text) <= size, do: {text, ""}
-
-  defp split_summary_chunk(text, size) do
-    <<chunk::binary-size(^size), rest::binary>> = text
-    if String.valid?(chunk), do: {chunk, rest}, else: split_summary_chunk(text, size - 1)
-  end
-
-  defp summary_message(transcript, previous_summary) do
-    prompt = """
-    Create a detailed summary of the following coding session transcript. Preserve all important information: files read and their key content, files edited and what changed, commands run and their output, decisions made and why, and the current state of any work in progress.
-
-    Incorporate the previous summary into the updated summary. Preserve the user's current task and all unfinished work so execution can continue from this summary.
-
-    <previous_summary>
-    #{previous_summary}
-    </previous_summary>
-
-    <transcript>
-    #{transcript}
-    </transcript>
-
-    Reply with the summary only.
-    """
-
-    %{role: :user, content: [%{type: :text, text: prompt}]}
-  end
-
-  defp request_summary(state, message, output_limit) do
-    params = %{
-      model: state.model,
-      session_id: state.session_id,
-      log_session_id: state.log_session_id,
-      turn_id: state.turn_state.turn_id,
-      purpose: :compaction,
-      context: %{
-        messages: [message],
-        system_prompt: nil,
-        tools: []
-      },
-      options: Keyword.put(state.provider_options, :max_tokens, output_limit)
-    }
-
-    request =
-      params
-      |> Map.put(:origin_session_id, state.session_id)
-      |> ProviderRequest.new()
-      |> ProviderRequest.begin(System.monotonic_time(:millisecond), DateTime.utc_now())
-
-    emit(state, {:metrics, :request_started, request_fact(request)})
-    meter_summary_request(state, request)
-  end
-
-  defp meter_summary_request(state, request) do
-    {text, request, status, reason} =
-      state.provider
-      |> Provider.stream(request)
-      |> Enum.reduce_while({"", request, nil, nil}, &reduce_summary_event/2)
-
-    status = status || :failed
-
-    finished =
-      ProviderRequest.finish(
-        request,
-        status,
-        System.monotonic_time(:millisecond),
-        DateTime.utc_now()
-      )
-
-    fact =
-      if status == :completed,
-        do: request_fact(finished),
-        else: Map.put(request_fact(finished), :failure_reason, inspect(reason))
-
-    emit(state, {:metrics, :request_finished, fact})
-
-    if status == :completed,
-      do: {:ok, text, request.request_id},
-      else: {:error, reason || :stream_ended_without_terminal, request.request_id}
-  rescue
-    exception ->
-      finished =
-        ProviderRequest.finish(
-          request,
-          :failed,
-          System.monotonic_time(:millisecond),
-          DateTime.utc_now()
-        )
-
-      emit(
-        state,
-        {:metrics, :request_finished,
-         Map.put(request_fact(finished), :failure_reason, inspect(exception))}
-      )
-
-      {:error, ProviderError.from_exception(exception), request.request_id}
-  catch
-    kind, reason ->
-      finished =
-        ProviderRequest.finish(
-          request,
-          :failed,
-          System.monotonic_time(:millisecond),
-          DateTime.utc_now()
-        )
-
-      emit(
-        state,
-        {:metrics, :request_finished,
-         Map.put(request_fact(finished), :failure_reason, inspect({kind, reason}))}
-      )
-
-      {:error, ProviderError.from_exception({kind, reason}), request.request_id}
-  end
-
-  defp reduce_summary_event(
-         %ProviderEvent{type: :content_text_delta},
-         {text, request, status, reason}
-       ) do
-    request = ProviderRequest.mark_output(request, System.monotonic_time(:millisecond), :text)
-    {:cont, {text, request, status, reason}}
-  end
-
-  defp reduce_summary_event(%ProviderEvent{type: :content_thinking_delta}, acc) do
-    {text, request, status, reason} = acc
-    request = ProviderRequest.mark_output(request, System.monotonic_time(:millisecond), :thinking)
-    {:cont, {text, request, status, reason}}
-  end
-
-  defp reduce_summary_event(%ProviderEvent{type: :usage_updated, usage: usage}, acc) do
-    {text, request, status, reason} = acc
-    {:cont, {text, put_request_usage(request, usage), status, reason}}
-  end
-
-  defp reduce_summary_event(
-         %ProviderEvent{type: :response_completed, message: message, usage: usage},
-         {_text, request, _status, _reason}
-       ) do
-    text = summary_message_text(message)
-    request = put_request_usage(request, usage || ProviderUsage.from_map(message[:usage]))
-
-    request =
-      if text == "",
-        do: request,
-        else: ProviderRequest.mark_output(request, System.monotonic_time(:millisecond), :text)
-
-    {:halt, {text, request, :completed, nil}}
-  end
-
-  defp reduce_summary_event(
-         %ProviderEvent{type: :response_failed, error: error},
-         {text, request, _, _}
-       ) do
-    status = if match?(%ProviderError{kind: :cancelled}, error), do: :cancelled, else: :failed
-    {:halt, {text, request, status, error}}
-  end
-
-  defp reduce_summary_event(_event, acc), do: {:cont, acc}
-
-  defp summary_message_text(%{content: blocks}) when is_list(blocks) do
-    Enum.map_join(blocks, "", fn
-      %{type: :text, text: text} -> text
-      _block -> ""
-    end)
-  end
-
-  defp summary_message_text(%{content: text}) when is_binary(text), do: text
-  defp summary_message_text(_message), do: ""
 
   defp resolve_policy(policy) when is_pid(policy), do: policy
   defp resolve_policy(policy) when is_atom(policy), do: policy
@@ -4682,7 +4406,14 @@ defmodule Sigma.Agent do
   def __backplane_context_error__(state, context), do: context_budget_error(state, context)
 
   @doc false
-  def __backplane_prepare_context__(state, tools, window, environment, request_messages) do
+  def __backplane_prepare_context__(
+        state,
+        tools,
+        window,
+        environment,
+        request_messages,
+        on_activity \\ nil
+      ) do
     build = fn current ->
       messages = projected_request_messages(current, request_messages)
 
@@ -4706,7 +4437,7 @@ defmodule Sigma.Agent do
         (policy.context_window || 100_000) - policy.output_reserve
       )
 
-    retention_budget = max(0, div(input_budget - overhead, 2))
+    retention_budget = min(20_000, max(0, div(input_budget - overhead, 2)))
 
     if retention_budget > 0 and
          (snapshot.next_request_estimated_input_tokens >= policy.threshold or
@@ -4714,7 +4445,8 @@ defmodule Sigma.Agent do
       case run_compact(state,
              trigger: :auto,
              keep_budget: retention_budget,
-             summary_output_limit: min(1024, retention_budget)
+             summary_output_limit: retention_budget,
+             on_activity: on_activity
            ) do
         {state, {:ok, _}} ->
           context = build.(state)

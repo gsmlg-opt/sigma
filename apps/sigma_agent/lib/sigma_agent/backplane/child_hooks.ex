@@ -6,6 +6,11 @@ defmodule Sigma.Agent.Backplane.ChildHooks do
   alias Sigma.Agent.Backplane.{ChildPermission, HookDelivery, ToolPreparation}
   alias Sigma.Coding.Hooks.Outcome
 
+  defdelegate tool_effect_timeout(invocation, context),
+    to: Sigma.Agent.Backplane.ExecutionPolicy
+
+  def prepare_provider_retry(snapshot, %{host: host}), do: host.prepare_provider_retry.(snapshot)
+
   def prompt(message, %{host: host}) do
     if is_function(host[:canonical_hook_prompt], 1) do
       with {:ok, canonical} <- host.canonical_hook_prompt.(message) do

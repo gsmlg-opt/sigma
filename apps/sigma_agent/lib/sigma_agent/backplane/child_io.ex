@@ -11,7 +11,7 @@ defmodule Sigma.Agent.Backplane.ChildIO do
   require Logger
 
   alias Backplane.AgentRuntime.{Conversation, Error, Plan, Codex.Session}
-  alias Sigma.Agent.{ContextBuilder, ContextPolicy, Hooks, Message, SessionContext}
+  alias Sigma.Agent.{Compaction, ContextBuilder, ContextPolicy, Hooks, Message, SessionContext}
   alias Sigma.Coding.Hooks.Outcome
 
   alias Sigma.Agent.Backplane.{
@@ -29,7 +29,7 @@ defmodule Sigma.Agent.Backplane.ChildIO do
     ToolCatalog
   }
 
-  alias Sigma.Ai.{ProviderRequest, ProviderUsage}
+  alias Sigma.Ai.{ProviderError, ProviderRequest, ProviderUsage}
   alias Sigma.Coding.{Dispatcher, Tool}
   alias Sigma.Session.{Log, Writer}
 
@@ -45,6 +45,10 @@ defmodule Sigma.Agent.Backplane.ChildIO do
   def archive_source(io), do: GenServer.call(io, :archive_source, :infinity)
   def validate(io, key), do: GenServer.call(io, {:validate, key}, :infinity)
   def project(io, key, messages), do: GenServer.call(io, {:project, key, messages}, :infinity)
+
+  def prepare_provider_retry(io, key, snapshot),
+    do: GenServer.call(io, {:prepare_provider_retry, key, snapshot}, :infinity)
+
   def reject_preparation(io, key), do: GenServer.call(io, {:reject_preparation, key}, :infinity)
 
   @doc "Closes native resources and async hooks and persists their independent confirmations."
@@ -299,27 +303,31 @@ defmodule Sigma.Agent.Backplane.ChildIO do
     do: {:reply, retiring_error(), state}
 
   def handle_call({:context_remaining, key}, _from, %{key: key} = state) do
-    context = build_context(state, state.messages, state.catalog_tools)
-
-    snapshot =
-      ContextPolicy.snapshot(
-        model: state.config.model,
-        system: context.system,
-        messages: context.messages,
-        tools: context.tools
-      )
-
     remaining =
-      ContextControls.tokens_left(snapshot,
-        model: state.config.model,
-        context_limit: Map.get(state.config, :context_limit),
-        output_reserve:
-          Sigma.Ai.Provider.output_token_limit(
-            state.config.provider,
-            state.config.model,
-            Map.get(state.config, :provider_options, [])
+      with {:ok, messages} <- context_messages(state, state.messages) do
+        context = build_context(state, messages, state.catalog_tools)
+
+        snapshot =
+          ContextPolicy.snapshot(
+            model: state.config.model,
+            system: context.system,
+            messages: context.messages,
+            tools: context.tools
           )
-      )
+
+        ContextControls.tokens_left(snapshot,
+          model: state.config.model,
+          context_limit: Map.get(state.config, :context_limit),
+          output_reserve:
+            Sigma.Ai.Provider.output_token_limit(
+              state.config.provider,
+              state.config.model,
+              Map.get(state.config, :provider_options, [])
+            )
+        )
+      else
+        _ -> nil
+      end
 
     {:reply, remaining, state}
   end
@@ -363,6 +371,17 @@ defmodule Sigma.Agent.Backplane.ChildIO do
 
   def handle_call({:project, _key, _messages}, _from, state), do: {:reply, stale(), state}
 
+  def handle_call({:prepare_provider_retry, _key, _snapshot}, _from, %{retiring: true} = state),
+    do: {:reply, retiring_error(), state}
+
+  def handle_call({:prepare_provider_retry, key, snapshot}, _from, %{key: key} = state) do
+    {result, state} = persist_provider_failure(state, snapshot)
+    {:reply, result, state}
+  end
+
+  def handle_call({:prepare_provider_retry, _key, _snapshot}, _from, state),
+    do: {:reply, stale(), state}
+
   def handle_call({:hook_prompt, key, message}, from, %{key: key} = state) do
     # Hold prompt preparation until the admission receipt restores its identity.
     # Checkpoint projection must stay free: steering admission can await it.
@@ -389,6 +408,105 @@ defmodule Sigma.Agent.Backplane.ChildIO do
 
   def handle_call({:canonical_hook_messages, _key, _messages}, _from, state),
     do: {:reply, stale(), state}
+
+  def handle_call({:context_window, {run_id, _} = key}, _from, %{key: key} = state) do
+    window =
+      with {:ok, %{run: run}} <- Store.load(state.store, run_id) do
+        ContextControls.window(%{run: run, conversation: run.context.conversation}, run_id)
+      else
+        _ -> nil
+      end
+
+    {:reply, window, state}
+  end
+
+  def handle_call({:context_window, _key}, _from, state), do: {:reply, nil, state}
+
+  def handle_call({:prepare_context, _key, _, _, _}, _from, %{retiring: true} = state),
+    do: {:reply, retiring_error(), state}
+
+  def handle_call({:prepare_context, key, messages, tools, window}, _from, %{key: key} = state) do
+    result =
+      with nil <- state.persistence_error,
+           {:ok, messages} <- context_messages(state, messages) do
+        context = build_context(state, messages, tools, window.window)
+
+        snapshot =
+          ContextPolicy.snapshot(
+            model: state.config.model,
+            system: context.system,
+            messages: context.messages,
+            tools: context.tools
+          )
+
+        policy =
+          ContextPolicy.policy(snapshot,
+            model: state.config.model,
+            context_limit: Map.get(state.config, :context_limit),
+            output_reserve:
+              Sigma.Ai.Provider.output_token_limit(
+                state.config.provider,
+                state.config.model,
+                Map.get(state.config, :provider_options, [])
+              )
+          )
+
+        overhead =
+          (snapshot.estimate_components[:system] || 0) +
+            (snapshot.estimate_components[:tools] || 0)
+
+        input_budget =
+          min(policy.threshold, (policy.context_window || 100_000) - policy.output_reserve)
+
+        keep_budget = min(20_000, max(0, div(input_budget - overhead, 2)))
+
+        project = ContextBuilder.continuation_projection(messages)
+
+        {summarize, keep} =
+          if keep_budget > 0 and
+               (snapshot.next_request_estimated_input_tokens >= policy.threshold or
+                  policy.overflow in [:overflow, :hard_overflow]) do
+            Compaction.split(messages, keep_budget, project)
+          else
+            {[], messages}
+          end
+
+        {:ok,
+         %{
+           context: context,
+           summarize: summarize,
+           summary_messages: Enum.flat_map(summarize, project),
+           keep: keep,
+           keep_budget: keep_budget,
+           context_window: policy.context_window,
+           before_tokens: snapshot.next_request_estimated_input_tokens,
+           hook_context: hook_context(state)
+         }}
+      else
+        {:error, _} = error -> error
+        error -> {:error, error}
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:prepare_context, _, _, _, _}, _from, state), do: {:reply, stale(), state}
+
+  def handle_call({:compaction_event, _key, _event}, _from, %{retiring: true} = state),
+    do: {:reply, retiring_error(), state}
+
+  def handle_call({:compaction_event, key, event}, _from, %{key: key} = state) do
+    state = if state.persistence_error, do: state, else: append(state, event)
+    result = if state.persistence_error, do: {:error, state.persistence_error}, else: :ok
+    {:reply, result, state}
+  end
+
+  def handle_call({:compaction_event, _, _}, _from, state), do: {:reply, stale(), state}
+
+  def handle_call({:compaction_active, key}, _from, %{key: key} = state),
+    do: {:reply, not state.retiring and is_nil(state.persistence_error), state}
+
+  def handle_call({:compaction_active, _}, _from, state), do: {:reply, false, state}
 
   def handle_call({:start_hook, key}, _from, %{key: key} = state) do
     if state.start_hook_pending do
@@ -724,20 +842,22 @@ defmodule Sigma.Agent.Backplane.ChildIO do
     hook_context = hook_context(state)
     initial_prompt = :atomics.new(1, signed: false)
 
+    provider_options =
+      Map.get(config, :provider_options, [])
+      |> Keyword.put(
+        :cancellation_ref,
+        Sigma.Ai.ManagedCancellation.key(
+          state.identity.child_session_id,
+          state.identity.run_id,
+          state.identity.incarnation
+        )
+      )
+
     host = %{
       model: config.model,
       provider: config.provider,
       native_tools: config[:native_tools] == true,
-      provider_options:
-        Map.get(config, :provider_options, [])
-        |> Keyword.put(
-          :cancellation_ref,
-          Sigma.Ai.ManagedCancellation.key(
-            state.identity.child_session_id,
-            state.identity.run_id,
-            state.identity.incarnation
-          )
-        ),
+      provider_options: provider_options,
       session_id: state.identity.child_session_id,
       log_session_id: state.identity.child_session_id,
       turn_id: public_run_id(state.identity),
@@ -765,24 +885,21 @@ defmodule Sigma.Agent.Backplane.ChildIO do
           {:ok, %{prepared | id: message.id}}
         end
       end,
-      build_context: fn messages ->
-        additional_context = GenServer.call(io, {:hook_context, key}, :infinity)
-        {:ok, messages} = GenServer.call(io, {:canonical_hook_messages, key, messages}, :infinity)
-
-        ContextBuilder.build(
-          messages:
-            messages
-            |> Hooks.prepend_context(additional_context)
-            |> Hooks.async_messages(state.hook_async_contexts),
-          session_context: Map.get(config, :session_context) || SessionContext.new(),
-          system_prompt: Map.get(config, :system_prompt),
-          tools: catalog.tools,
-          cwd: config.cwd,
-          model: config.model
+      context_window: fn -> GenServer.call(io, {:context_window, key}, :infinity) end,
+      build_context: fn messages, window, tools, on_activity ->
+        prepare_context(
+          io,
+          key,
+          messages,
+          tools,
+          window,
+          Map.put(config, :provider_options, provider_options),
+          state.identity,
+          on_activity
         )
-        |> ContextBuilder.with_execution_environment(
-          CodexResources.environment(state.native_context)
-        )
+      end,
+      prepare_provider_retry: fn snapshot ->
+        prepare_provider_retry(io, key, snapshot)
       end,
       context_error:
         &Sigma.Agent.__backplane_context_error__(
@@ -820,6 +937,11 @@ defmodule Sigma.Agent.Backplane.ChildIO do
       run_timeout: :infinity,
       effect_timeout: 300_000
     ]
+    |> Keyword.merge(
+      Sigma.Agent.Backplane.ExecutionPolicy.provider_options(
+        Map.get(config, :provider_options, [])
+      )
+    )
     |> then(fn options ->
       if state.native_context,
         do: Keyword.put(options, :session_binding, state.native_context.session_binding),
@@ -1092,7 +1214,40 @@ defmodule Sigma.Agent.Backplane.ChildIO do
     end
   end
 
-  defp build_context(state, messages, tools) do
+  defp context_messages(state, messages) do
+    with {:ok, selected} <- apply(Writer, :context_snapshot, [state.writer]) do
+      previous = Map.new(state.messages, &{&1.id, &1})
+
+      results =
+        for %{role: :tool_result} = message <- state.messages,
+            into: %{},
+            do: {message.tool_call_id, message}
+
+      messages =
+        Enum.map(messages, fn message ->
+          canonical =
+            case message do
+              %{role: :tool_result, tool_call_id: id} -> Map.get(results, id, message)
+              _ -> Map.get(previous, message.id, message)
+            end
+
+          restore_hook_message(state, canonical)
+        end)
+
+      retained = MapSet.new(selected.context_messages, & &1.id)
+      excluded = MapSet.difference(state.persisted, retained)
+      requested = MapSet.new(messages, & &1.id)
+
+      summaries =
+        Enum.filter(selected.context_messages, fn message ->
+          message.role == :compaction_summary and not MapSet.member?(requested, message.id)
+        end)
+
+      {:ok, summaries ++ Enum.reject(messages, &MapSet.member?(excluded, &1.id))}
+    end
+  end
+
+  defp build_context(state, messages, tools, window \\ 1) do
     ContextBuilder.build(
       messages:
         messages
@@ -1102,9 +1257,143 @@ defmodule Sigma.Agent.Backplane.ChildIO do
       system_prompt: Map.get(state.config, :system_prompt),
       tools: tools,
       cwd: state.config.cwd,
-      model: state.config.model
+      model: state.config.model,
+      context_window: window
     )
     |> ContextBuilder.with_execution_environment(CodexResources.environment(state.native_context))
+  end
+
+  # Run summaries in the actual Provider worker, leaving ChildIO responsive to
+  # cancellation, tool settlement and retirement. The Writer ACK gates release
+  # of the prepared context; Runtime's canonical history is never replaced.
+  defp prepare_context(io, key, messages, tools, window, config, identity, on_activity) do
+    fetch = fn ->
+      case GenServer.call(io, {:prepare_context, key, messages, tools, window}, :infinity) do
+        {:ok, plan} -> plan
+        {:error, reason} -> raise ProviderError.from_exception(reason)
+      end
+    end
+
+    plan = fetch.()
+
+    if plan.summarize == [] do
+      plan.context
+    else
+      emit = fn event ->
+        case GenServer.call(io, {:compaction_event, key, event}, :infinity) do
+          :ok -> :ok
+          {:error, reason} -> raise ProviderError.from_exception(reason)
+        end
+      end
+
+      fact = %{
+        compaction_id: "compact_#{System.unique_integer([:positive])}",
+        revision: 0,
+        status: :started,
+        trigger: :auto,
+        before_tokens: plan.before_tokens,
+        before_source: :estimated,
+        started_at: DateTime.utc_now() |> DateTime.to_iso8601()
+      }
+
+      emit.({:metrics, :compaction, fact})
+
+      pre =
+        Hooks.dispatch(:pre_compact, config[:hook_specs] || [], plan.hook_context, %{
+          trigger: :auto
+        })
+
+      result =
+        case Outcome.control(pre) do
+          {:halt, reason} ->
+            {:error, {:hook_stopped, reason}, []}
+
+          _ ->
+            Compaction.summarize(
+              plan.summary_messages,
+              %{
+                provider: config.provider,
+                model: config.model,
+                provider_options: config.provider_options,
+                session_id: identity.child_session_id,
+                log_session_id: identity.child_session_id,
+                turn_id: public_run_id(identity),
+                context_window: plan.context_window,
+                cancelled?: fn ->
+                  not GenServer.call(io, {:compaction_active, key}, :infinity)
+                end,
+                emit: fn event, request, reason ->
+                  request_fact = request_fact(request)
+
+                  request_fact =
+                    if reason,
+                      do: Map.put(request_fact, :failure_reason, inspect(reason)),
+                      else: request_fact
+
+                  emit.({:metrics, event, request_fact})
+                end
+              },
+              summary_output_limit: plan.keep_budget,
+              on_activity: on_activity
+            )
+        end
+
+      case result do
+        {:ok, text, request_ids} ->
+          summary = %Message{
+            id: "compaction_#{System.unique_integer([:positive])}",
+            role: :compaction_summary,
+            content: text,
+            timestamp: System.system_time(:millisecond)
+          }
+
+          first_kept_id =
+            case List.first(plan.keep) do
+              nil -> nil
+              message -> message.id
+            end
+
+          emit.({:compact, summary, first_kept_id})
+
+          emit.(
+            {:metrics, :compaction,
+             Map.merge(fact, %{
+               revision: 1,
+               status: :committed,
+               summary_id: summary.id,
+               first_kept_id: first_kept_id,
+               request_ids: request_ids,
+               after_tokens: Compaction.estimate([summary | plan.keep]),
+               after_source: :estimated,
+               finished_at: DateTime.utc_now() |> DateTime.to_iso8601()
+             })}
+          )
+
+          post =
+            Hooks.dispatch(:post_compact, config[:hook_specs] || [], plan.hook_context, %{
+              trigger: :auto
+            })
+
+          case Outcome.control(post) do
+            {:halt, reason} -> raise ProviderError.from_exception({:hook_stopped, reason})
+            _ -> fetch.().context
+          end
+
+        {:error, reason, request_ids} ->
+          emit.(
+            {:metrics, :compaction,
+             Map.merge(fact, %{
+               revision: 1,
+               status: :failed,
+               request_ids: request_ids,
+               failure_reason: inspect(reason),
+               finished_at: DateTime.utc_now() |> DateTime.to_iso8601()
+             })}
+          )
+
+          raise ProviderError.from_exception(reason)
+      end
+    end
   end
 
   defp execute(io, key, operation) do
@@ -1275,6 +1564,39 @@ defmodule Sigma.Agent.Backplane.ChildIO do
     |> case do
       {:ok, state} -> {:ok, %{state | messages: messages}}
       {error, state} -> {error, state}
+    end
+  end
+
+  defp persist_provider_failure(%{persistence_error: error} = state, _snapshot)
+       when not is_nil(error), do: {{:error, error}, state}
+
+  defp persist_provider_failure(state, snapshot) do
+    case CanonicalHistory.failed_message(snapshot) do
+      nil ->
+        {:ok, state}
+
+      message ->
+        if MapSet.member?(state.persisted, message.id) do
+          {:ok, state}
+        else
+          case apply(Writer, :append, [state.writer, {:message_end, message}]) do
+            {:ok, _} ->
+              {:ok,
+               %{
+                 state
+                 | messages: state.messages ++ [message],
+                   persisted: MapSet.put(state.persisted, message.id)
+               }}
+
+            {:error, reason} ->
+              error =
+                Error.new(:execution_failure, "child failed Provider journal append failed",
+                  cause: reason
+                )
+
+              {{:error, error}, %{state | persistence_error: error}}
+          end
+        end
     end
   end
 
