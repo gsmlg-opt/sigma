@@ -1736,24 +1736,93 @@ defmodule Sigma.Web.SessionLiveTest do
   end
 
   @tag :tmp_dir
-  test "a removed historical model is unavailable instead of using the global default", %{
+  test "a removed historical model keeps history readable and allows explicit replacement", %{
     conn: conn,
     tmp_dir: tmp_dir
   } do
     with_agent_config(tmp_dir, fn ->
-      write_provider_configs("openai", "smart", %{"openai" => ["smart"]})
-      session_id = unique_session_id("removed-history")
-      path = session_storage_path(session_id)
-      File.mkdir_p!(Path.dirname(path))
-      assert :ok = Log.persist_event(path, {:agent_start, @workdir})
-      assert {:ok, _} = Log.append_model_change(path, "openai", "removed")
-      before_log = File.read!(path)
-      {:ok, view, html} = live_loaded(conn, session_path(session_id))
-      assert html =~ "Model unavailable"
-      assert has_element?(view, "a[href='/settings/models']")
-      refute Enum.any?(composer_model(view).choices, &(&1.label == "removed"))
-      assert is_nil(Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent))
-      assert File.read!(path) == before_log
+      with_mock_provider(CaptureProvider, fn ->
+        with_capture_provider_pid(self(), fn ->
+          write_provider_configs("openai", "smart", %{
+            "openai" => ["smart"],
+            "old-provider" => [],
+            "replacement" => ["shared-model"]
+          })
+
+          session_id = unique_session_id("removed-history")
+          path = session_storage_path(session_id)
+          File.mkdir_p!(Path.dirname(path))
+          assert :ok = Log.persist_event(path, {:agent_start, @workdir})
+          assert {:ok, _} = Log.append_model_change(path, "old-provider", "shared-model")
+
+          assert :ok =
+                   Log.persist_event(
+                     path,
+                     {:message_end,
+                      Message.assistant("historical-answer", %{
+                        content: [%{type: :text, text: "Preserved earlier work"}]
+                      })}
+                   )
+
+          before_log = File.read!(path)
+          {:ok, view, html} = live_loaded(conn, session_path(session_id))
+          {:ok, observer, _html} = live_loaded(conn, session_path(session_id))
+          assert html =~ "Model unavailable"
+
+          render_change(view, "select_context_limit", %{"_target" => ["context_limit"]})
+
+          assert Enum.any?(
+                   chat_snapshot(view).messages,
+                   &(&1.id == "historical-answer" and &1.content == "Preserved earlier work")
+                 )
+
+          setting = composer_model(view)
+          assert setting.value in [nil, ""]
+          assert Enum.any?(setting.choices, &(&1.description == "openai" and &1.label == "smart"))
+
+          selected =
+            Enum.find(
+              setting.choices,
+              &(&1.description == "replacement" and &1.label == "shared-model")
+            ).value
+
+          refute chat_snapshot(view).admission.canSubmit
+          assert File.read!(path) == before_log
+          refute_received {:provider_params, _}
+
+          assert {:ok, _} = Sigma.Session.Models.add("old-provider", ["shared-model"])
+
+          assert_eventually(fn ->
+            Enum.any?(composer_model(view).choices, &(&1.description == "old-provider"))
+          end)
+
+          assert composer_model(view).value in [nil, ""]
+          refute chat_snapshot(view).admission.canSubmit
+          refute is_pid(Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent))
+
+          assert render_hook(view, "send_prompt", %{"value" => "/reload-tools", "images" => []}) =~
+                   "Choose a configured model"
+
+          assert_reply(view, %{status: "rejected"})
+          assert File.read!(path) == before_log
+
+          request_composer_setting(view, "model", selected)
+          assert_reply(view, %{status: "ok", value: ^selected, revision: 2})
+          assert composer_model(view).value == selected
+          refute render(view) =~ "Model unavailable"
+          assert chat_snapshot(view).admission.canSubmit
+          assert String.starts_with?(File.read!(path), before_log)
+          assert {:ok, snapshot} = Log.snapshot(path)
+          assert %{provider_id: "replacement", model_id: "shared-model"} = snapshot
+
+          assert_eventually(fn ->
+            composer_model(observer).value == selected and
+              chat_snapshot(observer).admission.canSubmit
+          end)
+
+          refute_received {:provider_params, _}
+        end)
+      end)
     end)
   end
 

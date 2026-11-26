@@ -133,7 +133,8 @@ defmodule Sigma.Web.SessionLive do
          storage_path,
          meta_path,
          repo_key,
-         log_session_id
+         log_session_id,
+         selected_config \\ nil
        ) do
     session_meta = read_session_meta(meta_path)
 
@@ -151,7 +152,7 @@ defmodule Sigma.Web.SessionLive do
     system_config = ConfigManager.get_config()
 
     config =
-      Application.get_env(:sigma_web, :test_provider_config) ||
+      selected_config || Application.get_env(:sigma_web, :test_provider_config) ||
         session_provider_config(snapshot, session_meta)
 
     global_agents = Map.get(system_config, "system_prompt")
@@ -176,6 +177,20 @@ defmodule Sigma.Web.SessionLive do
       )
 
     case resolve_provider(config) do
+      {:error, :model_unavailable} ->
+        load_unavailable_model(
+          snapshot,
+          session_id,
+          workdir,
+          sessions_dir,
+          storage_path,
+          context_limit,
+          effective_cwd,
+          mcp_server_ids,
+          system_config,
+          context_discovery
+        )
+
       {:error, reason} ->
         {:error, {:provider_config, reason}}
 
@@ -287,81 +302,80 @@ defmodule Sigma.Web.SessionLive do
     end
   end
 
+  defp load_unavailable_model(
+         snapshot,
+         session_id,
+         workdir,
+         sessions_dir,
+         storage_path,
+         context_limit,
+         effective_cwd,
+         mcp_server_ids,
+         system_config,
+         context_discovery
+       ) do
+    agent = Sigma.Agent.Runtime.lookup(workdir, session_id, :agent)
+
+    status =
+      if is_pid(agent),
+        do: load_agent_status(agent),
+        else: %{
+          phase: :idle,
+          turn_id: nil,
+          current_request_id: nil,
+          context_snapshot: nil,
+          context_policy: %{context_limit: context_limit}
+        }
+
+    with {:ok, sessions} <- Sigma.Session.Log.list_session_summaries(sessions_dir) do
+      metrics = ensure_metrics_session(snapshot.metrics, session_id)
+      context_policy = status.context_policy
+
+      {:ok,
+       %{
+         active_provider_id: snapshot.provider_id,
+         agent: agent,
+         turn_id: status.turn_id,
+         context_snapshot: status.context_snapshot,
+         current_request_id: status.current_request_id,
+         provider_retry: status[:provider_retry],
+         context_token_count: context_display_tokens(status.context_snapshot),
+         context_window: context_policy[:context_window],
+         context_limit: context_policy[:context_limit] || context_limit,
+         session_metrics: Sigma.Session.Metrics.snapshot(metrics),
+         session_metrics_state: metrics,
+         context_policy: context_policy,
+         branch_summaries: load_branch_summaries(snapshot, storage_path),
+         parent_session_id: snapshot.parent_session_id,
+         runtime_status: status.phase,
+         current_model: snapshot.model_id,
+         current_model_value: model_option_value(snapshot.provider_id, snapshot.model_id),
+         effort_setting: nil,
+         context_diagnostics: context_discovery.diagnostics,
+         context_trace: context_discovery.trace,
+         effective_cwd: effective_cwd,
+         mcp_server_ids: mcp_server_ids,
+         model_options: model_options(system_config, snapshot.provider_id),
+         subagents: snapshot.subagents,
+         native_plan: PlanProjection.latest(snapshot.messages),
+         subagents_available: snapshot.subagents_available,
+         subagents_recovery_error: Map.get(snapshot, :subagents_recovery_error),
+         pending_user_questions: load_pending_user_questions(agent),
+         pending_mcp_elicitations: load_pending_mcp_elicitations(agent),
+         sessions: sessions,
+         transcript: transcript_data(snapshot.messages),
+         terminal_capability:
+           if(is_pid(agent),
+             do: TerminalBinding.capability(),
+             else: %{status: :unavailable, reason: :model_unavailable, details: %{}}
+           )
+       }}
+    end
+  end
+
   @impl true
   def handle_async(:session_load, {:ok, {:ok, session_data}}, socket) do
-    agent = session_data.agent
-    :ok = Sigma.Agent.subscribe(agent)
-    # Turn tasks capture the direct subscriber list when they start. The session
-    # topic also delivers events to a page that joins an already running turn.
-    :ok =
-      Phoenix.PubSub.subscribe(
-        Sigma.Web.PubSub,
-        session_topic(
-          ConfigManager.repository_key(socket.assigns.workdir),
-          socket.assigns.session_id
-        )
-      )
-
-    session_data =
-      refresh_loaded_transcript(
-        session_data,
-        socket.assigns.storage_path,
-        socket.assigns.session_id,
-        socket.assigns.workdir
-      )
-
-    agent_ref = Process.monitor(agent)
-
-    socket =
-      socket
-      |> assign(:session_load, AsyncResult.ok(socket.assigns.session_load, true))
-      |> assign(:active_provider_id, session_data.active_provider_id)
-      |> assign(:agent, session_data.agent)
-      |> assign(:agent_ref, agent_ref)
-      |> assign(:context_token_count, session_data.context_token_count)
-      |> assign(:context_window, session_data.context_window)
-      |> assign(:context_limit, session_data.context_limit)
-      |> assign(:context_snapshot, session_data.context_snapshot)
-      |> assign(:current_request_id, session_data.current_request_id)
-      |> assign(:provider_retry, session_data.provider_retry)
-      |> assign(:session_metrics, session_data.session_metrics)
-      |> assign(:session_metrics_state, session_data.session_metrics_state)
-      |> assign(:context_policy, session_data.context_policy)
-      |> assign(:branch_summaries, session_data.branch_summaries)
-      |> assign(:parent_session_id, session_data.parent_session_id)
-      |> assign(:runtime_status, session_data.runtime_status)
-      |> assign(:current_model, session_data.current_model)
-      |> assign(:current_model_value, session_data.current_model_value)
-      |> assign(:effort_setting, session_data.effort_setting)
-      |> assign(:context_diagnostics, session_data.context_diagnostics)
-      |> assign(:context_trace, session_data.context_trace)
-      |> assign(:effective_cwd, session_data.effective_cwd)
-      |> assign(:mcp_server_ids, session_data.mcp_server_ids)
-      |> assign(:model_options, session_data.model_options)
-      |> assign(
-        :model_unavailable,
-        not configured_model?(session_data.active_provider_id, session_data.current_model)
-      )
-      |> assign(:subagents, session_data.subagents)
-      |> assign(:native_plan, session_data.native_plan)
-      |> assign(:subagents_available, session_data.subagents_available)
-      |> assign(:subagents_recovery_error, session_data.subagents_recovery_error)
-      |> assign(:pending_user_questions, session_data.pending_user_questions)
-      |> assign(:async_interactions, load_async_interactions(agent))
-      |> assign(:pending_mcp_elicitations, session_data.pending_mcp_elicitations)
-      |> assign(:sessions, session_data.sessions)
-      |> assign(:session_ready, true)
-      |> assign(:turn_id, session_data.turn_id)
-      |> assign(:turn_in_flight, active_runtime_phase?(session_data.runtime_status))
-      |> assign(session_data.transcript)
-      |> start_async(:agent_status, fn -> Sigma.Agent.status(agent) end)
-
-    socket =
-      socket
-      |> initialize_terminals(session_data.terminal_capability)
-      |> initialize_chat()
-
-    {:noreply, socket}
+    {:noreply, apply_loaded_session(socket, session_data)}
   end
 
   def handle_async(:session_load, {:ok, {:error, {:provider_config, :model_unavailable}}}, socket) do
@@ -469,6 +483,87 @@ defmodule Sigma.Web.SessionLive do
     do: {:noreply, assign(socket, :branch_summaries, branches)}
 
   def handle_async(:retry_branches, _result, socket), do: {:noreply, socket}
+
+  defp apply_loaded_session(socket, session_data, chat_metadata \\ nil) do
+    agent = session_data.agent
+    if is_pid(agent), do: :ok = Sigma.Agent.subscribe(agent)
+    # Turn tasks capture the direct subscriber list when they start. The session
+    # topic also delivers events to a page that joins an already running turn.
+    if not socket.assigns.session_ready do
+      :ok =
+        Phoenix.PubSub.subscribe(
+          Sigma.Web.PubSub,
+          session_topic(
+            ConfigManager.repository_key(socket.assigns.workdir),
+            socket.assigns.session_id
+          )
+        )
+    end
+
+    session_data =
+      refresh_loaded_transcript(
+        session_data,
+        socket.assigns.storage_path,
+        socket.assigns.session_id,
+        socket.assigns.workdir
+      )
+
+    agent_ref = if is_pid(agent), do: Process.monitor(agent)
+
+    socket =
+      socket
+      |> assign(:session_load, AsyncResult.ok(socket.assigns.session_load, true))
+      |> assign(:active_provider_id, session_data.active_provider_id)
+      |> assign(:agent, session_data.agent)
+      |> assign(:agent_ref, agent_ref)
+      |> assign(:context_token_count, session_data.context_token_count)
+      |> assign(:context_window, session_data.context_window)
+      |> assign(:context_limit, session_data.context_limit)
+      |> assign(:context_snapshot, session_data.context_snapshot)
+      |> assign(:current_request_id, session_data.current_request_id)
+      |> assign(:provider_retry, session_data.provider_retry)
+      |> assign(:session_metrics, session_data.session_metrics)
+      |> assign(:session_metrics_state, session_data.session_metrics_state)
+      |> assign(:context_policy, session_data.context_policy)
+      |> assign(:branch_summaries, session_data.branch_summaries)
+      |> assign(:parent_session_id, session_data.parent_session_id)
+      |> assign(:runtime_status, session_data.runtime_status)
+      |> assign(:current_model, session_data.current_model)
+      |> assign(:current_model_value, session_data.current_model_value)
+      |> assign(:effort_setting, session_data.effort_setting)
+      |> assign(:context_diagnostics, session_data.context_diagnostics)
+      |> assign(:context_trace, session_data.context_trace)
+      |> assign(:effective_cwd, session_data.effective_cwd)
+      |> assign(:mcp_server_ids, session_data.mcp_server_ids)
+      |> assign(:model_options, session_data.model_options)
+      |> assign(
+        :model_unavailable,
+        not (is_pid(agent) and
+               configured_model?(session_data.active_provider_id, session_data.current_model))
+      )
+      |> assign(:subagents, session_data.subagents)
+      |> assign(:native_plan, session_data.native_plan)
+      |> assign(:subagents_available, session_data.subagents_available)
+      |> assign(:subagents_recovery_error, session_data.subagents_recovery_error)
+      |> assign(:pending_user_questions, session_data.pending_user_questions)
+      |> assign(:async_interactions, load_async_interactions(agent))
+      |> assign(:pending_mcp_elicitations, session_data.pending_mcp_elicitations)
+      |> assign(:sessions, session_data.sessions)
+      |> assign(:session_ready, true)
+      |> assign(:turn_id, session_data.turn_id)
+      |> assign(:turn_in_flight, active_runtime_phase?(session_data.runtime_status))
+      |> assign(session_data.transcript)
+      |> initialize_terminals(session_data.terminal_capability)
+
+    socket =
+      if is_pid(agent),
+        do: start_async(socket, :agent_status, fn -> Sigma.Agent.status(agent) end),
+        else: socket
+
+    if chat_metadata,
+      do: replace_chat_snapshot(socket, chat_metadata),
+      else: initialize_chat(socket)
+  end
 
   defp refresh_loaded_transcript(session_data, storage_path, session_id, workdir) do
     # Recover messages committed between the async load and this subscription.
@@ -820,7 +915,8 @@ defmodule Sigma.Web.SessionLive do
             </details>
 
             <p :if={@model_unavailable} id="session-model-unavailable" class="mb-2 text-xs text-error" role="status">
-              Model unavailable. <.link navigate={~p"/settings/models"} class="underline">Models settings</.link>
+              Model unavailable. Choose another configured model to continue.
+              <.link navigate={~p"/settings/models"} class="underline">Models settings</.link>
             </p>
             <div id="chat-input-area" phx-update="ignore" class="relative">
               <div id="prompt-input" aria-label="Message">Loading composer…</div>
@@ -855,15 +951,15 @@ defmodule Sigma.Web.SessionLive do
           <form id="context-limit-form" phx-change="select_context_limit" class="mb-2">
             <.dm_select id="context-limit-select" name="context_limit" label="Context limit"
               value={to_string(@context_limit)} size="sm"
-              disabled={not @session_ready or @turn_in_flight}>
+              disabled={not @session_ready or @turn_in_flight or @model_unavailable}>
               <option :for={{label, limit} <- context_limit_options(@context_limit)}
                 value={limit} selected={limit == @context_limit}>{label}</option>
             </.dm_select>
           </form>
           <form id="custom-context-limit-form" phx-submit="select_context_limit" class="mb-2 flex items-end gap-2">
             <.dm_input id="custom-context-limit" type="number" name="context_limit" label="Custom budget (tokens)"
-              value={@context_limit} min="1" step="1" disabled={not @session_ready or @turn_in_flight} />
-            <.dm_btn native_submit size="sm" disabled={not @session_ready or @turn_in_flight}>Apply</.dm_btn>
+              value={@context_limit} min="1" step="1" disabled={not @session_ready or @turn_in_flight or @model_unavailable} />
+            <.dm_btn native_submit size="sm" disabled={not @session_ready or @turn_in_flight or @model_unavailable}>Apply</.dm_btn>
           </form>
           <p :if={@session_ready and is_nil(@context_policy[:context_limit])} class="mb-2 text-xs text-on-surface-variant">
             Context limit applies after the current turn finishes.
@@ -879,7 +975,7 @@ defmodule Sigma.Web.SessionLive do
             phx-click="compact_session"
             variant="ghost"
             size="sm"
-            disabled={not @session_ready or @turn_in_flight or @pending_compaction}
+            disabled={not @session_ready or @turn_in_flight or @pending_compaction or @model_unavailable}
             class="mt-2"
           >
             Compact context
@@ -1356,6 +1452,7 @@ defmodule Sigma.Web.SessionLive do
     %{
       canSubmit:
         session_ready?(socket) and not socket.assigns.pending_compaction and
+          not socket.assigns.model_unavailable and
           socket.assigns[:pending_continue] != true and
           not subagent_recovery_required?(socket.assigns[:subagents_recovery_error]),
       allowWhileStreaming: true
@@ -3051,6 +3148,10 @@ defmodule Sigma.Web.SessionLive do
   @impl true
   def handle_event("send_prompt", %{"value" => prompt} = params, socket) do
     cond do
+      socket.assigns.model_unavailable ->
+        {:reply, %{status: "rejected"},
+         put_flash(socket, :error, "Choose a configured model before sending a message.")}
+
       not session_ready?(socket) ->
         {:reply, %{status: "rejected"}, put_flash(socket, :info, "Session is still loading.")}
 
@@ -3522,6 +3623,9 @@ defmodule Sigma.Web.SessionLive do
 
   def handle_event("compact_session", _params, socket) do
     cond do
+      socket.assigns.model_unavailable ->
+        {:noreply, put_flash(socket, :error, "Choose a configured model before compacting.")}
+
       not socket.assigns.session_ready ->
         {:noreply, put_flash(socket, :error, "Wait for the session to finish loading.")}
 
@@ -3595,7 +3699,7 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def handle_event("select_context_limit", %{"context_limit" => selected}, socket) do
-    if session_ready?(socket) do
+    if session_ready?(socket) and not socket.assigns.model_unavailable do
       sessions_dir = socket.assigns.sessions_dir
       session_id = socket.assigns.session_id
 
@@ -3621,11 +3725,19 @@ defmodule Sigma.Web.SessionLive do
           {:noreply, put_flash(socket, :error, "Could not persist context limit.")}
       end
     else
-      {:noreply, put_flash(socket, :info, "Session is still loading.")}
+      message =
+        if socket.assigns.model_unavailable,
+          do: "Choose a configured model before changing context limit.",
+          else: "Session is still loading."
+
+      {:noreply, put_flash(socket, :info, message)}
     end
   catch
     :exit, _reason -> {:noreply, put_flash(socket, :error, "Session is unavailable.")}
   end
+
+  # Disabled fields are omitted when LiveView recovers a form after reconnecting.
+  def handle_event("select_context_limit", _params, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("chat.setting", params, socket) do
@@ -3667,6 +3779,7 @@ defmodule Sigma.Web.SessionLive do
              get_in(socket.assigns, [:effort_setting, :value]),
              options
            ),
+         {:ok, session_data} <- start_selected_model_session(socket, selected_config),
          {:ok, _entry_id} <-
            persist_selected_model(
              socket,
@@ -3676,6 +3789,11 @@ defmodule Sigma.Web.SessionLive do
              model,
              Keyword.put_new(options, :reasoning_effort, nil)
            ) do
+      socket =
+        if session_data,
+          do: apply_loaded_session(socket, session_data, socket.assigns.chat_initial.metadata),
+          else: socket
+
       selection = [
         active_provider_id: provider_id,
         current_model: model_id,
@@ -3698,6 +3816,9 @@ defmodule Sigma.Web.SessionLive do
     else
       {:error, {:model_change_persistence_failed, _reason}} ->
         {:error, "Could not persist model selection."}
+
+      {:error, {:selected_model_start_failed, reason}} ->
+        {:error, "Could not start the selected model's session: #{format_load_error(reason)}"}
 
       _ ->
         {:error, "Unknown model selection."}
@@ -3722,6 +3843,39 @@ defmodule Sigma.Web.SessionLive do
   end
 
   defp change_composer_setting(_, _, _), do: {:error, "Unknown session setting."}
+
+  defp start_selected_model_session(%{assigns: %{agent: agent}}, _config) when is_pid(agent),
+    do: {:ok, nil}
+
+  defp start_selected_model_session(socket, config) do
+    assigns = socket.assigns
+    repo_key = ConfigManager.repository_key(assigns.workdir)
+
+    result =
+      with {:ok, snapshot} <-
+             Sigma.Agent.Runtime.session_snapshot(
+               assigns.workdir,
+               assigns.session_id,
+               assigns.storage_path
+             ) do
+        load_session_data(
+          snapshot,
+          assigns.session_id,
+          assigns.workdir,
+          assigns.sessions_dir,
+          assigns.storage_path,
+          assigns.meta_path,
+          repo_key,
+          assigns.log_session_id,
+          config
+        )
+      end
+
+    case result do
+      {:ok, session_data} -> {:ok, session_data}
+      {:error, reason} -> {:error, {:selected_model_start_failed, reason}}
+    end
+  end
 
   defp persist_selected_model(
          socket,
@@ -3836,14 +3990,41 @@ defmodule Sigma.Web.SessionLive do
       assign(socket,
         model_options: options,
         model_unavailable:
-          not configured_model?(socket.assigns.active_provider_id, socket.assigns.current_model)
+          not (is_pid(socket.assigns.agent) and
+                 configured_model?(
+                   socket.assigns.active_provider_id,
+                   socket.assigns.current_model
+                 ))
       )
 
     {:noreply, refresh_composer_settings(socket)}
   end
 
   def handle_info({:session_model_selected, selection}, socket) do
-    {:noreply, socket |> assign(selection) |> refresh_composer_settings()}
+    socket = socket |> assign(selection) |> refresh_composer_settings()
+
+    socket =
+      if is_pid(socket.assigns.agent) do
+        socket
+      else
+        assigns = socket.assigns
+
+        socket
+        |> assign(:session_ready, false)
+        |> start_async(:session_load, fn ->
+          load_session_data(
+            assigns.session_id,
+            assigns.workdir,
+            assigns.sessions_dir,
+            assigns.storage_path,
+            assigns.meta_path,
+            ConfigManager.repository_key(assigns.workdir),
+            assigns.log_session_id
+          )
+        end)
+      end
+
+    {:noreply, socket}
   end
 
   def handle_info(

@@ -135,6 +135,38 @@ flash and persisted turn details. Reconnecting to a live Agent reads its retry
 status without scheduling another request. Retries inside an individual HTTP
 submission remain part of that Provider call rather than separate UI counters.
 
+### Missing configured models
+
+A session whose historical provider/model pair is no longer configured still
+loads its saved transcript, metrics and configured model choices. The composer
+requires an explicit selection before submitting. Neither the global default
+nor a matching model ID under another provider replaces the historical pair
+automatically. A cold view starts no placeholder Provider host; an existing
+live Agent can still be observed. Selecting a replacement starts or updates the
+normal session through the existing serialized model-change path, preserving
+the old journal prefix and synchronizing other open views. Loading the view and
+selecting the replacement do not submit a Provider request. Restoring the old
+pair in configuration refreshes the choices but leaves a detached view awaiting
+explicit selection. The focused LiveView regression covers a model moved to
+another provider, restoration of the old pair, two open views, the selection
+revision and unchanged historical content.
+
+The selected local checks passed: 10 Agent checks and nine LiveView checks.
+The removed-model case was then extended with configuration restoration and
+rerun successfully. This is 19 distinct checks; the rerun is not an additional
+case. Provider calls in these regressions use controlled fixtures, so this does
+not establish recovery of the external model gateway.
+
+The deployed dev snapshot passed strict compilation of all 269 umbrella files.
+Chrome verified that `session_ZRx8Ss-v_ol1fNT3` loads its two historical messages,
+accepts the explicit selection `prov_35/MiniMax-M3.1-Flash`, and remains Ready
+with `canSubmit: true` after reload, without console errors. Its journal prefix
+is unchanged; the sole appended entry is the model change, with no new Provider
+requests or tool results. Disabled context fields omitted during LiveView form
+recovery are ignored; the extended regression and actual server reconnect both
+pass. The running BEAM modules match the compiled snapshot and retain Runtime
+1.10.102, the existing agent directory, and disabled code reloading/watchers.
+
 ## Parallel dispatch
 
 Runtime overlaps consecutive calls whose pinned descriptors explicitly declare
