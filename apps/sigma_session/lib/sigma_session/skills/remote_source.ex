@@ -1,12 +1,12 @@
 defmodule Sigma.Session.Skills.RemoteSource do
-  @moduledoc "Configured Backplane Skill Protocol read source with exact offline reuse."
+  @moduledoc "Configured Backplane Skill Protocol source with exact offline reads."
 
   alias Backplane.SkillProtocol.{Client, Error, SkillRef, Source.Backplane, TemporaryStorage}
   alias Sigma.Session.ConfigManager
   alias Sigma.Session.Skills.{BindingStore, RemoteCache}
 
   @enforce_keys [:source, :source_id, :cache_root, :binding_path]
-  defstruct [:source, :source_id, :cache_root, :binding_path, :access_scope]
+  defstruct [:source, :client, :source_id, :cache_root, :binding_path, :access_scope]
 
   @type t :: %__MODULE__{}
 
@@ -38,6 +38,7 @@ defmodule Sigma.Session.Skills.RemoteSource do
       {:ok,
        %__MODULE__{
          source: source,
+         client: client,
          source_id: client.source_id,
          access_scope: access_scope(opts),
          cache_root: Keyword.get(opts, :cache_root, Path.join(agent_dir, "skill-cache")),
@@ -48,7 +49,46 @@ defmodule Sigma.Session.Skills.RemoteSource do
   end
 
   @spec catalog(t(), keyword()) :: {:ok, map()} | {:error, Error.t()}
-  def catalog(%__MODULE__{source: source}, opts \\ []), do: Backplane.catalog(source, opts)
+  def catalog(%__MODULE__{source: source}, opts \\ []) do
+    if opts[:view] in [:always, "always"] and not discovery_available?() do
+      discovery_unavailable()
+    else
+      Backplane.catalog(source, opts)
+    end
+  end
+
+  # TODO(upstream): gsmlg-opt/backplane#193 Adopt the published discovery SDK.
+  def discovery_available? do
+    Code.ensure_loaded?(Backplane) and function_exported?(Backplane, :search, 2)
+  end
+
+  def search(%__MODULE__{source: source}, opts) do
+    if discovery_available?(),
+      do: apply(Backplane, :search, [source, opts]),
+      else: discovery_unavailable()
+  end
+
+  # TODO(upstream): gsmlg-opt/backplane#193 Adopt the published creation SDK.
+  def create_available? do
+    Code.ensure_loaded?(Client) and function_exported?(Client, :create, 3)
+  end
+
+  def create(%__MODULE__{client: client}, attrs, opts \\ []) do
+    if create_available?(),
+      do: apply(Client, :create, [client, attrs, opts]),
+      else:
+        {:error,
+         Error.new(
+           :unsupported_capability,
+           :wire,
+           "Backplane skill creation SDK needs an upgrade"
+         )}
+  end
+
+  defp discovery_unavailable do
+    {:error,
+     Error.new(:unsupported_capability, :wire, "Backplane discovery SDK needs an upgrade")}
+  end
 
   @spec resolve(t(), String.t(), String.t() | nil, keyword()) ::
           {:ok, Backplane.SkillProtocol.BundleManifest.t()} | {:error, Error.t()}

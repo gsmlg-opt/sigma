@@ -1,6 +1,6 @@
 defmodule Sigma.Agent.Backplane.SkillResources do
   @moduledoc """
-  Executor-only, read-only skill resources owned by one Codex resource host.
+  Executor-owned skill resources and remote creation for one Codex resource host.
 
   Listing pins catalog descriptors, not file contents. The first package read
   prepares a verified immutable bundle; text pages then share that bundle and
@@ -14,7 +14,7 @@ defmodule Sigma.Agent.Backplane.SkillResources do
   alias Backplane.AgentRuntime.Error
   alias Backplane.AgentRuntime.Codex.Session
   alias Sigma.Agent.Backplane.PluginSkills
-  alias Sigma.Session.Skills.{Catalog, Snapshot}
+  alias Sigma.Session.Skills.{Catalog, RemoteAdapter, Snapshot}
 
   @list_page_size 20
   @text_page_bytes 16 * 1024
@@ -50,7 +50,8 @@ defmodule Sigma.Agent.Backplane.SkillResources do
      empty(%{
        workspace: Keyword.fetch!(opts, :workspace),
        binding: nil,
-       plugin_skills: %{entries: %{}, diagnostics: []}
+       plugin_skills: %{entries: %{}, diagnostics: []},
+       remote_skills: %{skills: [], diagnostics: []}
      })}
   end
 
@@ -60,7 +61,13 @@ defmodule Sigma.Agent.Backplane.SkillResources do
       {:ok, next} ->
         case PluginSkills.load(plugins) do
           {:ok, plugin_skills} ->
-            {:reply, :ok, empty(%{next | binding: binding, plugin_skills: plugin_skills})}
+            {:reply, :ok,
+             empty(%{
+               next
+               | binding: binding,
+                 plugin_skills: plugin_skills,
+                 remote_skills: apply(RemoteAdapter, :discovery, [])
+             })}
 
           {:error, _} = error ->
             {:reply, error, empty(%{next | binding: nil})}
@@ -117,14 +124,94 @@ defmodule Sigma.Agent.Backplane.SkillResources do
     end
   end
 
+  defp dispatch("skills::search", %{"query" => _} = args, operation, state)
+       when not is_map_key(args, "authority"),
+       do: dispatch("skills::search", Map.put(args, "authority", "executor"), operation, state)
+
+  defp dispatch(
+         "skills::search",
+         %{"authority" => "executor", "source_id" => source_id, "query" => query} = args,
+         operation,
+         state
+       ) do
+    params = %{source_id: source_id, q: query, cursor: args["cursor"], limit: args["limit"]}
+
+    cancelled? = fn -> not match?({:ok, _}, validate(state.binding, operation)) end
+
+    case apply(RemoteAdapter, :search, [params, [cancelled?: cancelled?]]) do
+      {:ok, result}
+      when map_size(state.packages) + length(result.items) <= @max_catalog_entries ->
+        entries = Enum.map(result.items, &remote_entry/1)
+
+        packages =
+          entries |> Enum.filter(& &1.listed.model_readable) |> Map.new(&{&1.listed.package, &1})
+
+        {{:ok, %{skills: Enum.map(entries, & &1.listed), next_cursor: result.next_cursor}},
+         %{state | packages: Map.merge(state.packages, packages)}}
+
+      {:ok, _result} ->
+        {error(:overloaded, "skill catalog entry limit exceeded"), state}
+
+      {:error, reason} ->
+        {{:error,
+          Error.new(:unsupported_capability, reason.message,
+            details: Map.take(reason, [:code, :reason, :retryable?])
+          )}, state}
+    end
+  end
+
+  defp dispatch("skills::create", %{"authority" => "cloud"}, _operation, state),
+    do: {error(:unsupported_capability, "cloud skill authority is not connected"), state}
+
+  defp dispatch("skills::create", %{"source_id" => _}, _operation, state)
+       when map_size(state.packages) >= @max_catalog_entries,
+       do: {error(:overloaded, "skill catalog entry limit exceeded"), state}
+
+  defp dispatch("skills::create", %{"source_id" => _} = args, operation, state) do
+    cancelled? = fn -> not match?({:ok, _}, validate(state.binding, operation)) end
+
+    case apply(RemoteAdapter, :create, [args, [cancelled?: cancelled?]]) do
+      {:ok, skill} ->
+        entry = remote_entry(skill)
+
+        packages =
+          if entry.listed.model_readable,
+            do: Map.put(state.packages, entry.listed.package, entry),
+            else: state.packages
+
+        {{:ok, entry.listed}, %{state | packages: packages}}
+
+      {:error, reason} ->
+        class =
+          case reason.code do
+            :already_exists -> :resource_conflict
+            :invalid_request -> :validation
+            :unsupported_skill_kind -> :unsupported_capability
+            code when code in [:temporarily_unavailable, :timeout, :cancelled] -> :unknown_outcome
+            _ -> :forbidden
+          end
+
+        {{:error,
+          Error.new(class, reason.message,
+            details: Map.take(reason, [:code, :reason, :retryable?])
+          )}, state}
+    end
+  end
+
   defp dispatch("skills::read", %{"package" => package} = args, operation, state)
        when is_binary(package) do
     with {:ok, entry} <- fetch(state.packages, package, "unknown or expired skill package"),
          :ok <- eligible(state, entry),
          {:ok, relative, resource} <- resource(entry, args["resource"]) do
       case args["cursor"] do
-        nil -> read(state, package, entry, relative, resource, operation)
-        cursor -> read_next(state, package, resource, cursor)
+        nil ->
+          case authorize_cached_read(state, package, entry, operation) do
+            :ok -> read(state, package, entry, relative, resource, operation)
+            {:error, reason} -> {remote_error(reason), state}
+          end
+
+        cursor ->
+          read_next(state, package, resource, cursor)
       end
     else
       {:error, _} = error -> {error, state}
@@ -139,7 +226,8 @@ defmodule Sigma.Agent.Backplane.SkillResources do
 
     skills =
       (apply(Catalog, :automatic, [catalog]) ++
-         Enum.map(state.plugin_skills.entries, fn {_id, entry} -> entry.skill end))
+         Enum.map(state.plugin_skills.entries, fn {_id, entry} -> entry.skill end) ++
+         Enum.filter(state.remote_skills.skills, &apply(RemoteAdapter, :eligible?, [&1])))
       |> Enum.sort_by(&{reference(&1), &1.skill_id})
 
     cond do
@@ -167,6 +255,9 @@ defmodule Sigma.Agent.Backplane.SkillResources do
               }
             }
 
+            entry =
+              if Map.get(skill, :source_kind) == "backplane", do: remote_entry(skill), else: entry
+
             case Map.fetch(state.plugin_skills.entries, skill.skill_id) do
               {:ok, plugin} -> Map.put(entry, :installation, plugin.installation)
               :error -> entry
@@ -178,7 +269,8 @@ defmodule Sigma.Agent.Backplane.SkillResources do
         snapshot = %{
           entries: entries,
           warnings:
-            Enum.map(catalog.diagnostics, &Map.from_struct/1) ++ state.plugin_skills.diagnostics
+            Enum.map(catalog.diagnostics, &Map.from_struct/1) ++
+              state.plugin_skills.diagnostics ++ state.remote_skills.diagnostics
         }
 
         packages = Map.new(entries, &{&1.listed.package, &1})
@@ -212,6 +304,7 @@ defmodule Sigma.Agent.Backplane.SkillResources do
     {{:ok,
       %{
         skills: Enum.map(entries, & &1.listed),
+        sources: apply(RemoteAdapter, :discovery_sources, []),
         warnings: snapshot.warnings,
         next_cursor: next_cursor
       }}, state}
@@ -231,7 +324,7 @@ defmodule Sigma.Agent.Backplane.SkillResources do
         case prepared(state, package, entry, operation) do
           {:ok, prepared, next} ->
             with {:ok, contents} <-
-                   apply(Snapshot, :read, [prepared, relative, [max_bytes: @max_resource_bytes]]),
+                   read_prepared(prepared, relative),
                  :ok <- text(contents),
                  {:ok, _owner} <- validate(state.binding, operation),
                  :ok <- eligible(state, entry) do
@@ -262,7 +355,7 @@ defmodule Sigma.Agent.Backplane.SkillResources do
 
         result =
           with :ok <- verify_plugin(entry),
-               do: apply(Snapshot, :prepare, [entry.skill, [cancelled?: cancelled?]])
+               do: prepare_skill(entry.skill, cancelled?)
 
         case result do
           {:ok, snapshot} ->
@@ -271,7 +364,7 @@ defmodule Sigma.Agent.Backplane.SkillResources do
               {:ok, snapshot, %{state | prepared: Map.put(state.prepared, package, snapshot)}}
             else
               {:error, _} = error ->
-                case apply(Snapshot, :release, [snapshot]) do
+                case release_prepared(snapshot) do
                   :ok ->
                     {:error, elem(error, 1), state}
 
@@ -366,6 +459,76 @@ defmodule Sigma.Agent.Backplane.SkillResources do
 
   defp resource(_entry, _uri), do: error(:validation, "invalid skill resource")
 
+  defp authorize_cached_read(
+         state,
+         package,
+         %{skill: %{source_kind: "backplane"} = skill},
+         operation
+       ) do
+    if Map.has_key?(state.prepared, package) do
+      cancelled? = fn -> not match?({:ok, _}, validate(state.binding, operation)) end
+      apply(RemoteAdapter, :authorize_exact, [skill, [cancelled?: cancelled?]])
+    else
+      :ok
+    end
+  end
+
+  defp authorize_cached_read(_state, _package, _entry, _operation), do: :ok
+
+  defp remote_error(reason) do
+    {:error,
+     Error.new(:forbidden, reason.message,
+       details: Map.take(reason, [:code, :reason, :retryable?])
+     )}
+  end
+
+  defp remote_entry(skill) do
+    package = opaque()
+    readable? = apply(RemoteAdapter, :eligible?, [skill])
+
+    %{
+      skill: skill,
+      listed: %{
+        package: if(readable?, do: package),
+        name: skill.name,
+        description: skill.description,
+        authority: "executor",
+        reference: skill.reference,
+        revision: skill.revision,
+        artifact_digest: skill.artifact_digest,
+        manual_only: skill.manual_only?,
+        model_readable: readable?,
+        main_resource: if(readable?, do: "skill://#{package}/SKILL.md")
+      }
+    }
+  end
+
+  defp prepare_skill(%{source_kind: "backplane"} = skill, cancelled?) do
+    case apply(RemoteAdapter, :prepare_exact, [skill, [cancelled?: cancelled?]]) do
+      {:ok, prepared} -> {:ok, %{root: prepared.root, remote_prepared: prepared}}
+      {:error, reason} -> remote_error(reason)
+    end
+  end
+
+  defp prepare_skill(skill, cancelled?),
+    do: apply(Snapshot, :prepare, [skill, [cancelled?: cancelled?]])
+
+  defp read_prepared(%{remote_prepared: prepared}, relative),
+    do:
+      apply(RemoteAdapter, :read_prepared, [prepared, relative, [max_bytes: @max_resource_bytes]])
+
+  defp read_prepared(prepared, relative),
+    do: apply(Snapshot, :read, [prepared, relative, [max_bytes: @max_resource_bytes]])
+
+  defp release_prepared(%{remote_prepared: _}), do: :ok
+  defp release_prepared(prepared), do: apply(Snapshot, :release, [prepared])
+
+  defp eligible(_state, %{skill: %{source_kind: "backplane"} = skill}) do
+    if apply(RemoteAdapter, :eligible?, [skill]),
+      do: :ok,
+      else: error(:forbidden, "remote skill source changed; list again")
+  end
+
   defp eligible(state, %{skill: %{source: :plugin} = skill}) do
     case Map.fetch(state.plugin_skills.entries, skill.skill_id) do
       {:ok, %{skill: ^skill}} -> :ok
@@ -398,9 +561,13 @@ defmodule Sigma.Agent.Backplane.SkillResources do
        else: error(:forbidden, "skill catalog policy changed; list again")
   end
 
+  defp reference(%{source_kind: "backplane", reference: reference}), do: reference
   defp reference(%{source: :repository, name: name}), do: "repo:" <> name
   defp reference(%{source: :global, name: name}), do: "global:" <> name
   defp reference(%{source: :plugin} = skill), do: PluginSkills.reference(skill)
+
+  defp listed_skill?(_state, _catalog, %{source_kind: "backplane"} = skill),
+    do: apply(RemoteAdapter, :eligible?, [skill])
 
   defp listed_skill?(state, _catalog, %{source: :plugin} = skill),
     do: match?({:ok, %{skill: ^skill}}, Map.fetch(state.plugin_skills.entries, skill.skill_id))
@@ -466,7 +633,7 @@ defmodule Sigma.Agent.Backplane.SkillResources do
   defp release(state) do
     pending =
       Map.reject(state.prepared, fn {_package, snapshot} ->
-        apply(Snapshot, :release, [snapshot]) == :ok
+        release_prepared(snapshot) == :ok
       end)
 
     next = %{state | prepared: pending}

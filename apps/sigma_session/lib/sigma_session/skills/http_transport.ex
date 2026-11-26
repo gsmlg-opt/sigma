@@ -2,7 +2,7 @@ defmodule Sigma.Session.Skills.HTTPTransport do
   @moduledoc """
   `Backplane.SkillProtocol.Client` transport over `Sigma.Ai.HTTP` (http_fetch).
 
-  Honors the Client request contract: GET `url` with `headers`, stop at
+  Honors the Client request contract: `method`, `url`, `headers` and `body`, stop at
   `deadline`, when `cancelled?.()` turns true, or once the body exceeds
   `max_bytes`. Returns `{:ok, %{status, headers, body}}` with single-valued
   lowercase headers, or `{:error, reason}`.
@@ -13,7 +13,9 @@ defmodule Sigma.Session.Skills.HTTPTransport do
   @spec request(map()) :: {:ok, map()} | {:error, term()}
   def request(request) do
     case HTTP.stream(
+           method: Map.get(request, :method, :get),
            url: request.url,
+           body: Map.get(request, :body),
            headers: request.headers,
            receive_timeout: request.timeout_ms
          ) do
@@ -44,7 +46,13 @@ defmodule Sigma.Session.Skills.HTTPTransport do
         # Selective: only this response's stream messages; others stay queued.
         receive do
           message
-          when (is_tuple(message) and elem(message, 0) in [:stream_chunk, :stream_end, :stream_trailers, :stream_error] and
+          when (is_tuple(message) and
+                  elem(message, 0) in [
+                    :stream_chunk,
+                    :stream_end,
+                    :stream_trailers,
+                    :stream_error
+                  ] and
                   elem(message, 1) == stream) or
                  (is_tuple(message) and tuple_size(message) == 5 and elem(message, 0) == :DOWN and
                     elem(message, 1) == monitor) ->
@@ -60,7 +68,8 @@ defmodule Sigma.Session.Skills.HTTPTransport do
                 {:ok,
                  %{
                    status: response.status,
-                   headers: Map.new(response.headers, fn {name, [value | _]} -> {name, value} end),
+                   headers:
+                     Map.new(response.headers, fn {name, [value | _]} -> {name, value} end),
                    body: IO.iodata_to_binary(chunks)
                  }}
 

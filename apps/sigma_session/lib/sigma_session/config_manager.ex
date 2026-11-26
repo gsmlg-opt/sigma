@@ -123,6 +123,7 @@ defmodule Sigma.Session.ConfigManager do
         "default_model_id" => default_model,
         "system_prompt" => system_prompt,
         "disabled_global_skills" => disabled_global_skill_names(settings),
+        "load_global_skills" => settings["loadGlobalSkills"] != false,
         "permissions" => permission_settings(settings),
         "credentials" => credentials,
         "providers" => providers
@@ -431,6 +432,17 @@ defmodule Sigma.Session.ConfigManager do
   defp normalize_theme(theme) when theme in ["sunshine", "moonlight"], do: theme
   defp normalize_theme(_theme), do: "default"
 
+  def load_global_skills?, do: load_json(@settings_file, %{})["loadGlobalSkills"] != false
+
+  def set_load_global_skills(enabled?) when is_boolean(enabled?) do
+    transaction(fn ->
+      settings = load_json(@settings_file, %{})
+      save_json(@settings_file, Map.put(settings, "loadGlobalSkills", enabled?))
+      Sigma.Session.ConfigEvents.broadcast()
+      :ok
+    end)
+  end
+
   def disabled_global_skills do
     @settings_file
     |> load_json(%{})
@@ -473,7 +485,8 @@ defmodule Sigma.Session.ConfigManager do
             "credentialId",
             "accessContextId",
             "enabled",
-            "offline"
+            "offline",
+            "discovery"
           ])
 
         source =
@@ -652,6 +665,7 @@ defmodule Sigma.Session.ConfigManager do
       access_context_id: trim_config_value(source["accessContextId"]),
       enabled?: source["enabled"] != false,
       offline?: source["offline"] == true,
+      discovery?: source["discovery"] == true,
       resolution_error: nil
     }
 

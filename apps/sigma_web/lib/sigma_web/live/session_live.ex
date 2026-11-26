@@ -5739,7 +5739,8 @@ defmodule Sigma.Web.SessionLive do
   defp logs_topic(repo_key, session_id), do: "sigma:logs:#{repo_key}:#{session_id}"
 
   defp session_skills_context(effective_cwd) do
-    effective_cwd |> Skills.Catalog.build() |> Skills.Catalog.automatic()
+    (effective_cwd |> Skills.Catalog.build() |> Skills.Catalog.automatic()) ++
+      Skills.RemoteAdapter.automatic()
   end
 
   defp slash_commands(cwd) do

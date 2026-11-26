@@ -4,6 +4,104 @@ defmodule Sigma.Web.ProtocolSessionOptionsTest do
   alias Sigma.Web.ProtocolSessionOptions
 
   @tag :tmp_dir
+  test "protocol creation and restore use remote defaults with the global directory disabled", %{
+    tmp_dir: dir
+  } do
+    previous =
+      Map.new(
+        [:global_skills_dir, :remote_skill_source_options],
+        &{&1, Application.fetch_env(:sigma_session, &1)}
+      )
+
+    on_exit(fn ->
+      for {key, original} <- previous do
+        case original do
+          {:ok, value} -> Application.put_env(:sigma_session, key, value)
+          :error -> Application.delete_env(:sigma_session, key)
+        end
+      end
+    end)
+
+    global = Path.join(dir, "global")
+    Application.put_env(:sigma_session, :global_skills_dir, global)
+
+    with_config(dir, fn ->
+      for {root, name} <- [
+            {global, "hidden-global"},
+            {Path.join(dir, ".agents/skills"), "visible-repository"}
+          ] do
+        path = Path.join(root, name)
+        File.mkdir_p!(path)
+
+        File.write!(
+          Path.join(path, "SKILL.md"),
+          "---\nname: #{name}\ndescription: Marker\n---\nBody"
+        )
+      end
+
+      File.write!(
+        Path.join([dir, "agent", "auth.json"]),
+        Formata.JSON.encode!(%{"p" => %{"type" => "api_key", "key" => "fixture-only"}})
+      )
+
+      :ok = Sigma.Session.ConfigManager.set_load_global_skills(false)
+
+      {:ok, _} =
+        Sigma.Session.ConfigManager.put_skill_source("remote-one", %{
+          "baseUrl" => "https://skills.test",
+          "credentialId" => "p",
+          "discovery" => true
+        })
+
+      Application.put_env(:sigma_session, :remote_skill_source_options,
+        transport: fn request ->
+          assert URI.parse(request.url).path == "/skill-protocol/v1/catalog"
+          assert URI.decode_query(URI.parse(request.url).query)["view"] == "always"
+
+          {:ok,
+           %{
+             status: 200,
+             body:
+               Formata.JSON.encode!(%{
+                 "protocol_version" => "1",
+                 "view" => "always",
+                 "next_cursor" => nil,
+                 "data" => [
+                   %{
+                     "skill_id" => "remote-skill",
+                     "name" => "remote-default",
+                     "description" => "Remote marker",
+                     "revision" => "rev-1",
+                     "artifact_digest" => "sha256:" <> String.duplicate("a", 64),
+                     "publication_status" => "ready",
+                     "disable_model_invocation" => false
+                   }
+                 ]
+               })
+           }}
+        end
+      )
+
+      snapshot = %{cwd: dir, mcp_server_ids: [], provider_id: "p", model_id: "kept"}
+
+      for _attempt <- 1..2 do
+        opts = ProtocolSessionOptions.resolve(snapshot, dir, dir, "skills-restore")
+        text = Sigma.Agent.SessionContext.to_text(opts[:session_context])
+
+        if Sigma.Session.Skills.RemoteSource.discovery_available?() do
+          assert text =~ "<name>remote-default</name>"
+          assert text =~ "remote-one:remote-skill"
+        else
+          refute text =~ "<name>remote-default</name>"
+        end
+
+        assert text =~ "visible-repository"
+        refute text =~ "hidden-global"
+      end
+    end)
+  end
+
+  @tag :tmp_dir
   test "protocol sessions select native tools through the session host", %{tmp_dir: tmp} do
     with_config(tmp, fn ->
       snapshot = %{

@@ -72,7 +72,7 @@ defmodule Sigma.Web.ProtocolSessionOptions do
 
       session_context =
         SessionContext.new(
-          skills: Skills.Catalog.automatic(skills_catalog),
+          skills: Skills.Catalog.automatic(skills_catalog) ++ Skills.RemoteAdapter.automatic(),
           agents_context: [ConfigManager.get_config()["system_prompt"], discovery.content],
           current_date: Date.utc_today()
         )

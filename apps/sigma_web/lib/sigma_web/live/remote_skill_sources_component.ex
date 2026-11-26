@@ -81,6 +81,7 @@ defmodule Sigma.Web.RemoteSkillSourcesComponent do
             <.source_preview provider_id={@form["provider_id"]} credentials={@credentials} />
             <p :if={@form["provider_id"] == "" and @form["standalone"]} class="text-sm">This standalone source keeps its existing origin and credential. Select a provider to use a shared connection.</p>
             <.dm_select name="source[enabled]" value={@form["enabled"]} label="Enabled" options={[{"true", "Enabled"}, {"false", "Disabled"}]} />
+            <.dm_select name="source[discovery]" value={@form["discovery"]} label="Model discovery" options={[{"false", "Manual invocation"}, {"true", "Backplane defaults and search"}]} />
             <.dm_select name="source[offline]" value={@form["offline"]} label="Access" options={[{"false", "Online"}, {"true", "Offline: verified cached skills only"}]} />
             <div class="flex gap-2"><.dm_btn native_submit variant="primary">Save source</.dm_btn><.dm_btn id="remote-source-cancel" phx-click="cancel_remote_source" phx-target={@myself} variant="ghost">Cancel</.dm_btn></div>
           </form>
@@ -119,6 +120,7 @@ defmodule Sigma.Web.RemoteSkillSourcesComponent do
            "provider_id" => "",
            "enabled" => "true",
            "offline" => "false",
+           "discovery" => "false",
            "editing" => false,
            "standalone" => false
          },
@@ -139,6 +141,7 @@ defmodule Sigma.Web.RemoteSkillSourcesComponent do
              "provider_id" => Map.get(source, :provider_id) || "",
              "enabled" => to_string(source.enabled?),
              "offline" => to_string(source.offline?),
+             "discovery" => to_string(source.discovery?),
              "editing" => true,
              "standalone" => Map.get(source, :provider_id) in [nil, ""]
            },
@@ -164,7 +167,8 @@ defmodule Sigma.Web.RemoteSkillSourcesComponent do
     attrs = %{
       "name" => form["name"],
       "enabled" => form["enabled"] == "true",
-      "offline" => form["offline"] == "true"
+      "offline" => form["offline"] == "true",
+      "discovery" => form["discovery"] == "true"
     }
 
     attrs =
@@ -271,8 +275,8 @@ defmodule Sigma.Web.RemoteSkillSourcesComponent do
   defp merge_source(form, attrs) do
     permitted =
       if form["editing"],
-        do: ["name", "provider_id", "enabled", "offline"],
-        else: ["id", "name", "provider_id", "enabled", "offline"]
+        do: ["name", "provider_id", "enabled", "offline", "discovery"],
+        else: ["id", "name", "provider_id", "enabled", "offline", "discovery"]
 
     Map.merge(form, Map.take(attrs, permitted))
   end

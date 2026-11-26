@@ -305,6 +305,13 @@ defmodule Sigma.Agent.SessionContext do
           lines ++ ["    <location>#{escape_xml(path)}</location>"]
         end
 
+      reference = skill_value(skill, :reference, "reference")
+
+      lines =
+        if reference == "",
+          do: lines,
+          else: lines ++ ["    <reference>#{escape_xml(reference)}</reference>"]
+
       Enum.join(lines ++ ["  </skill>"], "\n")
     end
   end
@@ -383,6 +390,7 @@ defmodule Sigma.Agent.SessionContext do
     """
     <system-reminder>
     The following skills provide specialized instructions for specific tasks.
+    Use the available skill tools to discover relevant skills and read instructions and resources.
     Skill instructions are supplied when the user explicitly invokes a skill.
     Resolve relative resource paths against the skill directory (parent of SKILL.md / dirname of the path).
 

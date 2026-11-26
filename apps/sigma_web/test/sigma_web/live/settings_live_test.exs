@@ -258,6 +258,82 @@ defmodule Sigma.Web.SettingsLiveTest do
   end
 
   @tag :tmp_dir
+  test "remote source editor persists explicit model discovery", %{conn: conn, tmp_dir: dir} do
+    with_agent_dir(dir, fn ->
+      File.mkdir_p!(Path.join(dir, "agent"))
+
+      File.write!(
+        Path.join([dir, "agent", "auth.json"]),
+        Formata.JSON.encode!(%{"fixture" => %{"type" => "api_key", "key" => "test-only"}})
+      )
+
+      {:ok, _} =
+        Sigma.Session.ConfigManager.put_skill_source("remote-one", %{
+          "baseUrl" => "https://skills.test",
+          "credentialId" => "fixture"
+        })
+
+      refute hd(Sigma.Session.ConfigManager.skill_sources()).discovery?
+      {:ok, view, _} = live(conn, "/settings/skills")
+      render_async(view)
+
+      view
+      |> element("button[phx-click='edit_remote_source'][phx-value-id='remote-one']")
+      |> render_click()
+
+      view
+      |> form("#remote-source-form", %{"source" => %{"discovery" => "true"}})
+      |> render_submit()
+
+      assert hd(Sigma.Session.ConfigManager.skill_sources()).discovery?
+      {:ok, restored, _} = live(conn, "/settings/skills")
+      render_async(restored)
+
+      restored
+      |> element("button[phx-click='edit_remote_source'][phx-value-id='remote-one']")
+      |> render_click()
+
+      assert has_element?(
+               restored,
+               "select[name='source[discovery]'] option[value='true'][selected]"
+             )
+    end)
+  end
+
+  @tag :tmp_dir
+  test "global directory switch persists and hides newly added global skills", %{
+    conn: conn,
+    tmp_dir: dir
+  } do
+    previous = Application.get_env(:sigma_session, :global_skills_dir)
+    global = Path.join(dir, "global")
+    Application.put_env(:sigma_session, :global_skills_dir, global)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:sigma_session, :global_skills_dir, previous),
+        else: Application.delete_env(:sigma_session, :global_skills_dir)
+    end)
+
+    write_skill(global, "visible-marker", "Initially visible")
+
+    with_agent_dir(dir, fn ->
+      {:ok, view, _} = live(conn, "/settings/skills")
+      assert render_async(view) =~ "visible-marker"
+      view |> element("#load-global-skills") |> render_click()
+      refute Sigma.Session.ConfigManager.load_global_skills?()
+      write_skill(global, "later-marker", "Added while disabled")
+      html = render_async(view)
+      refute html =~ "visible-marker"
+      refute html =~ "later-marker"
+      {:ok, restored, _} = live(conn, "/settings/skills")
+      refute render_async(restored) =~ "later-marker"
+      restored |> element("#load-global-skills") |> render_click()
+      assert render_async(restored) =~ "later-marker"
+    end)
+  end
+
+  @tag :tmp_dir
   test "shows globally discovered skills", %{conn: conn, tmp_dir: tmp_dir} do
     global_skills_dir = Path.join([tmp_dir, ".agents", "skills"])
     write_skill(global_skills_dir, "global-skill", "Global skill description")

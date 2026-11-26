@@ -76,6 +76,14 @@ defmodule Sigma.Session.Skills do
 
   @doc false
   def discover_dir(root_dir, source) when source in [:repository, :global] do
+    if source == :global and not ConfigManager.load_global_skills?() do
+      %{dir: root_dir, entries: [], skills: [], diagnostics: []}
+    else
+      discover_enabled_dir(root_dir, source)
+    end
+  end
+
+  defp discover_enabled_dir(root_dir, source) do
     if File.dir?(root_dir) do
       root = Path.expand(root_dir)
       source_id = source_id(source, root)

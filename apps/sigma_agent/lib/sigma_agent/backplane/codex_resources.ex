@@ -602,6 +602,8 @@ defmodule Sigma.Agent.Backplane.CodexResources do
          {:ok, notes} <- open_notes(state.archive),
          {:ok, runtime} <-
            ExtensionRuntime.start_link(
+             skill_search: true,
+             skill_create: true,
              scope: scope,
              owner_pid: self(),
              adapter: ExtensionResources,

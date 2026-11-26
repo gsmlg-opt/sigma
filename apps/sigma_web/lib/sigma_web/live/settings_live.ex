@@ -805,6 +805,7 @@ defmodule Sigma.Web.SettingsLive do
       |> assign(:all_visible_skills_selected?, all_visible_skills_selected?)
       |> assign(:some_visible_skills_selected?, some_visible_skills_selected?)
       |> assign(:enabled_skills, Enum.count(skills, & &1.enabled?))
+      |> assign(:load_global_skills, ConfigManager.load_global_skills?())
 
     ~H"""
     <div class="space-y-6">
@@ -814,6 +815,10 @@ defmodule Sigma.Web.SettingsLive do
           <p class="text-sm text-on-surface-variant mt-1">Globally available Skills</p>
         </div>
       </div>
+
+      <.dm_switch id="load-global-skills" name="load_global_skills" checked={@load_global_skills}
+        label="加载 ~/.agents/skills" phx-click="toggle_global_skill_loading"
+        phx-value-enabled={to_string(!@load_global_skills)} />
 
       <div
         :if={!Enum.empty?(@result.skills)}
@@ -1688,6 +1693,11 @@ defmodule Sigma.Web.SettingsLive do
   # Skills Handlers
 
   @impl true
+  def handle_event("toggle_global_skill_loading", %{"enabled" => enabled}, socket) do
+    :ok = ConfigManager.set_load_global_skills(enabled == "true")
+    {:noreply, socket |> assign(:selected_skill_names, []) |> reload_current_settings_data()}
+  end
+
   def handle_event("filter_skills", %{"skills" => %{"query" => query}}, socket) do
     {:noreply, assign(socket, :skills_query, trim_form_value(query))}
   end

@@ -10,7 +10,7 @@ defmodule Sigma.Agent.Backplane.NativeTools do
   @async_names ~w(request_user_input_async send_message_to_user_async)
   @mcp_names ~w(list_mcp_resources list_mcp_resource_templates read_mcp_resource mcp_events)
   @plugin_names ~w(list_available_plugins_to_install request_plugin_install)
-  @skill_names ~w(skills::list skills::read)
+  @skill_names ~w(skills::list skills::read skills::search skills::create)
   @memory_names ~w(memories::add_ad_hoc_note memories::list memories::read memories::search)
   @history_names ~w(history::list_windows history::list_items history::read_item history::search_contents)
   @note_names ~w(notes::list_files_by_prefix notes::read_file notes::search_contents notes::append_to_file notes::write_file)
@@ -36,7 +36,22 @@ defmodule Sigma.Agent.Backplane.NativeTools do
   def plugin_names, do: @plugin_names
   def discovery_names, do: @discovery_names
   def environment_names, do: @environment_names
-  def skill_names, do: @skill_names
+  # TODO(upstream): gsmlg-opt/backplane#193 Adopt the published skill extensions.
+  def skill_names do
+    runtime = Backplane.AgentRuntime.Codex.ExtensionRuntime
+    Code.ensure_loaded?(runtime)
+
+    unsupported =
+      for {name, capability} <- [
+            {"skills::search", :skill_search_supported?},
+            {"skills::create", :skill_create_supported?}
+          ],
+          not (function_exported?(runtime, capability, 0) and apply(runtime, capability, [])),
+          do: name
+
+    @skill_names -- unsupported
+  end
+
   def memory_names, do: @memory_names
   def history_names, do: @history_names
   def note_names, do: @note_names

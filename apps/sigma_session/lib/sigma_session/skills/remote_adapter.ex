@@ -1,5 +1,5 @@
 defmodule Sigma.Session.Skills.RemoteAdapter do
-  @moduledoc "Session-owned configured remote Skill catalog and preparation boundary."
+  @moduledoc "Session-owned remote Skill discovery, preparation and creation boundary."
 
   alias Backplane.SkillProtocol.{Descriptor, Error, PreparedSkill, SkillRef}
   alias Sigma.Session.{ConfigManager, SlashCommands}
@@ -29,7 +29,7 @@ defmodule Sigma.Session.Skills.RemoteAdapter do
     with {:ok, source} <- configured_source(source_id),
          :ok <- searchable(source),
          {:ok, remote} <- remote_source(source, opts),
-         {:ok, result} <- RemoteSource.catalog(remote, catalog_options(params)) do
+         {:ok, result} <- discover(remote, source, params) do
       items = Enum.map(result.data, &descriptor(&1, source))
 
       {:ok,
@@ -45,6 +45,238 @@ defmodule Sigma.Session.Skills.RemoteAdapter do
       {:error, %Error{} = error} -> {:error, remote_error(error)}
       {:error, %{code: _code} = error} -> {:error, error}
       {:error, code} when is_atom(code) -> {:error, safe_error(code)}
+    end
+  end
+
+  def discovery do
+    ConfigManager.skill_sources()
+    |> Enum.filter(&(&1.enabled? and &1.discovery?))
+    |> Enum.reduce(%{skills: [], diagnostics: []}, fn source, acc ->
+      case always_pages(source, nil, [], MapSet.new()) do
+        {:ok, items} ->
+          %{acc | skills: acc.skills ++ items}
+
+        {:error, error} ->
+          diagnostic =
+            Map.merge(Map.take(error, [:code, :message, :reason, :retryable?]), %{
+              source_id: source.source_id
+            })
+
+          %{acc | diagnostics: acc.diagnostics ++ [diagnostic]}
+      end
+    end)
+  end
+
+  def automatic do
+    discovery().skills |> Enum.filter(&eligible?/1)
+  end
+
+  def discovery_sources do
+    configured = ConfigManager.skill_sources()
+
+    sources()
+    |> Enum.filter(fn source ->
+      Enum.any?(
+        configured,
+        &(&1.source_id == source.source_id and &1.discovery?)
+      )
+    end)
+  end
+
+  def search(params, opts \\ []) do
+    with {:ok, source} <- configured_source(value(params, :source_id)),
+         true <- source.discovery?,
+         :ok <- searchable(source),
+         {:ok, remote} <- remote_source(source, opts),
+         {:ok, result} <-
+           RemoteSource.search(
+             remote,
+             Keyword.merge(discovery_options(params), Keyword.take(opts, [:cancelled?]))
+           ) do
+      {:ok,
+       %{items: Enum.map(result.data, &descriptor(&1, source)), next_cursor: result.next_cursor}}
+    else
+      false -> {:error, safe_error(:skill_disabled)}
+      {:error, %Error{} = error} -> {:error, remote_error(error)}
+      {:error, error} when is_atom(error) -> {:error, safe_error(error)}
+    end
+  end
+
+  def create(params, opts \\ []) do
+    attrs = Map.take(params, ~w(slug name description content))
+
+    with {:ok, source} <- configured_source(value(params, :source_id)),
+         true <- source.discovery?,
+         :ok <- searchable(source),
+         {:ok, remote} <- remote_source(source, opts),
+         {:ok, manifest} <- RemoteSource.create(remote, attrs, Keyword.take(opts, [:cancelled?])) do
+      {:ok,
+       descriptor(
+         struct(Descriptor,
+           ref: manifest.ref,
+           name: manifest.document_metadata["name"],
+           description: manifest.document_metadata["description"],
+           argument_hint: manifest.document_metadata["argument-hint"],
+           disable_model_invocation:
+             manifest.document_metadata["disable-model-invocation"] == true,
+           revision: manifest.ref.revision,
+           artifact_digest: manifest.artifact_digest,
+           publication_status: "ready"
+         ),
+         source
+       )}
+    else
+      false -> {:error, safe_error(:skill_disabled)}
+      {:error, %Error{} = error} -> {:error, creation_error(error)}
+      {:error, error} when is_atom(error) -> {:error, safe_error(error)}
+    end
+  end
+
+  defp creation_error(%Error{code: :unsupported_capability, phase: :wire} = error),
+    do: %{
+      remote_error(error)
+      | message: "Skill source needs a Backplane upgrade for remote creation"
+    }
+
+  defp creation_error(%Error{code: code} = error)
+       when code in [:already_exists, :invalid_request],
+       do: %{
+         code: code,
+         message:
+           if(code == :already_exists,
+             do: "Remote skill slug already exists",
+             else: "Remote skill creation request is invalid"
+           ),
+         retryable?: error.retryable
+       }
+
+  defp creation_error(%Error{code: code, phase: :transport})
+       when code in [:temporarily_unavailable, :timeout, :cancelled],
+       do: %{code: code, message: "Remote skill creation outcome is unknown", retryable?: false}
+
+  defp creation_error(error), do: remote_error(error)
+
+  def eligible?(%{
+        source_config: expected,
+        manual_only?: false,
+        enabled?: true,
+        revision: revision,
+        artifact_digest: digest
+      })
+      when is_binary(revision) and is_binary(digest) do
+    case configured_source(expected.source_id) do
+      {:ok, ^expected} -> expected.enabled? and expected.discovery?
+      _ -> false
+    end
+  end
+
+  def eligible?(_skill), do: false
+
+  def read_prepared(%{root: root, files: files}, relative, opts) do
+    prepared = %PreparedSkill{root: root, document: nil, manifest: %{files: files}}
+    Backplane.SkillProtocol.Resource.read(prepared, relative, opts)
+  end
+
+  def prepare_exact(skill, opts \\ []) do
+    with true <- eligible?(skill),
+         {:ok, remote} <- remote_source(skill.source_config, opts),
+         {:ok, prepared} <-
+           RemoteSource.prepare(
+             remote,
+             skill.source_key,
+             Keyword.merge(opts, revision: skill.revision, offline: skill.source_config.offline?)
+           ),
+         :ok <- exact_digest(prepared, skill),
+         true <- prepared.document.metadata["disable-model-invocation"] != true do
+      {:ok,
+       %{
+         root: prepared.root,
+         files: Enum.map(prepared.manifest.files, &Map.take(&1, [:path, :bytes, :sha256]))
+       }}
+    else
+      false -> {:error, safe_error(:skill_disabled)}
+      {:error, %Error{} = error} -> {:error, remote_error(error)}
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  def authorize_exact(skill, opts \\ []) do
+    with true <- eligible?(skill),
+         {:ok, remote} <- remote_source(skill.source_config, opts) do
+      if skill.source_config.offline? do
+        case prepare_exact(skill, opts) do
+          {:ok, _} -> :ok
+          error -> error
+        end
+      else
+        with {:ok, manifest} <-
+               RemoteSource.resolve(
+                 remote,
+                 skill.source_key,
+                 skill.revision,
+                 Keyword.take(opts, [:cancelled?])
+               ),
+             do: exact_digest(%{manifest: manifest}, skill)
+      end
+    else
+      false -> {:error, safe_error(:skill_disabled)}
+      {:error, %Error{} = error} -> {:error, remote_error(error)}
+      {:error, error} -> {:error, error}
+    end
+    |> case do
+      {:error, %Error{} = error} -> {:error, remote_error(error)}
+      result -> result
+    end
+  end
+
+  defp exact_digest(prepared, skill) do
+    if prepared.manifest.artifact_digest == skill.artifact_digest,
+      do: :ok,
+      else:
+        {:error,
+         Protocol.error_map(
+           Error.new(:integrity_mismatch, :bundle, "Skill descriptor digest changed")
+         )}
+  end
+
+  defp discover(remote, %{discovery?: true}, params) do
+    case optional_string(value(params, :q)) do
+      nil -> RemoteSource.catalog(remote, Keyword.put(discovery_options(params), :view, :always))
+      _ -> RemoteSource.search(remote, discovery_options(params))
+    end
+  end
+
+  defp discover(remote, _source, params),
+    do: RemoteSource.catalog(remote, catalog_options(params))
+
+  defp always_pages(source, cursor, items, seen) do
+    with :ok <- searchable(source),
+         {:ok, remote} <- remote_source(source, []),
+         {:ok, result} <-
+           RemoteSource.catalog(remote,
+             view: :always,
+             cursor: cursor,
+             limit: 100,
+             fields: [:argument_hint]
+           ) do
+      items = items ++ Enum.map(result.data, &descriptor(&1, source))
+
+      cond do
+        length(items) > 4_096 or MapSet.size(seen) >= 64 ->
+          {:error, safe_error(:catalog_limit_exceeded)}
+
+        is_nil(result.next_cursor) ->
+          {:ok, items}
+
+        MapSet.member?(seen, result.next_cursor) ->
+          {:error, safe_error(:catalog_limit_exceeded)}
+
+        true ->
+          always_pages(source, result.next_cursor, items, MapSet.put(seen, result.next_cursor))
+      end
+    else
+      {:error, %Error{} = error} -> {:error, remote_error(error)}
+      {:error, code} -> {:error, safe_error(code)}
     end
   end
 
@@ -134,6 +366,9 @@ defmodule Sigma.Session.Skills.RemoteAdapter do
     RemoteSource.new(source_opts)
   end
 
+  defp discovery_options(params),
+    do: Keyword.put(catalog_options(params), :fields, [:argument_hint])
+
   defp catalog_options(params) do
     [
       q: optional_string(value(params, :q)),
@@ -171,12 +406,14 @@ defmodule Sigma.Session.Skills.RemoteAdapter do
       description: descriptor.description || "",
       reference: source.source_id <> ":" <> ref.skill_id,
       source_kind: "backplane",
-      manual_only?: true,
+      manual_only?:
+        not source.discovery? or Map.get(descriptor, :disable_model_invocation) == true,
       argument_hint: optional_descriptor_field(descriptor, :argument_hint),
       enabled?: descriptor.publication_status == "ready",
       revision: descriptor.revision,
       artifact_digest: descriptor.artifact_digest,
-      status: descriptor.publication_status
+      status: descriptor.publication_status,
+      source_config: source
     }
   end
 
@@ -213,6 +450,15 @@ defmodule Sigma.Session.Skills.RemoteAdapter do
   defp remote_error(%Error{code: code} = error) when code in [:unauthorized, :forbidden],
     do: Map.put(Protocol.error_map(error), :reason, code)
 
+  defp remote_error(%Error{code: code, phase: :wire} = error)
+       when code in [:unsupported_protocol, :unsupported_capability],
+       do:
+         Map.put(
+           Protocol.error_map(error),
+           :message,
+           "Skill source needs a Backplane upgrade for default discovery and search"
+         )
+
   defp remote_error(error), do: Protocol.error_map(error)
 
   defp safe_error(code) do
@@ -220,7 +466,8 @@ defmodule Sigma.Session.Skills.RemoteAdapter do
       skill_not_found: "Skill not found",
       skill_disabled: "Skill is disabled",
       remote_unavailable: "Skill source is unavailable",
-      invalid_skill_metadata: "Skill source configuration is invalid"
+      invalid_skill_metadata: "Skill source configuration is invalid",
+      catalog_limit_exceeded: "Remote skill catalog exceeds the discovery budget"
     }
 
     %{code: code, message: Map.get(messages, code, "Skill operation failed"), retryable?: false}
