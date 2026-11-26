@@ -99,8 +99,47 @@ defmodule Sigma.Web.ProjectSkillsLiveTest do
         """
       )
 
+      owner = self()
+      previous = Application.get_env(:sigma_session, :remote_skill_source_options)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:sigma_session, :remote_skill_source_options, previous),
+          else: Application.delete_env(:sigma_session, :remote_skill_source_options)
+      end)
+
+      Application.put_env(:sigma_session, :remote_skill_source_options,
+        transport: fn request ->
+          uri = URI.parse(request.url)
+          cursor = URI.decode_query(uri.query || "")["cursor"]
+          send(owner, {:remote_page, uri.path, cursor})
+          name = if cursor, do: "second-skill", else: "first-skill"
+
+          {:ok,
+           %{
+             status: 200,
+             body:
+               Formata.JSON.encode!(%{
+                 "protocol_version" => "1",
+                 "next_cursor" => if(is_nil(cursor), do: "next"),
+                 "data" => [
+                   %{
+                     "skill_id" => name,
+                     "name" => name,
+                     "description" => "Remote description",
+                     "revision" => "r1",
+                     "artifact_digest" => "sha256:" <> String.duplicate("a", 64),
+                     "publication_status" => "ready"
+                   }
+                 ]
+               })
+           }}
+        end
+      )
+
       encoded_repository = Base.url_encode64(workdir, padding: false)
-      {:ok, _view, html} = live(conn, "/repository/#{encoded_repository}/skills")
+      {:ok, view, _html} = live(conn, "/repository/#{encoded_repository}/skills")
+      html = render_async(view, 2000)
 
       assert html =~ "Settings"
       assert html =~ "Skills"
@@ -126,6 +165,14 @@ defmodule Sigma.Web.ProjectSkillsLiveTest do
       assert html =~ "Remote One"
       assert html =~ "configured"
       refute html =~ "skills.example.test"
+      assert_receive {:remote_page, "/skill-protocol/v1/catalog", nil}
+      assert has_element?(view, "#remote-skill-sources", "/skill remote-one:first-skill")
+      view |> element("#remote-skill-sources button", "Load more") |> render_click()
+      html = render_async(view, 2000)
+      assert_receive {:remote_page, "/skill-protocol/v1/catalog", "next"}
+      assert html =~ "/skill remote-one:first-skill"
+      assert html =~ "/skill remote-one:second-skill"
+      refute has_element?(view, "#remote-skill-sources button", "Load more")
       assert html =~ ~s(href="/repository/#{encoded_repository}/skills?tab=global")
     end)
   end

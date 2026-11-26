@@ -96,6 +96,12 @@ defmodule Sigma.Web.ProjectSkillsLive do
                 <span class="font-medium text-on-surface">{source.name}</span>
                 <span class="font-mono text-xs">{source.source_id}</span>
                 <span>{source.status}</span>
+                <.live_component
+                  :if={source.status == "configured"}
+                  module={Sigma.Web.ProjectRemoteSkillsComponent}
+                  id={"project-remote-skills-" <> Base.url_encode64(source.source_id, padding: false)}
+                  source_id={source.source_id}
+                />
               </li>
             </ul>
           </div>
