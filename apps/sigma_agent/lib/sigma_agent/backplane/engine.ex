@@ -1234,6 +1234,20 @@ defmodule Sigma.Agent.Backplane.Engine do
     {state, users, assistant, nil}
   end
 
+  defp reduce_event(state, %{type: :provider_retry_scheduled} = event, users, assistant) do
+    retry = %{
+      turn_id: state.turn_state.turn_id,
+      retry_class: event.retry_class,
+      retry_count: event.retry_count,
+      delay_ms: event.delay_ms,
+      error: event.error |> normalize_error() |> Exception.message() |> String.slice(0, 2_000),
+      status: :waiting
+    }
+
+    Sigma.Agent.__backplane_emit__(state, {:provider_retry_scheduled, retry})
+    {state, users, assistant, nil}
+  end
+
   defp reduce_event(state, _event, users, assistant), do: {state, users, assistant, nil}
 
   defp finish(state, conversation, outcome) do

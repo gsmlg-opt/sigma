@@ -12,7 +12,7 @@ defmodule Sigma.Agent.TurnState do
 
   @phases @active_phases ++ [:idle, :completed, :failed, :cancelled]
 
-  defstruct [:turn_id, :cancellation_ref, :cancel_timer, phase: :idle]
+  defstruct [:turn_id, :cancellation_ref, :cancel_timer, :provider_retry, phase: :idle]
 
   def idle, do: %__MODULE__{}
 
@@ -24,8 +24,14 @@ defmodule Sigma.Agent.TurnState do
     }
   end
 
-  def transition(%__MODULE__{} = turn, phase) when phase in @phases,
-    do: %{turn | phase: phase}
+  def transition(%__MODULE__{} = turn, phase) when phase in @phases do
+    retry =
+      if phase == :streaming_provider and is_map(turn.provider_retry),
+        do: %{turn.provider_retry | status: :requesting},
+        else: nil
+
+    %{turn | phase: phase, provider_retry: retry}
+  end
 
   def active?(%__MODULE__{phase: phase}), do: phase in @active_phases
 end

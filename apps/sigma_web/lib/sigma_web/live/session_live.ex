@@ -243,6 +243,7 @@ defmodule Sigma.Web.SessionLive do
              turn_id: agent_status.turn_id,
              context_snapshot: context_snapshot,
              current_request_id: agent_status.current_request_id,
+             provider_retry: agent_status[:provider_retry],
              context_token_count: context_display_tokens(context_snapshot),
              context_window: context_policy[:context_window],
              context_limit: context_policy[:context_limit] || context_limit,
@@ -322,6 +323,7 @@ defmodule Sigma.Web.SessionLive do
       |> assign(:context_limit, session_data.context_limit)
       |> assign(:context_snapshot, session_data.context_snapshot)
       |> assign(:current_request_id, session_data.current_request_id)
+      |> assign(:provider_retry, session_data.provider_retry)
       |> assign(:session_metrics, session_data.session_metrics)
       |> assign(:session_metrics_state, session_data.session_metrics_state)
       |> assign(:context_policy, session_data.context_policy)
@@ -663,7 +665,7 @@ defmodule Sigma.Web.SessionLive do
                 </h1>
                 <p :if={current_session_unnamed?(@sessions, @session_id)} class="font-mono text-[10px] text-on-surface-variant">{short_session_id(@session_id)}</p>
               </div>
-              <span id="session-runtime-phase" class="sigma-session-chip" role="status">{runtime_phase_label(@runtime_status)}</span>
+              <span id="session-runtime-phase" class="sigma-session-chip" role="status">{runtime_label(@runtime_status, @provider_retry)}</span>
               <SessionObservability.context_warning policy={assigns[:context_policy] || %{}} />
             </div>
 
@@ -732,6 +734,17 @@ defmodule Sigma.Web.SessionLive do
         />
 
         <footer class="sigma-session-composer px-4 py-3 md:px-6">
+          <section
+            :if={@provider_retry}
+            id="session-provider-retry"
+            role="status"
+            aria-live="polite"
+            class="mx-auto mb-3 max-w-4xl rounded-lg border border-error bg-error-container p-3 text-sm text-on-error-container"
+          >
+            <p class="font-semibold">Retrying model request…</p>
+            <p>Retry {@provider_retry.retry_count} · retry delay {retry_delay_label(@provider_retry.delay_ms)}</p>
+            <p class="mt-1 break-words">{Sigma.Ai.ProviderError.display_message(@provider_retry.error)}</p>
+          </section>
           <section
             :if={subagent_recovery_required?(@subagents_recovery_error)}
             id="subagent-recovery"
@@ -1335,7 +1348,7 @@ defmodule Sigma.Web.SessionLive do
       active: socket.assigns.turn_in_flight,
       turnId: if(socket.assigns.turn_in_flight, do: socket.assigns.turn_id),
       phase: socket.assigns.runtime_status,
-      label: runtime_phase_label(socket.assigns.runtime_status)
+      label: runtime_label(socket.assigns.runtime_status, socket.assigns.provider_retry)
     }
   end
 
@@ -2206,6 +2219,14 @@ defmodule Sigma.Web.SessionLive do
   defp runtime_phase_label(:compacting), do: "Compacting context…"
   defp runtime_phase_label(:queued), do: "Queued…"
   defp runtime_phase_label(_phase), do: "Working…"
+
+  defp runtime_label(:streaming_provider, %{}), do: "Retrying model request…"
+  defp runtime_label(phase, _retry), do: runtime_phase_label(phase)
+
+  defp retry_delay_label(delay_ms) when rem(delay_ms, 1_000) == 0,
+    do: "#{div(delay_ms, 1_000)} s"
+
+  defp retry_delay_label(delay_ms), do: "#{delay_ms / 1_000} s"
 
   defp fork_boundary_label(%{message_id: :all}), do: "latest completed turn"
 
@@ -3848,7 +3869,7 @@ defmodule Sigma.Web.SessionLive do
   def handle_info({:agent_start, _cwd}, socket) do
     {:noreply,
      socket
-     |> assign(turn_in_flight: true, runtime_status: :streaming_provider)
+     |> assign(turn_in_flight: true, runtime_status: :streaming_provider, provider_retry: nil)
      |> refresh_continue_button()}
   end
 
@@ -3860,9 +3881,19 @@ defmodule Sigma.Web.SessionLive do
      |> refresh_continue_button()}
   end
 
+  def handle_info({:provider_retry_scheduled, %{turn_id: turn_id} = retry}, socket) do
+    if socket.assigns.turn_in_flight and socket.assigns.turn_id == turn_id and
+         socket.assigns.runtime_status == :streaming_provider do
+      {:noreply, socket |> assign(:provider_retry, retry) |> queue_chat_state()}
+    else
+      {:noreply, socket}
+    end
+  end
+
   @impl true
   def handle_info({:tool_execution_start, _id, _name, _arguments}, socket) do
-    {:noreply, socket |> assign(:runtime_status, :running_tools) |> queue_chat_state()}
+    {:noreply,
+     socket |> assign(runtime_status: :running_tools, provider_retry: nil) |> queue_chat_state()}
   end
 
   @impl true
@@ -3874,7 +3905,7 @@ defmodule Sigma.Web.SessionLive do
   def handle_info({:agent_end, _}, socket) do
     {:noreply,
      socket
-     |> assign(turn_in_flight: false, streaming_message_id: nil)
+     |> assign(turn_in_flight: false, streaming_message_id: nil, provider_retry: nil)
      |> refresh_continue_button()}
   end
 
@@ -3882,7 +3913,12 @@ defmodule Sigma.Web.SessionLive do
   def handle_info({:turn_completed, _turn_id}, socket) do
     {:noreply,
      socket
-     |> assign(turn_in_flight: false, streaming_message_id: nil, runtime_status: :completed)
+     |> assign(
+       turn_in_flight: false,
+       streaming_message_id: nil,
+       runtime_status: :completed,
+       provider_retry: nil
+     )
      |> refresh_continue_button()}
   end
 
@@ -3890,7 +3926,12 @@ defmodule Sigma.Web.SessionLive do
   def handle_info({:turn_failed, _turn_id}, socket) do
     {:noreply,
      socket
-     |> assign(turn_in_flight: false, streaming_message_id: nil, runtime_status: :failed)
+     |> assign(
+       turn_in_flight: false,
+       streaming_message_id: nil,
+       runtime_status: :failed,
+       provider_retry: nil
+     )
      |> refresh_continue_button()}
   end
 
@@ -3903,7 +3944,12 @@ defmodule Sigma.Web.SessionLive do
   def handle_info({:turn_cancelled}, socket) do
     {:noreply,
      socket
-     |> assign(turn_in_flight: false, streaming_message_id: nil, runtime_status: :cancelled)
+     |> assign(
+       turn_in_flight: false,
+       streaming_message_id: nil,
+       runtime_status: :cancelled,
+       provider_retry: nil
+     )
      |> refresh_continue_button()}
   end
 
@@ -3926,7 +3972,12 @@ defmodule Sigma.Web.SessionLive do
     {:noreply,
      socket
      |> put_flash(:error, "Turn failed: #{Sigma.Web.OperationError.turn_message(msg)}")
-     |> assign(turn_in_flight: false, streaming_message_id: nil, runtime_status: :failed)
+     |> assign(
+       turn_in_flight: false,
+       streaming_message_id: nil,
+       runtime_status: :failed,
+       provider_retry: nil
+     )
      |> refresh_continue_button()}
   end
 
@@ -4042,7 +4093,13 @@ defmodule Sigma.Web.SessionLive do
 
   @impl true
   def handle_info({:message_update, message, _event}, socket) do
-    {:noreply, stream_display_message(socket, message)}
+    socket =
+      if message.role == :assistant and
+           get_in(message.metadata || %{}, [:turn_id]) == socket.assigns.turn_id,
+         do: assign(socket, :provider_retry, nil),
+         else: socket
+
+    {:noreply, socket |> stream_display_message(message) |> queue_chat_state()}
   end
 
   @impl true
@@ -4123,7 +4180,11 @@ defmodule Sigma.Web.SessionLive do
 
     metrics_state = Sigma.Session.Metrics.reduce(metrics_state, {fact, attrs})
     runtime_status = metrics_runtime_status(fact, attrs, socket)
-    socket = if fact == :turn_started, do: assign(socket, :turn_id, attrs.turn_id), else: socket
+
+    socket =
+      if fact == :turn_started,
+        do: assign(socket, turn_id: attrs.turn_id, provider_retry: nil),
+        else: socket
 
     socket =
       socket
@@ -4996,6 +5057,7 @@ defmodule Sigma.Web.SessionLive do
     |> assign(:pending_compaction, false)
     |> assign(:parent_session_id, nil)
     |> assign(:runtime_status, :loading)
+    |> assign(:provider_retry, nil)
     |> assign(:active_provider_id, nil)
     |> assign(:current_model, nil)
     |> assign(:current_model_value, nil)

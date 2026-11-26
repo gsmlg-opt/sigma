@@ -1379,8 +1379,9 @@ defmodule Sigma.Agent do
     do: {:noreply, maybe_goal_idle(%{state | goal_resume_pending: true})}
 
   def handle_cast({:notify_subscribers, event}, state) do
+    state = state |> record_turn_error(event) |> record_provider_retry(event)
     notify_subscribers(state, event)
-    {:noreply, record_turn_error(state, event)}
+    {:noreply, state}
   end
 
   def handle_cast({:set_model, model}, state) do
@@ -2337,6 +2338,7 @@ defmodule Sigma.Agent do
       phase: state.turn_state.phase,
       turn_id: state.turn_state.turn_id,
       current_request_id: state.current_request_id,
+      provider_retry: state.turn_state.provider_retry,
       reasoning_effort: state.provider_options[:reasoning_effort],
       context_snapshot: state.context_snapshot,
       context_policy: current_context_policy(state),
@@ -2780,6 +2782,23 @@ defmodule Sigma.Agent do
   end
 
   defp record_turn_error(state, _event), do: state
+
+  defp record_provider_retry(state, {:provider_retry_scheduled, %{turn_id: turn_id} = retry}) do
+    if state.turn_state.turn_id == turn_id and state.turn_state.phase == :streaming_provider,
+      do: %{state | turn_state: %{state.turn_state | provider_retry: retry}},
+      else: state
+  end
+
+  defp record_provider_retry(
+         state,
+         {:message_update, %Message{metadata: %{turn_id: turn_id}}, _event}
+       ) do
+    if state.turn_state.turn_id == turn_id,
+      do: %{state | turn_state: %{state.turn_state | provider_retry: nil}},
+      else: state
+  end
+
+  defp record_provider_retry(state, _event), do: state
 
   defp turn_error_summary(reason) when is_exception(reason),
     do: reason |> Exception.message() |> String.slice(0, 2_000)

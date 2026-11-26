@@ -121,6 +121,20 @@ ACKs, terminal provider outcomes and unclassified failures stop automatic retry.
 Negotiated same-ID recovery remains first choice and never falls through to a
 replacement POST. See [provider creation safety](../provider-creation-safety.md).
 
+### Visible retry feedback
+
+Runtime `provider_retry_scheduled` events now reach the root Agent's live status
+and LiveView subscribers. The session shows the bounded failure reason, retry
+number and configured delay, with a `Retrying model request…` status. The delay
+is the scheduled backoff, not a countdown or a total request deadline. The turn
+remains active while waiting and while its replacement request runs; an empty
+assistant start does not hide the previous error. Current-turn output, a new
+turn or a terminal outcome clears the retry banner. Stale turn events cannot
+replace or clear current feedback. Final failures retain the existing error
+flash and persisted turn details. Reconnecting to a live Agent reads its retry
+status without scheduling another request. Retries inside an individual HTTP
+submission remain part of that Provider call rather than separate UI counters.
+
 ## Parallel dispatch
 
 Runtime overlaps consecutive calls whose pinned descriptors explicitly declare

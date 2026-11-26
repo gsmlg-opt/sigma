@@ -3754,6 +3754,120 @@ defmodule Sigma.Web.SessionLiveTest do
     refute footer =~ "open="
   end
 
+  test "shows provider retry failures while keeping the turn active", %{conn: conn} do
+    session_id = unique_session_id("provider-retry")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+    turn_id = "retry-turn"
+    send(view.pid, {:metrics, :turn_started, %{turn_id: turn_id, session_id: session_id}})
+    send(view.pid, {:turn_start})
+
+    retry = %{
+      turn_id: turn_id,
+      retry_class: :stream,
+      retry_count: 1,
+      delay_ms: 5_000,
+      error: "AI provider HTTP 504: Gateway Timeout",
+      status: :waiting
+    }
+
+    send(view.pid, {:provider_retry_scheduled, retry})
+    banner = view |> element("#session-provider-retry") |> render()
+    assert banner =~ "Gateway Timeout"
+    assert banner =~ "Retry 1"
+    assert banner =~ "5 s"
+    assert has_element?(view, "#session-runtime-phase", "Retrying model request…")
+    assert %{active: true, label: "Retrying model request…"} = chat_snapshot(view).runtime
+    refute render(view) =~ "Turn failed:"
+
+    send(view.pid, {:turn_start})
+    assert has_element?(view, "#session-provider-retry", "Gateway Timeout")
+    assert has_element?(view, "#session-runtime-phase", "Retrying model request…")
+
+    send(
+      view.pid,
+      {:provider_retry_scheduled,
+       %{retry | turn_id: "older-turn", error: "stale failure", retry_count: 9}}
+    )
+
+    assert has_element?(view, "#session-provider-retry", "Retry 1")
+    refute render(view) =~ "stale failure"
+  end
+
+  test "clears provider retry feedback on progress and settled or new turns", %{conn: conn} do
+    for ending <- [:progress, :completed, :failed, :cancelled, :new_turn] do
+      session_id = unique_session_id("provider-retry-#{ending}")
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+      turn_id = "retry-turn"
+      send(view.pid, {:metrics, :turn_started, %{turn_id: turn_id, session_id: session_id}})
+      send(view.pid, {:turn_start})
+
+      retry = %{
+        turn_id: turn_id,
+        retry_class: :stream,
+        retry_count: 1,
+        delay_ms: 5_000,
+        error: "AI provider HTTP 504: Gateway Timeout",
+        status: :waiting
+      }
+
+      send(view.pid, {:provider_retry_scheduled, retry})
+
+      assert has_element?(view, "#session-provider-retry", "Gateway Timeout")
+
+      case ending do
+        :progress ->
+          message =
+            Message.assistant("retry-answer", %{
+              content: [],
+              metadata: %{turn_id: turn_id}
+            })
+
+          send(view.pid, {:message_start, message})
+          assert has_element?(view, "#session-provider-retry", "Gateway Timeout")
+          updated = %{message | content: [%{type: :text, text: "Recovered"}]}
+
+          send(
+            view.pid,
+            {:message_update, %{updated | metadata: %{turn_id: "older-turn"}},
+             {:text_delta, 0, "Old output", updated}}
+          )
+
+          assert has_element?(view, "#session-provider-retry", "Gateway Timeout")
+          send(view.pid, {:message_update, updated, {:text_delta, 0, "Recovered", updated}})
+
+        :completed ->
+          send(view.pid, {:turn_completed, turn_id})
+
+        :failed ->
+          send(view.pid, {:turn_error, "AI provider HTTP 504: Gateway Timeout"})
+          send(view.pid, {:turn_failed, turn_id})
+
+        :cancelled ->
+          send(view.pid, {:turn_cancelled})
+
+        :new_turn ->
+          send(
+            view.pid,
+            {:metrics, :turn_started, %{turn_id: "next-turn", session_id: session_id}}
+          )
+
+          send(view.pid, {:turn_start})
+      end
+
+      refute has_element?(view, "#session-provider-retry"), "retry feedback survived #{ending}"
+
+      if ending == :failed do
+        assert has_element?(view, "#flash-error .toast-message", "Gateway Timeout")
+        assert has_element?(view, "#session-runtime-phase", "Failed")
+      end
+
+      if ending in [:completed, :failed, :cancelled, :new_turn] do
+        send(view.pid, {:provider_retry_scheduled, retry})
+        refute has_element?(view, "#session-provider-retry"), "stale retry revived #{ending}"
+      end
+    end
+  end
+
   test "shows an upstream compilation failure in the live flash and restored turn details", %{
     conn: conn
   } do
@@ -4648,6 +4762,7 @@ defmodule Sigma.Web.SessionLiveTest do
         async_interactions: %{items: [], leaf_id: nil},
         parent_session_id: nil,
         runtime_status: :idle,
+        provider_retry: nil,
         session_id: "render_session",
         session_load: Phoenix.LiveView.AsyncResult.loading(),
         session_ready: true,

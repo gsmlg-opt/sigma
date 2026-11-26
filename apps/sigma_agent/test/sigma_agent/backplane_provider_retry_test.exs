@@ -102,6 +102,74 @@ defmodule Sigma.Agent.BackplaneProviderRetryTest do
     assert Enum.all?(snapshot.messages, &(&1.role == :user))
   end
 
+  test "root exposes the retry error while waiting and requesting until model progress", c do
+    handle = start_root(c)
+    assert {:accepted, %{turn_id: turn_id}} = Sigma.Agent.prompt(handle.agent, "Finish")
+    assert_receive {:retry_provider, first, _}
+
+    send(
+      first,
+      {:events,
+       [
+         %ProviderEvent{
+           type: :response_failed,
+           error: %ProviderError{
+             kind: :timeout,
+             message: "AI provider HTTP 504: Gateway Timeout",
+             retry_class: :stream
+           },
+           retry: %{class: :stream, retry_after_ms: 500}
+         }
+       ]}
+    )
+
+    assert_receive {:provider_retry_scheduled,
+                    %{
+                      turn_id: ^turn_id,
+                      retry_class: :stream,
+                      retry_count: 1,
+                      delay_ms: 500,
+                      error: "AI provider HTTP 504: Gateway Timeout",
+                      status: :waiting
+                    } = retry},
+                   2_000
+
+    assert %{phase: :streaming_provider, provider_retry: ^retry} =
+             Sigma.Agent.subscribe_snapshot(handle.agent)
+
+    assert_receive {:retry_provider, next, _}, 2_000
+
+    assert %{provider_retry: %{status: :requesting, error: error}} =
+             Sigma.Agent.status(handle.agent)
+
+    assert error == retry.error
+
+    message = %{completed().message | content: [%{type: :text, text: "progress"}]}
+
+    send(
+      next,
+      {:events, [%ProviderEvent{type: :content_text_delta, delta: "progress", message: message}]}
+    )
+
+    assert_receive {:message_update, _, _}, 2_000
+    assert %{provider_retry: nil} = Sigma.Agent.status(handle.agent)
+
+    send(next, {:events, [completed()]})
+    assert_receive {:agent_end, _}, 3_000
+    assert %{phase: :completed, provider_retry: nil} = Sigma.Agent.status(handle.agent)
+
+    GenServer.cast(handle.agent, {:notify_subscribers, {:provider_retry_scheduled, retry}})
+    assert %{phase: :completed, provider_retry: nil} = Sigma.Agent.status(handle.agent)
+
+    assert {:accepted, %{turn_id: next_turn}} = Sigma.Agent.prompt(handle.agent, "Next task")
+    assert next_turn != turn_id
+    assert_receive {:retry_provider, worker, _}
+    GenServer.cast(handle.agent, {:notify_subscribers, {:provider_retry_scheduled, retry}})
+    assert %{turn_id: ^next_turn, provider_retry: nil} = Sigma.Agent.status(handle.agent)
+    send(worker, {:events, [completed()]})
+    assert_receive {:agent_end, _}, 3_000
+  end
+
   test "retry false keeps a stream failure terminal", c do
     handle = start_root(c, options: [test_pid: self(), retry: false])
     assert {:accepted, _} = Sigma.Agent.prompt(handle.agent, "Finish the task")
@@ -119,8 +187,10 @@ defmodule Sigma.Agent.BackplaneProviderRetryTest do
     assert {:accepted, _} = Sigma.Agent.prompt(handle.agent, "Finish")
     assert_receive {:retry_provider, first, _}
     send(first, {:events, [failed()]})
-    assert_receive {:message_end, %{role: :assistant, stop_reason: :error}}
+    assert_receive {:provider_retry_scheduled, retry}
+    assert %{provider_retry: ^retry} = Sigma.Agent.status(handle.agent)
     assert {:cancelling, _} = Sigma.Agent.cancel(handle.agent)
+    assert %{provider_retry: nil} = Sigma.Agent.status(handle.agent)
     assert_receive {:agent_end, _}, 3_000
     refute_receive {:retry_provider, _, _}, 350
   end
