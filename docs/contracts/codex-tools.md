@@ -1698,8 +1698,8 @@ installed-release and managed-child archive acceptance.
 The default native profile includes `skills::list` and `skills::read` through the
 public ExtensionRuntime host adapter. `SkillResources` uses the actual
 `Skills.Catalog` automatic/resolve rules; manual-only and disabled skills are not
-model-readable, including guessed references. Executor authority is supported;
-cloud authority reports unsupported capability. Repository/global duplicate names
+model-readable, including guessed references. Executor listings include eligible local, plugin, and Backplane skills.
+Cloud listings use the default catalog of Backplane sources enabled for model discovery. Repository/global duplicate names
 retain independent opaque packages and `skill://` resource identities.
 
 For a configured plugin host, every root and managed-child binding re-resolves the

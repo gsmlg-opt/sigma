@@ -114,13 +114,11 @@ defmodule Sigma.Agent.Backplane.SkillResources do
     end
   end
 
-  defp dispatch("skills::list", %{"authority" => "cloud"}, _operation, state),
-    do: {error(:unsupported_capability, "cloud skill authority is not connected"), state}
-
-  defp dispatch("skills::list", %{"authority" => "executor"} = args, _operation, state) do
+  defp dispatch("skills::list", %{"authority" => authority} = args, _operation, state)
+       when authority in ["executor", "cloud"] do
     case Map.get(args, "cursor") do
-      nil -> list(state)
-      cursor -> list_next(state, cursor)
+      nil -> list(state, authority)
+      cursor -> list_next(state, authority, cursor)
     end
   end
 
@@ -221,13 +219,40 @@ defmodule Sigma.Agent.Backplane.SkillResources do
   defp dispatch(_name, _args, _operation, state),
     do: {error(:validation, "unsupported skill resource request"), state}
 
-  defp list(state) do
+  defp list(state, "cloud") do
+    if apply(RemoteAdapter, :discovery_sources, []) == [] do
+      {error(:unsupported_capability, "Enable model discovery for a Backplane skill source"),
+       state}
+    else
+      list_snapshot(
+        state,
+        "cloud",
+        nil,
+        state.remote_skills.skills,
+        state.remote_skills.diagnostics
+      )
+    end
+  end
+
+  defp list(state, "executor") do
     catalog = apply(Catalog, :build, [state.workspace])
 
     skills =
-      (apply(Catalog, :automatic, [catalog]) ++
-         Enum.map(state.plugin_skills.entries, fn {_id, entry} -> entry.skill end) ++
-         Enum.filter(state.remote_skills.skills, &apply(RemoteAdapter, :eligible?, [&1])))
+      apply(Catalog, :automatic, [catalog]) ++
+        Enum.map(state.plugin_skills.entries, fn {_id, entry} -> entry.skill end) ++
+        state.remote_skills.skills
+
+    warnings =
+      Enum.map(catalog.diagnostics, &Map.from_struct/1) ++
+        state.plugin_skills.diagnostics ++ state.remote_skills.diagnostics
+
+    list_snapshot(state, "executor", catalog, skills, warnings)
+  end
+
+  defp list_snapshot(state, authority, catalog, skills, warnings) do
+    skills =
+      skills
+      |> Enum.filter(&listed_skill?(state, catalog, &1))
       |> Enum.sort_by(&{reference(&1), &1.skill_id})
 
     cond do
@@ -238,40 +263,9 @@ defmodule Sigma.Agent.Backplane.SkillResources do
         {error(:overloaded, "skill catalog entry limit exceeded"), state}
 
       true ->
-        entries =
-          for skill <- skills,
-              listed_skill?(state, catalog, skill) do
-            package = opaque()
-
-            entry = %{
-              skill: skill,
-              listed: %{
-                package: package,
-                name: skill.name,
-                description: skill.description,
-                authority: "executor",
-                reference: reference(skill),
-                main_resource: "skill://#{package}/SKILL.md"
-              }
-            }
-
-            entry =
-              if Map.get(skill, :source_kind) == "backplane", do: remote_entry(skill), else: entry
-
-            case Map.fetch(state.plugin_skills.entries, skill.skill_id) do
-              {:ok, plugin} -> Map.put(entry, :installation, plugin.installation)
-              :error -> entry
-            end
-          end
-
+        entries = Enum.map(skills, &list_entry(state, &1, authority))
         id = opaque()
-
-        snapshot = %{
-          entries: entries,
-          warnings:
-            Enum.map(catalog.diagnostics, &Map.from_struct/1) ++
-              state.plugin_skills.diagnostics ++ state.remote_skills.diagnostics
-        }
+        snapshot = %{authority: authority, entries: entries, warnings: warnings}
 
         packages = Map.new(entries, &{&1.listed.package, &1})
 
@@ -285,13 +279,42 @@ defmodule Sigma.Agent.Backplane.SkillResources do
     end
   end
 
-  defp list_next(state, cursor) do
+  defp list_entry(_state, %{source_kind: "backplane"} = skill, authority),
+    do: remote_entry(skill, authority)
+
+  defp list_entry(state, skill, "executor") do
+    package = opaque()
+
+    entry = %{
+      skill: skill,
+      listed: %{
+        package: package,
+        name: skill.name,
+        description: skill.description,
+        authority: "executor",
+        reference: reference(skill),
+        main_resource: "skill://#{package}/SKILL.md"
+      }
+    }
+
+    case Map.fetch(state.plugin_skills.entries, skill.skill_id) do
+      {:ok, plugin} -> Map.put(entry, :installation, plugin.installation)
+      :error -> entry
+    end
+  end
+
+  defp list_next(state, authority, cursor) do
     with {:ok, %{kind: :list, id: id, offset: offset}} <- cursor(state, cursor, :list),
-         {:ok, snapshot} <- fetch(state.catalogs, id, "skill catalog snapshot expired"),
-         :ok <- eligible_entries(state, snapshot.entries) do
+         {:ok, %{authority: ^authority} = snapshot} <-
+           fetch(state.catalogs, id, "skill catalog snapshot expired"),
+         :ok <- eligible_entries(state, snapshot) do
       list_page(state, id, snapshot, offset)
     else
-      {:error, _} = error -> {error, state}
+      {:ok, _other_authority} ->
+        {error(:validation, "cursor belongs to another skill authority"), state}
+
+      {:error, _} = error ->
+        {error, state}
     end
   end
 
@@ -482,7 +505,7 @@ defmodule Sigma.Agent.Backplane.SkillResources do
      )}
   end
 
-  defp remote_entry(skill) do
+  defp remote_entry(skill, authority \\ "executor") do
     package = opaque()
     readable? = apply(RemoteAdapter, :eligible?, [skill])
 
@@ -492,7 +515,7 @@ defmodule Sigma.Agent.Backplane.SkillResources do
         package: if(readable?, do: package),
         name: skill.name,
         description: skill.description,
-        authority: "executor",
+        authority: authority,
         reference: skill.reference,
         revision: skill.revision,
         artifact_digest: skill.artifact_digest,
@@ -551,8 +574,8 @@ defmodule Sigma.Agent.Backplane.SkillResources do
     end
   end
 
-  defp eligible_entries(state, entries) do
-    catalog = apply(Catalog, :build, [state.workspace])
+  defp eligible_entries(state, %{entries: entries, authority: authority}) do
+    catalog = if authority == "executor", do: apply(Catalog, :build, [state.workspace])
 
     if Enum.all?(entries, fn entry ->
          listed_skill?(state, catalog, entry.skill)

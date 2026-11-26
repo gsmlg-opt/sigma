@@ -14,8 +14,10 @@ covers published skills outside that selection. Empty defaults remain empty.
 
 The native model workflow is
 
-1. Call `skills::list` with `authority: "executor"` to obtain defaults and `sources`.
-2. Choose the configured `source_id` from `sources` and call `skills::search` with
+1. Call `skills::list` with `authority: "cloud"` for the configured Backplane defaults.
+   Executor listings also include these skills alongside local and plugin skills.
+   Use each page cursor with the authority that issued it.
+2. On runtimes exposing `skills::search`, choose the configured `source_id` from `sources` and call it with
    that `source_id` and a task-related `query`. Authority defaults to `executor`.
    Each source owns its search cursor and can be searched independently.
 3. Pass the returned opaque `package` to `skills::read`. Relative resources use
@@ -51,8 +53,7 @@ skill directories retain their existing behavior.
 
 Creation sends one POST. An existing slug returns `already_exists`.
 
-This integration currently requires the candidate Backplane Skill Protocol and
-Agent Runtime discovery APIs. The repository
-lockfile remains the published baseline. Old SDKs return an upgrade error for
-opt-in discovery, and old runtimes retain their existing native skill tools.
-Adopting the published packages and repeating the integration checks is pending. [Backplane #193](https://github.com/gsmlg-opt/backplane/issues/193)
+Sigma pins the Skill Protocol SDK to upstream commit
+`31a161f3fcee5687ed20d4e5ec1452552c105805` for default discovery.
+The locked Agent Runtime exposes native list and read. Native search and creation
+require the runtime release containing those extensions. [Backplane #193](https://github.com/gsmlg-opt/backplane/issues/193)

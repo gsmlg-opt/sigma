@@ -26,7 +26,11 @@ defmodule Sigma.Session.MixProject do
       {:sigma_ai, in_umbrella: true},
       {:sigma_protocol, in_umbrella: true},
       {:sigma_agent, in_umbrella: true, only: :test},
-      {:backplane_skill_protocol, "~> 1.10"},
+      {:backplane_skill_protocol,
+       github: "gsmlg-opt/backplane",
+       sparse: "apps/backplane_skill_protocol",
+       ref: "31a161f3fcee5687ed20d4e5ec1452552c105805",
+       depth: 1},
       {:formata, "~> 0.4"},
       {:telemetry, "~> 1.0"}
     ]

@@ -459,103 +459,122 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
     end
   end
 
+  defp configure_cloud_source!(ctx) do
+    alias Sigma.Session.ConfigManager
+    alias Backplane.SkillProtocol.{Bundle, SkillRef, Wire}
+    previous = Application.fetch_env(:sigma_session, :remote_skill_source_options)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:sigma_session, :remote_skill_source_options, value)
+        :error -> Application.delete_env(:sigma_session, :remote_skill_source_options)
+      end
+    end)
+
+    package_root =
+      skill!(
+        Path.join(ctx.dir, "package"),
+        "remote-review",
+        "Remote quartzneedle" <> String.duplicate(" packaged text", 2000)
+      )
+
+    File.mkdir_p!(Path.join(package_root, "references"))
+    File.write!(Path.join(package_root, "references/checklist.md"), "Checklist version one")
+    File.write!(Path.join(package_root, "references/extra.md"), "Unseen resource")
+
+    assert {:ok, bundle} =
+             Bundle.pack(package_root, Path.join(ctx.dir, "remote.tar.gz"),
+               ref: %SkillRef{source_id: "remote-one", skill_id: "review", revision: "rev-1"}
+             )
+
+    archive = File.read!(bundle.archive_path)
+    File.mkdir_p!(ConfigManager.agent_dir())
+
+    File.write!(
+      Path.join(ConfigManager.agent_dir(), "auth.json"),
+      Formata.JSON.encode!(%{"fixture" => %{"type" => "api_key", "key" => "test-fixture"}})
+    )
+
+    {:ok, _} =
+      ConfigManager.put_skill_source("remote-one", %{
+        "discovery" => true,
+        "baseUrl" => "https://skills.test",
+        "credentialId" => "fixture"
+      })
+
+    owner = self()
+
+    transport = fn request ->
+      uri = URI.parse(request.url)
+      query = URI.decode_query(uri.query || "")
+      send(owner, {:remote_request, uri.path, query})
+
+      descriptor = %{
+        "skill_id" => "review",
+        "name" => "remote-review",
+        "description" => "Remote review",
+        "revision" => "rev-1",
+        "artifact_digest" => bundle.manifest.artifact_digest,
+        "publication_status" => "ready",
+        "disable_model_invocation" => false
+      }
+
+      response =
+        case uri.path do
+          "/skill-protocol/v1/catalog" ->
+            Formata.JSON.encode!(%{
+              "protocol_version" => "1",
+              "view" => "always",
+              "data" => [descriptor],
+              "next_cursor" => nil
+            })
+
+          "/skill-protocol/v1/search" ->
+            Formata.JSON.encode!(%{
+              "protocol_version" => "1",
+              "view" => "search",
+              "data" => [descriptor],
+              "next_cursor" => nil
+            })
+
+          "/skill-protocol/v1/resolve" ->
+            Formata.JSON.encode!(Wire.manifest_map(bundle.manifest))
+
+          "/skill-protocol/v1/artifact" ->
+            archive
+        end
+
+      {:ok, %{status: 200, body: response}}
+    end
+
+    Application.put_env(:sigma_session, :remote_skill_source_options,
+      transport: transport,
+      cache_root: Path.join(ctx.dir, "cache"),
+      binding_path: Path.join(ctx.dir, "bindings.json")
+    )
+  end
+
+  test "cloud authority lists Backplane defaults and reads the issued package", ctx do
+    configure_cloud_source!(ctx)
+    skill!(repo_root(ctx.dir), "local-only", "Repository body")
+    {binding, context, _profile} = bound!(ctx.dir)
+    assert {:ok, listing} = execute(context, binding, "skills::list", %{"authority" => "cloud"})
+
+    assert [%{authority: "cloud", reference: "remote-one:review", package: package}] =
+             listing.skills
+
+    assert {:ok, %{contents: contents}} =
+             execute(context, binding, "skills::read", %{"package" => package})
+
+    assert contents =~ "Remote quartzneedle"
+  end
+
   if "skills::search" in NativeTools.skill_names() and
        Sigma.Session.Skills.RemoteSource.discovery_available?() do
     test "remote defaults and search issue exact packages and read complete bundle resources",
          ctx do
       alias Sigma.Session.ConfigManager
-      alias Backplane.SkillProtocol.{Bundle, SkillRef, Wire}
-      previous = Application.fetch_env(:sigma_session, :remote_skill_source_options)
-
-      on_exit(fn ->
-        case previous do
-          {:ok, value} -> Application.put_env(:sigma_session, :remote_skill_source_options, value)
-          :error -> Application.delete_env(:sigma_session, :remote_skill_source_options)
-        end
-      end)
-
-      package_root =
-        skill!(
-          Path.join(ctx.dir, "package"),
-          "remote-review",
-          "Remote quartzneedle" <> String.duplicate(" packaged text", 2000)
-        )
-
-      File.mkdir_p!(Path.join(package_root, "references"))
-      File.write!(Path.join(package_root, "references/checklist.md"), "Checklist version one")
-      File.write!(Path.join(package_root, "references/extra.md"), "Unseen resource")
-
-      assert {:ok, bundle} =
-               Bundle.pack(package_root, Path.join(ctx.dir, "remote.tar.gz"),
-                 ref: %SkillRef{source_id: "remote-one", skill_id: "review", revision: "rev-1"}
-               )
-
-      archive = File.read!(bundle.archive_path)
-      File.mkdir_p!(ConfigManager.agent_dir())
-
-      File.write!(
-        Path.join(ConfigManager.agent_dir(), "auth.json"),
-        Formata.JSON.encode!(%{"fixture" => %{"type" => "api_key", "key" => "test-fixture"}})
-      )
-
-      {:ok, _} =
-        ConfigManager.put_skill_source("remote-one", %{
-          "discovery" => true,
-          "baseUrl" => "https://skills.test",
-          "credentialId" => "fixture"
-        })
-
-      owner = self()
-
-      transport = fn request ->
-        uri = URI.parse(request.url)
-        query = URI.decode_query(uri.query || "")
-        send(owner, {:remote_request, uri.path, query})
-
-        descriptor = %{
-          "skill_id" => "review",
-          "name" => "remote-review",
-          "description" => "Remote review",
-          "revision" => "rev-1",
-          "artifact_digest" => bundle.manifest.artifact_digest,
-          "publication_status" => "ready",
-          "disable_model_invocation" => false
-        }
-
-        response =
-          case uri.path do
-            "/skill-protocol/v1/catalog" ->
-              Formata.JSON.encode!(%{
-                "protocol_version" => "1",
-                "view" => "always",
-                "data" => [descriptor],
-                "next_cursor" => nil
-              })
-
-            "/skill-protocol/v1/search" ->
-              Formata.JSON.encode!(%{
-                "protocol_version" => "1",
-                "view" => "search",
-                "data" => [descriptor],
-                "next_cursor" => nil
-              })
-
-            "/skill-protocol/v1/resolve" ->
-              Formata.JSON.encode!(Wire.manifest_map(bundle.manifest))
-
-            "/skill-protocol/v1/artifact" ->
-              archive
-          end
-
-        {:ok, %{status: 200, body: response}}
-      end
-
-      Application.put_env(:sigma_session, :remote_skill_source_options,
-        transport: transport,
-        cache_root: Path.join(ctx.dir, "cache"),
-        binding_path: Path.join(ctx.dir, "bindings.json")
-      )
-
+      configure_cloud_source!(ctx)
       {binding, context, _profile} = bound!(ctx.dir)
 
       assert {:ok, listing} =
