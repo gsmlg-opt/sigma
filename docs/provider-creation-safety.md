@@ -54,9 +54,11 @@ whose required lifecycle ACKs are missing.
 The comparison uses Codex `af71942309704997f4bdc86c020717646423c080`.
 The matching retry contract is publicly available in Backplane Runtime 1.10.102,
 published on 2026-11-26. Public tarball checksums and documentation availability
-have been verified. Sigma dependency adoption and the matching dev-service
-restart remain pending at this publication checkpoint; the public release alone
-does not establish running-service behavior. Qualification and adoption are tracked in the
+have been verified. Sigma now locks that public package under `~> 1.10`; strict
+compilation, matching dev-service restart and loaded-module readback passed.
+The existing session's historical recovery gate remains unchanged; no new model
+request was submitted during restart verification. Qualification, service evidence
+and remaining validation limits are tracked in the
 [alignment document](features/codex-execution-policy-alignment.md).
 
 ## Explicit in-process background recovery

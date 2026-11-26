@@ -251,10 +251,30 @@ publication.
 
 Sigma selects the two-component requirement `~> 1.10`, with `mix.lock` pinning
 the verified public Runtime 1.10.102. Other locked package versions remain unchanged.
-Compilation against the public package and the matching dev-service restart are
-still pending at this adoption checkpoint. Publication alone does not establish
-that port 4580 runs the new policy. Historical session
-outcomes and missing lifecycle acknowledgements remain unchanged.
+Sigma commit `8e71b7d5c29a4d9d2392faa5471d36b9c888cb39` is pushed to `origin/main`.
+Release qualification passed forced warnings-as-errors compilation for all 109
+Runtime source files. Sigma's public-package consumer passed the same strict
+compilation for all 269 umbrella source files; `SIGMA_RELEASE=true mix assets.build`
+also passed.
+
+Port 4580 now serves the matching private snapshot
+`/private/tmp/sigma-policy-1.10.102-20261126-180845` (PID 78041). The previous
+stable process (PID 56430) exited. Runtime readback confirms version 1.10.102,
+all ten sampled loaded modules matching the snapshot's BEAM files, disabled
+code reloading/watchers, the original `~/.pi/agent` configuration/session roots
+and HTTP 200. Evidence is retained in
+`/tmp/sigma-policy-1.10.102-20261126-180845-run/verified.json` and `preflight.json`.
+
+Chrome reload confirms LiveView connected, chat/composer mounted, no console
+errors/warnings and the original recovery gate with an enabled `Fork to continue`.
+The journal remains exactly 898,376 bytes with SHA-256
+`1cbbb9e1a64a4e3a49f37940568240667b65a4a8b2de0614584bdd549efba443`;
+the served asset still matches the SHA-256 recorded below. Integrity evidence is
+`/tmp/sigma-policy-release-62d_49ng/post-restart-integrity.json`.
+No prompt, retry, Continue or fork was submitted. Historical outcomes and missing
+lifecycle acknowledgements remain unchanged. The 223 local functional checks
+above qualify behavior; online-model execution, Linux native/other-architecture
+execution and full E2E remain unverified.
 
 ## Session failure during development, 2026-11-26
 
@@ -289,11 +309,11 @@ No historical cleanup or pending tool outcome may be marked successful from
 the absence of a worker. A fork is the existing independent continuation path
 when the original lifetime cannot be reconciled through public acknowledgements.
 
-### Stable development service
+### Historical stable development service (superseded)
 
 The affected dev process (PID 35880) was stopped gracefully. A private snapshot
-of committed Sigma `54a1061de02e2487b45a6ddb2e4d9860d9a44dfd` now serves 4580
-with public Runtime 1.10.101. It lives at
+of committed Sigma `54a1061de02e2487b45a6ddb2e4d9860d9a44dfd` temporarily served 4580
+with public Runtime 1.10.101 before the verified policy adoption above. It lived at
 `/private/tmp/sigma-stable-54a1061-20261126-164652`; its source and dependency
 files are isolated from the working checkout. All 267 umbrella source files
 passed forced warnings-as-errors compilation. Startup uses:
