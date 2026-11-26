@@ -184,6 +184,13 @@ process, reads the saved failure and selected plan projection, and verifies no
 Provider sampling or journal byte changes. A disposable copy of the actual
 session also decodes the original 79-byte fragment without inventing arguments.
 
+If Runtime attachment still fails or its loader exits, the page reads the saved
+transcript, title, model and metrics without creating another Runtime. It shows
+Failed and a persistent error, with submission disabled. It no longer presents
+a readable session as Loading indefinitely. Three selected LiveView checks cover
+both failure return forms, unchanged journal bytes and absent Agent/Writer
+creation, plus existing missing-model replacement and busy-startup behavior.
+
 ### Missing configured models
 
 A session whose historical provider/model pair is no longer configured still

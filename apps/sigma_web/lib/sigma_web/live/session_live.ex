@@ -403,17 +403,11 @@ defmodule Sigma.Web.SessionLive do
   end
 
   def handle_async(:session_load, {:ok, {:error, reason}}, socket) do
-    {:noreply,
-     socket
-     |> assign(:session_load, AsyncResult.failed(socket.assigns.session_load, reason))
-     |> put_flash(:error, "Could not load session: #{format_load_error(reason)}")}
+    {:noreply, load_failed_session(socket, reason)}
   end
 
   def handle_async(:session_load, {:exit, reason}, socket) do
-    {:noreply,
-     socket
-     |> assign(:session_load, AsyncResult.failed(socket.assigns.session_load, {:exit, reason}))
-     |> put_flash(:error, "Could not load session: #{format_load_error(reason)}")}
+    {:noreply, load_failed_session(socket, {:exit, reason})}
   end
 
   def handle_async(:manual_compaction, {:ok, {:ok, _result}}, socket) do
@@ -483,6 +477,45 @@ defmodule Sigma.Web.SessionLive do
     do: {:noreply, assign(socket, :branch_summaries, branches)}
 
   def handle_async(:retry_branches, _result, socket), do: {:noreply, socket}
+
+  defp load_failed_session(socket, reason) do
+    socket =
+      socket
+      |> assign(:session_load, AsyncResult.failed(socket.assigns.session_load, reason))
+      |> assign(runtime_status: :failed, session_ready: false, turn_in_flight: false, agent: nil)
+      |> put_flash(:error, "Could not load session: #{format_load_error(reason)}")
+
+    # Display only: a failed Runtime attachment must not hide readable history or
+    # trigger another attachment, Provider request, or journal mutation.
+    socket =
+      case Sigma.Session.Log.snapshot(socket.assigns.storage_path) do
+        {:ok, snapshot} ->
+          sessions =
+            case Sigma.Session.Log.list_session_summaries(socket.assigns.sessions_dir) do
+              {:ok, sessions} -> sessions
+              {:error, _} -> []
+            end
+
+          metrics = ensure_metrics_session(snapshot.metrics, socket.assigns.session_id)
+
+          socket
+          |> assign(transcript_data(snapshot.messages))
+          |> assign(
+            sessions: sessions,
+            active_provider_id: snapshot.provider_id,
+            current_model: snapshot.model_id,
+            current_model_value: model_option_value(snapshot.provider_id, snapshot.model_id),
+            session_metrics_state: metrics,
+            session_metrics: Sigma.Session.Metrics.snapshot(metrics),
+            parent_session_id: snapshot.parent_session_id
+          )
+
+        {:error, _} ->
+          socket
+      end
+
+    initialize_chat(socket)
+  end
 
   defp apply_loaded_session(socket, session_data, chat_metadata \\ nil) do
     agent = session_data.agent
@@ -884,6 +917,9 @@ defmodule Sigma.Web.SessionLive do
             </.dm_btn>
           </section>
           <div class="relative">
+            <p :if={@session_load.failed && is_nil(@goal_recovery) && not @model_unavailable} id="session-load-error" role="alert" class="mb-3 text-sm text-error">
+              Could not load session: {format_load_error(@session_load.failed)}
+            </p>
             <div :if={not @session_ready and is_nil(@session_load.failed)} class="mb-3 flex items-center gap-3 text-sm text-on-surface-variant">
               <.dm_loading_spinner size="sm" />
               <span>Loading session...</span>
@@ -5301,7 +5337,7 @@ defmodule Sigma.Web.SessionLive do
   defp session_observability_snapshot(assigns) do
     status =
       cond do
-        not assigns[:session_ready] -> :loading
+        not assigns[:session_ready] and assigns[:runtime_status] != :failed -> :loading
         true -> assigns[:runtime_status] || :idle
       end
 

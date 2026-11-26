@@ -943,6 +943,88 @@ defmodule Sigma.Web.SessionLiveTest do
     end)
   end
 
+  test "runtime load errors retain readable partial history with failed admission" do
+    session_id = unique_session_id("load-failed-history")
+    path = session_storage_path(session_id)
+    File.mkdir_p!(Path.dirname(path))
+    :ok = Log.persist_event(path, {:agent_start, @workdir})
+    {:ok, _} = Log.append_model_change(path, "openai", "smart")
+    :ok = Log.persist_event(path, {:message_end, Message.user("retained-user", "Continue work")})
+
+    partial_json = ~s({"cmd":"printf never-execute |)
+
+    partial =
+      Message.assistant("retained-partial", %{
+        content: [
+          %{type: :text, text: "Saved partial response"},
+          %{type: :tool_call, id: "unfinished", name: "exec_command", partial_json: partial_json}
+        ],
+        stop_reason: :error,
+        metadata: %{provider_failure: %{kind: :malformed_stream, code: "invalid_tool_arguments"}}
+      })
+
+    :ok = Log.persist_event(path, {:message_end, partial})
+    File.write!(Path.rootname(path) <> ".meta.json", ~s({"title":"Retained session"}))
+    original = File.read!(path)
+    assert {:ok, snapshot} = Log.snapshot(path)
+    reason = {:invalid_plan_journal, {:invalid_content_field, :tool_call, :arguments}}
+
+    for result <- [{:ok, {:error, reason}}, {:exit, {:noproc, {:load, session_id}}}] do
+      socket =
+        recovery_socket(
+          session_id: session_id,
+          sessions_dir: Path.dirname(path),
+          storage_path: path,
+          session_ready: false,
+          runtime_status: :loading,
+          effort_setting: nil,
+          renaming_session: nil,
+          agent: nil,
+          agent_ref: nil
+        )
+
+      assert {:noreply, failed} =
+               Sigma.Web.SessionLive.handle_async(:session_load, result, socket)
+
+      assert failed.assigns.runtime_status == :failed
+      refute failed.assigns.session_ready
+      assert failed.assigns.agent == nil
+      assert failed.assigns.current_model == "smart"
+      assert failed.assigns.active_provider_id == "openai"
+
+      assert failed.assigns.display_messages[partial.id].content ==
+               List.last(snapshot.messages).content
+
+      assert failed.assigns.session_metrics ==
+               Sigma.Session.Metrics.snapshot(%{snapshot.metrics | session_id: session_id})
+
+      refute failed.assigns.chat_initial.admission.canSubmit
+      assert failed.assigns.chat_initial.runtime.phase == :failed
+      assert failed.assigns.chat_initial.messages != []
+      assert failed.assigns.display_messages["retained-user"].content == "Continue work"
+      assert inspect(failed.assigns.chat_initial.messages) =~ "Saved partial response"
+      assert failed.assigns.flash["error"] =~ "Could not load session"
+
+      html = render_session(failed.assigns)
+      assert html =~ "Retained session"
+      assert html =~ "Failed"
+      assert html =~ "session-load-error"
+      assert html =~ if(match?({:exit, _}, result), do: "noproc", else: "invalid_plan_journal")
+      refute html =~ "Loading session..."
+
+      assert {:reply, %{status: "error"}, _} =
+               Sigma.Web.SessionLive.handle_event(
+                 "chat.send",
+                 %{"id" => "messages", "conversation_id" => session_id, "text" => "run"},
+                 failed
+               )
+
+      assert File.read!(path) == original
+      assert Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent) == nil
+      assert Sigma.Agent.Runtime.lookup(@workdir, session_id, :writer) == nil
+    end
+  end
+
   test "exposes runtime context warnings outside the collapsible details panel" do
     for policy <- [
           %{overflow: :hard_overflow},
