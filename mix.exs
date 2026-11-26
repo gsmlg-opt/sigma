@@ -35,6 +35,7 @@ defmodule Sigma.MixProject do
         "assets.setup",
         "assets.build"
       ],
+      "phx.server": [fn _args -> build_macos_process_helper() end, "phx.server"],
       "sigma.run": ["phx.server"],
       "sigma.rel-build": ["assets.build", &build_release/1],
       "sigma.rel-run": ["sigma.rel-build", &run_release/1],
@@ -63,12 +64,15 @@ defmodule Sigma.MixProject do
   end
 
   defp prepare_process_helper(release) do
+    build_macos_process_helper()
+    release
+  end
+
+  defp build_macos_process_helper do
     if :os.type() == {:unix, :darwin} do
       Mix.Task.reenable("backplane.command.build")
       Mix.Task.run("backplane.command.build")
     end
-
-    release
   end
 
   defp assemble_code_mode_runner(release) do

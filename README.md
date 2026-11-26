@@ -45,7 +45,7 @@ mix setup
 mix phx.server
 ```
 
-`mix setup` runs `deps.get`, `backplane.command.build`, the public `backplane.code_mode.build` task, `assets.setup`, and `assets.build`. `backplane.command.build` compiles Backplane's packaged LocalCommand session helper into the dependency's `priv/bin` (required on macOS); it does not otherwise modify dependency source. `mix sigma.run` is an alias for `mix phx.server`.
+`mix setup` runs `deps.get`, `backplane.command.build`, the public `backplane.code_mode.build` task, `assets.setup`, and `assets.build`. On macOS, `mix phx.server` and its alias `mix sigma.run` also build Backplane's LocalCommand session helper into the dependency's `priv/bin` before starting Phoenix.
 
 `mix sigma.rel-run` builds the frontend assets, overwrites the `sigma` release for the current Mix environment, and runs it in the foreground.
 
