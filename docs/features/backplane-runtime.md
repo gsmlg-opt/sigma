@@ -37,7 +37,7 @@ Store APIs can reopen runtime evidence. Sigma does not yet load/fence an interru
 - Exact tool schemas are retained. Unsupported MCP schema keywords fail explicitly; constraints are never stripped to force acceptance.
 - Sigma's coding dispatcher remains the tool boundary for permissions and pre/post hooks.
 - The existing Bash tool stops its BEAM task on cancellation or timeout, but external shell descendants can continue. Reconcile shell effects before retrying a cancelled command.
-- Each turn has a work quota of 100 provider/tool invocations and a five-minute effect timeout. The root run has no wall-clock timeout. The quota does not measure billed tokens and bounds repeated failed tool attempts.
+- Root and managed-child turns use Backplane 1.10.101's `work: :infinity`, retaining provider/tool usage accounting without an invocation quota. Runs have no wall-clock timeout; each effect retains its five-minute timeout. Context-window management and explicit Goal budgets are independent of this execution setting.
 - Writer-backed sessions expose the session-owned subagent collaboration tools; writerless sessions retain their ordinary tools without collaboration admission.
 - Real-provider and browser acceptance are separate from deterministic local integration tests.
 

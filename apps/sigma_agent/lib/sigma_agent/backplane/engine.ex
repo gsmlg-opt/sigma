@@ -390,7 +390,7 @@ defmodule Sigma.Agent.Backplane.Engine do
             Enum.drop(Sigma.Agent.__backplane_context_messages__(state), -1)
           ),
         authority: catalog.authority,
-        work: 100,
+        work: :infinity,
         provider_output_limit: :infinity,
         run_timeout: :infinity,
         effect_timeout: 300_000

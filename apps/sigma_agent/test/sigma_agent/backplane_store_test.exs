@@ -185,6 +185,7 @@ defmodule Sigma.Agent.Backplane.StoreTest do
          tools: profile.tools,
          authority: profile.authority,
          schema_admission: :strict,
+         work: :infinity,
          run_timeout: 30_000,
          effect_timeout: 10_000}
       )
@@ -192,6 +193,7 @@ defmodule Sigma.Agent.Backplane.StoreTest do
     assert {:ok, _} = Conversation.prompt(conversation, "Ask")
     assert_receive {:agent_runtime, ^run_id, %{type: :run_completed}}, 5_000
     assert {:ok, %{run: %{state: :completed}} = expected} = Store.load(context, run_id)
+    assert expected.run.execution_budget.quota == :infinity
     refute expected.run.execution_intents == %{}
     before = runtime_files(root)
 

@@ -815,7 +815,7 @@ defmodule Sigma.Agent.Backplane.ChildIO do
       tools: catalog.tools,
       authority: catalog.authority,
       messages: CanonicalHistory.runtime_messages(state.messages),
-      work: 100,
+      work: :infinity,
       provider_output_limit: :infinity,
       run_timeout: :infinity,
       effect_timeout: 300_000

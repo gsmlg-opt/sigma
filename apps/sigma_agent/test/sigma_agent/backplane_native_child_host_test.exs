@@ -70,6 +70,66 @@ defmodule Sigma.Agent.BackplaneNativeChildHostTest do
     %{agent: handle.agent, host: host, path: path, dir: dir}
   end
 
+  @tag :unlimited_work
+  @tag timeout: 120_000
+  test "native root turns continue beyond 100 provider and tool operations", c do
+    root = prompt!(c.agent)
+
+    root =
+      Enum.reduce(1..51, root, fn _, provider ->
+        next = call!(provider, "get_context_remaining", %{})
+        refute result!(next, "get_context_remaining").is_error
+        next
+      end)
+
+    finish!(root)
+    assert eventually(fn -> Sigma.Agent.status(c.agent).phase == :completed end)
+
+    store = :sys.get_state(c.agent).backplane_store
+    assert {:ok, %{run: run}} = Store.load(store, root.params.turn_id)
+    assert run.state == :completed
+    assert run.execution_budget.quota == :infinity
+    assert run.execution_budget.used == 103
+    assert map_size(run.execution_budget.reservations) == 103
+  end
+
+  @tag :unlimited_work
+  @tag timeout: 120_000
+  test "managed children continue beyond 100 operations and accept a followup", c do
+    root = prompt!(c.agent)
+    {child, root} = spawn!(root, "a")
+
+    child =
+      Enum.reduce(1..51, child, fn _, provider ->
+        next = call!(provider, "get_context_remaining", %{})
+        refute result!(next, "get_context_remaining").is_error
+        next
+      end)
+
+    finish!(child)
+    assert eventually(fn -> roster(c.host).counts.stopped == 1 end)
+    {store, _path} = child_store!(c, child.params.session_id)
+    assert {:ok, %{hosts: hosts}} = Store.host_retirement(store, :all)
+    [host] = Map.values(hosts)
+    [binding] = Map.values(host.bindings)
+    assert {:ok, %{run: run}} = Store.load(store, binding.run_id)
+    assert run.state == :completed
+    assert run.execution_budget.quota == :infinity
+    assert run.execution_budget.used == 103
+    assert map_size(run.execution_budget.reservations) == 103
+
+    send_call(root, "followup_task", %{"target" => "/root/a", "message" => "continue"})
+    next = provider!(child.params.session_id)
+    root = provider!("native-root")
+    refute result!(root, "followup_task").is_error
+    next = call!(next, "get_context_remaining", %{})
+    refute result!(next, "get_context_remaining").is_error
+    finish!(next)
+    finish!(root)
+    assert eventually(fn -> Sigma.Agent.status(c.agent).phase == :completed end)
+    assert eventually(fn -> roster(c.host).counts.stopped == 1 end)
+  end
+
   test "managed child catalog includes published apply_patch", c do
     root = prompt!(c.agent)
     {child, root} = spawn!(root, "a")
