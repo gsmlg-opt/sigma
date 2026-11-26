@@ -13,7 +13,8 @@ defmodule Sigma.Session.Providers do
             not valid_origin?(origin) ->
               {:error, :invalid_service_origin}
 
-            not ConfigManager.credential_available?(credential_id) ->
+            (service != :skills or credential_id != "") and
+                not ConfigManager.credential_available?(credential_id) ->
               {:error, :credential_unavailable}
 
             true ->

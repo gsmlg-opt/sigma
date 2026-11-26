@@ -81,6 +81,78 @@ defmodule Sigma.Web.SettingsServicesLiveTest do
     assert standalone["url"] == "https://standalone.example/mcp"
   end
 
+  test "a remote source draft can be saved after fixing its provider in another tab", %{
+    conn: conn,
+    provider_id: pid
+  } do
+    credential_id = ConfigManager.get_config()["providers"][pid]["credential_id"]
+    {:ok, _} = ConfigManager.update_provider(pid, %{"credential_id" => "missing-credential"})
+
+    {:ok, view, _} = live(conn, "/settings/skills")
+    render_async(view, 2000)
+    view |> element("#remote-source-new") |> render_click()
+
+    view
+    |> form("#remote-source-form", %{"source" => %{"id" => "backplane", "provider_id" => pid}})
+    |> render_change()
+
+    assert has_element?(view, "#remote-source-form", "Select a credential for this provider")
+
+    assert has_element?(
+             view,
+             "#remote-source-form a[href='/settings/providers'][target='_blank']"
+           )
+
+    assert has_element?(view, "#remote-source-form button[type='submit'][disabled]")
+
+    {:ok, providers, _} = live(conn, "/settings/providers")
+    render_async(providers, 2000)
+    providers |> element("#provider-edit-#{pid}") |> render_click()
+
+    providers
+    |> form("#provider-settings-form", %{"provider" => %{"credential_id" => credential_id}})
+    |> render_submit()
+
+    assert has_element?(view, "#remote-source-form", "Shared service credential")
+    refute has_element?(view, "#remote-source-form button[type='submit'][disabled]")
+    view |> form("#remote-source-form") |> render_submit()
+    assert [%{source_id: "backplane", provider_id: ^pid}] = ConfigManager.skill_sources()
+  end
+
+  test "saves and browses a remote source with no provider credential", %{
+    conn: conn,
+    provider_id: pid
+  } do
+    {:ok, _} = ConfigManager.update_provider(pid, %{"credential_id" => ""})
+    owner = self()
+
+    Application.put_env(:sigma_session, :remote_skill_source_options,
+      transport: fn request ->
+        send(owner, {:catalog_headers, request.headers})
+        {:ok, %{status: 200, body: ~s({"protocol_version":"1","data":[],"next_cursor":null})}}
+      end
+    )
+
+    {:ok, view, _} = live(conn, "/settings/skills")
+    render_async(view, 2000)
+    view |> element("#remote-source-new") |> render_click()
+
+    view
+    |> form("#remote-source-form", %{"source" => %{"id" => "backplane", "provider_id" => pid}})
+    |> render_change()
+
+    assert has_element?(view, "#remote-source-form", "Credential: None")
+    view |> form("#remote-source-form") |> render_submit()
+
+    assert [%{source_id: "backplane", credential_id: "", provider_id: ^pid}] =
+             ConfigManager.skill_sources()
+
+    view |> element("[phx-click='browse_remote_source']") |> render_click()
+    assert render_async(view, 2000) =~ "No remote skills match this search."
+    assert_receive {:catalog_headers, headers}
+    refute Map.has_key?(headers, "authorization")
+  end
+
   test "remote sources are explicit, stable, and browse the skill protocol", %{
     conn: conn,
     provider_id: pid

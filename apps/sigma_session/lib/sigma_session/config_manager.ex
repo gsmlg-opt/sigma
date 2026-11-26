@@ -513,6 +513,8 @@ defmodule Sigma.Session.ConfigManager do
 
   @doc false
   @spec credential_supplier(binary()) :: (-> binary() | nil)
+  def credential_supplier(""), do: fn -> nil end
+
   def credential_supplier(credential_id) when is_binary(credential_id) do
     fn ->
       case load_json(@auth_file, %{})[credential_id] do

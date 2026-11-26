@@ -430,14 +430,29 @@ defmodule Sigma.Session.Skills.RemoteAdapter do
 
   defp source_status(source) do
     cond do
-      not source.enabled? -> "disabled"
-      source.resolution_error != nil -> "provider_unavailable"
-      source.base_url == "" -> "invalid_configuration"
-      source.credential_id == "" -> "invalid_configuration"
-      source.access_context_id == "" -> "invalid_configuration"
-      source.offline? -> "offline"
-      not ConfigManager.credential_available?(source.credential_id) -> "credential_unavailable"
-      true -> "configured"
+      not source.enabled? ->
+        "disabled"
+
+      source.resolution_error != nil ->
+        "provider_unavailable"
+
+      source.base_url == "" ->
+        "invalid_configuration"
+
+      source.provider_id == "" and source.credential_id == "" ->
+        "invalid_configuration"
+
+      source.access_context_id == "" ->
+        "invalid_configuration"
+
+      source.offline? ->
+        "offline"
+
+      source.credential_id != "" and not ConfigManager.credential_available?(source.credential_id) ->
+        "credential_unavailable"
+
+      true ->
+        "configured"
     end
   end
 

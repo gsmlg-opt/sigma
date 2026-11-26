@@ -33,10 +33,12 @@ defmodule Sigma.Web.RemoteSkillSourcesComponent do
 
   @impl true
   def render(assigns) do
+    assigns = assign(assigns, :service, source_service(assigns.form))
+
     ~H"""
     <section id={@id} class="space-y-4 mb-8">
       <div class="flex flex-wrap items-center justify-between gap-3"><h3 class="text-xl font-bold">Remote sources</h3><.dm_btn id="remote-source-new" phx-click="new_remote_source" phx-target={@myself} variant="primary" size="sm">Add remote source</.dm_btn></div>
-      <p :if={@error} class="text-error" role="alert">{@error}</p>
+      <p :if={@error && !@form} class="text-error" role="alert">{@error}</p>
       <p :if={@sources == []} class="text-sm text-on-surface-variant">No remote sources configured.</p>
       <div class="grid gap-4 lg:grid-cols-2">
         <.dm_card :for={source <- @sources} variant="bordered" class="min-w-0 bg-surface-container-low">
@@ -78,12 +80,12 @@ defmodule Sigma.Web.RemoteSkillSourcesComponent do
             <.dm_input name="source[id]" value={@form["id"]} label="Source ID" readonly={@form["editing"] == true} required />
             <.dm_input name="source[name]" value={@form["name"]} label="Display name" />
             <.dm_select name="source[provider_id]" value={@form["provider_id"]} label="Backplane provider" options={source_provider_options(@providers, @form)} />
-            <.source_preview provider_id={@form["provider_id"]} credentials={@credentials} />
+            <.source_preview :if={@form["provider_id"] != ""} service={@service} credentials={@credentials} />
             <p :if={@form["provider_id"] == "" and @form["standalone"]} class="text-sm">This standalone source keeps its existing origin and credential. Select a provider to use a shared connection.</p>
             <.dm_select name="source[enabled]" value={@form["enabled"]} label="Enabled" options={[{"true", "Enabled"}, {"false", "Disabled"}]} />
             <.dm_select name="source[discovery]" value={@form["discovery"]} label="Model discovery" options={[{"false", "Manual invocation"}, {"true", "Backplane defaults and search"}]} />
             <.dm_select name="source[offline]" value={@form["offline"]} label="Access" options={[{"false", "Online"}, {"true", "Offline: verified cached skills only"}]} />
-            <div class="flex gap-2"><.dm_btn native_submit variant="primary">Save source</.dm_btn><.dm_btn id="remote-source-cancel" phx-click="cancel_remote_source" phx-target={@myself} variant="ghost">Cancel</.dm_btn></div>
+            <div class="flex gap-2"><.dm_btn native_submit variant="primary" disabled={match?({:error, _}, @service)}>Save source</.dm_btn><.dm_btn id="remote-source-cancel" phx-click="cancel_remote_source" phx-target={@myself} variant="ghost">Cancel</.dm_btn></div>
           </form>
         </:body>
       </.dm_modal>
@@ -95,19 +97,34 @@ defmodule Sigma.Web.RemoteSkillSourcesComponent do
     """
   end
 
-  defp source_preview(assigns) do
-    assigns = assign(assigns, :service, Providers.resolve_service(assigns.provider_id, :skills))
+  defp source_service(%{"provider_id" => "", "standalone" => true}), do: {:ok, nil}
 
+  defp source_service(%{"provider_id" => id}) when id not in [nil, ""],
+    do: Providers.resolve_service(id, :skills)
+
+  defp source_service(_form), do: {:error, :provider_required}
+
+  defp source_preview(assigns) do
     ~H"""
-    <div :if={@provider_id != ""} class="rounded-lg bg-surface-container-high p-3 text-sm break-all">
+    <div class="rounded-lg bg-surface-container-high p-3 text-sm">
       <%= case @service do %>
         <% {:ok, service} -> %>
-          <p>Service origin: {service.origin}</p><p>Credential: {credential_name(@credentials, service.credential_id)}</p><p>Protocol: {service.origin <> "/skill-protocol/v1"}</p>
-        <% _ -> %><p class="text-error" role="status">Provider unavailable. Check its service origin and credential.</p>
+          <p class="break-all">Service origin: {service.origin}</p><p>Credential: {credential_name(@credentials, service.credential_id)}</p><p class="break-all">Protocol: {service.origin <> "/skill-protocol/v1"}</p>
+        <% {:error, reason} -> %>
+          <p class="text-error" role="status">{provider_error(reason)}</p>
+          <.dm_link href={~p"/settings/providers"} target="_blank" rel="noopener" class="underline">Open provider settings in a new tab</.dm_link>
       <% end %>
     </div>
     """
   end
+
+  defp provider_error(:credential_unavailable),
+    do: "Select a credential for this provider in Settings."
+
+  defp provider_error(:invalid_service_origin),
+    do: "Set a valid Backplane service origin for this provider in Settings."
+
+  defp provider_error(_reason), do: "This Backplane provider is no longer available."
 
   @impl true
   def handle_event("new_remote_source", _, socket),
@@ -151,9 +168,10 @@ defmodule Sigma.Web.RemoteSkillSourcesComponent do
   end
 
   def handle_event("change_remote_source", %{"source" => attrs}, socket),
-    do: {:noreply, assign(socket, :form, merge_source(socket.assigns.form, attrs))}
+    do: {:noreply, assign(socket, form: merge_source(socket.assigns.form, attrs), error: nil)}
 
-  def handle_event("cancel_remote_source", _, socket), do: {:noreply, assign(socket, :form, nil)}
+  def handle_event("cancel_remote_source", _, socket),
+    do: {:noreply, assign(socket, form: nil, error: nil)}
 
   def handle_event("confirm_delete_remote_source", %{"id" => id}, socket),
     do: {:noreply, assign(socket, :deleting, id)}
@@ -176,33 +194,25 @@ defmodule Sigma.Web.RemoteSkillSourcesComponent do
         do: Map.put(attrs, "providerId", form["provider_id"]),
         else: attrs
 
-    valid =
-      if form["provider_id"] != "",
-        do: match?({:ok, _}, Providers.resolve_service(form["provider_id"], :skills)),
-        else: form["standalone"]
-
-    duplicate? =
-      not form["editing"] and
-        Enum.any?(ConfigManager.skill_sources(), &(&1.source_id == form["id"]))
-
-    if valid and not duplicate? do
-      case ConfigManager.put_skill_source(form["id"], attrs) do
-        {:ok, _} ->
-          {:noreply,
-           socket
-           |> cancel_async(:remote_catalog)
-           |> assign(form: nil, browsing: nil, catalog: nil, catalog_state: :idle, error: nil)
-           |> refresh()}
-
-        _ ->
-          {:noreply,
-           assign(socket,
-             form: form,
-             error: "Source could not be saved. Check its ID and provider."
-           )}
-      end
+    with {:ok, _service} <- source_service(form),
+         false <-
+           not form["editing"] and
+             Enum.any?(ConfigManager.skill_sources(), &(&1.source_id == String.trim(form["id"]))),
+         {:ok, _} <- ConfigManager.put_skill_source(form["id"], attrs) do
+      {:noreply,
+       socket
+       |> cancel_async(:remote_catalog)
+       |> assign(form: nil, browsing: nil, catalog: nil, catalog_state: :idle, error: nil)
+       |> refresh()}
     else
-      {:noreply, assign(socket, form: form, error: "Select an available Backplane provider.")}
+      true ->
+        {:noreply, assign(socket, form: form, error: "This source ID is already in use.")}
+
+      {:error, :invalid_id} ->
+        {:noreply, assign(socket, form: form, error: "Enter a source ID.")}
+
+      {:error, _provider_error} ->
+        {:noreply, assign(socket, form: form, error: nil)}
     end
   end
 
@@ -312,6 +322,8 @@ defmodule Sigma.Web.RemoteSkillSourcesComponent do
       true -> "Configured"
     end
   end
+
+  defp credential_name(_credentials, ""), do: "None"
 
   defp credential_name(credentials, id),
     do: get_in(credentials, [id, "name"]) || "Unavailable credential"
