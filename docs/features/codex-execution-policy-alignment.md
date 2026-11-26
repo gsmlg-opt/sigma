@@ -135,6 +135,37 @@ flash and persisted turn details. Reconnecting to a live Agent reads its retry
 status without scheduling another request. Retries inside an individual HTTP
 submission remain part of that Provider call rather than separate UI counters.
 
+### Invalid Anthropic tool output
+
+Backplane AI protocol 1.10.102 classifies invalid or non-object JSON at an
+Anthropic tool block's completion as a retryable provider observation with code
+`invalid_tool_arguments` ([backplane#192](https://github.com/gsmlg-opt/backplane/issues/192)).
+Sigma accepts only that typed contract as a stream replacement retry. The same
+message without the matching kind, stage, code and retry hint remains terminal;
+unrelated malformed streams retain their existing behavior. The existing five
+replacement retry limit and `retry: false` apply. Partial commands are never
+repaired or dispatched, and failed output remains in display history while its
+unfinished tool calls are omitted from replacement Provider context.
+
+The later explicit 20:26 submission in `session_ZRx8Ss-v_ol1fNT3` completed 43
+Provider requests and saved 79 tool results before its 44th request failed.
+The final tool arguments were 79 bytes of an unterminated JSON string ending at
+a shell pipe. That call never reached execution. Its previously terminal error
+explains why the task stopped despite having no work-count or wall-time cap.
+The original failed turn remains historical; upgrading does not submit or replay
+it. A controlled native-command regression verifies a settled command executes
+once, replacement sampling succeeds, the original journal prefix and tool result
+remain exact, and the incomplete call receives no fabricated result.
+
+With the published 1.10.102 package locked, six selected AI checks and all ten
+root/child retry checks pass. The controlled HTTP test feeds a real truncated
+Anthropic SSE tool block and verifies preserved partial output, typed retry
+metadata and absence of tool completion. The deployment snapshot also passes
+forced warnings-as-errors compilation of all 269 umbrella source files; the
+upstream package passes its 12 Anthropic projection cases. These controlled
+checks do not establish that the external model gateway will return valid JSON
+on its next request.
+
 ### Missing configured models
 
 A session whose historical provider/model pair is no longer configured still
@@ -158,7 +189,7 @@ case. Provider calls in these regressions use controlled fixtures, so this does
 not establish recovery of the external model gateway.
 
 The deployed dev snapshot passed strict compilation of all 269 umbrella files.
-Chrome verified that `session_ZRx8Ss-v_ol1fNT3` loads its two historical messages,
+At that acceptance boundary, Chrome verified that `session_ZRx8Ss-v_ol1fNT3` loads its two historical messages,
 accepts the explicit selection `prov_35/MiniMax-M3.1-Flash`, and remains Ready
 with `canSubmit: true` after reload, without console errors. Its journal prefix
 is unchanged; the sole appended entry is the model change, with no new Provider

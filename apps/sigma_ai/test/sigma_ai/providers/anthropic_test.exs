@@ -1,7 +1,7 @@
 defmodule Sigma.Ai.Providers.AnthropicTest do
   use ExUnit.Case, async: true
 
-  alias Sigma.Ai.{ProviderError, Stream}
+  alias Sigma.Ai.{Provider, ProviderError, ProviderRequest, Stream}
   alias Sigma.Ai.Providers.Anthropic
 
   @fixture_path Path.expand("../../fixtures/sse/anthropic_usage.txt", __DIR__)
@@ -654,6 +654,94 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
       end)
     end
 
+    test "truncated native function arguments retain partial output and request a stream retry" do
+      partial_json = ~S({"cmd": "printf \"ready\" |)
+
+      prefix =
+        [
+          %{"type" => "message_start", "message" => %{"id" => "msg_truncated"}},
+          %{
+            "type" => "content_block_start",
+            "index" => 0,
+            "content_block" => %{
+              "type" => "tool_use",
+              "id" => "toolu_truncated",
+              "name" => "exec_command",
+              "input" => %{}
+            }
+          },
+          %{
+            "type" => "content_block_delta",
+            "index" => 0,
+            "delta" => %{"type" => "input_json_delta", "partial_json" => partial_json}
+          }
+        ]
+        |> Enum.map_join(fn event -> "data: " <> Formata.JSON.encode!(event) <> "\n\n" end)
+
+      suffix =
+        [
+          %{"type" => "content_block_stop", "index" => 0},
+          %{"type" => "message_delta", "delta" => %{"stop_reason" => "tool_use"}},
+          %{"type" => "message_stop"}
+        ]
+        |> Enum.map_join(fn event -> "data: " <> Formata.JSON.encode!(event) <> "\n\n" end)
+
+      tool = %{
+        name: "exec_command",
+        description: "Run a command.",
+        parameters: %{"type" => "object", "properties" => %{"cmd" => %{"type" => "string"}}}
+      }
+
+      with_capture_server(
+        [prefix, suffix],
+        fn base_url, _captured ->
+          request =
+            ProviderRequest.new(%{
+              model: %{id: "claude-test", api: "anthropic-messages", provider: "anthropic"},
+              context: %{messages: [], tools: [@patch_tool, tool]},
+              options: [api_key: "test-key", base_url: base_url, receive_timeout: 1_000]
+            })
+
+          events =
+            Provider.stream(Anthropic, request)
+            |> Elixir.Stream.map(fn event ->
+              if event.type == :tool_call_arguments_delta do
+                assert_receive {:sse_paused, server}
+                send(server, :continue_sse)
+              end
+
+              event
+            end)
+            |> Enum.to_list()
+
+          assert Enum.any?(events, &(&1.type == :tool_call_started))
+          assert Enum.any?(events, &(&1.type == :tool_call_arguments_delta))
+          refute Enum.any?(events, &(&1.type in [:tool_call_completed, :response_completed]))
+
+          assert %{type: :response_failed, error: error, message: message, retry: retry} =
+                   List.last(events)
+
+          assert error.kind == :malformed_stream
+          assert error.retryable
+          assert error.retry_class == :stream
+          assert error.code == "invalid_tool_arguments"
+          assert retry == %{class: :stream, retry_after_ms: nil}
+
+          assert [
+                   %{
+                     id: "toolu_truncated",
+                     name: "exec_command",
+                     input_kind: :function,
+                     partial_json: ^partial_json
+                   } = partial_call
+                 ] = message.content
+
+          refute Map.has_key?(partial_call, :arguments)
+        end,
+        pause_after: byte_size(prefix)
+      )
+    end
+
     test "replays custom and namespaced history with exact re-wrapped input" do
       raw = " line one\r\nline ✓ two \n"
       alias_name = wire_alias("history::search_contents")
@@ -807,6 +895,8 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
 
         assert error.kind == :malformed_stream
         assert error.message =~ "projection"
+        refute error.retryable
+        assert is_nil(error.retry_class)
       end)
     end
 
@@ -847,6 +937,8 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
           end
 
         assert error.kind == :malformed_stream
+        refute error.retryable
+        assert is_nil(error.retry_class)
       end)
     end
 
@@ -972,12 +1064,13 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
     "bp_" <> binary_part(Base.encode16(:crypto.hash(:sha256, name), case: :lower), 0, 60)
   end
 
-  defp with_capture_server(chunks, fun) do
+  defp with_capture_server(chunks, fun, opts \\ []) do
     {:ok, listen_socket} =
       :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
 
     {:ok, port} = :inet.port(listen_socket)
     {:ok, captured} = Agent.start_link(fn -> %{} end)
+    test_pid = self()
 
     task =
       Task.async(fn ->
@@ -1000,7 +1093,22 @@ defmodule Sigma.Ai.Providers.AnthropicTest do
           body
         ]
 
-        :ok = :gen_tcp.send(socket, response)
+        case opts[:pause_after] do
+          nil ->
+            :ok = :gen_tcp.send(socket, response)
+
+          pause_after ->
+            <<prefix::binary-size(^pause_after), suffix::binary>> = body
+            :ok = :gen_tcp.send(socket, [Enum.drop(response, -1), prefix])
+            send(test_pid, {:sse_paused, self()})
+
+            receive do
+              :continue_sse -> :ok = :gen_tcp.send(socket, suffix)
+            after
+              5_000 -> raise "SSE continuation was not requested"
+            end
+        end
+
         :gen_tcp.close(socket)
         :gen_tcp.close(listen_socket)
       end)

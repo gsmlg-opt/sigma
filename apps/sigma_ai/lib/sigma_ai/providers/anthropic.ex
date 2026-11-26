@@ -765,7 +765,8 @@ defmodule Sigma.Ai.Providers.Anthropic do
         {events, acc, codec}
 
       {:error, error, _codec} ->
-        raise ProviderError.malformed(error.message)
+        # TODO(upstream): gsmlg-opt/backplane#192 uses typed retry hints for invalid tool output.
+        raise ProviderError.malformed(error)
     end
   end
 

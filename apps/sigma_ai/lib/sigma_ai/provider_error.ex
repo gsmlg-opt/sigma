@@ -103,6 +103,22 @@ defmodule Sigma.Ai.ProviderError do
   def from_reason(reason),
     do: new(:transport_unavailable, reason, retryable: true)
 
+  def malformed(%Backplane.AiProtocol.Error{
+        kind: :upstream_error,
+        stage: :observation,
+        provider_code: "invalid_tool_arguments",
+        retry_hint: :retryable,
+        message: message
+      }) do
+    %{
+      malformed(message)
+      | code: "invalid_tool_arguments",
+        retryable: true,
+        retry_class: :stream
+    }
+  end
+
+  def malformed(%Backplane.AiProtocol.Error{message: message}), do: malformed(message)
   def malformed(reason), do: new(:malformed_stream, reason)
 
   def from_exception(%__MODULE__{} = error), do: error

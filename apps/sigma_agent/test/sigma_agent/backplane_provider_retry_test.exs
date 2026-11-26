@@ -102,6 +102,103 @@ defmodule Sigma.Agent.BackplaneProviderRetryTest do
     assert Enum.all?(snapshot.messages, &(&1.role == :user))
   end
 
+  test "invalid Anthropic tool JSON retries without replaying a settled command", c do
+    marker = Path.join(c.tmp_dir, "settled-command")
+
+    handle =
+      start_root(c,
+        native_tools: true,
+        native_memory_root: Path.join(c.tmp_dir, "memories"),
+        model: %{id: "retry", provider: "fixture", api: "openai-responses"}
+      )
+
+    assert {:accepted, _} = Sigma.Agent.prompt(handle.agent, "Finish")
+    assert_receive {:retry_provider, first, _}, 5_000
+
+    call = %{
+      id: "settled-command",
+      name: "exec_command",
+      arguments: %{"cmd" => "printf x >> '#{marker}'"}
+    }
+
+    message = %{
+      completed().message
+      | stop_reason: :tool_use,
+        content: [Map.put(call, :type, :tool_call)]
+    }
+
+    send(
+      first,
+      {:events,
+       [
+         %ProviderEvent{type: :tool_call_completed, tool_call: call, index: 0, message: message},
+         %ProviderEvent{type: :response_completed, message: message}
+       ]}
+    )
+
+    assert_receive {:retry_provider, second, _}, 10_000
+    assert File.read!(marker) == "x"
+    assert {:ok, settled} = Log.snapshot(handle.path)
+    settled_results = Enum.filter(settled.messages, &(&1.role == :tool_result))
+    assert [%{tool_call_id: "settled-command", is_error: false}] = settled_results
+    original_prefix = File.read!(handle.path)
+
+    error =
+      ProviderError.malformed(%Backplane.AiProtocol.Error{
+        kind: :upstream_error,
+        stage: :observation,
+        provider_code: "invalid_tool_arguments",
+        retry_hint: :retryable,
+        message: "Anthropic tool arguments are not complete JSON"
+      })
+
+    partial_json = ~s({"cmd": "printf never-execute |)
+
+    partial = %{
+      failed().message
+      | content: [
+          %{type: :text, text: "Continue after the saved result"},
+          %{
+            type: :tool_call,
+            id: "truncated-command",
+            name: "exec_command",
+            partial_json: partial_json
+          }
+        ]
+    }
+
+    send(second, {:events, [%{failed() | error: error, retry: nil, message: partial}]})
+    assert_receive {:retry_provider, replacement, request}, 3_000
+
+    assert [projected_result] = Enum.filter(request.context.messages, &(&1.role == :tool_result))
+    keys = [:content, :is_error, :tool_name, :tool_call_id]
+    assert Map.take(projected_result, keys) == Map.take(hd(settled_results), keys)
+    refute inspect(request.context.messages) =~ "never-execute"
+    assert File.read!(marker) == "x"
+    assert String.starts_with?(File.read!(handle.path), original_prefix)
+    refute_received {:tool_execution_start, "truncated-command", _, _}
+
+    send(replacement, {:events, [completed()]})
+    assert_receive {:agent_end, _}, 5_000
+    refute_received {:turn_error, _}
+    assert {:ok, final} = Log.snapshot(handle.path)
+    assert Enum.filter(final.messages, &(&1.role == :tool_result)) == settled_results
+    assert Enum.count(Map.values(final.metrics.requests), &(&1.status == :failed)) == 1
+    assert File.read!(marker) == "x"
+
+    assert {:ok, entries} = Sigma.Session.Storage.JsonlFile.read(handle.path)
+
+    assert Enum.any?(entries, fn entry ->
+             content = get_in(entry, ["message", "content"])
+
+             is_list(content) and
+               Enum.any?(content, fn block ->
+                 is_map(block) and block["id"] == "truncated-command" and
+                   block["partial_json"] == partial_json
+               end)
+           end)
+  end
+
   test "root exposes the retry error while waiting and requesting until model progress", c do
     handle = start_root(c)
     assert {:accepted, %{turn_id: turn_id}} = Sigma.Agent.prompt(handle.agent, "Finish")
