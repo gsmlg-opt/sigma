@@ -50,6 +50,7 @@ defmodule Sigma.Session.EntryDecoder do
     "mime_type" => :mime_type,
     "detail" => :detail,
     "arguments" => :arguments,
+    "partial_json" => :partial_json,
     "input_kind" => :input_kind,
     "thought_signature" => :thought_signature
   }
@@ -118,7 +119,8 @@ defmodule Sigma.Session.EntryDecoder do
          {:ok, level} <- optional_enum(Map.get(data, "level"), @levels, :level),
          {:ok, status_type} <-
            optional_enum(Map.get(data, "status_type"), @status_types, :status_type),
-         {:ok, content} <- content(Map.get(data, "content")),
+         {:ok, content} <-
+           content(Map.get(data, "content"), failed_provider_message?(role, stop_reason, data)),
          :ok <- validate_content_for_role(role, content),
          :ok <- validate_role_fields(role, data),
          {:ok, message_fields} <- message_fields(data),
@@ -260,12 +262,17 @@ defmodule Sigma.Session.EntryDecoder do
   defp invalid_enum(:level), do: {:error, :invalid_level}
   defp invalid_enum(:status_type), do: {:error, :invalid_status_type}
 
-  defp content(nil), do: {:ok, nil}
-  defp content(value) when is_binary(value), do: {:ok, value}
+  defp failed_provider_message?(role, stop_reason, data) do
+    role == :assistant and stop_reason == :error and
+      match?(%{"provider_failure" => failure} when is_map(failure), data["metadata"])
+  end
 
-  defp content(items) when is_list(items) do
+  defp content(nil, _failed_provider?), do: {:ok, nil}
+  defp content(value, _failed_provider?) when is_binary(value), do: {:ok, value}
+
+  defp content(items, failed_provider?) when is_list(items) do
     Enum.reduce_while(items, {:ok, []}, fn item, {:ok, acc} ->
-      case content_item(item) do
+      case content_item(item, failed_provider?) do
         {:ok, decoded} -> {:cont, {:ok, [decoded | acc]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -276,15 +283,15 @@ defmodule Sigma.Session.EntryDecoder do
     end
   end
 
-  defp content(_value), do: {:error, :invalid_content}
+  defp content(_value, _failed_provider?), do: {:error, :invalid_content}
 
-  defp content_item(%{"type" => type} = item) when is_binary(type) do
+  defp content_item(%{"type" => type} = item, failed_provider?) when is_binary(type) do
     case Map.fetch(@content_types, type) do
       {:ok, content_type} ->
         decoded = item |> take_known(@content_fields) |> Map.put(:type, content_type)
 
         with {:ok, decoded} <- decode_input_kind(decoded),
-             :ok <- validate_content_item(content_type, decoded) do
+             :ok <- validate_content_item(content_type, decoded, failed_provider?) do
           {:ok, decoded}
         end
 
@@ -293,7 +300,7 @@ defmodule Sigma.Session.EntryDecoder do
     end
   end
 
-  defp content_item(_item), do: {:error, :invalid_content_item}
+  defp content_item(_item, _failed_provider?), do: {:error, :invalid_content_item}
 
   defp decode_input_kind(%{type: :tool_call, input_kind: kind} = item) do
     case kind do
@@ -304,6 +311,17 @@ defmodule Sigma.Session.EntryDecoder do
   end
 
   defp decode_input_kind(item), do: {:ok, item}
+
+  defp validate_content_item(:tool_call, item, true) when not is_map_key(item, :arguments) do
+    with :ok <- required_content_field(item, :tool_call, :id, &non_empty_binary?/1),
+         :ok <- required_content_field(item, :tool_call, :name, &non_empty_binary?/1),
+         :ok <- required_content_field(item, :tool_call, :partial_json, &is_binary/1),
+         :ok <- nullable_content_field(item, :tool_call, :thought_signature, &is_binary/1) do
+      :ok
+    end
+  end
+
+  defp validate_content_item(type, item, _failed_provider?), do: validate_content_item(type, item)
 
   defp validate_content_item(:text, item) do
     with :ok <- required_content_field(item, :text, :text, &is_binary/1),

@@ -267,6 +267,71 @@ defmodule Sigma.Agent.BackplaneProviderRetryTest do
     assert_receive {:agent_end, _}, 3_000
   end
 
+  test "a terminal partial tool call survives cold session loading without sampling", c do
+    handle = start_root(c)
+    assert {:accepted, _} = Sigma.Agent.prompt(handle.agent, "Finish")
+    assert_receive {:retry_provider, worker, _}
+    partial_json = ~s({"cmd": "printf unfinished |)
+
+    partial = %{
+      failed().message
+      | content: [
+          %{
+            type: :tool_call,
+            id: "unfinished",
+            name: "exec_command",
+            input_kind: :function,
+            partial_json: partial_json
+          }
+        ]
+    }
+
+    send(
+      worker,
+      {:events,
+       [
+         %{
+           failed()
+           | error: ProviderError.malformed("Anthropic tool arguments are not complete JSON"),
+             retry: nil,
+             message: partial
+         }
+       ]}
+    )
+
+    assert_receive {:agent_end, _}, 3_000
+    assert :ok = Sigma.Agent.retire_host(handle.agent)
+    supervisor = Runtime.lookup(c.tmp_dir, :supervisor)
+    assert :ok = DynamicSupervisor.terminate_child(Sigma.Agent.DynamicSupervisor, supervisor)
+    original = File.read!(handle.path)
+
+    assert {:ok, snapshot} = Log.snapshot(handle.path)
+    assert [%{role: :user}, %{stop_reason: :error}] = snapshot.messages
+
+    assert [%{role: :user, content: "Finish"}] =
+             Sigma.Agent.ContextBuilder.build(messages: snapshot.context_messages).messages
+
+    reopened = start_root(c)
+    assert Process.alive?(reopened.agent)
+    assert %{phase: :idle} = Sigma.Agent.status(reopened.agent)
+    assert {:ok, selected} = Writer.selected_journal(reopened.writer)
+
+    failed_entry =
+      Enum.find(selected.entries, &(get_in(&1, ["message", "stop_reason"]) == "error"))
+
+    assert {:ok, %{content: [decoded]}} = Sigma.Session.EntryDecoder.message(failed_entry)
+    assert decoded.partial_json == partial_json
+    refute Map.has_key?(decoded, :arguments)
+
+    assert {:ok, nil} =
+             Sigma.Agent.Backplane.PlanProjection.latest_entries(selected.entries,
+               leaf_id: selected.leaf_id
+             )
+
+    refute_receive {:retry_provider, _, _}, 100
+    assert File.read!(handle.path) == original
+  end
+
   test "retry false keeps a stream failure terminal", c do
     handle = start_root(c, options: [test_pid: self(), retry: false])
     assert {:accepted, _} = Sigma.Agent.prompt(handle.agent, "Finish the task")

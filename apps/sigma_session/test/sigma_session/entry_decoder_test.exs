@@ -32,6 +32,74 @@ defmodule Sigma.Session.EntryDecoderTest do
     end
   end
 
+  test "failed provider messages retain unfinished tool arguments without inventing input" do
+    for kind <- [:function, :custom] do
+      partial = %{
+        type: :tool_call,
+        id: "unfinished-call",
+        name: "exec_command",
+        input_kind: kind,
+        partial_json: ~S({"cmd": "printf \"ready\" |)
+      }
+
+      message =
+        Message.assistant("failed-message", %{
+          content: [%{type: :thinking, thinking: "Earlier output"}, partial],
+          stop_reason: :error,
+          metadata: %{provider_failure: %{error: "incomplete tool JSON"}},
+          timestamp: 123
+        })
+
+      assert {:ok, entry} = EntryEncoder.encode({:message_end, message}, nil, true)
+      wire_entry = entry |> Formata.JSON.encode!() |> Formata.JSON.decode!()
+      before = Formata.JSON.encode!(wire_entry)
+      assert {:ok, replayed} = EntryDecoder.message(wire_entry)
+      assert replayed.content == message.content
+      refute Map.has_key?(List.last(replayed.content), :arguments)
+      assert Formata.JSON.encode!(wire_entry) == before
+    end
+  end
+
+  test "unfinished tool blocks require failed provider provenance and valid partial fields" do
+    partial = %{
+      "type" => "tool_call",
+      "id" => "unfinished-call",
+      "name" => "exec_command",
+      "input_kind" => "function",
+      "partial_json" => ~s({"cmd": "unfinished |)
+    }
+
+    failure = %{
+      "role" => "assistant",
+      "stop_reason" => "error",
+      "metadata" => %{"provider_failure" => %{}},
+      "content" => [partial]
+    }
+
+    for overrides <- [
+          %{"stop_reason" => "tool_use"},
+          %{"stop_reason" => "aborted"},
+          %{"stop_reason" => nil},
+          %{"role" => "user"},
+          %{"metadata" => %{}},
+          %{"metadata" => %{"provider_failure" => nil}}
+        ] do
+      assert {:error, {:invalid_content_field, :tool_call, :arguments}} =
+               EntryDecoder.message(message_entry(Map.merge(failure, overrides)))
+    end
+
+    for {block, field} <- [
+          {Map.put(partial, "id", ""), :id},
+          {Map.put(partial, "name", ""), :name},
+          {Map.put(partial, "partial_json", nil), :partial_json},
+          {Map.delete(partial, "partial_json"), :partial_json},
+          {Map.put(partial, "arguments", nil), :arguments}
+        ] do
+      assert {:error, {:invalid_content_field, :tool_call, ^field}} =
+               EntryDecoder.message(message_entry(%{failure | "content" => [block]}))
+    end
+  end
+
   test "custom input tags reject mismatched kinds without creating atoms" do
     unknown = "custom_kind_#{System.unique_integer([:positive])}"
 

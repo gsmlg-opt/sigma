@@ -166,6 +166,24 @@ upstream package passes its 12 Anthropic projection cases. These controlled
 checks do not establish that the external model gateway will return valid JSON
 on its next request.
 
+### Cold reload of failed tool calls
+
+The original failed turn also exposed a separate host decoder defect: selected
+plan loading decoded every journal message as completed content, rejecting a
+failed tool block with `partial_json` and no `arguments`. The decoder now retains
+that exact fragment only for assistant error messages carrying `provider_failure`
+metadata. Tool identity and a binary partial fragment remain required. Other
+messages keep their existing complete-argument validation, and no input is
+invented. Plan projection can therefore read earlier confirmed publications
+through the failed entry. Provider context retains its existing pairing and
+failed-message projection; unfinished calls cannot become executable history.
+
+The 29 decoder cases and 18 selected retry/plan cases pass. Cold session coverage
+retires the original host through its public API, starts a fresh repository
+process, reads the saved failure and selected plan projection, and verifies no
+Provider sampling or journal byte changes. A disposable copy of the actual
+session also decodes the original 79-byte fragment without inventing arguments.
+
 ### Missing configured models
 
 A session whose historical provider/model pair is no longer configured still
