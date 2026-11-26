@@ -675,7 +675,6 @@ defmodule Sigma.Agent.Backplane.CodexResources do
 
   defp start_resources(workspace, plugins) do
     with {:ok, command_server} <- PlainCommand.start_link(owner_pid: self(), async_start: true) do
-      # TODO(upstream): gsmlg-opt/backplane#190 — adopt the published interactive command API.
       result =
         with {:ok, command} <-
                Command.new(%{

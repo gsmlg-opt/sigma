@@ -7,8 +7,6 @@ defmodule Sigma.Agent.Backplane.ExecutionPolicy do
   def provider_options(options) do
     [
       provider_idle_timeout: Keyword.get(options, :receive_timeout) || @idle_timeout,
-      # TODO: Adopt the published Runtime retry policy tracked in backplane#191.
-      # https://github.com/gsmlg-opt/backplane/issues/191
       provider_retry:
         if(Keyword.get(options, :retry) == false,
           do: false,

@@ -241,11 +241,20 @@ Release artifact: `/tmp/sigma-policy-release-62d_49ng/backplane_agent_runtime-1.
 Hex inner checksum: `6021DE71B106E3FD431A282BC30F623C8C0B2DD3E846DD67E31D4E571B8C6FFD`.
 Archive SHA-256: `2ff6011834cd1627b6ef1a62654d20116379767bf79c83848f63d477f4b376a7`.
 
-At release preparation, the existing local Hex OAuth session was expired and
-the supported browser/device login flow was initiated. Actual public registry
-publication, Sigma lockfile adoption and the matching service restart must be
-verified before marking this release active. The broad unified gateway Release
-workflow is not used for this Runtime-only publication.
+Runtime 1.10.102 was publicly published on 2026-11-26 at
+10:15:57 UTC. The public Hex tarball matches both checksums above; release
+metadata reports `has_docs: true`, and the public documentation returns HTTP 200.
+Readback evidence is retained in
+`/tmp/sigma-policy-release-62d_49ng/public-readback.json`.
+The broad unified gateway Release workflow was not used for this Runtime-only
+publication.
+
+Sigma selects the two-component requirement `~> 1.10`, with `mix.lock` pinning
+the verified public Runtime 1.10.102. Other locked package versions remain unchanged.
+Compilation against the public package and the matching dev-service restart are
+still pending at this adoption checkpoint. Publication alone does not establish
+that port 4580 runs the new policy. Historical session
+outcomes and missing lifecycle acknowledgements remain unchanged.
 
 ## Session failure during development, 2026-11-26
 
