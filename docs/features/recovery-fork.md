@@ -52,3 +52,24 @@ case also completes a new target prompt through a controlled Provider while
 preserving the source Runtime and lifetime records. Forced warnings-as-errors
 compilation passes for all 269 umbrella source files. Online model execution
 is outside these checks.
+
+## Live verification, 2026-11-26
+
+Port 4580 runs Sigma `f32319870145cbbe2a57dd9ad113feb612fa22c1` with public
+Runtime 1.10.102 from `/private/tmp/sigma-recovery-fork-brpacf51` (PID 89378).
+The previous process exited; all 16 sampled loaded modules match the new
+snapshot. Code reloading/watchers remain disabled and the original agent and
+session directories remain selected.
+
+Chrome completed the original recovery button and confirmation flow, creating
+`fork_72dc44e0f3ff729f`. Its LiveView is connected, runtime is idle/Ready,
+`canSubmit` is true, and no recovery banner or console errors/warnings remain.
+The new conversation and Provider context equal the source's selected history;
+target child admissions are empty. No online prompt was submitted.
+
+The original 900,284 journal bytes remain an exact prefix. Only the two successful
+fork operation facts were appended, bringing the source to 901,053 bytes. All
+26 existing sidecar files retain their hashes, and the source still has 104
+Provider request starts and 91 tool results. Evidence is in
+`/tmp/sigma-fork-live-integrity.json` and the snapshot's sibling
+`sigma-recovery-fork-brpacf51-run/verified.json`.

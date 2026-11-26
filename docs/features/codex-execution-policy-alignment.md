@@ -257,7 +257,7 @@ Runtime source files. Sigma's public-package consumer passed the same strict
 compilation for all 269 umbrella source files; `SIGMA_RELEASE=true mix assets.build`
 also passed.
 
-Port 4580 now serves the matching private snapshot
+The initial policy adoption served port 4580 from the matching private snapshot
 `/private/tmp/sigma-policy-1.10.102-20261126-180845` (PID 78041). The previous
 stable process (PID 56430) exited. Runtime readback confirms version 1.10.102,
 all ten sampled loaded modules matching the snapshot's BEAM files, disabled
@@ -275,6 +275,9 @@ No prompt, retry, Continue or fork was submitted. Historical outcomes and missin
 lifecycle acknowledgements remain unchanged. The 223 local functional checks
 above qualify behavior; online-model execution, Linux native/other-architecture
 execution and full E2E remain unverified.
+
+The subsequent [recovery fork fix](recovery-fork.md) records the current service
+snapshot and actual successful browser creation of an independent continuation.
 
 ## Session failure during development, 2026-11-26
 
