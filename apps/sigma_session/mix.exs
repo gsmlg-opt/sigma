@@ -26,7 +26,7 @@ defmodule Sigma.Session.MixProject do
       {:sigma_ai, in_umbrella: true},
       {:sigma_protocol, in_umbrella: true},
       {:sigma_agent, in_umbrella: true, only: :test},
-      {:backplane_skill_protocol, "~> 1.10.103"},
+      {:backplane_skill_protocol, "~> 1.10"},
       {:formata, "~> 0.4"},
       {:telemetry, "~> 1.0"}
     ]
