@@ -24,6 +24,7 @@ defmodule Sigma.Agent.Backplane.SkillResources do
   @max_prepared 8
   @max_reads 16
   @cache_ttl_ms 300_000
+  @empty_remote_skills %{skills: [], diagnostics: []}
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
@@ -51,7 +52,7 @@ defmodule Sigma.Agent.Backplane.SkillResources do
        workspace: Keyword.fetch!(opts, :workspace),
        binding: nil,
        plugin_skills: %{entries: %{}, diagnostics: []},
-       remote_skills: %{skills: [], diagnostics: []}
+       remote_skills: @empty_remote_skills
      })}
   end
 
@@ -61,13 +62,14 @@ defmodule Sigma.Agent.Backplane.SkillResources do
       {:ok, next} ->
         case PluginSkills.load(plugins) do
           {:ok, plugin_skills} ->
-            {:reply, :ok,
-             empty(%{
-               next
-               | binding: binding,
-                 plugin_skills: plugin_skills,
-                 remote_skills: apply(RemoteAdapter, :discovery, [])
-             })}
+            next =
+              Map.merge(next, %{
+                binding: binding,
+                plugin_skills: plugin_skills,
+                remote_skills: apply(RemoteAdapter, :discovery, [])
+              })
+
+            {:reply, :ok, empty(next)}
 
           {:error, _} = error ->
             {:reply, error, empty(%{next | binding: nil})}
@@ -117,7 +119,8 @@ defmodule Sigma.Agent.Backplane.SkillResources do
   defp dispatch("skills::list", %{"authority" => authority} = args, _operation, state)
        when authority in ["executor", "cloud"] do
     case Map.get(args, "cursor") do
-      nil -> list(state, authority)
+      # A run bound before remote discovery was added has no remote snapshot.
+      nil -> list(Map.put_new(state, :remote_skills, @empty_remote_skills), authority)
       cursor -> list_next(state, authority, cursor)
     end
   end

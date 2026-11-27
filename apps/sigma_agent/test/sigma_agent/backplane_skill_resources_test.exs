@@ -92,6 +92,33 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
     finish!(provider)
   end
 
+  test "an already bound skill owner can list local skills after a code reload", ctx do
+    skill!(repo_root(ctx.dir), "existing", "Existing local skill")
+    {binding, context, _profile, resources} = bound_resources!(ctx.dir)
+    cache = :sys.get_state(resources).skill_resources
+    :sys.replace_state(cache, &Map.delete(&1, :remote_skills))
+
+    assert {:ok, %{skills: [%{reference: "repo:existing"}], warnings: []}} =
+             execute(context, binding, "skills::list", %{"authority" => "executor"})
+
+    assert Process.alive?(cache)
+    detach!(binding)
+  end
+
+  test "an existing skill owner can bind the next run after a code reload", ctx do
+    {binding, _context, _profile, resources} = bound_resources!(ctx.dir)
+    cache = :sys.get_state(resources).skill_resources
+    detach!(binding)
+    :sys.replace_state(cache, &Map.delete(&1, :remote_skills))
+
+    assert {:ok, next} = CodexResources.bind(resources, authority("next"))
+
+    assert %{binding: ^next, remote_skills: %{skills: [], diagnostics: []}} =
+             :sys.get_state(cache)
+
+    assert {:ok, %{status: :confirmed}} = CodexResources.close(resources)
+  end
+
   test "real catalog preserves source identity and reads packaged instructions and references",
        ctx do
     repo = skill!(repo_root(ctx.dir), "shared", "Repository body")
