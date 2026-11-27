@@ -430,6 +430,7 @@ defmodule Sigma.Web.RepositoryLiveTest do
     end)
   end
 
+  @tag :session_operation_errors
   test "maps terminal operation rejections to safe actionable messages" do
     assert OperationError.message(Sigma.Agent.Terminals.Error.new(:cleanup_unconfirmed)) ==
              "Terminal cleanup could not be confirmed. The session was not changed; retry cleanup before trying again."
@@ -449,7 +450,59 @@ defmodule Sigma.Web.RepositoryLiveTest do
              "This session identifier is invalid. No files were changed."
 
     assert OperationError.message({:internal, %{secret: "do not expose"}}) ==
-             "This session operation could not be completed. No files were changed."
+             "This session operation could not be completed. Refresh the session state before trying again."
+  end
+
+  @tag :session_operation_errors
+  test "host retirement failures identify only unconfirmed lifecycle components" do
+    error =
+      Backplane.AgentRuntime.Error.new(:unknown_outcome, "root retirement failed",
+        cause: %{
+          native: {:ok, %{status: :confirmed}},
+          async_hooks: {:error, :unavailable},
+          session_end: {:error, :unavailable}
+        }
+      )
+
+    assert OperationError.message(error) ==
+             "Session cleanup could not be confirmed for async hooks, SessionEnd. Check the session state and retry the operation."
+
+    assert OperationError.message(:host_retirement_unconfirmed) ==
+             "Session cleanup could not be confirmed. Check the last tool results and retry after cleanup recovers."
+
+    assert OperationError.message(Backplane.AgentRuntime.Error.new(:unknown_outcome, "lost")) ==
+             "The session operation outcome is unconfirmed. Check the session state before retrying."
+
+    assert OperationError.message(Backplane.AgentRuntime.Error.new(:timeout, "timed out")) ==
+             "Sigma timed out waiting for session state or cleanup. Check the session state before retrying."
+
+    assert OperationError.message({:session_unavailable, :noproc}) ==
+             "The session runtime is unavailable. Reload the session before trying again."
+  end
+
+  @tag :session_operation_errors
+  test "operation acknowledgement failures retain successful file effects" do
+    saved = {:ok, %{session_id: "deleted", deleted: true}}
+    persistence = {:operation_result_persistence_failed, saved, :unavailable}
+
+    assert OperationError.message(persistence) ==
+             "The session was deleted, but Sigma could not save the operation result. Refresh the session list."
+
+    assert OperationError.message(
+             {:operation_result_persistence_failed, {:ok, %{renamed: true}}, :unavailable}
+           ) ==
+             "The session operation was applied, but Sigma could not save its result. Refresh the session state before retrying."
+
+    assert OperationError.message(
+             {:session_operation_release_failed, {:error, persistence}, :unavailable}
+           ) ==
+             "Sigma could not release the session operation state. The session was deleted, but Sigma could not save the operation result. Refresh the session list."
+
+    assert OperationError.message(
+             {:operation_result_persistence_failed, {:error, :host_retirement_unconfirmed},
+              :unavailable}
+           ) ==
+             "Sigma could not save the failed operation result. Session cleanup could not be confirmed. Check the last tool results and retry after cleanup recovers."
   end
 
   @tag :tmp_dir

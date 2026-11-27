@@ -27,15 +27,15 @@ defmodule Sigma.MixProject do
 
   defp aliases do
     [
-      # macOS LocalCommand requires Backplane's packaged session helper.
+      # LocalCommand pipe EOF requires the platform's packaged native helper.
       setup: [
         "deps.get",
-        "backplane.command.build",
+        fn _args -> build_command_helper() end,
         &build_code_mode_runner/1,
         "assets.setup",
         "assets.build"
       ],
-      "phx.server": [fn _args -> build_macos_process_helper() end, "phx.server"],
+      "phx.server": [fn _args -> build_command_helper() end, "phx.server"],
       "sigma.run": ["phx.server"],
       "sigma.rel-build": ["assets.build", &build_release/1],
       "sigma.rel-run": ["sigma.rel-build", &run_release/1],
@@ -55,7 +55,6 @@ defmodule Sigma.MixProject do
     ]
   end
 
-  # TODO(upstream): gsmlg-opt/backplane#187 Publish the QuickBEAM runner task before releasing Sigma.
   defp build_code_mode_runner([]) do
     output = Path.join(Mix.Project.build_path(), "backplane_code_mode_runner")
     File.rm_rf!(output)
@@ -64,15 +63,20 @@ defmodule Sigma.MixProject do
   end
 
   defp prepare_process_helper(release) do
-    build_macos_process_helper()
+    build_command_helper()
     release
   end
 
-  defp build_macos_process_helper do
-    if :os.type() == {:unix, :darwin} do
-      Mix.Task.reenable("backplane.command.build")
-      Mix.Task.run("backplane.command.build")
-    end
+  defp build_command_helper do
+    task =
+      case :os.type() do
+        {:unix, :darwin} -> "backplane.command.build"
+        {:unix, :linux} -> "backplane.pty.build"
+        platform -> Mix.raise("Unsupported command platform: #{inspect(platform)}")
+      end
+
+    Mix.Task.reenable(task)
+    Mix.Task.run(task)
   end
 
   defp assemble_code_mode_runner(release) do
@@ -97,7 +101,7 @@ defmodule Sigma.MixProject do
     case Mix.shell().cmd({helper_builder, ["release"]}, use_stdio: true) do
       0 ->
         Mix.Task.run("backplane.mcp.stdio.build")
-        Mix.Task.run("backplane.command.build")
+        build_command_helper()
 
         case Mix.shell().cmd({mix, ["release", "sigma", "--overwrite", "--force"]},
                env: env,

@@ -61,6 +61,90 @@ defmodule Sigma.Agent.BackplaneCommandHandleFunctionalTest do
     %{agent: handle.agent, path: path, dir: dir, provider: provider!()}
   end
 
+  test "EOF closes a real command input and retains its output and cleanup", c do
+    provider =
+      call!(c.provider, "exec_command", %{
+        "cmd" => "printf READY; cat; printf END",
+        "yield_time_ms" => 20
+      })
+
+    assert %{"status" => "running", "session_id" => handle} =
+             provider |> result!("exec_command") |> value!()
+
+    provider =
+      call!(provider, "write_stdin", %{
+        "session_id" => handle,
+        "chars" => "payload",
+        "yield_time_ms" => 20
+      })
+
+    assert %{"status" => "running"} = provider |> result!("write_stdin") |> value!()
+
+    provider =
+      call!(provider, "write_stdin", %{
+        "session_id" => handle,
+        "chars" => "",
+        "eof" => true,
+        "yield_time_ms" => 5_000
+      })
+
+    completed = result!(provider, "write_stdin")
+    refute completed.is_error
+
+    assert %{"status" => "completed", "exit_code" => 0, "cleanup_status" => "confirmed"} =
+             value!(completed)
+
+    assert value!(completed)["output"] =~ "END"
+    provider = call!(provider, "exec_command", %{"cmd" => "printf after-eof"})
+    next = result!(provider, "exec_command")
+    refute next.is_error
+    assert value!(next)["output"] == "after-eof"
+    finish!(provider)
+    assert_receive {:agent_end, _}, 10_000
+    assert Sigma.Agent.status(c.agent).phase == :completed
+  end
+
+  test "unsupported PTY EOF rejects nonempty input before writing and the same turn continues",
+       c do
+    provider =
+      call!(c.provider, "exec_command", %{
+        "cmd" => "stty -echo; read line; printf '%s' \"$line\"",
+        "tty" => true,
+        "yield_time_ms" => 20
+      })
+
+    assert %{"status" => "running", "session_id" => handle} =
+             provider |> result!("exec_command") |> value!()
+
+    provider =
+      call!(provider, "write_stdin", %{
+        "session_id" => handle,
+        "chars" => "must-not-write\n",
+        "eof" => true
+      })
+
+    error = result!(provider, "write_stdin")
+    assert error.is_error
+    assert value!(error)["error"]["class"] == "unsupported_capability"
+
+    provider =
+      call!(provider, "write_stdin", %{
+        "session_id" => handle,
+        "chars" => "accepted\n",
+        "yield_time_ms" => 5_000
+      })
+
+    completed = result!(provider, "write_stdin")
+    refute completed.is_error
+
+    assert %{"status" => "completed", "exit_code" => 0, "output" => "accepted"} =
+             value!(completed)
+
+    finish!(provider)
+    assert_receive {:agent_end, _}, 10_000
+    assert Sigma.Agent.status(c.agent).phase == :completed
+  end
+
   test "a completed command handle returns a model error and the same turn can run another command",
        c do
     {provider, handle} = completed_handle!(c.provider)

@@ -18,6 +18,7 @@ defmodule Sigma.Agent.Subagents do
   }
 
   alias Sigma.Session.{Subagents, Writer}
+  alias Sigma.Agent.Incidents
 
   @collaboration ~w(spawn_agent send_message followup_task interrupt_agent list_agents wait_agent)
   @configuration ~w(model provider provider_options system_prompt session_context context_limit cwd tools mcp_servers hook_specs dispatcher_opts policy task_supervisor native_tools native_memory_root native_plugins)a
@@ -1754,6 +1755,13 @@ defmodule Sigma.Agent.Subagents do
           config: root_config,
           identity: identity,
           root_header_id: root_header_id,
+          incident_context:
+            Incidents.context(state.transcript_path, root_header_id, %{
+              kind: :child,
+              id: identity.child_session_id,
+              session_id: identity.child_session_id,
+              agent_path: identity.agent_path
+            }),
           lifetime_recovery: state.lifetime_recovery,
           messages: messages,
           transcript_path: Path.join(directory, "session.jsonl"),

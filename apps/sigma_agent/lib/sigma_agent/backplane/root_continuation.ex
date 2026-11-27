@@ -1,7 +1,8 @@
 defmodule Sigma.Agent.Backplane.RootContinuation do
-  @moduledoc "Explicit root continuation through the public durable Runtime decision."
+  @moduledoc "Root continuation through the public durable Runtime decision."
 
   alias Backplane.AgentRuntime.Error
+  alias Sigma.Agent.Incidents
 
   alias Sigma.Agent.Backplane.{
     GoalCoordinator,
@@ -13,16 +14,20 @@ defmodule Sigma.Agent.Backplane.RootContinuation do
     Store
   }
 
-  def prepare(state, source_run_id) do
+  def prepare(state, source_run_id, on_started \\ fn _ -> :ok end) do
     with {:ok, scope} <- GoalCoordinator.identity(state.goal_integration.coordinator),
          {:ok, identities} <- GoalRuns.list(scope.root, scope.thread_id) do
       identity = Enum.find(identities, &(&1.run_id == source_run_id))
 
       case identity && Store.load(state.backplane_store, source_run_id) do
         {:ok, %{run: %{state: :unknown_outcome} = run}} ->
-          if RunRecovery.missing_tool_result?(run, identity),
-            do: continue(state, identity),
-            else: {:ok, nil}
+          if RunRecovery.missing_tool_result?(run, identity) do
+            record_started(state, identity, run)
+            on_started.(%{source_run_id: source_run_id})
+            continue(state, identity)
+          else
+            {:ok, nil}
+          end
 
         {:error, _} = error ->
           error
@@ -31,6 +36,27 @@ defmodule Sigma.Agent.Backplane.RootContinuation do
           {:ok, nil}
       end
     end
+  end
+
+  defp record_started(state, identity, run) do
+    references =
+      for {_, %{type: :tool, status: status, operation: operation}} <- run.execution_intents,
+          status in [:started, :uncertain],
+          operation.run_id == identity.run_id,
+          operation.incarnation == identity.incarnation,
+          not Map.has_key?(run.tool_results, operation.invocation_id) do
+        Map.take(operation, [:run_id, :invocation_id, :tool_call_id])
+      end
+
+    Incidents.record(state.incident_context, %{
+      kind: :recovery_started,
+      stage: :root_continuation,
+      recovery_state: :preparing,
+      run_id: identity.run_id,
+      source_run_id: identity.run_id,
+      incarnation: identity.incarnation,
+      evidence_refs: references
+    })
   end
 
   defp continue(state, identity) do

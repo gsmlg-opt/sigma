@@ -1,5 +1,163 @@
 # Architecture and acceptance history
 
+## Malformed tool arguments and session controls (2026-11-27)
+
+The live `fork_ad237257be91cb4e` transcript contained a function-style
+`write_stdin` call with `chars: {}` and numeric session ID 4902. SessionLive
+called `String.trim/1` on that map while projecting the tool card, crashing both
+the live update and asynchronous history reload. The browser repeatedly
+reconnected and displayed Loading instead of the persisted failed turn.
+
+Tool summaries now trim only binary input and display only scalar summary
+fields. Structured malformed values stay intact in the raw tool input. A
+Writer-backed LiveView regression reproduced the original crash before the fix
+and exercises live updates and history reload. See
+[tool projection and deletion](session-tool-projection.md) for the complete
+behavior and validation boundaries.
+
+The fork's final Runtime revision 249 independently records `unknown_outcome`
+for a later `write_stdin` with empty characters and `eof: true`. Its execution
+intent started, but its result is absent. Provider work finished; native and
+manager retirement records are confirmed, while async-hook and SessionEnd
+acknowledgements are absent. The old service used Runtime 1.10.104. Two
+RepositoryLive delete confirmations are logged; the user's screenshot confirms
+the existing active-turn rejection. Delete now reserves admission, requests the
+existing Stop flow and waits for owned tasks and actual retirement before
+removing files. Queued resources are released without starting their work.
+The reservation covers recovery decisions and owner loss; failed retirement
+retains its evidence and supports an explicit retry. Five Agent and one LiveView
+cases pass on the public dependency graph (seed 527311), including the lost
+acknowledgement case. No real session was deleted or continued during diagnosis.
+
+## Dependency upgrade and Formata image metadata (2026-11-27)
+
+`mix hex.outdated` and `mix deps.update --all` updated the five Backplane packages
+to 1.10.106, the DuskMoon Bundler native family to 10.1.15, the HTTP family to
+stable 1.0.0 and lazy_html to 0.1.16. Direct requirements use two version
+components. Image dimension estimation now calls `Formata.ImageInfo.info/2`;
+the redundant ex_image_info dependency and unused lock entries are removed.
+
+The Phoenix Hex package and all direct DuskMoon npm packages share release
+2.1.0. Hex offers duskmoon_phoenix 2.2.0, but the corresponding npm
+`duskmoon_phoenix@2.2.0` is not published. The lock retains the complete common
+release until both package registries offer it. This is the only remaining
+update reported by the final `mix hex.outdated` check.
+
+The npm layout places Core dependencies beneath individual Elements packages.
+Sigma's OXC task now retains importer-relative `node_modules` lookup before the
+umbrella fallback. Its unchanged self-containment check and all three selected
+asset cases pass; Bun's AST reports no imports in the intermediate or final app
+bundle. No dependency source was patched.
+
+Runtime 1.10.106 is now available from Hex. Its published archive has SHA256
+`08627899d080be2dc1caffe2828cc4488d33823a6e791948ac701f1d2c1d5a88`.
+All 152 source files match the qualified candidate below; archive ordering,
+compression and Hex build metadata account for the archive checksum difference.
+Current validation uses the actual locked public packages without path
+overrides. Earlier candidate acceptance below retains its historical scope.
+
+Public-package validation passed 64 selected Agent cases (seed 527312), two
+additional active-delete Runtime cases (seed 527311), 45 HTTP/stream/recovery
+cases (seed 527307), 13 tool-projection cases (seed 527310), and 46 JavaScript
+hook cases. Native builds and the session, pipe and exit-acknowledgement probes
+passed. The selections do not claim the full suite, Linux execution or remote CI.
+The earlier five Linux `/proc` failures below retain their historical scope.
+Evidence: `/Volumes/Data/tmp/sigma-deps-upgrade-zwchi4ni/`.
+
+## Automatic uncertain-operation recovery and incident collection (2026-11-27)
+
+Matched live root terminal callbacks now reserve automatic continuation through
+the existing public cessation and durable source-to-target decision. The original
+unknown result remains absent. Queued user followups retain their content and
+resources; otherwise the fresh run instructs the model to report uncertainty,
+inspect current state and continue. Stop wins before replacement host adoption.
+An ineligible synthetic probe restores the original failed identity; preparation
+failure never recursively schedules another attempt. Cold reads do no work.
+See [Automatic recovery](automatic-recovery.md) for the complete behavior.
+
+Live root/child tool, Provider and selected Runtime failures and root recovery
+transitions produce bounded immutable JSON records under the repository session
+directory's `.incidents/<root-header-id>/`. Actual session file lifecycle checks
+verify retention through rename, cross-directory adoption and deletion, with an
+independent header for forks. The collector is auxiliary: it supplies no cleanup
+proof, invented result, uploader or retention daemon. The
+[incident format](operation-incidents.md) defines correlation, bounds, static
+summaries, publication durability and future collector discovery.
+
+The serialized Runtime 1.10.106 extracted-package consumer passed 24 Agent cases
+(seed 527211) and four selected LiveView cases (seed 527210), including real reads,
+commands, gated SessionEnd, Stop before admission, stale terminals, queued
+resources, lost preparation acknowledgement, cold explicit continuation and
+original Store preservation. Strict compilation and asset builds passed. The broader lifecycle
+and command selection passed 51/56 cases (seed 527207). The five failures reached
+existing Linux `/proc/<pid>` assertions on this macOS host; they are not claimed
+as passes. Intentional missing-acknowledgement and older teardown diagnostics
+remain in the evidence logs.
+
+This was candidate acceptance before Runtime 1.10.106 publication. Sigma's
+lock and running dev service retained 1.10.104 at that boundary. Published
+dependency adoption is described above; committed source validation and
+orderly service replacement are separate acceptance steps.
+Evidence: `/Volumes/Data/tmp/sigma-eof-qualification-issiln0c/auto-*.log`.
+
+No real Provider prompt or Continue was submitted by this validation. A new
+readback found the real journal and four lifecycle/index files had advanced at
+13:07–13:16 CST, before these tests began at 13:37. Their actor is not inferred.
+All 326 other files in the original 331-file manifest, including the original
+unknown Runtime snapshot and journal blocks, remain byte-identical. The current
+JSONL still starts with the entire saved original journal. The earlier 331/331
+manifest check describes its earlier observation, not this later state.
+
+## Command stdin EOF and historical continuation (2026-11-27)
+
+The failed `session_PcoLfe8yF82ZZONs` ended at a non-PTY `write_stdin` request
+with empty characters and `eof: true`. Its tool result is absent; all Provider
+requests completed. The generic lost-worker outcome does not establish a worker
+crash. PlainCommand lacked the public input-close callback, and ordinary macOS
+Port pipes could not implement half-close. Subsequent unconfirmed retirement
+obscured that first failure. The earlier journal timeout is a separate incident.
+
+PlainCommand delegates non-PTY input close to public LocalCommand with
+`pipe_stdin: true`. The upstream macOS session helper owns the actual child stdin
+pipe, flushes accepted input before acknowledging EOF, and independently drains
+stdout/stderr through exit. Exact guardian evidence, guardian reaping and a
+successful broker Port exit remain required for cleanup confirmation. macOS
+cleanup covers the original process group; it does not claim Linux session-wide
+process discovery. A dropped EOF acknowledgement retains uncertainty.
+
+PTY jobs expose their actual transport. Unsupported EOF is rejected through the
+SDK's existing pre-dispatch contract before any accompanying characters are
+written. PTY input remains usable afterward. No control character substitutes
+for pipe EOF. Setup, development startup and release assembly build Backplane's
+macOS command helper or Linux pipe/PTY helper for the selected platform.
+
+A lost historical command result remains `unknown_outcome`. Continue requires
+the original executor observation and actual native, async-hook and SessionEnd
+acknowledgements, then reserves a fresh run. It never reconstructs the old result
+or replays the old command. Root continuation does not require a full recovery
+journal export; child archive export keeps its separate contract and limits.
+
+Runtime 1.10.106 candidate acceptance used an extracted Hex-format archive with
+SHA256 `6ba64184d49bf060eab5d86f8ae30b2cb36486e0accd7d4be7520766db296166`.
+The consumer passed 30 EOF/adapter/command/continuation cases (seed 517106),
+then eight selected QuickBEAM and managed-child cases (seed 517107). The native
+macOS suite passed all seven cases, including slow-reader backpressure and
+descendant cleanup. A separately compiled dropped-EOF-ACK fixture preserved
+`unknown_outcome` and subsequently confirmed actual cancellation. Native build
+and probes also passed from a package path containing a space. Strict compilation,
+documentation generation, scoped formatting and diff checks passed.
+
+Earlier consumer attempts retained two unconfirmed command-cleanup results;
+their cause was not established. Ten independent full-startup repetitions, six
+instrumented Mix repetitions and the final serialized matrix passed without a
+cancellation-source change or weaker receipt checks. Concurrent compilation was
+present in the earlier attempts, but this does not establish causation. Existing
+unconfirmed teardown diagnostics remain in the captured logs. Linux execution,
+other architectures and remote CI were not run for this change. Evidence is under
+`/Volumes/Data/tmp/sigma-eof-qualification-issiln0c/` and
+`/Volumes/Data/tmp/backplane-active-cancel/`. No real prompt or Continue was
+submitted to the affected session during qualification.
+
 ## Private Runtime Store journal format (2026-11-27)
 
 Sigma's file-backed Store keeps the public Backplane snapshot and recovery

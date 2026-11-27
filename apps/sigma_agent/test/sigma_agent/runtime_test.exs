@@ -36,6 +36,20 @@ defmodule Sigma.Agent.RuntimeTest do
     end
   end
 
+  defmodule DeleteBlockingProvider do
+    @behaviour Sigma.Ai.Provider
+
+    @impl true
+    def stream(params) do
+      owner = Keyword.fetch!(params.options, :test_pid)
+      send(owner, {:delete_provider_waiting, self()})
+
+      receive do
+        :finish -> []
+      end
+    end
+  end
+
   defmodule ReasoningProvider do
     @behaviour Sigma.Ai.Provider
 
@@ -208,6 +222,151 @@ defmodule Sigma.Agent.RuntimeTest do
     assert {:ok, cancelled} = Sigma.Agent.Runtime.session_snapshot(repo, "source", source_path)
     assert cancelled.metrics.requests[request_id].status == :cancelled
     assert cancelled.metrics.turns[turn_id].status == :cancelled
+  end
+
+  @tag :session_delete_lifecycle
+  test "delete stops the active provider and releases queued work before removing files",
+       context do
+    repo = tmp_repo!(context, "delete-active")
+    sessions_dir = Path.join(repo, "sessions")
+    source_path = Path.join(sessions_dir, "source.jsonl")
+    owner = self()
+    {hook, marker, gate} = delete_session_end_gate(repo)
+
+    assert {:ok, handle} =
+             Sigma.Agent.Runtime.get_session(
+               repo,
+               "source",
+               session_opts(
+                 cwd: repo,
+                 transcript_path: source_path,
+                 native_tools: true,
+                 hook_specs: [hook],
+                 provider: DeleteBlockingProvider,
+                 model: %{id: "test", api: "openai-responses", provider: "test"},
+                 options: [test_pid: owner]
+               )
+             )
+
+    :ok = Sigma.Agent.subscribe(handle.agent)
+    assert {:accepted, _} = Sigma.Agent.prompt(handle.agent, "active work")
+    assert_receive {:delete_provider_waiting, provider}, 5_000
+    provider_monitor = Process.monitor(provider)
+
+    resource = %{
+      root: Path.join(repo, "queued"),
+      release: fn -> send(owner, :queued_released) end
+    }
+
+    assert {:queued_as_follow_up, _} =
+             Sigma.Agent.prompt(handle.agent, "must not start", prepared_resources: [resource])
+
+    deletion =
+      Task.async(fn -> Sigma.Agent.Runtime.delete_session(repo, "source", sessions_dir) end)
+
+    try do
+      assert_receive {:DOWN, ^provider_monitor, :process, ^provider, _}, 5_000
+      assert await_delete_state(fn -> File.exists?(marker) end)
+      assert_receive :queued_released, 1_000
+      assert File.exists?(source_path)
+      assert Task.yield(deletion, 0) == nil
+      assert {:rejected, :session_busy} = Sigma.Agent.prompt(handle.agent, "must not race")
+      assert %{follow_up_queue_count: 0} = Sigma.Agent.status(handle.agent)
+    after
+      File.touch!(gate)
+    end
+
+    assert_receive {:turn_cancelled}, 5_000
+    assert {:ok, %{deleted: true, session_id: "source"}} = Task.await(deletion, 10_000)
+    refute File.exists?(source_path)
+    refute File.exists?(source_path <> ".runtime")
+    refute File.exists?(source_path <> ".subagents")
+    refute_receive :queued_released, 0
+    refute_receive {:delete_provider_waiting, _}, 0
+  end
+
+  @tag :session_delete_lifecycle
+  test "delete retries a retained retirement failure without removing files", context do
+    repo = tmp_repo!(context, "delete-retirement-failure")
+    sessions_dir = Path.join(repo, "sessions")
+    path = Path.join(sessions_dir, "source.jsonl")
+    {hook, marker, gate} = delete_session_end_gate(repo)
+
+    assert {:ok, handle} =
+             Sigma.Agent.Runtime.get_session(
+               repo,
+               "source",
+               session_opts(
+                 cwd: repo,
+                 transcript_path: path,
+                 native_tools: true,
+                 hook_specs: [hook],
+                 model: %{id: "test", api: "openai-responses", provider: "test"}
+               )
+             )
+
+    assert {:ok, _} = Sigma.Session.Writer.flush(handle.writer)
+    original = File.read!(path)
+
+    deletion =
+      Task.async(fn -> Sigma.Agent.Runtime.delete_session(repo, "source", sessions_dir) end)
+
+    try do
+      assert await_delete_state(fn -> File.exists?(marker) end)
+      retirement = :sys.get_state(handle.agent).host_retirement_task
+      assert %Task{} = retirement
+      Process.exit(retirement.pid, :kill)
+    after
+      File.touch!(gate)
+    end
+
+    assert {:error, first} = Task.await(deletion, 10_000)
+    refute first == :session_busy
+    retained = :sys.get_state(handle.agent)
+    assert retained.turn_state.phase == :session_operation
+    assert retained.delete_operation == nil
+    facts = retained.host_retirement_facts
+    assert map_size(facts) > 0
+
+    assert {:error, retry} = Sigma.Agent.Runtime.delete_session(repo, "source", sessions_dir)
+    refute retry == :session_busy
+    assert :sys.get_state(handle.agent).host_retirement_facts == facts
+    assert File.read!(path) == original
+    assert File.exists?(retained.backplane_store_path)
+  end
+
+  defp delete_session_end_gate(repo) do
+    marker = Path.join(repo, "session-end.log")
+    gate = Path.join(repo, "session-end.release")
+    quote_shell = fn path -> "'" <> String.replace(path, "'", "'\\''") <> "'" end
+    on_exit(fn -> File.touch(gate) end)
+
+    hook = %Sigma.Coding.Hooks.Spec{
+      event: :session_end,
+      matcher: :any,
+      handler: %Sigma.Coding.Hooks.Spec.Command{
+        cmd:
+          "printf 'once\\n' >> #{quote_shell.(marker)}; while ! test -f #{quote_shell.(gate)}; do sleep 0.01; done",
+        timeout_ms: 10_000
+      },
+      origin: {:user, repo},
+      trusted?: true,
+      dialect: :codex
+    }
+
+    {hook, marker, gate}
+  end
+
+  defp await_delete_state(check, attempts \\ 500)
+  defp await_delete_state(check, 0), do: check.()
+
+  defp await_delete_state(check, attempts) do
+    if check.() do
+      true
+    else
+      Process.sleep(10)
+      await_delete_state(check, attempts - 1)
+    end
   end
 
   test "starts repository supervisors lazily and reuses them per repo", context do

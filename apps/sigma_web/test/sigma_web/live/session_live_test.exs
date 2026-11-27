@@ -115,7 +115,8 @@ defmodule Sigma.Web.SessionLiveTest do
             nil
           )
 
-        [{:provider_error, error}]
+        # This fixture exercises terminal failure and an explicit fresh Continue.
+        [{:provider_error, %{error | retryable: false, retry_class: nil}}]
       else
         Sigma.Web.MockProvider.stream(params)
       end
@@ -873,6 +874,99 @@ defmodule Sigma.Web.SessionLiveTest do
     assert chat_config(render(view)) == initial
   end
 
+  @tag :automatic_recovery_ui
+  test "automatic recovery replaces failed status until admission or another terminal event", %{
+    conn: conn
+  } do
+    session_id = unique_session_id("automatic-recovery-status")
+    {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+    send(view.pid, {:turn_failed, "failed-source"})
+    assert %{active: false, phase: :failed} = chat_snapshot(view).runtime
+
+    for terminal <- [{:turn_cancelled}, {:turn_error, "Recovery closure is unconfirmed"}] do
+      send(view.pid, {:recovery_started, %{source_run_id: "failed-source"}})
+
+      assert %{active: true, phase: :session_operation, label: "Preparing recovery…"} =
+               chat_snapshot(view).runtime
+
+      send(view.pid, terminal)
+      assert %{active: false} = chat_snapshot(view).runtime
+    end
+
+    send(view.pid, {:recovery_started, %{source_run_id: "failed-source"}})
+    send(view.pid, {:agent_start, @workdir})
+
+    assert %{active: true, phase: :streaming_provider} = chat_snapshot(view).runtime
+    assert chat_snapshot(view).messages == []
+  end
+
+  @tag :automatic_recovery_ui
+  test "an eligibility probe status cannot revive a failed turn before recovery starts" do
+    source = "failed-recovery-source"
+
+    socket =
+      recovery_socket(
+        agent: nil,
+        runtime_status: :failed,
+        turn_id: source,
+        turn_in_flight: false
+      )
+
+    status = %{
+      phase: :session_operation,
+      turn_id: source,
+      context_policy: %{context_limit: 256_000}
+    }
+
+    assert {:noreply, observed} =
+             Sigma.Web.SessionLive.handle_async(:agent_status, {:ok, status}, socket)
+
+    assert observed.assigns.runtime_status == :failed
+    refute observed.assigns.turn_in_flight
+
+    assert {:noreply, recovering} =
+             Sigma.Web.SessionLive.handle_info(
+               {:recovery_started, %{source_run_id: source}},
+               observed
+             )
+
+    assert recovering.assigns.runtime_status == :session_operation
+    assert recovering.assigns.turn_in_flight
+  end
+
+  @tag :automatic_recovery_ui
+  test "React Stop remains usable while recovery preparation is displayed", %{conn: conn} do
+    write_selectable_provider_configs()
+    session_id = unique_session_id("automatic-recovery-stop")
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+    Application.put_env(:sigma_web, :blocking_provider_pid, self())
+    on_exit(fn -> Application.delete_env(:sigma_web, :blocking_provider_pid) end)
+
+    with_mock_provider(BlockingTurnProvider, fn ->
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+      render_hook(view, "chat.send", %{
+        "id" => "messages",
+        "conversation_id" => session_id,
+        "text" => "Controlled turn"
+      })
+
+      assert_reply(view, %{status: "ok", admission: "accepted"})
+      assert_receive {:web_provider_waiting, _provider, _}, 3_000
+      send(view.pid, {:recovery_started, %{source_run_id: "failed-source"}})
+      assert %{active: true, phase: :session_operation} = chat_snapshot(view).runtime
+
+      render_hook(view, "chat.stop", %{"id" => "messages", "conversation_id" => session_id})
+      assert_reply(view, %{status: "ok"})
+      assert_receive {:turn_cancelled}, 5_000
+
+      assert_eventually(fn ->
+        match?(%{active: false, phase: :cancelled}, chat_snapshot(view).runtime)
+      end)
+    end)
+  end
+
   test "React chat rejects another conversation before admitting a prompt", %{conn: conn} do
     session_id = unique_session_id("react-scope")
     {:ok, view, _html} = live_loaded(conn, session_path(session_id))
@@ -1143,6 +1237,36 @@ defmodule Sigma.Web.SessionLiveTest do
                flash: %{"error" => "Invalid session id."}
              }}} =
              live(conn, session_path("a/b"))
+  end
+
+  @tag :session_delete_lifecycle
+  test "delete cancels an active turn and removes the session after retirement", %{conn: conn} do
+    write_selectable_provider_configs()
+    session_id = unique_session_id("delete-after-stop")
+    storage_path = session_storage_path(session_id)
+    Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+    Application.put_env(:sigma_web, :blocking_provider_pid, self())
+    on_exit(fn -> Application.delete_env(:sigma_web, :blocking_provider_pid) end)
+
+    with_mock_provider(BlockingTurnProvider, fn ->
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+      render_hook(view, "chat.send", %{
+        "id" => "messages",
+        "conversation_id" => session_id,
+        "text" => "Controlled deletion lifecycle"
+      })
+
+      assert_reply(view, %{status: "ok", admission: "accepted"})
+      assert_receive {:web_provider_waiting, _provider, _}, 3_000
+      assert chat_snapshot(view).runtime.active
+
+      render_click(view, "session_menu_action", %{"value" => "delete", "session" => session_id})
+      assert_receive {:turn_cancelled}, 5_000
+      assert_redirect(view, "/repository/#{@encoded_workdir}")
+      refute File.exists?(storage_path)
+      assert Sigma.Agent.Runtime.lookup(@workdir, session_id, :agent) == nil
+    end)
   end
 
   test "delete menu action rejects traversal session ids", %{conn: conn} do
@@ -2793,6 +2917,7 @@ defmodule Sigma.Web.SessionLiveTest do
     assert_receive {:message_start, %{role: :user, content: "try again"}}, 2000
   end
 
+  @tag :automatic_recovery_ui
   test "continues the same session after an actual provider failure without retrying it", %{
     conn: conn
   } do
@@ -2815,6 +2940,19 @@ defmodule Sigma.Web.SessionLiveTest do
             not chat_snapshot(view).runtime.active
         end)
 
+        assert {:ok, {agent, _policy}} =
+                 Sigma.Web.SessionManager.get_agent(session_id, repo_path: @workdir)
+
+        assert_eventually(fn ->
+          status = Sigma.Agent.status(agent)
+
+          status.phase == :failed and status.turn_id == failed.turn_id and
+            is_nil(:sys.get_state(agent).pending_host_prompt)
+        end)
+
+        render_async(view, 3_000)
+        assert %{active: false, phase: :failed} = chat_snapshot(view).runtime
+        refute_receive {:recovery_started, _}, 0
         refute_receive {:provider_params, _}, 100
         journal = File.read!(session_storage_path(session_id))
         chat_action(view, assistant.id, "continue_session")

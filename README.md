@@ -49,9 +49,8 @@ mix phx.server
 
 `mix sigma.rel-run` builds the frontend assets, overwrites the `sigma` release for the current Mix environment, and runs it in the foreground.
 
-The QuickBEAM migration build hooks require the corresponding Runtime release.
-Local verification uses an unpublished Hex-format candidate; tracked dependency
-adoption remains pending publication.
+The QuickBEAM build hooks and macOS pipe broker use the published Runtime
+1.10.106 dependency selected by `mix.lock`.
 
 Code Mode uses Backplane's standalone QuickBEAM runner. Setup builds it under
 `_build/<env>/backplane_code_mode_runner`; every `mix release sigma` builds a

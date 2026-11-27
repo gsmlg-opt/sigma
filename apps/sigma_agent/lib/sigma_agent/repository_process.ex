@@ -245,9 +245,11 @@ defmodule Sigma.Agent.RepositoryProcess do
   defp acquire_operation(nil, _operation), do: :ok
 
   defp acquire_operation(%{agent: agent}, operation) when is_pid(agent) do
-    if elem(operation, 0) == :fork,
-      do: Sigma.Agent.begin_session_operation(agent, :fork),
-      else: Sigma.Agent.begin_session_operation(agent)
+    case elem(operation, 0) do
+      :fork -> Sigma.Agent.begin_session_operation(agent, :fork)
+      :delete -> Sigma.Agent.begin_session_operation(agent, :delete)
+      _ -> Sigma.Agent.begin_session_operation(agent)
+    end
   catch
     :exit, reason -> {:error, {:session_unavailable, reason}}
   end

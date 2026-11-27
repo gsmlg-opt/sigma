@@ -17,6 +17,7 @@ defmodule Sigma.Agent do
   alias Sigma.Coding.ToolError
   alias Sigma.Coding.Hooks.Outcome
   alias Sigma.Agent.Hooks
+  alias Sigma.Agent.Incidents
 
   alias Sigma.Agent.Backplane.{
     AsyncDelivery,
@@ -78,6 +79,8 @@ defmodule Sigma.Agent do
     :host_retirement_stage,
     :host_recovery_task,
     :pending_host_prompt,
+    :delete_operation,
+    :incident_context,
     :goal_integration,
     :goal_admission,
     :goal_execution_admission,
@@ -248,6 +251,9 @@ defmodule Sigma.Agent do
 
   def begin_session_operation(pid, :fork),
     do: GenServer.call(pid, {:begin_session_operation, :fork})
+
+  def begin_session_operation(pid, :delete),
+    do: GenServer.call(pid, {:begin_session_operation, :delete}, :infinity)
 
   def end_session_operation(pid), do: GenServer.call(pid, :end_session_operation, :infinity)
   def compact(pid, opts \\ []), do: GenServer.call(pid, {:compact, opts}, :infinity)
@@ -491,7 +497,16 @@ defmodule Sigma.Agent do
       {:ok, state} ->
         case RootRetirement.context(state) do
           {:ok, context} ->
-            {:ok, %{state | host_retirement: context}, {:continue, :session_start}}
+            incident_context =
+              if context do
+                Incidents.context(state.transcript_path, context.identity.root_header_id, %{
+                  session_id: state.log_session_id,
+                  agent_path: "/root"
+                })
+              end
+
+            {:ok, %{state | host_retirement: context, incident_context: incident_context},
+             {:continue, :session_start}}
 
           {:error, reason} ->
             {:stop, reason}
@@ -693,7 +708,8 @@ defmodule Sigma.Agent do
   def handle_call({:goal_reserve, thread, request}, _from, state) do
     counts = PromptQueue.counts(state.prompt_queue)
 
-    if goal_thread?(state, thread) and request.host_generation == state.goal_generation and
+    if is_nil(state.delete_operation) and goal_thread?(state, thread) and
+         request.host_generation == state.goal_generation and
          is_nil(state.current_turn_task) and is_nil(state.goal_admission) and
          state.turn_state.phase not in [:cancelling, :session_operation] and
          counts == %{steering: 0, follow_up: 0} do
@@ -795,8 +811,41 @@ defmodule Sigma.Agent do
   end
 
   @impl true
+  def handle_call({:begin_session_operation, :delete}, from, state) do
+    if state.delete_operation || state.fork_operation_turn_state ||
+         (state.turn_state.phase == :session_operation and is_nil(state.pending_host_prompt) and
+            not retained_retirement_failure?(state)) do
+      {:reply, {:error, :session_busy}, state}
+    else
+      monitor = Process.monitor(elem(from, 0))
+
+      state =
+        state
+        |> Map.put(:delete_operation, %{
+          from: from,
+          monitor: monitor,
+          status: :waiting,
+          acquired?: false
+        })
+        |> fence_goal_admission(:cancelled)
+
+      Enum.each(state.prompt_queue.follow_up, &release_resources(&1.prepared_resources))
+      state = %{state | prompt_queue: PromptQueue.new()}
+
+      case handle_call(:cancel, from, state) do
+        {:reply, {:error, reason}, state} when reason != :no_active_turn ->
+          Process.demonitor(monitor, [:flush])
+          {:reply, {:error, reason}, %{state | delete_operation: nil}}
+
+        {:reply, _result, state} ->
+          {:noreply, finish_delete_reservation(state)}
+      end
+    end
+  end
+
   def handle_call({:begin_session_operation, :fork}, _from, state) do
-    if is_nil(state.current_turn_task) and not TurnState.active?(state.turn_state) and
+    if is_nil(state.delete_operation) and is_nil(state.current_turn_task) and
+         not TurnState.active?(state.turn_state) and
          is_nil(state.fork_operation_turn_state) and is_nil(state.goal_idle_task) and
          is_nil(state.pending_host_prompt) and is_nil(state.host_retirement_task) and
          is_nil(state.host_recovery_task) and
@@ -814,7 +863,8 @@ defmodule Sigma.Agent do
 
   @impl true
   def handle_call(:begin_session_operation, _from, state) do
-    if is_nil(state.current_turn_task) and state.turn_state.phase != :session_operation and
+    if is_nil(state.delete_operation) and is_nil(state.current_turn_task) and
+         state.turn_state.phase != :session_operation and
          is_nil(state.goal_idle_task) and subagents_can_stop?(state) do
       {:reply, :ok,
        %{state | turn_state: TurnState.transition(state.turn_state, :session_operation)}}
@@ -824,6 +874,15 @@ defmodule Sigma.Agent do
   end
 
   @impl true
+  def handle_call(
+        :end_session_operation,
+        from,
+        %{delete_operation: %{status: :reserved, monitor: monitor}} = state
+      ) do
+    Process.demonitor(monitor, [:flush])
+    handle_call(:end_session_operation, from, %{state | delete_operation: nil})
+  end
+
   def handle_call(
         :end_session_operation,
         _from,
@@ -1461,7 +1520,7 @@ defmodule Sigma.Agent do
         %{host_retirement_task: %{ref: ref}} = state
       ) do
     Process.demonitor(ref, [:flush])
-    {:noreply, complete_host_retirement(state, facts)}
+    {:noreply, state |> complete_host_retirement(facts) |> finish_delete_reservation()}
   end
 
   def handle_info(
@@ -1470,7 +1529,7 @@ defmodule Sigma.Agent do
       ) do
     Process.demonitor(ref, [:flush])
     facts = Map.put(state.host_retirement_facts, :completion, result)
-    {:noreply, settle_host_retirement(state, facts)}
+    {:noreply, state |> settle_host_retirement(facts) |> finish_delete_reservation()}
   end
 
   def handle_info(
@@ -1492,6 +1551,15 @@ defmodule Sigma.Agent do
   end
 
   def handle_info(
+        {:root_continuation_started, pid, info},
+        %{host_recovery_task: %{pid: pid}, pending_host_prompt: pending} = state
+      )
+      when not is_nil(pending) do
+    unless pending.cancelled?, do: emit(state, {:recovery_started, info})
+    {:noreply, state}
+  end
+
+  def handle_info(
         {ref, {:host_continuation, result}},
         %{host_recovery_task: %{ref: ref}} = state
       ) do
@@ -1501,14 +1569,24 @@ defmodule Sigma.Agent do
     state =
       case result do
         {:ok, nil} ->
-          item = Map.put(state.pending_host_prompt.item, :continuation_source, nil)
+          cond do
+            state.pending_host_prompt.cancelled? ->
+              finish_host_prompt(state, :cancelled, nil)
 
-          inspect_host_prompt(%{
-            state
-            | pending_host_prompt: %{state.pending_host_prompt | item: item}
-          })
+            automatic_recovery?(state.pending_host_prompt.item) ->
+              discard_automatic_recovery(state)
 
-        {:ok, decision, _facts, context} ->
+            true ->
+              item = Map.put(state.pending_host_prompt.item, :continuation_source, nil)
+
+              inspect_host_prompt(%{
+                state
+                | pending_host_prompt: %{state.pending_host_prompt | item: item}
+              })
+          end
+
+        {:ok, decision, facts, context} ->
+          state = if facts, do: %{state | host_retirement_facts: facts}, else: state
           item = state.pending_host_prompt.item
 
           item = %{
@@ -1525,11 +1603,19 @@ defmodule Sigma.Agent do
 
           state = %{state | pending_host_prompt: %{state.pending_host_prompt | item: item}}
 
-          ready = if context, do: adopt_host(state, context), else: {:ok, state}
+          if state.pending_host_prompt.cancelled? do
+            finish_host_prompt(state, :cancelled, nil)
+          else
+            ready = if context, do: adopt_host(state, context), else: {:ok, state}
 
-          case ready do
-            {:ok, ready} -> start_host_prompt(ready)
-            {:error, reason, retained} -> finish_host_prompt(retained, :failed, reason)
+            case ready do
+              {:ok, ready} ->
+                record_recovery(ready, :recovery_admitted, decision)
+                start_host_prompt(ready)
+
+              {:error, reason, retained} ->
+                finish_host_prompt(retained, :failed, reason)
+            end
           end
 
         {:already_admitted, decision} ->
@@ -1542,7 +1628,9 @@ defmodule Sigma.Agent do
 
           if pending[:reply_to], do: GenServer.reply(pending.reply_to, {:already_admitted, info})
           release_resources(pending.item.prepared_resources)
+
           %{state | pending_host_prompt: nil, turn_state: pending.previous_turn_state}
+          |> finish_delete_reservation()
 
         {:error, reason, facts} ->
           state = if facts, do: %{state | host_retirement_facts: facts}, else: state
@@ -1662,7 +1750,7 @@ defmodule Sigma.Agent do
           |> finish_turn(outcome)
 
         emit(new_state, {:agent_end, new_messages})
-        {:noreply, maybe_start_follow_up(new_state, outcome)}
+        {:noreply, after_live_turn(new_state, outcome)}
 
       _ ->
         {:noreply, state}
@@ -1677,16 +1765,18 @@ defmodule Sigma.Agent do
     case state.current_turn_task do
       %Task{ref: ^ref} ->
         Process.demonitor(ref, [:flush])
+        cancelling? = state.turn_state.phase == :cancelling
+        outcome = if cancelling?, do: :cancelled, else: :failed
 
         new_state =
           state
           |> clear_cancel_timer()
           |> Map.put(:current_turn_task, nil)
           |> Map.put(:context_reconciliation_required, true)
-          |> finish_turn(:failed, reason, persist_metrics?: false)
+          |> finish_turn(outcome, reason, persist_metrics?: false)
 
-        emit(new_state, {:turn_error, reason})
-        {:noreply, maybe_start_follow_up(new_state, :failed)}
+        unless cancelling?, do: emit(new_state, {:turn_error, reason})
+        {:noreply, after_live_turn(new_state, outcome)}
 
       _ ->
         {:noreply, state}
@@ -1708,8 +1798,7 @@ defmodule Sigma.Agent do
 
         unless cancelling?, do: emit(new_state, {:turn_error, reason})
 
-        {:noreply,
-         maybe_start_follow_up(new_state, if(cancelling?, do: :cancelled, else: :failed))}
+        {:noreply, after_live_turn(new_state, if(cancelling?, do: :cancelled, else: :failed))}
 
       _ ->
         {:noreply, state}
@@ -1739,6 +1828,14 @@ defmodule Sigma.Agent do
   end
 
   def handle_info(
+        {:DOWN, ref, :process, _pid, _reason},
+        %{delete_operation: %{monitor: ref} = deletion} = state
+      ) do
+    {:noreply,
+     finish_delete_reservation(%{state | delete_operation: %{deletion | status: :abandoned}})}
+  end
+
+  def handle_info(
         {:DOWN, ref, :process, _pid, reason},
         %{host_retirement_task: %{ref: ref}, host_retirement_stage: :completion} = state
       ) do
@@ -1749,7 +1846,7 @@ defmodule Sigma.Agent do
        )}
 
     facts = Map.put(state.host_retirement_facts, :completion, error)
-    {:noreply, settle_host_retirement(state, facts)}
+    {:noreply, state |> settle_host_retirement(facts) |> finish_delete_reservation()}
   end
 
   def handle_info(
@@ -1771,7 +1868,7 @@ defmodule Sigma.Agent do
         result: error
       })
 
-    {:noreply, complete_host_retirement(state, facts)}
+    {:noreply, state |> complete_host_retirement(facts) |> finish_delete_reservation()}
   end
 
   def handle_info(
@@ -1850,7 +1947,7 @@ defmodule Sigma.Agent do
             |> Map.put(:context_reconciliation_required, true)
             |> finish_turn(outcome, reason)
 
-          {:noreply, maybe_start_follow_up(new_state, outcome)}
+          {:noreply, after_live_turn(new_state, outcome)}
         end
 
       _ ->
@@ -2039,6 +2136,9 @@ defmodule Sigma.Agent do
     with {:ok, %{status: :ready}} <- GoalIntegration.recover_retired(handle), do: :ok
   end
 
+  defp inspect_host_prompt(%{delete_operation: deletion} = state) when not is_nil(deletion),
+    do: finish_delete_reservation(state)
+
   defp inspect_host_prompt(%{pending_host_prompt: nil} = state), do: state
   defp inspect_host_prompt(%{goal_idle_task: %Task{}} = state), do: state
   defp inspect_host_prompt(%{host_recovery_task: %Task{}} = state), do: state
@@ -2048,9 +2148,16 @@ defmodule Sigma.Agent do
          %{pending_host_prompt: %{item: %{continuation_source: source}}} = state
        )
        when is_binary(source) do
+    owner = self()
+
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
-        {:host_continuation, RootContinuation.prepare(state, source)}
+        result =
+          RootContinuation.prepare(state, source, fn info ->
+            send(owner, {:root_continuation_started, self(), info})
+          end)
+
+        {:host_continuation, result}
       end)
 
     %{state | host_recovery_task: task}
@@ -2142,6 +2249,15 @@ defmodule Sigma.Agent do
     release_resources(item.prepared_resources)
     notify_retry_admission(item, {:error, reason || :cancelled})
     if reason, do: emit(state, {:turn_error, reason})
+
+    if is_binary(item.continuation_source) do
+      record_recovery(
+        state,
+        if(outcome == :cancelled, do: :recovery_cancelled, else: :recovery_blocked),
+        nil,
+        reason
+      )
+    end
 
     %{
       state
@@ -2356,7 +2472,8 @@ defmodule Sigma.Agent do
         emit(state, {:prompt_rejected, reason})
         {{:rejected, reason}, state}
 
-      {:ok, _item} when state.turn_state.phase == :session_operation ->
+      {:ok, _item}
+      when not is_nil(state.delete_operation) or state.turn_state.phase == :session_operation ->
         release_resources(Keyword.get(opts, :prepared_resources, []))
         emit(state, {:prompt_rejected, :session_busy})
         {{:rejected, :session_busy}, state}
@@ -2875,6 +2992,10 @@ defmodule Sigma.Agent do
     end
   end
 
+  defp maybe_start_follow_up(%{delete_operation: deletion} = state, _outcome)
+       when not is_nil(deletion),
+       do: finish_delete_reservation(state)
+
   defp maybe_start_follow_up(state, outcome) when outcome in [:completed, :failed, :cancelled] do
     case PromptQueue.pop(state.prompt_queue, :follow_up) do
       {nil, _queue} ->
@@ -2884,6 +3005,156 @@ defmodule Sigma.Agent do
         state = %{state | prompt_queue: queue}
         emit(state, {:prompt_consumed, :follow_up, prompt_info(item, item.turn_id)})
         start_turn(state, item)
+    end
+  end
+
+  # Only an actual live turn may initiate recovery. Preparation failures and
+  # passive history reads never enter this path.
+  defp after_live_turn(%{delete_operation: deletion} = state, _outcome)
+       when not is_nil(deletion),
+       do: finish_delete_reservation(state)
+
+  defp after_live_turn(
+         %{native_tools: true, host_retirement: %{}, turn_state: %{turn_id: source}} = state,
+         :failed
+       )
+       when is_binary(source) do
+    _ =
+      Incidents.record(state.incident_context, %{
+        kind: :run_failed,
+        stage: :agent_terminal,
+        run_id: source
+      })
+
+    {queued, queue} = PromptQueue.pop(state.prompt_queue, :follow_up)
+
+    item =
+      if queued do
+        emit(state, {:prompt_consumed, :follow_up, prompt_info(queued, queued.turn_id)})
+        queued
+      else
+        {:ok, item} =
+          new_prompt_item(
+            "Continue the current task. An operation may have an uncertain outcome. " <>
+              "Report the issue, inspect the current state before repeating actions, " <>
+              "and continue using the available evidence.",
+            []
+          )
+
+        # The probe has no new durable run yet. Keep the source identity until
+        # the public continuation decision supplies the actual target.
+        %{item | turn_id: source, metadata: %{automatic_recovery: true}}
+      end
+
+    item =
+      if is_binary(item.continuation_source) do
+        item
+      else
+        %{item | continuation_source: source, continuation_pending?: true}
+      end
+
+    start_turn(%{state | prompt_queue: queue}, item)
+  end
+
+  defp after_live_turn(state, outcome), do: maybe_start_follow_up(state, outcome)
+
+  defp automatic_recovery?(item), do: Map.get(item.metadata, :automatic_recovery, false)
+
+  # The reservation is granted only after the existing Stop path has observed
+  # its owned tasks settle. RepositoryProcess then requires the actual host,
+  # Goal, Store and terminal retirement acknowledgements before deleting files.
+  defp retained_retirement_failure?(state) do
+    is_nil(state.current_turn_task) and is_nil(state.goal_idle_task) and
+      is_nil(state.host_recovery_task) and is_nil(state.host_retirement_task) and
+      (match?({:error, _}, state.host_retirement_facts[:result]) or
+         match?({:error, _}, state.host_retirement_facts[:completion]))
+  end
+
+  defp finish_delete_reservation(%{delete_operation: nil} = state), do: state
+
+  defp finish_delete_reservation(%{delete_operation: %{status: :reserved}} = state),
+    do: state
+
+  defp finish_delete_reservation(state) do
+    cond do
+      state.current_turn_task || state.goal_idle_task || state.host_recovery_task ||
+          state.host_retirement_task ->
+        state
+
+      state.pending_host_prompt ->
+        finish_host_prompt(state, :cancelled, nil)
+
+      state.delete_operation.status == :abandoned ->
+        deletion = state.delete_operation
+        state = %{state | delete_operation: nil}
+
+        if deletion.acquired? do
+          case handle_call(:end_session_operation, deletion.from, state) do
+            {:reply, _result, released} -> released
+            {:noreply, releasing} -> releasing
+          end
+        else
+          state
+        end
+
+      true ->
+        %{from: from} = deletion = state.delete_operation
+        GenServer.reply(from, :ok)
+
+        %{
+          state
+          | delete_operation: %{deletion | status: :reserved, acquired?: true},
+            turn_state: TurnState.transition(state.turn_state, :session_operation)
+        }
+    end
+  end
+
+  defp discard_automatic_recovery(state) do
+    pending = state.pending_host_prompt
+    release_resources(pending.item.prepared_resources)
+
+    %{state | pending_host_prompt: nil, turn_state: pending.previous_turn_state}
+    |> maybe_start_follow_up(:failed)
+  end
+
+  defp record_recovery(state, kind, decision, error \\ nil) do
+    item = state.pending_host_prompt.item
+    source = item.continuation_source
+    continuation = (decision && decision["continuation_id"]) || item.metadata[:continuation_id]
+
+    Incidents.record(state.incident_context, %{
+      kind: kind,
+      stage: :root_continuation,
+      run_id: source,
+      source_run_id: source,
+      target_run_id: (decision && decision["target"]["run_id"]) || (continuation && item.turn_id),
+      continuation_id: continuation,
+      recovery_state: kind,
+      blocked_component: if(kind == :recovery_blocked, do: blocked_component(state)),
+      error: error
+    })
+  end
+
+  defp blocked_component(state) do
+    facts = state.host_retirement_facts
+
+    components =
+      case facts[:result] do
+        {:error, %Backplane.AgentRuntime.Error{cause: cause}} when is_map(cause) -> cause
+        _ -> facts
+      end
+
+    [:native, :async_hooks, :session_end]
+    |> Enum.filter(fn component ->
+      case components[component] do
+        nil -> false
+        {:ok, %{status: :confirmed}} -> false
+        _ -> true
+      end
+    end)
+    |> case do
+      [] -> :continuation
+      components -> Enum.join(components, ".")
     end
   end
 
@@ -3045,6 +3316,9 @@ defmodule Sigma.Agent do
 
     %{state | goal_admission: admission, goal_generation: state.goal_generation + 1}
   end
+
+  defp maybe_goal_idle(%{delete_operation: deletion} = state) when not is_nil(deletion),
+    do: finish_delete_reservation(state)
 
   defp maybe_goal_idle(%{goal_integration: nil} = state), do: state
   defp maybe_goal_idle(%{goal_resume_pending: false} = state), do: state

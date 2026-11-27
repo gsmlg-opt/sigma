@@ -19,7 +19,7 @@ defmodule Sigma.Agent.Backplane.Engine do
     UserInput
   }
 
-  alias Sigma.Agent.{ContextBuilder, Message}
+  alias Sigma.Agent.{ContextBuilder, Incidents, Message}
   alias Sigma.Coding.Tool
 
   @poll_interval 10
@@ -999,6 +999,7 @@ defmodule Sigma.Agent.Backplane.Engine do
   defp persist_provider_failure(state, snapshot) do
     case CanonicalHistory.failed_message(snapshot) do
       nil ->
+        record_provider_failure(state, snapshot)
         {state, :ok}
 
       message ->
@@ -1012,11 +1013,30 @@ defmodule Sigma.Agent.Backplane.Engine do
             |> Sigma.Agent.__backplane_messages_changed__()
 
           Sigma.Agent.__backplane_acknowledge__(state)
+          record_provider_failure(state, snapshot)
           {state, :ok}
         end
     end
   catch
     kind, reason -> {state, {:error, {:provider_failure_persistence, kind, reason}}}
+  end
+
+  defp record_provider_failure(state, snapshot) do
+    Incidents.record_provider(
+      Map.get(state, :incident_context),
+      state.turn_state.turn_id,
+      get_in(snapshot, [:failed_attempt, :attempt_id]),
+      snapshot.error
+    )
+  end
+
+  defp record_runtime_failure(state, stage, error) do
+    Incidents.record(Map.get(state, :incident_context), %{
+      kind: :runtime_failure,
+      stage: stage,
+      run_id: state.turn_state.turn_id,
+      error: error
+    })
   end
 
   defp forward_steering_item(state, conversation, turn_id, item, users, forwarded) do
@@ -1065,6 +1085,7 @@ defmodule Sigma.Agent.Backplane.Engine do
 
     Sigma.Agent.__backplane_emit__(state, {:message_start, tool})
     Sigma.Agent.__backplane_emit__(state, {:message_end, tool})
+    Incidents.record_tool(Map.get(state, :incident_context), state.turn_state.turn_id, tool)
     results = state.backplane_tool_results ++ [tool]
 
     if length(results) == Enum.count(assistant.content, &match?(%{type: :tool_call}, &1)) do
@@ -1199,7 +1220,14 @@ defmodule Sigma.Agent.Backplane.Engine do
          users,
          assistant
        ) do
+    record_runtime_failure(state, :turn_failed, error)
     Sigma.Agent.__backplane_emit__(state, {:turn_error, normalize_error(error)})
+    {state, users, assistant, nil}
+  end
+
+  defp reduce_event(state, %{type: :turn_failed, error: error}, users, assistant)
+       when not is_nil(error) do
+    record_runtime_failure(state, :turn_failed, error)
     {state, users, assistant, nil}
   end
 
@@ -1225,6 +1253,7 @@ defmodule Sigma.Agent.Backplane.Engine do
   end
 
   defp reduce_event(state, %{type: :storage_failed, error: error}, users, assistant) do
+    record_runtime_failure(state, :storage_failed, error)
     Sigma.Agent.__backplane_emit__(state, {:turn_error, normalize_error(error)})
     {state, users, assistant, :failed}
   end

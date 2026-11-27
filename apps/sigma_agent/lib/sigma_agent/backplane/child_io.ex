@@ -11,7 +11,17 @@ defmodule Sigma.Agent.Backplane.ChildIO do
   require Logger
 
   alias Backplane.AgentRuntime.{Conversation, Error, Plan, Codex.Session}
-  alias Sigma.Agent.{Compaction, ContextBuilder, ContextPolicy, Hooks, Message, SessionContext}
+
+  alias Sigma.Agent.{
+    Compaction,
+    ContextBuilder,
+    ContextPolicy,
+    Hooks,
+    Incidents,
+    Message,
+    SessionContext
+  }
+
   alias Sigma.Coding.Hooks.Outcome
 
   alias Sigma.Agent.Backplane.{
@@ -87,6 +97,7 @@ defmodule Sigma.Agent.Backplane.ChildIO do
          mcp_client_source: Map.get(config, :mcp_client_source),
          mcp_server_ids: config |> Map.get(:mcp_clients, %{}) |> Map.keys(),
          identity: identity,
+         incident_context: Keyword.get(opts, :incident_context),
          transcript_path: path,
          backplane_store_path: sidecar_path,
          store: sidecar,
@@ -1553,6 +1564,7 @@ defmodule Sigma.Agent.Backplane.ChildIO do
       else
         case apply(Writer, :append, [state.writer, {:message_end, message}]) do
           {:ok, _entry_id} ->
+            Incidents.record_tool(state.incident_context, public_run_id(state.identity), message)
             {:cont, {:ok, %{state | persisted: MapSet.put(state.persisted, message.id)}}}
 
           {:error, reason} ->
@@ -1573,6 +1585,7 @@ defmodule Sigma.Agent.Backplane.ChildIO do
   defp persist_provider_failure(state, snapshot) do
     case CanonicalHistory.failed_message(snapshot) do
       nil ->
+        record_provider_failure(state, snapshot)
         {:ok, state}
 
       message ->
@@ -1581,6 +1594,8 @@ defmodule Sigma.Agent.Backplane.ChildIO do
         else
           case apply(Writer, :append, [state.writer, {:message_end, message}]) do
             {:ok, _} ->
+              record_provider_failure(state, snapshot)
+
               {:ok,
                %{
                  state
@@ -1598,6 +1613,15 @@ defmodule Sigma.Agent.Backplane.ChildIO do
           end
         end
     end
+  end
+
+  defp record_provider_failure(state, snapshot) do
+    Incidents.record_provider(
+      state.incident_context,
+      public_run_id(state.identity),
+      get_in(snapshot, [:failed_attempt, :attempt_id]),
+      snapshot.error
+    )
   end
 
   defp project_plan(

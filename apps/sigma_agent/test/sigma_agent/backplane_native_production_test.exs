@@ -198,9 +198,7 @@ defmodule Sigma.Agent.BackplaneNativeProductionTest do
     assert Sigma.Agent.status(agent).phase == :completed
   end
 
-  test "Continue admits one fresh run after a real QuickBEAM invocation loses its result", %{
-    dir: dir
-  } do
+  test "automatic recovery admits one run after a real QuickBEAM result is lost", %{dir: dir} do
     observer = self()
 
     mcp = %Sigma.Coding.MCP.Tool{
@@ -252,26 +250,27 @@ defmodule Sigma.Agent.BackplaneNativeProductionTest do
                not Map.has_key?(run.tool_results, intent.operation.invocation_id)
            end)
 
-    refute_receive {:native_provider, _, _}, 0
     journal = File.read!(Path.join(dir, "native.jsonl"))
-
-    assert {:accepted, %{turn_id: target} = info} =
-             Sigma.Agent.prompt(agent, "Continue", continuation_source: source)
-
+    assert_receive {:recovery_started, %{source_run_id: ^source}}, 5_000
     {provider, request} = provider!()
+    target = request.turn_id
     assert target != source
-    assert request.turn_id == target
 
     assert Enum.any?(request.context.messages, fn msg ->
              is_binary(msg.content) and msg.content =~ "outcome is unknown"
            end)
 
-    assert List.last(request.context.messages).content == "Continue"
+    assert List.last(request.context.messages).content =~ "inspect the current state"
     refute inspect(request.context.messages) =~ "tools.mcp__fixture__read"
     finish!(agent, provider)
     assert Sigma.Agent.status(agent).phase == :completed
     assert {:ok, ^original} = Store.load(store, source)
     assert String.starts_with?(File.read!(Path.join(dir, "native.jsonl")), journal)
+
+    assert {:already_admitted, %{turn_id: ^target} = info} =
+             Sigma.Agent.prompt(agent, "Continue", continuation_source: source)
+
+    refute_receive {:native_provider, _, _}, 0
 
     assert {:already_admitted, ^info} =
              Sigma.Agent.prompt(agent, "Continue", continuation_source: source)

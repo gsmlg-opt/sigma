@@ -1753,11 +1753,18 @@ defmodule Sigma.Web.SessionLive do
         {"Ran", command_text(args["cmd"])}
 
       "write_stdin" ->
-        session = args["session_id"]
+        session = summary_text(args["session_id"])
 
-        if args["chars"] in [nil, ""],
-          do: {"Waited for session", to_string(session)},
-          else: {"Sent input to session", "#{session}: #{String.trim(args["chars"])}"}
+        case args["chars"] do
+          chars when chars in [nil, ""] ->
+            {"Waited for session", session}
+
+          chars when is_binary(chars) ->
+            {"Sent input to session", "#{session}: #{String.trim(chars)}"}
+
+          _ ->
+            {"Sent input to session", session}
+        end
 
       "apply_patch" ->
         {"Edited", patch_paths(args["input"] || args["patch"])}
@@ -1766,20 +1773,22 @@ defmodule Sigma.Web.SessionLive do
         {"Updated plan", ""}
 
       "view_image" ->
-        {"Viewed image", to_string(args["path"])}
+        {"Viewed image", summary_text(args["path"])}
 
       "exec" ->
         {"Ran JavaScript", ""}
 
       "wait" ->
-        {"Waited for cell", to_string(args["cell_id"])}
+        {"Waited for cell", summary_text(args["cell_id"])}
 
       "tool_search" ->
-        {"Searched tools", to_string(args["query"])}
+        {"Searched tools", summary_text(args["query"])}
 
       "clock::sleep" ->
         {"Waited",
-         args |> Map.drop(["reason"]) |> Enum.map_join(" ", fn {k, v} -> "#{k}=#{v}" end)}
+         args
+         |> Map.drop(["reason"])
+         |> Enum.map_join(" ", fn {k, v} -> "#{k}=#{summary_text(v)}" end)}
 
       "mcp__" <> rest ->
         case String.split(rest, "__", parts: 2) do
@@ -1792,7 +1801,11 @@ defmodule Sigma.Web.SessionLive do
     end
   end
 
-  defp command_text(cmd) when is_list(cmd), do: Enum.join(cmd, " ")
+  defp summary_text(value) when is_binary(value), do: value
+  defp summary_text(value) when is_number(value) or is_boolean(value), do: to_string(value)
+  defp summary_text(_value), do: ""
+
+  defp command_text(cmd) when is_list(cmd), do: Enum.map_join(cmd, " ", &summary_text/1)
   defp command_text(cmd) when is_binary(cmd), do: cmd
   defp command_text(_cmd), do: ""
 
@@ -2356,6 +2369,7 @@ defmodule Sigma.Web.SessionLive do
   defp runtime_phase_label(:running_tools), do: "Running tools…"
   defp runtime_phase_label(:waiting_permission), do: "Waiting for approval…"
   defp runtime_phase_label(:waiting_elicitation), do: "Waiting for input…"
+  defp runtime_phase_label(:session_operation), do: "Preparing recovery…"
   defp runtime_phase_label(:cancelling), do: "Cancelling…"
   defp runtime_phase_label(:compacting), do: "Compacting context…"
   defp runtime_phase_label(:queued), do: "Queued…"
@@ -3010,11 +3024,8 @@ defmodule Sigma.Web.SessionLive do
               {:noreply, socket}
             end
 
-          {:error, :invalid_session_id} ->
-            {:noreply, put_flash(socket, :error, "Invalid session id")}
-
-          {:error, _reason} ->
-            {:noreply, put_flash(socket, :error, "Unable to delete session")}
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, Sigma.Web.OperationError.message(reason))}
         end
 
       _ ->
@@ -4095,6 +4106,19 @@ defmodule Sigma.Web.SessionLive do
     {:noreply,
      socket
      |> assign(turn_in_flight: true, runtime_status: :streaming_provider, provider_retry: nil)
+     |> refresh_continue_button()}
+  end
+
+  @impl true
+  def handle_info({:recovery_started, %{source_run_id: _source}}, socket) do
+    {:noreply,
+     socket
+     |> assign(
+       turn_in_flight: true,
+       runtime_status: :session_operation,
+       streaming_message_id: nil,
+       provider_retry: nil
+     )
      |> refresh_continue_button()}
   end
 

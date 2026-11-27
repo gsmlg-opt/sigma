@@ -178,7 +178,7 @@ defmodule Sigma.Agent.BackplaneHostedProductionTest do
                      false
                  end)
 
-          assert Sigma.Agent.status(handle.agent).phase == :failed
+          assert_failed(handle.agent, System.monotonic_time(:millisecond) + 5_000)
           refute_local_effects(events)
           refute_receive {:hosted_http, ^server, _index, _path, _body}, 100
           refute_receive {:hosted_http, ^other_server, _index, _path, _body}, 100
@@ -308,6 +308,17 @@ defmodule Sigma.Agent.BackplaneHostedProductionTest do
     assert Sigma.Agent.status(agent).phase == :completed
     refute_local_effects(events)
     events
+  end
+
+  defp assert_failed(agent, deadline) do
+    phase = Sigma.Agent.status(agent).phase
+
+    if phase == :failed or System.monotonic_time(:millisecond) >= deadline do
+      assert phase == :failed
+    else
+      Process.sleep(10)
+      assert_failed(agent, deadline)
+    end
   end
 
   defp refute_local_effects(events) do

@@ -13,7 +13,9 @@ defmodule Sigma.Agent.Backplane.PlainCommandFunctionalTest do
 
   test "PTY launch acknowledges a real terminal with the declared dimensions", %{command: command} do
     assert {:ok, %{rows: 24, columns: 120}} = Command.terminal(command)
+    assert %{stdin_close: %{pipe: true, pty: false}} = PlainCommand.capabilities(command)
     {invocation, job} = launch(command, "test -t 0 && test -t 1 && stty size")
+    assert job.tty
     assert %{terminal: %{pid: pid, sid: pid, rows: 24, columns: 120}} = job
     assert is_integer(pid)
     result = finished(command, invocation, job)
@@ -229,6 +231,64 @@ defmodule Sigma.Agent.Backplane.PlainCommandFunctionalTest do
     result = finished(command, invocation, job)
     assert text(result) == "ordinary"
     assert result.exit_status == 3
+    release(command, invocation)
+  end
+
+  @tag :tmp_dir
+  test "non-PTY EOF drains exact input and natural output before the workspace is reused", %{
+    command: command,
+    tmp_dir: dir
+  } do
+    gate = Path.join(dir, "finish-eof")
+
+    {invocation, job} =
+      launch(
+        command,
+        ~s(printf READY; cat; while [ ! -e "#{gate}" ]; do sleep 0.01; done; printf TAIL),
+        [],
+        %{tty: false}
+      )
+
+    ready = read_until(command, invocation, job, &(text(&1) == "READY"))
+    payload = "你好\nsecond line\n"
+    assert :ok = Command.write(command, invocation, job, payload)
+    assert :ok = Command.close_stdin(command, invocation, job)
+    assert :ok = Command.close_stdin(command, invocation, job)
+    File.write!(gate, "")
+    result = finished(command, invocation, job, cursor: ready.cursor)
+    assert text(result) == payload <> "TAIL"
+    assert result.status == :completed
+    assert result.exit_status == 0
+    # LocalCommand requests broker cleanup after receiving its natural exit frame.
+    assert result.termination_status == :requested
+    assert result.cleanup_status == :confirmed
+    assert {:error, %{class: :not_found}} = Command.close_stdin(command, invocation, job)
+    release(command, invocation)
+
+    {next, next_job} = launch(command, "printf reused", [], %{tty: false})
+    result = finished(command, next, next_job)
+    assert text(result) == "reused"
+    assert result.exit_status == 0
+    assert result.cleanup_status == :confirmed
+    release(command, next)
+  end
+
+  test "unsupported PTY EOF leaves the actual terminal input open", %{command: command} do
+    {invocation, job} =
+      launch(command, ~S(stty -echo; printf READY; read line; printf 'got:%s' "$line"))
+
+    ready = read_until(command, invocation, job, &(text(&1) == "READY"))
+    assert job.tty
+
+    assert {:error, %{class: :unsupported_capability}} =
+             Command.close_stdin(command, invocation, job)
+
+    assert :ok = Command.write(command, invocation, job, "still-open\n")
+    result = finished(command, invocation, job, cursor: ready.cursor)
+    assert text(result) == "got:still-open"
+    assert result.exit_status == 0
+    assert result.termination_status == :not_requested
+    assert result.cleanup_status == :confirmed
     release(command, invocation)
   end
 

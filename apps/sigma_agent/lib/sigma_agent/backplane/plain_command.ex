@@ -40,7 +40,8 @@ defmodule Sigma.Agent.Backplane.PlainCommand do
   @impl Command
   def start(command, request, opts) do
     if Map.get(request, :tty, false) do
-      GenServer.call(command.server, {:start_pty, request}, :infinity)
+      with {:ok, job} <- GenServer.call(command.server, {:start_pty, request}, :infinity),
+           do: {:ok, Map.put(job, :tty, true)}
     else
       with {:ok, local} <- local(command), do: LocalCommand.start(local, request, opts)
     end
@@ -61,6 +62,14 @@ defmodule Sigma.Agent.Backplane.PlainCommand do
 
   def write(command, invocation, job, chars) do
     with {:ok, local} <- local(command), do: LocalCommand.write(local, invocation, job, chars)
+  end
+
+  @impl Command
+  def close_stdin(_command, _invocation, %{pty_job: _pid}),
+    do: error(:unsupported_capability, "PTY command input cannot be half-closed")
+
+  def close_stdin(command, invocation, job) do
+    with {:ok, local} <- local(command), do: LocalCommand.close_stdin(local, invocation, job)
   end
 
   @impl Command
@@ -127,7 +136,11 @@ defmodule Sigma.Agent.Backplane.PlainCommand do
 
     state = %{
       local: nil,
-      local_options: Keyword.put(Keyword.get(opts, :local, []), :name, nil),
+      local_options:
+        opts
+        |> Keyword.get(:local, [])
+        |> Keyword.put(:name, nil)
+        |> Keyword.put(:pipe_stdin, true),
       native: Keyword.get(opts, :native, []),
       capabilities: %{},
       startup_error: nil,
@@ -301,8 +314,8 @@ defmodule Sigma.Agent.Backplane.PlainCommand do
 
   defp start_command(state) do
     with {:ok, local} <- LocalCommand.start_link(state.local_options) do
-      capabilities =
-        # PTYs use Sigma's own sigma-terminal-helper; Backplane's PTY backend is Linux-only.
+      # PTYs use Sigma's own sigma-terminal-helper; Backplane's PTY backend is Linux-only.
+      terminal_capabilities =
         case {:os.type(), Native.capabilities(state.native)} do
           {{:unix, os} = platform, {:ok, %{real_pty: true}}} when os in [:linux, :darwin] ->
             %{pty: %{verified: true, platforms: [platform], rows: 24, columns: 120}}
@@ -310,6 +323,11 @@ defmodule Sigma.Agent.Backplane.PlainCommand do
           _ ->
             %{}
         end
+
+      capabilities =
+        LocalCommand.capabilities(%{server: local})
+        |> Map.take([:stdin_close])
+        |> Map.merge(terminal_capabilities)
 
       {:ok, %{state | local: local, capabilities: capabilities}}
     end

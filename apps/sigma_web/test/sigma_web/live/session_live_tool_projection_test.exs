@@ -323,6 +323,96 @@ defmodule Sigma.Web.SessionLiveToolProjectionTest do
     end
   end
 
+  @tag :malformed_tool_projection
+  test "malformed native tool fields preserve the live chat and persisted session", %{conn: conn} do
+    {view, sid} = open_session(conn)
+    writer = Sigma.Agent.Runtime.lookup(@workdir, sid, :writer)
+
+    arguments = %{
+      "chars" => %{},
+      "max_output_tokens" => 15_000,
+      "session_id" => 4902,
+      "yield_time_ms" => 15_000
+    }
+
+    message =
+      assistant("malformed-native-input", [
+        %{
+          type: :tool_call,
+          id: "malformed-write-stdin",
+          name: "write_stdin",
+          input_kind: :function,
+          arguments: arguments
+        }
+      ])
+
+    assert {:ok, _} = Sigma.Session.Writer.append(writer, {:message_end, message})
+    send(view.pid, {:message_end, message})
+
+    assert [%{tools: [%{id: "malformed-write-stdin"} = tool]}] = snapshot(view, sid).messages
+    assert tool.title == "Sent input to session"
+    assert tool.detail == "4902"
+    assert {:ok, decoded} = Formata.JSON.decode(tool.input)
+    assert decoded == arguments
+    assert Process.alive?(view.pid)
+
+    # The real malformed call was rejected by native validation. Retain that
+    # settled exchange so history projects the same call rather than filtering
+    # an unfinished tool batch from safe Provider context.
+    validation_error =
+      ~s({"error":{"class":"validation","details":{"type":"string","path":"$arguments.chars","errors":[{"message":"at /chars: Expected type string, got object","path":["chars"],"rule":"type"}]},"message":"at /chars: Expected type string, got object"},"is_error":true})
+
+    result = %Message{
+      id: "malformed-write-stdin-result",
+      role: :tool_result,
+      tool_call_id: "malformed-write-stdin",
+      tool_name: "write_stdin",
+      content: [%{type: :text, text: validation_error}],
+      is_error: true,
+      timestamp: 2_000
+    }
+
+    assert {:ok, _} = Sigma.Session.Writer.append(writer, {:message_end, result})
+    deliver_result(view, result)
+
+    assert [%{tools: [%{status: "error", result: ^validation_error} = settled_tool]}] =
+             snapshot(view, sid).messages
+
+    assert settled_tool.input == tool.input
+    assert settled_tool.detail == tool.detail
+    before_reload = File.read!(ConfigManager.sessions_dir(@workdir) |> Path.join("#{sid}.jsonl"))
+
+    key = ConfigManager.repository_key(@workdir)
+    {:ok, reloaded, _html} = live(conn, "/repository/#{key}/sessions/#{sid}")
+    render_async(reloaded, 3_000)
+    assert [%{tools: [^settled_tool]}] = snapshot(reloaded, sid).messages
+
+    assert File.read!(ConfigManager.sessions_dir(@workdir) |> Path.join("#{sid}.jsonl")) ==
+             before_reload
+
+    # A malformed history card must not prevent access to session operations.
+    {:ok, repository, _html} = live(conn, "/repository/#{key}")
+    assert has_element?(repository, "#delete-session-#{sid}")
+  end
+
+  @tag :malformed_tool_projection
+  test "structured values in native summary fields cannot crash projection" do
+    alias Sigma.Web.SessionLive
+
+    for {name, args} <- [
+          {"write_stdin", %{"session_id" => %{}, "chars" => ["invalid"]}},
+          {"exec_command", %{"cmd" => ["echo", %{}]}},
+          {"view_image", %{"path" => %{}}},
+          {"wait", %{"cell_id" => %{}}},
+          {"tool_search", %{"query" => %{}}},
+          {"clock::sleep", %{"duration_ms" => %{}}}
+        ] do
+      assert {title, detail} = SessionLive.tool_summary(name, args)
+      assert is_binary(title)
+      assert is_binary(detail)
+    end
+  end
+
   test "tool summaries name the action like Codex" do
     alias Sigma.Web.SessionLive
 
