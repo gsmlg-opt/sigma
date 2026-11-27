@@ -12,18 +12,58 @@ defmodule Sigma.Agent.Backplane.RecoveryJournal do
   def append(journal, current, next, command) do
     with {:ok, entries} <- entries(journal),
          :ok <- prefix(entries, current),
-         {:ok, kind, input} <- command(command),
-         entry = %{
-           "revision" => next.revision,
-           "prior_revision" => if(current, do: current.revision, else: 0),
-           "prior_incarnation" => if(current, do: current.incarnation, else: next.incarnation),
-           "incarnation" => next.incarnation,
-           "kind" => kind,
-           "input" => input
-         } do
+         {:ok, entry} <- entry(current, next, command) do
       {:ok, %{version: 1, entries: entries ++ [entry]}}
     end
   end
+
+  @doc false
+  def entry(current, next, command) do
+    with {:ok, kind, input} <- command(command) do
+      {:ok,
+       %{
+         "revision" => next.revision,
+         "prior_revision" => if(current, do: current.revision, else: 0),
+         "prior_incarnation" => if(current, do: current.incarnation, else: next.incarnation),
+         "incarnation" => next.incarnation,
+         "kind" => kind,
+         "input" => input
+       }}
+    end
+  end
+
+  @doc false
+  def summary(journal, record) do
+    with {:ok, [first | _] = entries} <- entries(journal),
+         :ok <- prefix(entries, record),
+         true <- valid_chain?(entries) do
+      {:ok,
+       %{
+         revision: record.revision,
+         incarnation: record.incarnation,
+         genesis_incarnation: first["incarnation"]
+       }}
+    else
+      _ -> malformed()
+    end
+  end
+
+  defp valid_chain?([first | rest]) do
+    is_integer(first["incarnation"]) and first["incarnation"] >= 0 and
+      first["prior_incarnation"] == first["incarnation"] and valid_tail?(rest, first)
+  end
+
+  defp valid_tail?([], _previous), do: true
+
+  defp valid_tail?([entry | rest], previous) when is_map(entry) do
+    entry["prior_revision"] == previous["revision"] and
+      entry["revision"] == previous["revision"] + 1 and
+      entry["prior_incarnation"] == previous["incarnation"] and
+      is_integer(entry["incarnation"]) and entry["incarnation"] >= previous["incarnation"] and
+      valid_tail?(rest, entry)
+  end
+
+  defp valid_tail?(_rest, _previous), do: false
 
   def read(nil, _record), do: missing()
 
@@ -54,7 +94,10 @@ defmodule Sigma.Agent.Backplane.RecoveryJournal do
   defp host_values(value), do: value
 
   defp entries(nil), do: {:ok, []}
-  defp entries(%{version: 1, entries: [_ | _] = entries}), do: {:ok, entries}
+
+  defp entries(%{version: 1, entries: [_ | _] = entries}) when is_list(entries),
+    do: {:ok, entries}
+
   defp entries(_), do: malformed()
 
   defp prefix([], nil), do: :ok

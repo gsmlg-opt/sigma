@@ -1,5 +1,65 @@
 # Architecture and acceptance history
 
+## Private Runtime Store journal format (2026-11-27)
+
+Sigma's file-backed Store keeps the public Backplane snapshot and recovery
+journal contracts unchanged. The private snapshot now embeds a version 2 head
+descriptor; immutable content-addressed blocks live beside that record under
+`<record>.runtime.journal/`, inside the session's existing `.runtime` tree.
+Each block preserves one exact command input, run identity and predecessor.
+Explicit journal reads verify hashes, run/revision/incarnation continuity and
+the original admission prefix before applying the existing public host-value
+projection. Ordinary loads and commits validate the selected descriptor without
+traversing historical blocks.
+
+The writer syncs and publishes a block before atomically renaming the ordinary
+snapshot. That final rename remains the commit point. A failed block or snapshot
+write leaves the previously acknowledged snapshot/journal pair selected;
+unreferenced blocks may remain and retries can reuse them. There is no garbage
+collection in this change. Fence commits use the same publication order after
+the existing prepared-fence ledger. As before, file data is synced, while the
+directory is not synced; this is not a new power-loss durability guarantee.
+
+Uncompressed ETF, compressed ETF and Zstandard legacy records remain readable
+without a migration write. A private Store-owned ETS cache retains only the
+extracted snapshot, original record bytes and validated prefix metadata.
+Every operation first rereads the authoritative file and requires exact bytes
+for a cache hit. Changed bytes are decoded again; read errors never use cached
+state. The next legitimate mutation preserves the complete original legacy
+record verbatim as an immutable prefix block, then links its new entry. Missing
+or incomplete journal prefixes remain incomplete. Cache entries are discarded
+after version 2 publication.
+
+All references are relative to the enclosing runtime tree, so recursive
+copy/move/adopt operations preserve independent journal ownership. This removes
+the accumulated journal from routine save/read costs; it does not reduce the
+logical size of historical full-conversation inputs. A first cold legacy decode
+and an explicit complete journal export can still require substantial memory
+and time. Recovery reads never execute Provider calls, tools or outbox effects,
+and format migration supplies no missing lifecycle acknowledgements.
+
+Local functional acceptance passed 27 selected Store/journal/child cases
+(seed 410232), then all ten storage cases after extending growth to 16/32/64
+checkpoints and removing the source before copy reopening (seed 868877).
+Five selected Web cases passed (seed 620163), including controlled Providers
+that remain active while failed/cancelled/completed events arrive. Strict
+compilation, scoped formatting and diff checks passed. Excluded security and
+permission cases were not run.
+The separate real-Store commit-timeout case also passed (seed 331408): after
+the exact timeout and Store resumption, the same Agent completed a fresh
+controlled turn with the original image context intact.
+
+An independent copy of the actual failed continuation loaded its legacy record
+in 2,010 ms; subsequent loads took 8,554–24,904 microseconds. A public fence on
+that disposable copy published version 2 in 253 ms, preserving all 51 tool
+results and every unrelated run field. Its main raw record is 31,055,693 bytes,
+versus 31,055,531 for the current snapshot alone. A new BEAM read the exact
+snapshot in 42 ms after the copied tree was moved and its source removed;
+all ten copied files remained byte-identical. All eight original transcript
+and Runtime files also remained unchanged during these checks. Evidence is
+under `/Volumes/Data/tmp/sigma-journal-acceptance-zfayuqdh/`. These are local
+controlled and copied-data checks, not another model run in the user's session.
+
 ## QuickBEAM Code Mode consumer wiring (2026-11-26)
 
 The migration consumer wiring uses only Backplane's public Code Mode APIs.

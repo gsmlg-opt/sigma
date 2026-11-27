@@ -2,7 +2,9 @@ defmodule Sigma.Agent.Backplane.Store do
   @moduledoc """
   Durable, file-backed sidecar for Backplane runtime snapshots.
 
-  Each acknowledged transition is written as one trusted external-term record.
+  Each acknowledged transition selects a trusted external-term snapshot and
+  its immutable recovery journal head. Journal blocks are published before
+  the snapshot; ordinary reads do not traverse historical command inputs.
   A store process serializes compare-and-set operations for one absolute directory
   and is registered locally in `Sigma.Agent.RepositoryRegistry`. This provides a
   single-writer boundary on one BEAM node; it is not a distributed lock.
@@ -25,12 +27,11 @@ defmodule Sigma.Agent.Backplane.Store do
 
   alias Backplane.AgentRuntime.Error
   alias Backplane.AgentRuntime.Store, as: RuntimeStore
-  alias Sigma.Agent.Backplane.{HostRetirement, ProviderLifecycle, RecoveryJournal}
+  alias Sigma.Agent.Backplane.{HostRetirement, ProviderLifecycle, StoreJournal}
 
   @behaviour RuntimeStore
 
   @record_keys [:run, :revision, :transition, :effects, :outbox, :incarnation]
-  @large_record_bytes 1024 * 1024
   @record_applications [
     :backplane_agent_runtime,
     :backplane_ai_protocol,
@@ -258,6 +259,7 @@ defmodule Sigma.Agent.Backplane.Store do
        %{
          path: path,
          filesystem: filesystem,
+         legacy_cache: :ets.new(__MODULE__, [:set, :private]),
          provider_observer:
            "provider-observer-" <> Base.url_encode64(:crypto.strong_rand_bytes(18)),
          provider_monitors: %{},
@@ -330,7 +332,13 @@ defmodule Sigma.Agent.Backplane.Store do
   def handle_call({:recovery_journal, run_id}, _from, state) do
     result =
       with {:ok, record, journal} <- read_record(state, run_id),
-           do: RecoveryJournal.read(journal, record)
+           do:
+             StoreJournal.read(
+               journal,
+               record,
+               journal_path(state, run_id),
+               filesystem_call(state)
+             )
 
     {:reply, result, state}
   end
@@ -473,7 +481,14 @@ defmodule Sigma.Agent.Backplane.Store do
                  next_incarnation
                ),
              {:ok, journal} <-
-               RecoveryJournal.append(journal, snapshot, fenced, :fence),
+               StoreJournal.append(
+                 journal,
+                 snapshot,
+                 fenced,
+                 :fence,
+                 journal_path(state, run_id),
+                 filesystem_call(state)
+               ),
              :ok <- write_snapshot(state, run_id, fenced, journal) do
           {:ok, %{revision: revision, run: run}}
         end
@@ -654,8 +669,16 @@ defmodule Sigma.Agent.Backplane.Store do
          :ok <- compare_stage(current, stage),
          snapshot = Map.take(stage, @record_keys),
          :ok <- validate_serializable(snapshot),
+         :ok <- validate_serializable(stage[:recovery_command]),
          {:ok, journal} <-
-           RecoveryJournal.append(journal, current, snapshot, stage[:recovery_command]),
+           StoreJournal.append(
+             journal,
+             current,
+             snapshot,
+             stage[:recovery_command],
+             journal_path(state, stage.run.run_id),
+             filesystem_call(state)
+           ),
          :ok <- write_snapshot(state, stage.run.run_id, snapshot, journal) do
       {:ok, %{revision: stage.revision}}
     end
@@ -714,11 +737,16 @@ defmodule Sigma.Agent.Backplane.Store do
   defp read_record(state, run_id) do
     case fs(state.filesystem, :read, [record_path(state.path, run_id)]) do
       {:ok, bytes} ->
-        with {:ok, raw} <- decode_snapshot(bytes),
-             journal = Map.get(raw, :recovery_journal),
-             snapshot = Map.delete(raw, :recovery_journal),
-             {:ok, snapshot} <- validate_snapshot(snapshot, run_id),
-             do: {:ok, snapshot, journal}
+        # Always read the authoritative bytes before consulting this cache. Only
+        # extracted legacy snapshots are retained, never their expanded journal.
+        case :ets.lookup(state.legacy_cache, run_id) do
+          [{^run_id, ^bytes, snapshot, journal}] ->
+            {:ok, snapshot, journal}
+
+          _ ->
+            :ets.delete(state.legacy_cache, run_id)
+            decode_record(state, run_id, bytes)
+        end
 
       {:error, :enoent} ->
         {:error, Error.new(:not_found, "runtime run not found")}
@@ -728,29 +756,35 @@ defmodule Sigma.Agent.Backplane.Store do
     end
   end
 
-  # Larger records use a Zstandard frame around the same external term. Old
-  # compressed and uncompressed ETF records can still be read in place.
-  defp decode_snapshot(<<0x28, 0xB5, 0x2F, 0xFD, _::binary>> = frame) do
-    frame |> :zstd.decompress() |> IO.iodata_to_binary() |> decode_term()
-  rescue
-    _error in [ErlangError, ArgumentError] -> malformed_record()
+  defp decode_record(state, run_id, bytes) do
+    with {:ok, raw} <- decode_snapshot(bytes),
+         stored_journal = Map.get(raw, :recovery_journal),
+         snapshot = Map.delete(raw, :recovery_journal),
+         {:ok, snapshot} <- validate_snapshot(snapshot, run_id),
+         :ok <- StoreJournal.validate(stored_journal, snapshot) do
+      journal =
+        case stored_journal do
+          nil -> nil
+          %{version: 2} -> stored_journal
+          legacy -> StoreJournal.legacy(bytes, legacy, snapshot)
+        end
+
+      if match?(%{version: :legacy}, journal),
+        do: :ets.insert(state.legacy_cache, {run_id, bytes, snapshot, journal})
+
+      {:ok, snapshot, journal}
+    end
   end
 
-  defp decode_snapshot(bytes), do: decode_term(bytes)
-
-  defp decode_term(bytes) do
-    try do
-      case :erlang.binary_to_term(bytes, [:safe]) do
-        snapshot when is_map(snapshot) ->
-          if Map.keys(snapshot) -- (@record_keys ++ [:recovery_journal]) == [],
-            do: {:ok, snapshot},
-            else: malformed_record()
-
-        _other ->
-          malformed_record()
-      end
-    rescue
-      ArgumentError -> malformed_record()
+  # Larger records use a Zstandard frame around the same external term. Old
+  # compressed and uncompressed ETF records can still be read in place.
+  defp decode_snapshot(bytes) do
+    with {:ok, snapshot} <- StoreJournal.decode(bytes) do
+      if Map.keys(snapshot) -- (@record_keys ++ [:recovery_journal]) == [],
+        do: {:ok, snapshot},
+        else: malformed_record()
+    else
+      _ -> malformed_record()
     end
   end
 
@@ -807,21 +841,15 @@ defmodule Sigma.Agent.Backplane.Store do
     snapshot = if journal, do: Map.put(snapshot, :recovery_journal, journal), else: snapshot
 
     with :ok <- validate_serializable(snapshot) do
-      # A multi-MiB inline image can recur in both Runtime and journal history.
-      # ETF's DEFLATE window cannot reference its previous occurrence.
-      bytes =
-        if :erlang.external_size(snapshot) >= @large_record_bytes do
-          snapshot
-          |> :erlang.term_to_iovec()
-          |> :zstd.compress(%{compressionLevel: 1, windowLog: 24, checksumFlag: true})
-          |> IO.iodata_to_binary()
-        else
-          :erlang.term_to_binary(snapshot, compressed: 6)
-        end
+      bytes = StoreJournal.encode(snapshot)
 
       case fs(state.filesystem, :write_atomic, [record_path(state.path, run_id), bytes]) do
-        :ok -> :ok
-        {:error, reason} -> storage_error("runtime record commit failed", reason)
+        :ok ->
+          :ets.delete(state.legacy_cache, run_id)
+          :ok
+
+        {:error, reason} ->
+          storage_error("runtime record commit failed", reason)
       end
     end
   end
@@ -859,6 +887,9 @@ defmodule Sigma.Agent.Backplane.Store do
     name = Base.url_encode64(digest, padding: false)
     Path.join(path, name <> ".runtime")
   end
+
+  defp journal_path(state, run_id), do: record_path(state.path, run_id) <> ".journal"
+  defp filesystem_call(state), do: fn operation, args -> fs(state.filesystem, operation, args) end
 
   defp absolute_path(opts) do
     case Keyword.get(opts, :path) do

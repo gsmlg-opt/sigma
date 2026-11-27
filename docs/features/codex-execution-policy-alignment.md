@@ -118,6 +118,41 @@ verify genuine rejection settlement and unchanged post-dispatch uncertainty.
 These controlled checks do not submit another model request in the user's
 session or establish the outcome of its unfinished historical tool call.
 
+### Commit acknowledgement timeout during a long continuation
+
+The next explicit continuation of `session_ZRx8Ss-v_ol1fNT3` started at
+09:53:19 on 2026-11-27 and failed at 10:19:14 with
+`timeout: commit acknowledgement timed out`. The last command had already
+persisted exit status zero and confirmed cleanup. A read of an independent
+Store copy retained all 51 tool results, with no unsettled intents, active
+Provider or tool, or pending outbox effects. The earlier numeric-handle and
+ENOSPC failures did not recur in this run.
+
+The private Store embedded every complete command input in the current
+snapshot file. Conversation checkpoints and completion inputs contain full
+conversation history, so rereading and recompressing the accumulated journal
+grew quadratically. The latest 921,389-byte compressed record expanded to
+995,192,193 bytes. A deterministic checkpoint fixture grew from 1,254,920 raw
+bytes at 32 checkpoints to 4,666,456 at 64. The default five-second commit ACK
+timer includes Store queueing, decoding, validation and publication; expiring
+the caller does not cancel a Store write already in progress.
+
+Sigma now persists a constant-size journal head in the ordinary snapshot and
+stores exact command entries in immutable linked blocks. Each block is synced
+before the snapshot's atomic rename selects it. Ordinary loads and commits
+never walk historical blocks. Explicit public journal reads reconstruct and
+validate the complete chain. See the private Store format entry in the
+[architecture notes](../agents/architecture-notes.md) for legacy compatibility,
+publication failures and the remaining full-export cost.
+
+After the timeout, synchronous Agent reconciliation repeatedly decoded old
+ancestry records, delaying status calls. A late status observation could also
+replace an already observed terminal phase with the same turn's still-active
+worker phase. SessionLive now preserves failed, cancelled and completed phases
+for that turn until an explicit turn start or a different turn identity.
+Historical timeout and uncertain tool facts remain intact; this repair does
+not replay a Provider request or tool.
+
 ## Context compaction
 
 `Sigma.Agent.Compaction` shares the existing tool-boundary split and Provider

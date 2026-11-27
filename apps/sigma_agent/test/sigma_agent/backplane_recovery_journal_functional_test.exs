@@ -96,7 +96,9 @@ defmodule Sigma.Agent.BackplaneRecoveryJournalFunctionalTest do
     bytes = files(dir)
     [path] = Map.keys(bytes)
     raw = :erlang.binary_to_term(bytes[path], [:safe])
-    assert List.last(raw.recovery_journal.entries)["input"] === input
+    block_path = Path.join(path <> ".journal", raw.recovery_journal.head)
+    {:ok, block} = block_path |> File.read!() |> Sigma.Agent.Backplane.StoreJournal.decode()
+    assert block.entry["input"] === input
     assert {:ok, [completed]} = Store.recovery_journal(store, run.run_id)
     projected = get_in(completed, ["input", "context", "conversation", "messages", Access.at(0)])
     assert map_size(projected) == map_size(Map.from_struct(message))
@@ -193,6 +195,12 @@ defmodule Sigma.Agent.BackplaneRecoveryJournalFunctionalTest do
     assert {:error, %Error{class: :unsupported_capability}} =
              Store.recovery_journal(reopened, run.run_id)
 
+    assert {:ok, %{revision: 2}} = Store.load(reopened, run.run_id)
+    assert {:ok, %{revision: 3}} = Store.fence(reopened, run.run_id, 2, 1, 2)
+
+    assert {:error, %Error{class: :unsupported_capability}} =
+             Store.recovery_journal(reopened, run.run_id)
+
     assert :ok = Store.retire(reopened)
   end
 
@@ -212,10 +220,21 @@ defmodule Sigma.Agent.BackplaneRecoveryJournalFunctionalTest do
     frame = File.read!(path)
     assert byte_size(frame) < 2 * byte_size(image)
     raw = frame |> :zstd.decompress() |> IO.iodata_to_binary() |> :erlang.binary_to_term([:safe])
-    File.write!(path, :erlang.term_to_binary(raw, compressed: 6))
+    block_path = Path.join(path <> ".journal", raw.recovery_journal.head)
+    {:ok, block} = block_path |> File.read!() |> Sigma.Agent.Backplane.StoreJournal.decode()
+    legacy = Map.put(raw, :recovery_journal, %{version: 1, entries: [block.entry]})
+    legacy_bytes = :erlang.term_to_binary(legacy, compressed: 6)
+    File.write!(path, legacy_bytes)
     assert {:ok, ^before} = Store.load(store, run.run_id)
     assert {:ok, %{revision: 2}} = Store.fence(store, run.run_id, 1, 1, 2)
     assert :ok = Store.retire(store)
+
+    assert Enum.any?(Path.wildcard(path <> ".journal/*"), fn block_path ->
+             {:ok, block} =
+               block_path |> File.read!() |> Sigma.Agent.Backplane.StoreJournal.decode()
+
+             block[:legacy] == legacy_bytes
+           end)
 
     {:ok, reopened} = Store.open(path: dir)
     assert {:ok, %{revision: 2}} = Store.load(reopened, run.run_id)
