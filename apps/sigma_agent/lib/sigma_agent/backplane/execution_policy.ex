@@ -41,6 +41,9 @@ defmodule Sigma.Agent.Backplane.ExecutionPolicy do
   defp wait_duration("clock::sleep", arguments),
     do: Map.get(arguments, "duration_ms")
 
+  defp wait_duration("exec_command", arguments),
+    do: min(Map.get(arguments, "yield_time_ms", 10_000), 30_000)
+
   defp wait_duration("write_stdin", arguments),
     do: min(Map.get(arguments, "yield_time_ms", 5_000), 300_000)
 

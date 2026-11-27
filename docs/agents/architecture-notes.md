@@ -1,5 +1,30 @@
 # Architecture and acceptance history
 
+## Initial command yield alignment (2026-11-27)
+
+Backplane Runtime 1.10.107
+([#196](https://github.com/gsmlg-opt/backplane/issues/196)) separates the initial
+command wait from stdin polling: `exec_command` defaults to ten seconds and yields
+within thirty seconds with the same running session; empty stdin polls retain
+their five-minute bound. Sigma's root and child timeout selectors reserve the
+effective initial wait plus five seconds for result settlement.
+
+The release is published on Hex with documentation, and Sigma locks 1.10.107.
+Registry checksum and downloaded package contents match the qualified archive
+from Backplane commit `9334ba6a`. Against that downloaded package, eighteen
+runtime/policy cases and one Writer-backed Agent turn pass, including the real
+thirty-second command regression, command-number cases and root/child timeout
+cases. The Agent turn resumes the same command through stdin and persists exactly
+one initial command result.
+
+Standalone Runtime and Sigma's Elixir compilation pass with warnings as errors
+in isolated build directories; the consumer also rebuilds the command helper and
+Code Mode runner. Frontend assets are not qualified: the isolated checkout lacks
+generated frontend resources and logs a vendor prebundle error during compilation.
+The running service remains on 1.10.106; no restart or deployment was performed.
+Historical unknown outcomes and the separate command cancellation-proof gap are
+unchanged.
+
 ## Malformed tool arguments and session controls (2026-11-27)
 
 The live `fork_ad237257be91cb4e` transcript contained a function-style

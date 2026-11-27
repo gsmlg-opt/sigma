@@ -74,25 +74,55 @@ defmodule Sigma.Agent.BackplaneExecutionPolicyTest do
     end
   end
 
-  for hooks <- [RootTimeout, ChildTimeout], duration <- [600_000, 600_000.0] do
+  test "root and child initial command waits leave time to return a running session" do
+    context = %{host: %{native_tool_names: ["exec_command"]}}
+
+    for hooks <- [RootTimeout, ChildTimeout],
+        {arguments, expected} <- [
+          {%{}, 15_000},
+          {%{"yield_time_ms" => 0}, 5_000},
+          {%{"yield_time_ms" => 1_000}, 6_000},
+          {%{"yield_time_ms" => 1_800_000}, 35_000},
+          {%{"yield_time_ms" => 1_800_000.0}, 35_000}
+        ] do
+      assert {:ok, ^expected} =
+               hooks.tool_effect_timeout(
+                 %{tool_name: "exec_command", arguments: arguments},
+                 context
+               )
+    end
+  end
+
+  for hooks <- [RootTimeout, ChildTimeout],
+      {name, parameter} <- [{"wait_agent", "timeout_ms"}, {"exec_command", "yield_time_ms"}],
+      duration <- [600_000, 600_000.0] do
     @hooks hooks
     @duration duration
-    test "#{hooks} allows wait #{inspect(duration)} to exceed the generic effect allowance" do
+    @tool_name name
+    @parameter parameter
+    test "#{hooks} allows #{name} wait #{inspect(duration)} to exceed the generic effect allowance" do
       {:ok, registry} =
         ToolRegistry.register(%ToolRegistry{}, %{
-          tool_name: "wait_agent",
+          tool_name: @tool_name,
           tool_revision: 1,
           description: "Wait fixture",
           backend: Backend,
           backend_context: %{test: self()},
           schema: %{
             "type" => "object",
-            "properties" => %{"timeout_ms" => %{"type" => "integer"}}
+            "properties" => %{@parameter => %{"type" => "integer"}}
           },
           safety: %{read_only: true, retry_safe: true, parallel_safe: false}
         })
 
-      pid = start_conversation(hooks: @hooks, registry: registry)
+      pid =
+        start_conversation(
+          hooks: @hooks,
+          registry: registry,
+          effect_timeout: 500,
+          provider_context: %{test: self(), host: %{native_tool_names: [@tool_name]}}
+        )
+
       assert_receive {:provider, worker, _}
 
       send(
@@ -101,14 +131,14 @@ defmodule Sigma.Agent.BackplaneExecutionPolicyTest do
          [
            %{
              type: :tool_call_completed,
-             tool_call: %{id: "wait", name: "wait_agent", arguments: %{"timeout_ms" => @duration}}
+             tool_call: %{id: "wait", name: @tool_name, arguments: %{@parameter => @duration}}
            },
            done()
          ]}
       )
 
       assert_receive {:waiting, waiting}, 1_000
-      Process.sleep(150)
+      Process.sleep(600)
       send(waiting, :finish)
       assert_receive {:provider, next, _}, 1_000
       send(next, {:events, [done()]})
@@ -131,7 +161,12 @@ defmodule Sigma.Agent.BackplaneExecutionPolicyTest do
           provider_context: %{test: self(), host: %{native_tool_names: ["wait_agent"]}},
           registry: %ToolRegistry{},
           subscriber: self(),
-          authority: %{caller: "host", run_id: run_id, grants: ["wait_agent"], tool_revision: 1},
+          authority: %{
+            caller: "host",
+            run_id: run_id,
+            grants: ["wait_agent", "exec_command"],
+            tool_revision: 1
+          },
           run_timeout: :infinity,
           effect_timeout: 80
         ],

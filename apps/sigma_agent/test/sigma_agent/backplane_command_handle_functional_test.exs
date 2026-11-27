@@ -61,6 +61,45 @@ defmodule Sigma.Agent.BackplaneCommandHandleFunctionalTest do
     %{agent: handle.agent, path: path, dir: dir, provider: provider!()}
   end
 
+  @tag timeout: 45_000
+  test "initial wait yields a retained command and the same turn finishes it through stdin", c do
+    send_call(c.provider, "exec_command", %{
+      "cmd" => "printf started; read -r answer; printf 'finished:%s' \"$answer\"",
+      "yield_time_ms" => 1_800_000
+    })
+
+    provider = provider!(c.provider.params.session_id, 32_000)
+
+    assert %{"status" => "running", "session_id" => handle, "command_id" => handle} =
+             provider |> result!("exec_command") |> value!()
+
+    provider =
+      call!(provider, "write_stdin", %{
+        "session_id" => handle,
+        "chars" => "answer\n",
+        "yield_time_ms" => 1_000
+      })
+
+    assert %{
+             "command_id" => ^handle,
+             "exit_code" => 0,
+             "output" => "finished:answer",
+             "cleanup_status" => "confirmed"
+           } = provider |> result!("write_stdin") |> value!()
+
+    finish!(provider)
+    assert_receive {:agent_end, _}, 10_000
+    assert Sigma.Agent.status(c.agent).phase == :completed
+
+    assert {:ok, saved} = Log.snapshot(c.path)
+
+    assert Enum.count(
+             saved.messages,
+             &(&1.role == :tool_result and &1.tool_name == "exec_command")
+           ) ==
+             1
+  end
+
   test "EOF closes a real command input and retains its output and cleanup", c do
     provider =
       call!(c.provider, "exec_command", %{
@@ -369,7 +408,7 @@ defmodule Sigma.Agent.BackplaneCommandHandleFunctionalTest do
     })
   end
 
-  defp provider!(session \\ :any) do
+  defp provider!(session \\ :any, timeout \\ 10_000) do
     receive do
       {:command_handle_provider, pid, params} when session == :any ->
         %{pid: pid, params: params}
@@ -384,7 +423,7 @@ defmodule Sigma.Agent.BackplaneCommandHandleFunctionalTest do
       {:turn_error, error} ->
         flunk("command turn failed: #{inspect(error)}")
     after
-      10_000 -> flunk("command Provider did not start")
+      timeout -> flunk("command Provider did not start")
     end
   end
 
