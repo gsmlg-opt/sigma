@@ -4171,6 +4171,60 @@ defmodule Sigma.Web.SessionLiveTest do
              chat_snapshot(view).messages
   end
 
+  for phase <- [:failed, :cancelled, :completed] do
+    @terminal_phase phase
+    test "a status observation cannot revive a #{@terminal_phase} turn during worker finalization",
+         %{
+           conn: conn
+         } do
+      write_selectable_provider_configs()
+      session_id = unique_session_id("terminal-status")
+      Phoenix.PubSub.subscribe(Sigma.Web.PubSub, session_topic(@workdir, session_id))
+      Application.put_env(:sigma_web, :blocking_provider_pid, self())
+      on_exit(fn -> Application.delete_env(:sigma_web, :blocking_provider_pid) end)
+
+      with_mock_provider(BlockingTurnProvider, fn ->
+        {:ok, view, _} = live_loaded(conn, session_path(session_id))
+
+        render_hook(view, "chat.send", %{
+          "id" => "messages",
+          "conversation_id" => session_id,
+          "text" => "Controlled turn"
+        })
+
+        assert_reply(view, %{status: "ok", admission: "accepted"})
+        assert_receive {:web_provider_waiting, provider, _}, 3_000
+        turn = chat_snapshot(view).runtime.turnId
+
+        try do
+          terminal_event =
+            case @terminal_phase do
+              :failed -> {:turn_error, "timeout: commit acknowledgement timed out"}
+              :cancelled -> {:turn_cancelled}
+              :completed -> {:turn_completed, turn}
+            end
+
+          send(view.pid, terminal_event)
+
+          send(
+            view.pid,
+            {:metrics, :turn_finished,
+             %{turn_id: turn, session_id: session_id, revision: 1, status: @terminal_phase}}
+          )
+
+          render_async(view, 3_000)
+          assert %{active: false, phase: @terminal_phase} = chat_snapshot(view).runtime
+
+          send(view.pid, {:turn_start})
+          assert %{active: true, phase: :streaming_provider} = chat_snapshot(view).runtime
+        after
+          send(provider, :release_web_provider)
+          assert_receive {:turn_completed, ^turn}, 5_000
+        end
+      end)
+    end
+  end
+
   test "restores persisted usage as owned by the logical route session", %{conn: conn} do
     session_id = unique_session_id("persisted_metrics")
     storage_path = session_storage_path(session_id)

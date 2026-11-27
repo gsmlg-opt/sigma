@@ -436,10 +436,18 @@ defmodule Sigma.Web.SessionLive do
 
   def handle_async(:agent_status, {:ok, %{phase: phase} = status}, socket) do
     phase =
-      if active_runtime_phase?(socket.assigns.runtime_status) and
-           not active_runtime_phase?(phase),
-         do: socket.assigns.runtime_status,
-         else: phase
+      cond do
+        socket.assigns.runtime_status in [:completed, :failed, :cancelled] and
+            socket.assigns.turn_id == status[:turn_id] ->
+          socket.assigns.runtime_status
+
+        active_runtime_phase?(socket.assigns.runtime_status) and
+            not active_runtime_phase?(phase) ->
+          socket.assigns.runtime_status
+
+        true ->
+          phase
+      end
 
     {:noreply, socket |> apply_agent_status(%{status | phase: phase}) |> queue_chat_state()}
   end
