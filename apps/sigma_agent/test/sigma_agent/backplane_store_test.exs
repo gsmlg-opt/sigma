@@ -204,6 +204,47 @@ defmodule Sigma.Agent.Backplane.StoreTest do
     assert runtime_files(root) == before
   end
 
+  test "a fresh BEAM reads persisted filesystem failure causes without changing records", %{
+    root: root,
+    faults: faults
+  } do
+    assert {:ok, context} = open(root, faults)
+
+    run = base_run("cold-filesystem-error")
+
+    assert {:ok, _} =
+             RuntimeStore.store(Store, context, run, %{
+               command: {:admit, 10, %{state: :running}}
+             })
+
+    assert {:ok, %{run: running}} = Store.load(context, run.run_id)
+
+    assert {:ok, _} =
+             RuntimeStore.store(Store, context, running, %{
+               command:
+                 {:finish, 11,
+                  %{
+                    run_id: run.run_id,
+                    incarnation: 1,
+                    status: :failed,
+                    outcome: %{
+                      error:
+                        Error.new(:execution_failure, "provider lifecycle commit failed",
+                          cause: :enospc
+                        )
+                    }
+                  }}
+             })
+
+    assert {:ok, expected} = Store.load(context, run.run_id)
+    before = runtime_files(root)
+    {output, status, result_path} = cold_reader(root, run.run_id, "filesystem-error")
+    assert status == 0, output
+    assert output =~ "COLD_STORE_OK"
+    assert :erlang.binary_to_term(File.read!(result_path), [:safe]) == expected
+    assert runtime_files(root) == before
+  end
+
   test "fresh BEAM decoding refuses an atom outside the installed application vocabulary", %{
     root: root,
     faults: faults
@@ -352,7 +393,7 @@ defmodule Sigma.Agent.Backplane.StoreTest do
 
     File.write!(script, ~S'''
     [root, run_id, result_path, mode] = System.argv()
-    if mode == "complete" do
+    if mode in ["complete", "filesystem-error"] do
       if :code.is_loaded(Backplane.AgentRuntime.Kernel), do: raise("reader preloaded Runtime")
       try do
         String.to_existing_atom("settled_children")
@@ -361,10 +402,18 @@ defmodule Sigma.Agent.Backplane.StoreTest do
         ArgumentError -> :ok
       end
     end
+    if mode == "filesystem-error" do
+      try do
+        String.to_existing_atom("enospc")
+        raise "reader preloaded filesystem failure cause"
+      rescue
+        ArgumentError -> :ok
+      end
+    end
     {:ok, _registry} = Registry.start_link(keys: :unique, name: Sigma.Agent.RepositoryRegistry)
     {:ok, store} = Sigma.Agent.Backplane.Store.open(path: root)
 
-    if mode == "complete" do
+    if mode in ["complete", "filesystem-error"] do
       {:ok, record} = Sigma.Agent.Backplane.Store.load(store, run_id)
       File.write!(result_path, :erlang.term_to_binary(record))
       IO.puts("COLD_STORE_OK")

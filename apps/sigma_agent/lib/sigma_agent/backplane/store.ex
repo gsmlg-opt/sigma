@@ -270,7 +270,8 @@ defmodule Sigma.Agent.Backplane.Store do
 
   defp load_record_schema do
     with {:ok, modules} <- record_modules(),
-         :ok <- Code.ensure_all_loaded(Enum.uniq(modules)) do
+         # File operation failures retain OTP's POSIX atoms as their original cause.
+         :ok <- Code.ensure_all_loaded(Enum.uniq([:erl_posix_msg | modules])) do
       :ok
     else
       {:error, reason} -> {:error, {:runtime_store_schema_unavailable, reason}}
