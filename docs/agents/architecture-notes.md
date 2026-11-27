@@ -48,6 +48,12 @@ permission cases were not run.
 The separate real-Store commit-timeout case also passed (seed 331408): after
 the exact timeout and Store resumption, the same Agent completed a fresh
 controlled turn with the original image context intact.
+After merging the concurrent skills SDK adoption, the published Skill Protocol
+1.10.103 consumer passed all 18 selected journal/storage/timeout/cloud-search
+cases (seed 607636) and the five Web cases again (seed 453700). Runtime remains
+locked to 1.10.104; dependency requirements retain the two-component `~> 1.10`
+form. The matching isolated development snapshot passed forced compilation
+with warnings as errors.
 
 An independent copy of the actual failed continuation loaded its legacy record
 in 2,010 ms; subsequent loads took 8,554–24,904 microseconds. A public fence on
