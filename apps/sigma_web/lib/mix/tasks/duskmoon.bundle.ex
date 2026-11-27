@@ -66,7 +66,8 @@ defmodule Mix.Tasks.Duskmoon.Bundle do
     case OXC.bundle(entry,
            cwd: File.cwd!(),
            format: :esm,
-           modules: [node_modules_path],
+           # Keep importer-relative lookup for nested npm dependencies.
+           modules: ["node_modules", node_modules_path],
            define: %{"process.env.NODE_ENV" => ~s("development")},
            exports: :named,
            preserve_entry_signatures: :strict

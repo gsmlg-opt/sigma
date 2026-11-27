@@ -221,7 +221,7 @@ defmodule Sigma.Agent.ContextPolicy do
     with {:ok, format} <- Map.fetch(@image_formats, mime),
          {:ok, bytes} <- Base.decode64(String.replace_prefix(data, "data:#{mime};base64,", "")),
          {^mime, width, height, _} when width > 0 and height > 0 <-
-           ExImageInfo.info(bytes, format) do
+           Formata.ImageInfo.info(bytes, format) do
       4 * min(10_000, div(width + 31, 32) * div(height + 31, 32))
     else
       _ -> @image_bytes

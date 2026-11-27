@@ -28,7 +28,6 @@ defmodule Sigma.Agent.MixProject do
       {:sigma_protocol, in_umbrella: true},
       {:sigma_ai, in_umbrella: true},
       {:sigma_coding, in_umbrella: true},
-      {:ex_image_info, "~> 1.0"},
       {:formata, "~> 0.4"}
     ]
   end
