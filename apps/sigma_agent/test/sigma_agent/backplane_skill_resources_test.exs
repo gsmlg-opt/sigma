@@ -571,6 +571,23 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
 
   if "skills::search" in NativeTools.skill_names() and
        Sigma.Session.Skills.RemoteSource.discovery_available?() do
+    test "cloud authority searches Backplane and reads the returned cloud package", ctx do
+      configure_cloud_source!(ctx)
+      {binding, context, _profile} = bound!(ctx.dir)
+
+      assert {:ok, %{skills: [%{authority: "cloud", package: package}]}} =
+               execute(context, binding, "skills::search", %{
+                 "authority" => "cloud",
+                 "source_id" => "remote-one",
+                 "query" => "quartzneedle"
+               })
+
+      assert {:ok, %{contents: contents}} =
+               execute(context, binding, "skills::read", %{"package" => package})
+
+      assert contents =~ "Remote quartzneedle"
+    end
+
     test "remote defaults and search issue exact packages and read complete bundle resources",
          ctx do
       alias Sigma.Session.ConfigManager

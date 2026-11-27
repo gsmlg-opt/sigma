@@ -8,7 +8,7 @@ Existing per-skill global choices apply again when the directory is re-enabled.
 
 Add or edit a remote source and select **Backplane defaults and search** under
 **Model discovery**. Sources retain manual invocation as their default mode.
-The connection uses its existing Backplane provider origin and credential.
+The connection uses its existing Backplane provider origin and authentication.
 Backplane's **Always return** selection supplies the default summaries. Search
 covers published skills outside that selection. Empty defaults remain empty.
 
@@ -17,8 +17,8 @@ The native model workflow is
 1. Call `skills::list` with `authority: "cloud"` for the configured Backplane defaults.
    Executor listings also include these skills alongside local and plugin skills.
    Use each page cursor with the authority that issued it.
-2. On runtimes exposing `skills::search`, choose the configured `source_id` from `sources` and call it with
-   that `source_id` and a task-related `query`. Authority defaults to `executor`.
+2. Choose the configured `source_id` from `sources` and call `skills::search` with
+   that `source_id`, a task-related `query`, and `authority: "cloud"`.
    Each source owns its search cursor and can be searched independently.
 3. Pass the returned opaque `package` to `skills::read`. Relative resources use
    the returned `skill://` resource prefix. Reads pin the discovered revision and
@@ -53,7 +53,6 @@ skill directories retain their existing behavior.
 
 Creation sends one POST. An existing slug returns `already_exists`.
 
-Sigma pins the Skill Protocol SDK to upstream commit
-`31a161f3fcee5687ed20d4e5ec1452552c105805` for default discovery.
-The locked Agent Runtime exposes native list and read. Native search and creation
-require the runtime release containing those extensions. [Backplane #193](https://github.com/gsmlg-opt/backplane/issues/193)
+Sigma uses the published `backplane_skill_protocol` 1.10.103 and
+`backplane_agent_runtime` 1.10.104 Hex packages. These versions provide native
+list, search, read, and creation through the configured source.

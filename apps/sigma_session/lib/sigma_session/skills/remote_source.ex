@@ -57,7 +57,6 @@ defmodule Sigma.Session.Skills.RemoteSource do
     end
   end
 
-  # TODO(upstream): gsmlg-opt/backplane#193 Adopt the published discovery SDK.
   def discovery_available? do
     Code.ensure_loaded?(Backplane) and function_exported?(Backplane, :search, 2)
   end
@@ -68,7 +67,6 @@ defmodule Sigma.Session.Skills.RemoteSource do
       else: discovery_unavailable()
   end
 
-  # TODO(upstream): gsmlg-opt/backplane#193 Adopt the published creation SDK.
   def create_available? do
     Code.ensure_loaded?(Client) and function_exported?(Client, :create, 3)
   end

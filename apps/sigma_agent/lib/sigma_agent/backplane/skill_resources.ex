@@ -128,10 +128,11 @@ defmodule Sigma.Agent.Backplane.SkillResources do
 
   defp dispatch(
          "skills::search",
-         %{"authority" => "executor", "source_id" => source_id, "query" => query} = args,
+         %{"authority" => authority, "source_id" => source_id, "query" => query} = args,
          operation,
          state
-       ) do
+       )
+       when authority in ["executor", "cloud"] do
     params = %{source_id: source_id, q: query, cursor: args["cursor"], limit: args["limit"]}
 
     cancelled? = fn -> not match?({:ok, _}, validate(state.binding, operation)) end
@@ -139,7 +140,7 @@ defmodule Sigma.Agent.Backplane.SkillResources do
     case apply(RemoteAdapter, :search, [params, [cancelled?: cancelled?]]) do
       {:ok, result}
       when map_size(state.packages) + length(result.items) <= @max_catalog_entries ->
-        entries = Enum.map(result.items, &remote_entry/1)
+        entries = Enum.map(result.items, &remote_entry(&1, authority))
 
         packages =
           entries |> Enum.filter(& &1.listed.model_readable) |> Map.new(&{&1.listed.package, &1})
