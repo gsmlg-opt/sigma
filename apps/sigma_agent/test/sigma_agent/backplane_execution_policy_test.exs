@@ -56,9 +56,28 @@ defmodule Sigma.Agent.BackplaneExecutionPolicyTest do
     assert_receive {:agent_runtime, _, %{type: :run_cancelled}}, 1_000
   end
 
-  for hooks <- [RootTimeout, ChildTimeout] do
+  test "root and child command waits accept integer-valued JSON numbers" do
+    context = %{host: %{native_tool_names: ["write_stdin"]}}
+
+    for hooks <- [RootTimeout, ChildTimeout] do
+      assert {:ok, 65_000} =
+               hooks.tool_effect_timeout(
+                 %{tool_name: "write_stdin", arguments: %{"yield_time_ms" => 60_000.0}},
+                 context
+               )
+
+      assert :default =
+               hooks.tool_effect_timeout(
+                 %{tool_name: "write_stdin", arguments: %{"yield_time_ms" => 60_000.5}},
+                 context
+               )
+    end
+  end
+
+  for hooks <- [RootTimeout, ChildTimeout], duration <- [600_000, 600_000.0] do
     @hooks hooks
-    test "#{hooks} allows an admitted wait to exceed the generic effect allowance" do
+    @duration duration
+    test "#{hooks} allows wait #{inspect(duration)} to exceed the generic effect allowance" do
       {:ok, registry} =
         ToolRegistry.register(%ToolRegistry{}, %{
           tool_name: "wait_agent",
@@ -82,7 +101,7 @@ defmodule Sigma.Agent.BackplaneExecutionPolicyTest do
          [
            %{
              type: :tool_call_completed,
-             tool_call: %{id: "wait", name: "wait_agent", arguments: %{"timeout_ms" => 600_000}}
+             tool_call: %{id: "wait", name: "wait_agent", arguments: %{"timeout_ms" => @duration}}
            },
            done()
          ]}

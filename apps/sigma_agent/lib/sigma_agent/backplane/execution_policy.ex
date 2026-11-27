@@ -22,6 +22,9 @@ defmodule Sigma.Agent.Backplane.ExecutionPolicy do
         duration when is_integer(duration) and duration >= 0 ->
           {:ok, min(duration + @settlement_allowance, 2_147_483_647)}
 
+        duration when is_float(duration) and duration >= 0 and duration == trunc(duration) ->
+          {:ok, min(trunc(duration) + @settlement_allowance, 2_147_483_647)}
+
         _ ->
           :default
       end

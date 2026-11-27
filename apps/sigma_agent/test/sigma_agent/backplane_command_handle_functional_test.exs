@@ -83,6 +83,52 @@ defmodule Sigma.Agent.BackplaneCommandHandleFunctionalTest do
     assert hd(errors).metadata["structured_result"]["error"]["class"] == "not_found"
   end
 
+  test "integer-valued JSON numbers resume a command after fractional input is rejected", c do
+    provider =
+      call!(c.provider, "exec_command", %{
+        "cmd" => "read line; printf '%s' \"$line\"",
+        "yield_time_ms" => 20
+      })
+
+    assert %{"status" => "running", "session_id" => handle} =
+             provider |> result!("exec_command") |> value!()
+
+    provider =
+      call!(provider, "write_stdin", %{
+        "session_id" => handle + 0.25,
+        "chars" => "unexpected\n"
+      })
+
+    error = result!(provider, "write_stdin")
+    assert error.is_error
+    assert value!(error)["error"]["class"] == "validation"
+
+    provider =
+      call!(provider, "write_stdin", %{
+        "session_id" => handle / 1,
+        "chars" => "resumed\n",
+        "yield_time_ms" => 1_000.0
+      })
+
+    result = result!(provider, "write_stdin")
+    refute result.is_error
+    assert %{"exit_code" => 0, "output" => "resumed"} = value!(result)
+    finish!(provider)
+    assert_receive {:agent_end, _}, 10_000
+    assert Sigma.Agent.status(c.agent).phase == :completed
+
+    assert {:ok, snapshot} = Log.snapshot(c.path)
+
+    call =
+      snapshot.messages
+      |> Enum.filter(&(&1.role == :assistant))
+      |> Enum.flat_map(& &1.content)
+      |> Enum.find(&(Map.get(&1, :id) == result.tool_call_id))
+
+    assert call.arguments["session_id"] === handle / 1
+    assert call.arguments["yield_time_ms"] === 1_000.0
+  end
+
   @tag timeout: 60_000
   test "real QuickBEAM settles both nested calls and continues after a completed handle error",
        c do

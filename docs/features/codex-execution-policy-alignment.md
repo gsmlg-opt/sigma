@@ -74,6 +74,50 @@ command helper accepts output cap zero only for the explicit truncation mode;
 it must be rebuilt with `mix backplane.pty.build` after adoption. An older
 helper refuses that mode. macOS uses the existing session helper.
 
+### JSON numeric command arguments
+
+JSON Schema accepts an integer-valued number such as `412.0` for a command
+handle. Backplane's integer-only handle guard previously sent that value into
+the opaque-job compatibility path, which returned `session_id is required`
+before writing or polling. Because the raw error came from a mutating tool,
+Runtime treated it as uncertain and stopped the run. The generic message
+`worker stopped; external effects require host reconciliation` did not prove
+that a worker had crashed.
+
+[backplane#194](https://github.com/gsmlg-opt/backplane/issues/194) owns command
+argument normalization and genuine rejection before dispatch, published in
+Runtime 1.10.104. Sigma's root and
+child timeout selector also accepts integer-valued floating-point wait durations,
+so `yield_time_ms: 60000.0` receives the same 65-second effect allowance as
+`60000`. Fractional durations are not truncated by the selector. Canonical
+arguments retain their original numeric representation.
+
+The 2026-11-27 09:18 failure in `session_ZRx8Ss-v_ol1fNT3` followed this path
+with handle `412.0`. A disposable public Store read preserved all six earlier
+command results and the last uncertain `write_stdin` intent without a result.
+The earlier 08:36 failure separately recorded `provider lifecycle commit failed`
+with cause `enospc`. Neither observation authorizes rewriting the old outcome,
+inventing a tool result, or replaying a command. Original transcript and Runtime
+file hashes remained unchanged during inspection.
+
+The ENOSPC record was complete ETF inside a valid Zstandard frame. A cold BEAM
+rejected its previously unseen `enospc` cause before validating the snapshot.
+Store now loads the fixed OTP `erl_posix_msg` module alongside its deployed
+application schema, so persisted filesystem failure causes are readable without
+deriving atoms from stored data. A separate-BEAM regression preserves the exact
+failed snapshot and record bytes; the ordinary completed-Conversation cold-read
+regression also passes. Continuation still requires the existing lifetime and
+settlement acknowledgements; readable history alone does not supply them.
+
+With the published Runtime 1.10.104 locked, all four actual root/child command
+checks, seven execution-policy checks and the two selected cold-read checks
+pass. The new command regression rejects fractional input, resumes the retained
+command using an integral float, completes the same turn and preserves the
+original floating-point arguments in JSONL. Upstream's five command tests also
+verify genuine rejection settlement and unchanged post-dispatch uncertainty.
+These controlled checks do not submit another model request in the user's
+session or establish the outcome of its unfinished historical tool call.
+
 ## Context compaction
 
 `Sigma.Agent.Compaction` shares the existing tool-boundary split and Provider
