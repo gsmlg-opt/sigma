@@ -66,6 +66,26 @@ and Runtime files also remained unchanged during these checks. Evidence is
 under `/Volumes/Data/tmp/sigma-journal-acceptance-zfayuqdh/`. These are local
 controlled and copied-data checks, not another model run in the user's session.
 
+Cold recovery of a retired run also accepts a fully settled boundary between
+Provider requests: `running` or `cancelling`, no active Provider/tools/children/
+dependencies/wait, empty effects/outbox and only consumed/cancelled intents.
+Require a nonempty original-incarnation Provider inventory, every exact Provider
+DOWN and all existing host retirement receipts. The public fence/cancel/cleanup
+sequence reaches `cancelled`, retaining historical context, results and intent
+facts. Failed writes during any of those three transitions can be retried from
+the authoritative revision. Active-Provider and terminal-unknown recovery keep
+their separate existing requirements.
+
+The root recovery matrix passed 14 cases (seed 126613), including an actual
+filesystem publication followed by a lost Provider-completion ACK, a completed
+clock result, cold reopening and a fresh controlled turn. Missing Provider DOWN
+still blocks without changing the old snapshot. On an independent copy of the
+affected session, public root reconciliation took 585 ms and reached revision
+692 from 689, preserving all 51 results, 34 Provider attempts, 85 consumed intents,
+the exact legacy prefix and transcript bytes. No Agent was started by that
+copied-data check. The five existing child recovery cases also passed
+(seed 705550), along with strict compilation, scoped formatting and diff checks.
+
 ## QuickBEAM Code Mode consumer wiring (2026-11-26)
 
 The migration consumer wiring uses only Backplane's public Code Mode APIs.

@@ -153,6 +153,24 @@ for that turn until an explicit turn start or a different turn identity.
 Historical timeout and uncertain tool facts remain intact; this repair does
 not replay a Provider request or tool.
 
+Cold reopening also exposed a missing host recovery branch. The acknowledged
+`provider_completed` transition had consumed the last Provider intent and
+cleared the active Provider, while leaving the run `running` between requests.
+RunRecovery previously accepted only a run with an active Provider identity.
+The affected run instead had 85 consumed intents, 51 settled tool results and
+no pending work. All 34 original Providers and the native host, async hooks and
+SessionEnd had actual retirement confirmations after orderly shutdown.
+
+Recovery now accepts that empty boundary in `running` or `cancelling`, while
+still requiring original run/incarnation identities, no effects/outbox/wait or
+unfinished work, and every original Provider and host retirement confirmation.
+The existing public Store fence, cancel and confirmed cleanup transitions end
+the old run as `cancelled`; they preserve its context, settled results, original
+Provider attempts, consumed intents and transcript. A fresh prompt starts a new
+run. Missing retirement facts and historical uncertain effects remain blocked.
+This is a Sigma guard correction using the published Runtime APIs; no upstream
+package change or synthetic acknowledgement is needed.
+
 ## Context compaction
 
 `Sigma.Agent.Compaction` shares the existing tool-boundary split and Provider

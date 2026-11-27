@@ -68,11 +68,20 @@ defmodule Sigma.Agent.BackplaneGoalRootRecoveryFunctionalTest do
                end),
                do: :injected_root_recovery_transition_failure
 
+          {:lose_ack, transition} ->
+            if Enum.any?(get_in(record, [:transition, :events]) || [], fn event ->
+                 event.type == transition
+               end),
+               do: :injected_root_runtime_ack_loss
+
           :allow ->
             nil
         end
 
       if cause do
+        if match?({:lose_ack, _}, mode),
+          do: :ok = Store.FileSystem.write_atomic(path, bytes)
+
         send(owner, {:root_recovery_write_rejected, cause})
         {:error, cause}
       else
@@ -573,6 +582,193 @@ defmodule Sigma.Agent.BackplaneGoalRootRecoveryFunctionalTest do
     send(fresh.pid, {:root_recovery_response, [%{type: :text, text: "New work completed"}]})
     assert_receive {:agent_end, _}, 8_000
     assert {:ok, ^reconciled} = Store.load(actual_store, identity.run_id)
+  end
+
+  test "production reopening settles a quiescent root without replaying its completed work", c do
+    {identity, retained} = quiescent_root!(c)
+    journal = File.read!(c.path)
+
+    assert {:ok, restored} = Runtime.get_session(c.dir, @session, c.opts)
+    assert {:ok, %{goal: nil}} = Sigma.Agent.goal(restored.agent)
+    assert {:error, {:already_started, store}} = Store.start_link(path: c.path <> ".runtime")
+    assert {:ok, terminal} = Store.load(store, identity.run_id)
+    assert terminal.run.state == :cancelled
+    assert terminal.run.incarnation == identity.incarnation + 1
+    assert terminal.revision == retained.revision + 3
+    assert terminal.run.tool_results === retained.run.tool_results
+    assert terminal.run.execution_intents === retained.run.execution_intents
+    assert terminal.run.context === retained.run.context
+    assert File.read!(c.path) === journal
+    refute_receive {:root_recovery_provider, _, _}, 100
+
+    assert :ok = Sigma.Agent.subscribe(restored.agent)
+
+    assert {:accepted, _} =
+             Sigma.Agent.prompt(restored.agent, "Start fresh after the saved boundary")
+
+    fresh = provider!()
+    refute fresh.params.turn_id == identity.run_id
+    send(fresh.pid, {:root_recovery_response, [%{type: :text, text: "Fresh turn completed"}]})
+    assert_receive {:agent_end, _}, 8_000
+    assert {:ok, ^terminal} = Store.load(store, identity.run_id)
+  end
+
+  test "quiescent root recovery still requires every original Provider DOWN", c do
+    {identity, retained} = quiescent_root!(c)
+    %{store: store, writer: writer} = recovery_owners!(c)
+    path = Path.join(c.path <> ".runtime", "provider-lifecycle.etf")
+    bytes = File.read!(path)
+    ledger = :erlang.binary_to_term(bytes, [:safe])
+    [provider | _] = Map.values(retained.run.provider_attempts)
+    assert %{status: :stopped} = ledger.attempts[provider]
+    incomplete = %{ledger | attempts: Map.delete(ledger.attempts, provider)}
+    File.write!(path, :erlang.term_to_binary(incomplete, compressed: 6))
+
+    assert {:error, %Error{class: :not_found}} =
+             GoalIntegration.open(
+               writer: writer,
+               transcript_path: c.path,
+               cwd: c.dir,
+               root: c.goal_root,
+               runtime_store: store,
+               host_context: %{}
+             )
+
+    assert {:ok, ^retained} = Store.load(store, identity.run_id)
+    refute_receive {:root_recovery_provider, _, _}, 100
+    File.write!(path, bytes)
+  end
+
+  for {failure, state, revisions} <-
+        [{:fence, :running, 0}, {:cancel, :running, 1}, {:cleanup, :cancelling, 2}] do
+    test "quiescent recovery resumes after a failed #{failure} write", c do
+      {identity, retained} = quiescent_root!(c)
+      %{store: store} = recovery_owners!(c)
+
+      mode =
+        case unquote(failure) do
+          :fence -> {:reject_fence, identity.incarnation}
+          :cancel -> {:reject_transition, "run.cancelling"}
+          :cleanup -> {:reject_transition, "run.cancelled"}
+        end
+
+      set_fault(c.ack_fault, mode)
+
+      for _ <- 1..2 do
+        assert {:ok, before} = Store.load(store, identity.run_id)
+
+        assert {:error, %Error{class: :execution_failure}} =
+                 Sigma.Agent.Backplane.RunRecovery.reconcile_root(store, identity, before)
+
+        assert {:ok, saved} = Store.load(store, identity.run_id)
+        assert saved.run.state == unquote(state)
+        assert saved.revision == retained.revision + unquote(revisions)
+        assert saved.run.tool_results === retained.run.tool_results
+        assert saved.run.execution_intents === retained.run.execution_intents
+      end
+
+      set_fault(c.ack_fault, :allow)
+      assert {:ok, before} = Store.load(store, identity.run_id)
+
+      assert {:ok, terminal} =
+               Sigma.Agent.Backplane.RunRecovery.reconcile_root(store, identity, before)
+
+      assert terminal.run.state == :cancelled
+      assert terminal.revision == retained.revision + 3
+      assert terminal.run.context === retained.run.context
+      assert terminal.run.tool_results === retained.run.tool_results
+      assert terminal.run.execution_intents === retained.run.execution_intents
+      refute_receive {:root_recovery_provider, _, _}, 100
+    end
+  end
+
+  defp quiescent_root!(c) do
+    repository = Runtime.lookup(c.dir, :supervisor)
+    assert :ok = DynamicSupervisor.terminate_child(Sigma.Agent.DynamicSupervisor, repository)
+    assert :ok = GoalStore.retire(c.goal_root)
+
+    store =
+      start_supervised!(
+        {Store, path: c.path <> ".runtime", filesystem: {FaultableFileSystem, c.ack_fault}},
+        id: :quiescent_root_store,
+        restart: :temporary
+      )
+
+    assert {:ok, handle} =
+             Runtime.get_session(c.dir, @session, Keyword.put(c.opts, :backplane_store, store))
+
+    assert :ok = Sigma.Agent.subscribe(handle.agent)
+
+    assert {:accepted, _} =
+             Sigma.Agent.prompt(handle.agent, "Read the clock before the storage fault")
+
+    first = provider!()
+
+    send(
+      first.pid,
+      {:root_recovery_response,
+       [
+         %{
+           type: :tool_call,
+           id: "settled-clock",
+           name: "clock::curr_time",
+           arguments: %{},
+           input_kind: :function
+         }
+       ]}
+    )
+
+    next = provider!()
+    monitor = Process.monitor(next.pid)
+    assert {:ok, log} = Log.snapshot(c.path)
+    assert {:ok, [identity]} = GoalRuns.list(c.goal_root, log.session_id)
+    set_fault(c.ack_fault, {:lose_ack, "run.provider_completed"})
+
+    send(
+      next.pid,
+      {:root_recovery_response,
+       [
+         %{
+           type: :tool_call,
+           id: "unstarted-goal",
+           name: "create_goal",
+           arguments: %{"objective" => "Must not replay"},
+           input_kind: :function
+         }
+       ]}
+    )
+
+    assert_receive {:root_recovery_write_rejected, :injected_root_runtime_ack_loss},
+                   8_000
+
+    assert_receive {:DOWN, ^monitor, :process, _, _}, 8_000
+    assert_receive {:agent_end, _}, 8_000
+    assert {:ok, retained} = Store.load(store, identity.run_id)
+    assert retained.run.state == :running
+    assert retained.run.active_provider == nil
+    assert map_size(retained.run.tool_results) == 1
+
+    assert Kernel.cleanup_requirements(retained.run) == %{
+             provider: nil,
+             tools: [],
+             children: [],
+             dependencies: []
+           }
+
+    assert retained.effects == []
+    assert retained.outbox == []
+
+    assert Enum.all?(retained.run.execution_intents, fn {_key, intent} ->
+             intent.status in [:consumed, :cancelled]
+           end)
+
+    set_fault(c.ack_fault, :allow)
+    assert {:ok, %{status: :confirmed, capture: :durable}} = Sigma.Agent.retire_host(handle.agent)
+    repository = Runtime.lookup(c.dir, :supervisor)
+    assert :ok = DynamicSupervisor.terminate_child(Sigma.Agent.DynamicSupervisor, repository)
+    assert :ok = Store.retire(store)
+    assert :ok = GoalStore.retire(c.goal_root)
+    {identity, retained}
   end
 
   defp recovery_owners!(c) do

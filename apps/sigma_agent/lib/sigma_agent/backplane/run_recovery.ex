@@ -140,6 +140,9 @@ defmodule Sigma.Agent.Backplane.RunRecovery do
           run.incarnation < identity.incarnation ->
         conflict(identity, "provider-only recovery run identity changed")
 
+      run.state in [:running, :cancelling] and is_nil(provider) ->
+        quiescent(identity, snapshot, work, intents)
+
       run.state not in @active or not is_map(provider) or
         ProviderLifecycle.validate_identity(provider) != :ok or
         provider.run_id != identity.run_id or provider.incarnation != identity.incarnation ->
@@ -158,6 +161,25 @@ defmodule Sigma.Agent.Backplane.RunRecovery do
       true ->
         :ok
     end
+  end
+
+  defp quiescent(identity, snapshot, work, intents) do
+    attempts = snapshot.run[:provider_attempts]
+
+    if work == %{provider: nil, tools: [], children: [], dependencies: []} and
+         is_nil(snapshot.run[:active_wait]) and snapshot.effects == [] and snapshot.outbox == [] and
+         is_map(intents) and
+         Enum.all?(intents, fn
+           {_key, %{status: status}} -> status in [:consumed, :cancelled]
+           _ -> false
+         end) and is_map(attempts) and map_size(attempts) > 0 and
+         Enum.all?(attempts, fn {attempt_id, provider} ->
+           ProviderLifecycle.validate_identity(provider) == :ok and
+             provider.attempt_id == attempt_id and provider.run_id == identity.run_id and
+             provider.incarnation == identity.incarnation
+         end),
+       do: :ok,
+       else: conflict(identity, "quiescent recovery requires only settled original work")
   end
 
   defp provider_intents?(intents, provider, outbox, statuses \\ [:started])
@@ -247,7 +269,9 @@ defmodule Sigma.Agent.Backplane.RunRecovery do
   defp stopped_providers(store, run) do
     attempts = run[:provider_attempts]
 
-    if is_map(attempts) and attempts[run.active_provider.attempt_id] == run.active_provider do
+    if is_map(attempts) and map_size(attempts) > 0 and
+         (is_nil(run.active_provider) or
+            attempts[run.active_provider.attempt_id] == run.active_provider) do
       Enum.reduce_while(attempts, :ok, fn {attempt_id, provider}, :ok ->
         with :ok <- ProviderLifecycle.validate_identity(provider),
              true <- attempt_id == provider.attempt_id and provider.run_id == run.run_id,
