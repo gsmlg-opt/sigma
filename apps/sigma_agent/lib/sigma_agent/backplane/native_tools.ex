@@ -36,7 +36,7 @@ defmodule Sigma.Agent.Backplane.NativeTools do
   def plugin_names, do: @plugin_names
   def discovery_names, do: @discovery_names
   def environment_names, do: @environment_names
-  # TODO(upstream): gsmlg-opt/backplane#193 Adopt the published skill extensions.
+
   def skill_names do
     runtime = Backplane.AgentRuntime.Codex.ExtensionRuntime
     Code.ensure_loaded?(runtime)
