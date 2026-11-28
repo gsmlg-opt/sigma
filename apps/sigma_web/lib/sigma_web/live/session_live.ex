@@ -5875,6 +5875,8 @@ defmodule Sigma.Web.SessionLive do
       |> Enum.map(fn skill ->
         %{
           kind: "skill",
+          sourceId: skill.source_id,
+          skillId: skill.skill_id,
           value: "/skill #{skill.reference}",
           reference: skill.reference,
           name: skill.name,

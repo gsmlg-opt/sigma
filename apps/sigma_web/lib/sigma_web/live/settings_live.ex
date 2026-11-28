@@ -3,6 +3,7 @@ defmodule Sigma.Web.SettingsLive do
 
   alias Sigma.Agent.ContextBuilder
   alias Sigma.Session.{ConfigEvents, ConfigManager, Providers, Skills}
+  alias Sigma.Web.SkillSelection
   alias Phoenix.LiveView.AsyncResult
 
   @credential_ref_regex ~r/^\{\{credential:([^}]+)\}\}$/
@@ -24,7 +25,7 @@ defmodule Sigma.Web.SettingsLive do
      |> assign(:credential_form, nil)
      |> assign(:deleting_credential, nil)
      |> assign(:skills_query, "")
-     |> assign(:selected_skill_names, [])
+     |> assign(:selected_skill_ids, MapSet.new())
      |> assign(:hooks_file, "")
      |> assign(:selected_id, nil)}
   end
@@ -187,7 +188,7 @@ defmodule Sigma.Web.SettingsLive do
                 <.render_skills
                   result={data}
                   query={@skills_query}
-                  selected_skill_names={@selected_skill_names}
+                  selected_skill_ids={@selected_skill_ids}
                 />
               </.settings_async_result>
             <% :mcp -> %>
@@ -782,11 +783,12 @@ defmodule Sigma.Web.SettingsLive do
 
   defp render_skills(assigns) do
     query = assigns[:query] || ""
-    selected_skill_names = assigns[:selected_skill_names] || []
+    selected_skill_ids = assigns[:selected_skill_ids] || MapSet.new()
     skills = get_in(assigns, [:result, :skills]) || []
     filtered_skills = filter_skills(skills, query)
-    visible_skill_names = Enum.map(filtered_skills, & &1.name)
-    selected_visible_skill_count = Enum.count(visible_skill_names, &(&1 in selected_skill_names))
+
+    selected_visible_skill_count =
+      Enum.count(filtered_skills, &MapSet.member?(selected_skill_ids, Skills.identity(&1)))
 
     all_visible_skills_selected? =
       filtered_skills != [] and selected_visible_skill_count == length(filtered_skills)
@@ -797,11 +799,11 @@ defmodule Sigma.Web.SettingsLive do
     assigns =
       assigns
       |> assign(:query, query)
-      |> assign(:selected_skill_names, selected_skill_names)
+      |> assign(:selected_skill_ids, selected_skill_ids)
       |> assign(:filtered_skills, filtered_skills)
       |> assign(:total_skills, length(skills))
       |> assign(:shown_skills, length(filtered_skills))
-      |> assign(:selected_skill_count, length(selected_skill_names))
+      |> assign(:selected_skill_count, MapSet.size(selected_skill_ids))
       |> assign(:all_visible_skills_selected?, all_visible_skills_selected?)
       |> assign(:some_visible_skills_selected?, some_visible_skills_selected?)
       |> assign(:enabled_skills, Enum.count(skills, & &1.enabled?))
@@ -931,17 +933,18 @@ defmodule Sigma.Web.SettingsLive do
             </tr>
           </thead>
           <tbody role="row-group">
-            <tr :for={skill <- @filtered_skills} role="row">
+            <tr :for={skill <- @filtered_skills} :key={Skills.identity(skill)} role="row">
               <td data-label="Select" role="cell" class="w-16">
                 <.dm_checkbox
-                  id={"skill-select-#{skill_row_id(skill)}"}
-                  name={"skill_selected[#{skill.name}]"}
-                  checked={skill_selected?(@selected_skill_names, skill.name)}
+                  id={"skill-select-#{SkillSelection.dom_key(skill)}"}
+                  name={"skill_selected[#{SkillSelection.dom_key(skill)}]"}
+                  checked={MapSet.member?(@selected_skill_ids, Skills.identity(skill))}
                   size="sm"
                   aria-label={"Select #{skill.name}"}
                   phx-click="toggle_skill_selection"
-                  phx-value-name={skill.name}
-                  phx-value-selected={to_string(!skill_selected?(@selected_skill_names, skill.name))}
+                  phx-value-source-id={skill.source_id}
+                  phx-value-skill-id={skill.skill_id}
+                  phx-value-selected={to_string(!MapSet.member?(@selected_skill_ids, Skills.identity(skill)))}
                 />
               </td>
               <td data-label="Name" role="cell" class="min-w-56">
@@ -950,7 +953,7 @@ defmodule Sigma.Web.SettingsLive do
                     <.dm_mdi name="auto-fix" class="w-5 h-5" />
                   </div>
                   <.dm_popover
-                    id={"skill-name-#{skill_row_id(skill)}"}
+                    id={"skill-name-#{SkillSelection.dom_key(skill)}"}
                     trigger_mode="hover"
                     placement="top-start"
                     arrow={false}
@@ -973,8 +976,8 @@ defmodule Sigma.Web.SettingsLive do
               </td>
               <td data-label="Enabled" role="cell" class="min-w-28">
                 <.dm_switch
-                  id={"skill-enabled-#{skill_row_id(skill)}"}
-                  name={"skill_enabled[#{skill.name}]"}
+                  id={"skill-enabled-#{SkillSelection.dom_key(skill)}"}
+                  name={"skill_enabled[#{SkillSelection.dom_key(skill)}]"}
                   checked={skill.enabled?}
                   size="sm"
                   aria-label={"Enable #{skill.name}"}
@@ -994,7 +997,7 @@ defmodule Sigma.Web.SettingsLive do
                 class="settings-skills-description-cell"
               >
                 <.dm_popover
-                  id={"skill-description-#{skill_row_id(skill)}"}
+                  id={"skill-description-#{SkillSelection.dom_key(skill)}"}
                   trigger_mode="hover"
                   placement="top-start"
                   arrow={false}
@@ -1695,7 +1698,9 @@ defmodule Sigma.Web.SettingsLive do
   @impl true
   def handle_event("toggle_global_skill_loading", %{"enabled" => enabled}, socket) do
     :ok = ConfigManager.set_load_global_skills(enabled == "true")
-    {:noreply, socket |> assign(:selected_skill_names, []) |> reload_current_settings_data()}
+
+    {:noreply,
+     socket |> assign(:selected_skill_ids, MapSet.new()) |> reload_current_settings_data()}
   end
 
   def handle_event("filter_skills", %{"skills" => %{"query" => query}}, socket) do
@@ -1708,34 +1713,35 @@ defmodule Sigma.Web.SettingsLive do
   end
 
   @impl true
-  def handle_event("toggle_skill_selection", %{"name" => name, "selected" => selected}, socket) do
-    selected_skill_names =
-      socket.assigns.selected_skill_names
-      |> set_skill_selection(name, selected == "true")
+  def handle_event(
+        "toggle_skill_selection",
+        %{"source-id" => source_id, "skill-id" => skill_id, "selected" => selected},
+        socket
+      ) do
+    selection =
+      SkillSelection.set(
+        socket.assigns.selected_skill_ids,
+        [{source_id, skill_id}],
+        selected == "true"
+      )
 
-    {:noreply, assign(socket, :selected_skill_names, selected_skill_names)}
+    {:noreply, assign(socket, :selected_skill_ids, selection)}
   end
 
   @impl true
   def handle_event("toggle_visible_skill_selection", %{"selected" => selected}, socket) do
-    visible_names =
+    visible =
       Skills.list_global().skills
       |> filter_skills(socket.assigns.skills_query)
-      |> Enum.map(& &1.name)
+      |> Enum.map(&Skills.identity/1)
 
-    selected_skill_names =
-      if selected == "true" do
-        merge_skill_selection(socket.assigns.selected_skill_names, visible_names)
-      else
-        remove_skill_selection(socket.assigns.selected_skill_names, visible_names)
-      end
-
-    {:noreply, assign(socket, :selected_skill_names, selected_skill_names)}
+    selection = SkillSelection.set(socket.assigns.selected_skill_ids, visible, selected == "true")
+    {:noreply, assign(socket, :selected_skill_ids, selection)}
   end
 
   @impl true
   def handle_event("clear_skill_selection", _, socket) do
-    {:noreply, assign(socket, :selected_skill_names, [])}
+    {:noreply, assign(socket, :selected_skill_ids, MapSet.new())}
   end
 
   @impl true
@@ -1754,14 +1760,13 @@ defmodule Sigma.Web.SettingsLive do
     enabled? = enabled == "true"
 
     names =
-      Skills.list_global().skills
-      |> selected_existing_skill_names(socket.assigns.selected_skill_names)
+      SkillSelection.names(socket.assigns.selected_skill_ids, Skills.list_global().skills)
 
     ConfigManager.set_global_skills_enabled(names, enabled?)
 
     {:noreply,
      socket
-     |> assign(:selected_skill_names, [])
+     |> assign(:selected_skill_ids, MapSet.new())
      |> reload_current_settings_data()
      |> put_flash(:info, bulk_skill_status_message(names, enabled?))}
   end
@@ -1916,7 +1921,7 @@ defmodule Sigma.Web.SettingsLive do
   defp clear_skills_state(socket, _action) do
     socket
     |> assign(:skills_query, "")
-    |> assign(:selected_skill_names, [])
+    |> assign(:selected_skill_ids, MapSet.new())
   end
 
   defp assign_settings_data_async(socket, action) do
@@ -2025,63 +2030,6 @@ defmodule Sigma.Web.SettingsLive do
     ]
     |> Enum.join(" ")
     |> String.downcase()
-  end
-
-  defp skill_row_id(skill) do
-    skill.name
-    |> String.replace(~r/[^a-zA-Z0-9_-]+/, "-")
-    |> String.trim("-")
-    |> case do
-      "" -> "unnamed"
-      id -> id
-    end
-  end
-
-  defp skill_selected?(selected_skill_names, name) do
-    Enum.member?(selected_skill_names, name)
-  end
-
-  defp set_skill_selection(selected_skill_names, name, selected?) do
-    selected_skill_names =
-      selected_skill_names
-      |> List.wrap()
-      |> Enum.reject(&(&1 in [nil, ""]))
-
-    if selected? do
-      [name | selected_skill_names]
-    else
-      Enum.reject(selected_skill_names, &(&1 == name))
-    end
-    |> Enum.uniq()
-    |> Enum.sort()
-  end
-
-  defp merge_skill_selection(selected_skill_names, names) do
-    (List.wrap(selected_skill_names) ++ List.wrap(names))
-    |> Enum.reject(&(&1 in [nil, ""]))
-    |> Enum.uniq()
-    |> Enum.sort()
-  end
-
-  defp remove_skill_selection(selected_skill_names, names) do
-    names = names |> List.wrap() |> MapSet.new()
-
-    selected_skill_names
-    |> List.wrap()
-    |> Enum.reject(&MapSet.member?(names, &1))
-    |> Enum.reject(&(&1 in [nil, ""]))
-    |> Enum.uniq()
-    |> Enum.sort()
-  end
-
-  defp selected_existing_skill_names(skills, selected_skill_names) do
-    existing_names = skills |> Enum.map(& &1.name) |> MapSet.new()
-
-    selected_skill_names
-    |> List.wrap()
-    |> Enum.filter(&MapSet.member?(existing_names, &1))
-    |> Enum.uniq()
-    |> Enum.sort()
   end
 
   defp skill_status_message(name, true), do: "#{name} enabled"

@@ -2,7 +2,7 @@ defmodule Sigma.Session.Skills.RemoteAdapter do
   @moduledoc "Session-owned remote Skill discovery, preparation and creation boundary."
 
   alias Backplane.SkillProtocol.{Descriptor, Error, PreparedSkill, SkillRef}
-  alias Sigma.Session.{ConfigManager, SlashCommands}
+  alias Sigma.Session.{ConfigManager, Skills, SlashCommands}
   alias Sigma.Session.Skills.{Protocol, RemoteSource}
 
   @default_limit 50
@@ -30,7 +30,7 @@ defmodule Sigma.Session.Skills.RemoteAdapter do
          :ok <- searchable(source),
          {:ok, remote} <- remote_source(source, opts),
          {:ok, result} <- discover(remote, source, params) do
-      items = Enum.map(result.data, &descriptor(&1, source))
+      items = result.data |> Enum.map(&descriptor(&1, source)) |> Enum.uniq_by(&Skills.identity/1)
 
       {:ok,
        %{

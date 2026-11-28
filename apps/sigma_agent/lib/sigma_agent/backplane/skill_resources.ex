@@ -4,8 +4,9 @@ defmodule Sigma.Agent.Backplane.SkillResources do
 
   Listing pins catalog descriptors, not file contents. The first package read
   prepares a verified immutable bundle; text pages then share that bundle and
-  one bounded content snapshot. Neither operation activates skills or executes
-  bundled scripts. All handles expire with the run or the bounded cache TTL.
+  one bounded content snapshot. Remote discovery reuses the issued handle for
+  the same authority and exact version. Neither operation activates skills or
+  executes bundled scripts. Handles expire with the run or the bounded cache TTL.
   """
 
   use GenServer
@@ -141,18 +142,18 @@ defmodule Sigma.Agent.Backplane.SkillResources do
     cancelled? = fn -> not match?({:ok, _}, validate(state.binding, operation)) end
 
     case apply(RemoteAdapter, :search, [params, [cancelled?: cancelled?]]) do
-      {:ok, result}
-      when map_size(state.packages) + length(result.items) <= @max_catalog_entries ->
-        entries = Enum.map(result.items, &remote_entry(&1, authority))
+      {:ok, result} ->
+        {entries, next} =
+          result.items
+          |> Enum.uniq_by(&skill_identity/1)
+          |> Enum.map_reduce(state, &remote_entry(&2, &1, authority))
 
-        packages =
-          entries |> Enum.filter(& &1.listed.model_readable) |> Map.new(&{&1.listed.package, &1})
-
-        {{:ok, %{skills: Enum.map(entries, & &1.listed), next_cursor: result.next_cursor}},
-         %{state | packages: Map.merge(state.packages, packages)}}
-
-      {:ok, _result} ->
-        {error(:overloaded, "skill catalog entry limit exceeded"), state}
+        if map_size(next.packages) <= max(@max_catalog_entries, map_size(state.packages)) do
+          {{:ok, %{skills: Enum.map(entries, & &1.listed), next_cursor: result.next_cursor}},
+           next}
+        else
+          {error(:overloaded, "skill catalog entry limit exceeded"), state}
+        end
 
       {:error, reason} ->
         {{:error,
@@ -174,14 +175,8 @@ defmodule Sigma.Agent.Backplane.SkillResources do
 
     case apply(RemoteAdapter, :create, [args, [cancelled?: cancelled?]]) do
       {:ok, skill} ->
-        entry = remote_entry(skill)
-
-        packages =
-          if entry.listed.model_readable,
-            do: Map.put(state.packages, entry.listed.package, entry),
-            else: state.packages
-
-        {{:ok, entry.listed}, %{state | packages: packages}}
+        {entry, next} = remote_entry(state, skill, "executor")
+        {{:ok, entry.listed}, next}
 
       {:error, reason} ->
         class =
@@ -257,34 +252,31 @@ defmodule Sigma.Agent.Backplane.SkillResources do
     skills =
       skills
       |> Enum.filter(&listed_skill?(state, catalog, &1))
+      |> Enum.uniq_by(&skill_identity/1)
       |> Enum.sort_by(&{reference(&1), &1.skill_id})
 
-    cond do
-      map_size(state.catalogs) >= @max_catalogs ->
-        {error(:overloaded, "skill catalog snapshot capacity reached"), state}
+    if length(skills) > @max_catalog_entries do
+      {error(:overloaded, "skill catalog entry limit exceeded"), state}
+    else
+      {entries, next} = Enum.map_reduce(skills, state, &list_entry(&2, &1, authority))
+      snapshot = %{authority: authority, entries: entries, warnings: warnings}
 
-      length(skills) > @max_catalog_entries ->
-        {error(:overloaded, "skill catalog entry limit exceeded"), state}
+      case Enum.find(state.catalogs, fn {_id, pinned} -> pinned == snapshot end) do
+        {id, _pinned} ->
+          list_page(next, id, snapshot, 0)
 
-      true ->
-        entries = Enum.map(skills, &list_entry(state, &1, authority))
-        id = opaque()
-        snapshot = %{authority: authority, entries: entries, warnings: warnings}
+        nil when map_size(state.catalogs) >= @max_catalogs ->
+          {error(:overloaded, "skill catalog snapshot capacity reached"), state}
 
-        packages = Map.new(entries, &{&1.listed.package, &1})
-
-        state = %{
-          state
-          | catalogs: Map.put(state.catalogs, id, snapshot),
-            packages: Map.merge(state.packages, packages)
-        }
-
-        list_page(state, id, snapshot, 0)
+        nil ->
+          id = opaque()
+          list_page(%{next | catalogs: Map.put(state.catalogs, id, snapshot)}, id, snapshot, 0)
+      end
     end
   end
 
-  defp list_entry(_state, %{source_kind: "backplane"} = skill, authority),
-    do: remote_entry(skill, authority)
+  defp list_entry(state, %{source_kind: "backplane"} = skill, authority),
+    do: remote_entry(state, skill, authority)
 
   defp list_entry(state, skill, "executor") do
     package = opaque()
@@ -293,6 +285,8 @@ defmodule Sigma.Agent.Backplane.SkillResources do
       skill: skill,
       listed: %{
         package: package,
+        source_id: skill.source_id,
+        skill_id: skill.skill_id,
         name: skill.name,
         description: skill.description,
         authority: "executor",
@@ -301,10 +295,13 @@ defmodule Sigma.Agent.Backplane.SkillResources do
       }
     }
 
-    case Map.fetch(state.plugin_skills.entries, skill.skill_id) do
-      {:ok, plugin} -> Map.put(entry, :installation, plugin.installation)
-      :error -> entry
-    end
+    entry =
+      case Map.fetch(state.plugin_skills.entries, skill.skill_id) do
+        {:ok, plugin} -> Map.put(entry, :installation, plugin.installation)
+        :error -> entry
+      end
+
+    {entry, put_package(state, entry)}
   end
 
   defp list_next(state, authority, cursor) do
@@ -509,14 +506,18 @@ defmodule Sigma.Agent.Backplane.SkillResources do
      )}
   end
 
-  defp remote_entry(skill, authority \\ "executor") do
-    package = opaque()
+  defp remote_entry(state, skill, authority) do
     readable? = apply(RemoteAdapter, :eligible?, [skill])
 
-    %{
+    {package, state} =
+      if readable?, do: remote_package(state, skill, authority), else: {nil, state}
+
+    entry = %{
       skill: skill,
       listed: %{
-        package: if(readable?, do: package),
+        package: package,
+        source_id: skill.source_id,
+        skill_id: skill.skill_id,
         name: skill.name,
         description: skill.description,
         authority: authority,
@@ -528,6 +529,33 @@ defmodule Sigma.Agent.Backplane.SkillResources do
         main_resource: if(readable?, do: "skill://#{package}/SKILL.md")
       }
     }
+
+    {entry, put_package(state, entry)}
+  end
+
+  defp remote_package(state, skill, authority) do
+    # A reconfigured source cannot inherit handles issued for its old connection.
+    key =
+      {authority, skill_identity(skill), skill.revision, skill.artifact_digest,
+       skill.source_config}
+
+    remote_packages = Map.get(state, :remote_packages, %{})
+
+    case Map.fetch(remote_packages, key) do
+      {:ok, package} ->
+        {package, state}
+
+      :error ->
+        package = opaque()
+        {package, Map.put(state, :remote_packages, Map.put(remote_packages, key, package))}
+    end
+  end
+
+  defp put_package(state, %{listed: %{package: nil}}), do: state
+
+  defp put_package(state, %{listed: %{package: package}} = entry) do
+    # Keep the descriptor captured at issuance for reads and authorization.
+    %{state | packages: Map.put_new(state.packages, package, entry)}
   end
 
   defp prepare_skill(%{source_kind: "backplane"} = skill, cancelled?) do
@@ -593,6 +621,8 @@ defmodule Sigma.Agent.Backplane.SkillResources do
   defp reference(%{source: :global, name: name}), do: "global:" <> name
   defp reference(%{source: :plugin} = skill), do: PluginSkills.reference(skill)
 
+  defp skill_identity(%{source_id: source_id, skill_id: skill_id}), do: {source_id, skill_id}
+
   defp listed_skill?(_state, _catalog, %{source_kind: "backplane"} = skill),
     do: apply(RemoteAdapter, :eligible?, [skill])
 
@@ -649,6 +679,7 @@ defmodule Sigma.Agent.Backplane.SkillResources do
     Map.merge(state, %{
       catalogs: %{},
       packages: %{},
+      remote_packages: %{},
       prepared: %{},
       reads: %{},
       cursors: %{},

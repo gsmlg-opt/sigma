@@ -41,6 +41,9 @@ defmodule Sigma.Session.Skills do
 
   def repository_skills_dir(workdir), do: Path.join([workdir, ".agents", "skills"])
 
+  @doc "Returns the stable identity of a skill descriptor."
+  def identity(%{source_id: source_id, skill_id: skill_id}), do: {source_id, skill_id}
+
   def list_global do
     disabled = ConfigManager.disabled_global_skills() |> MapSet.new()
     global_skills_dir() |> discover_dir(:global) |> mark_enabled(disabled) |> public_result()

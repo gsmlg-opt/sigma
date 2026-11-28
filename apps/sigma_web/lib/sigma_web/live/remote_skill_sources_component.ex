@@ -64,7 +64,7 @@ defmodule Sigma.Web.RemoteSkillSourcesComponent do
         <p :if={@catalog_state == :loading} role="status">Loading remote catalog…</p>
         <p :if={@catalog && @catalog.items == []}>No remote skills match this search.</p>
         <div :if={@catalog} class="space-y-3">
-          <article :for={skill <- @catalog.items} class="rounded-lg bg-surface-container-high p-3">
+          <article :for={skill <- @catalog.items} :key={Sigma.Session.Skills.identity(skill)} class="rounded-lg bg-surface-container-high p-3">
             <p class="font-bold">{skill.name}</p><p class="text-sm">{skill.description}</p>
             <p class="text-xs mt-2">Use this reference with the existing manual skill invocation:</p><code class="text-sm break-all">{skill.reference}</code>
             <p class="text-xs text-on-surface-variant">{skill.status}</p>

@@ -6,7 +6,7 @@ import { Button } from "@duskmoon-dev/components/button"
 import { Typography } from "@duskmoon-dev/components/typography"
 import { createDuskmoonReactChat, useChatSubmission } from "duskmoon_phoenix/react-chat"
 import { encodeImageFiles, validateImageFiles } from "../chat_attachments.js"
-import { filterSkillCandidates, insertSkillCandidate, searchableRemoteSources } from "../skill_completion.js"
+import { filterSkillCandidates, insertSkillCandidate, searchableRemoteSources, skillCandidateId } from "../skill_completion.js"
 
 const h = React.createElement
 const attachmentDrafts = new Map()
@@ -151,7 +151,8 @@ function Composer(props) {
           const body = await response.json()
           return (body.items || []).map((item) => ({
             kind: "skill", reference: item.reference, name: item.name, label: item.name,
-            description: item.description, source: item.sourceId
+            description: item.description, source: item.sourceId,
+            sourceId: item.sourceId, skillId: item.skillId
           }))
         }))
         if (!controller.signal.aborted) setRemote(pages.flat())
@@ -166,13 +167,17 @@ function Composer(props) {
     ? filterSkillCandidates([...commands, ...remote], value)
     : value.startsWith("/") && !/\s/.test(value)
       ? commands.filter((command) => command.value?.toLowerCase().startsWith(value.toLowerCase())) : []
-  const completion = candidates.length ? {
-    items: candidates.map((candidate, index) => ({
-      id: String(index), label: candidate.label || candidate.name || candidate.value,
+  const candidatesById = new Map(candidates.map((candidate) => [
+    candidate.kind === "skill" ? skillCandidateId(candidate) : candidate.value, candidate
+  ]))
+  const completion = candidatesById.size ? {
+    items: Array.from(candidatesById, ([id, candidate]) => ({
+      id, label: candidate.label || candidate.name || candidate.value,
       description: [candidate.description, candidate.source].filter(Boolean).join(" · ")
     })),
     onSelect: (item) => {
-      const candidate = candidates[Number(item.id)]
+      const candidate = candidatesById.get(item.id)
+      if (!candidate) return
       changeValue(skillQuery !== null ? insertSkillCandidate(value, candidate) : `${candidate.value} `)
     }
   } : undefined

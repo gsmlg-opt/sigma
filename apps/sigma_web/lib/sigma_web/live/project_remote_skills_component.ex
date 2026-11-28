@@ -2,6 +2,7 @@ defmodule Sigma.Web.ProjectRemoteSkillsComponent do
   use Sigma.Web, :live_component
 
   alias Sigma.Session.Skills.Facade
+  alias Sigma.Web.SkillSelection
 
   @impl true
   def update(%{id: id} = assigns, socket) do
@@ -13,7 +14,7 @@ defmodule Sigma.Web.ProjectRemoteSkillsComponent do
        |> assign(assigns)
        |> assign(cursor: nil, error: nil, empty?: false)
        |> stream_configure(:skills,
-         dom_id: fn skill -> id <> "-" <> Base.url_encode64(skill.reference, padding: false) end
+         dom_id: fn skill -> id <> "-" <> SkillSelection.dom_key(skill) end
        )
        |> stream(:skills, [])
        |> load_page()}

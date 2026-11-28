@@ -3,6 +3,7 @@ defmodule Sigma.Web.ProjectSkillsLive do
 
   alias Sigma.Session.{RepoManager, Skills}
   alias Sigma.Session.Skills.Facade
+  alias Sigma.Web.SkillSelection
   import Sigma.Web.ProjectSidebar
 
   @impl true
@@ -16,7 +17,7 @@ defmodule Sigma.Web.ProjectSkillsLive do
          |> assign(:encoded_repository, encoded_repository)
          |> assign(:tab, :project)
          |> assign(:skills_query, "")
-         |> assign(:selected_skill_names, [])}
+         |> assign(:selected_skill_ids, MapSet.new())}
 
       {:error, :unknown_repository} ->
         {:ok, redirect_unknown_repository(socket)}
@@ -32,7 +33,7 @@ defmodule Sigma.Web.ProjectSkillsLive do
      socket
      |> assign(:tab, tab)
      |> assign(:skills_query, "")
-     |> assign(:selected_skill_names, [])
+     |> assign(:selected_skill_ids, MapSet.new())
      |> assign(:project_skill_count, results |> Map.get(:project) |> count_enabled_skills())
      |> assign(:project_skill_total, results |> Map.get(:project) |> count_skills())
      |> assign(:global_skill_count, results |> Map.get(:global) |> count_enabled_skills())
@@ -273,17 +274,18 @@ defmodule Sigma.Web.ProjectSkillsLive do
           </tr>
         </thead>
         <tbody role="row-group">
-          <tr :for={skill <- @filtered_skills} role="row">
+          <tr :for={skill <- @filtered_skills} :key={Skills.identity(skill)} role="row">
             <td data-label="Select" role="cell" class="w-16">
               <.dm_checkbox
-                id={"project-skill-select-#{skill_row_id(skill)}"}
-                name={"skill_selected[#{skill.name}]"}
-                checked={skill_selected?(@selected_skill_names, skill.name)}
+                id={"project-skill-select-#{SkillSelection.dom_key(skill)}"}
+                name={"skill_selected[#{SkillSelection.dom_key(skill)}]"}
+                checked={MapSet.member?(@selected_skill_ids, Skills.identity(skill))}
                 size="sm"
                 aria-label={"Select #{skill.name}"}
                 phx-click="toggle_skill_selection"
-                phx-value-name={skill.name}
-                phx-value-selected={to_string(!skill_selected?(@selected_skill_names, skill.name))}
+                phx-value-source-id={skill.source_id}
+                phx-value-skill-id={skill.skill_id}
+                phx-value-selected={to_string(!MapSet.member?(@selected_skill_ids, Skills.identity(skill)))}
               />
             </td>
             <td data-label="Name" role="cell" class="min-w-56">
@@ -292,7 +294,7 @@ defmodule Sigma.Web.ProjectSkillsLive do
                   <.dm_mdi name="auto-fix" class="w-5 h-5" />
                 </div>
                 <.dm_popover
-                  id={"project-skill-name-#{skill_row_id(skill)}"}
+                  id={"project-skill-name-#{SkillSelection.dom_key(skill)}"}
                   trigger_mode="hover"
                   placement="top-start"
                   arrow={false}
@@ -315,8 +317,8 @@ defmodule Sigma.Web.ProjectSkillsLive do
             </td>
             <td data-label="Enabled" role="cell" class="min-w-28">
               <.dm_switch
-                id={"project-skill-enabled-#{skill_row_id(skill)}"}
-                name={"skill_enabled[#{skill.name}]"}
+                id={"project-skill-enabled-#{SkillSelection.dom_key(skill)}"}
+                name={"skill_enabled[#{SkillSelection.dom_key(skill)}]"}
                 checked={skill.enabled?}
                 size="sm"
                 aria-label={"Enable #{skill.name}"}
@@ -332,7 +334,7 @@ defmodule Sigma.Web.ProjectSkillsLive do
             </td>
             <td data-label="Description" role="cell" class="settings-skills-description-cell">
               <.dm_popover
-                id={"project-skill-description-#{skill_row_id(skill)}"}
+                id={"project-skill-description-#{SkillSelection.dom_key(skill)}"}
                 trigger_mode="hover"
                 placement="top-start"
                 arrow={false}
@@ -367,11 +369,12 @@ defmodule Sigma.Web.ProjectSkillsLive do
   # Shared table-state computation for both tabs.
   defp prepare_skill_table(assigns) do
     query = assigns[:skills_query] || ""
-    selected_skill_names = assigns[:selected_skill_names] || []
+    selected_skill_ids = assigns[:selected_skill_ids] || MapSet.new()
     skills = assigns.skills_result.skills
     filtered_skills = filter_skills(skills, query)
-    visible_skill_names = Enum.map(filtered_skills, & &1.name)
-    selected_visible_skill_count = Enum.count(visible_skill_names, &(&1 in selected_skill_names))
+
+    selected_visible_skill_count =
+      Enum.count(filtered_skills, &MapSet.member?(selected_skill_ids, Skills.identity(&1)))
 
     all_visible_skills_selected? =
       filtered_skills != [] and selected_visible_skill_count == length(filtered_skills)
@@ -383,7 +386,7 @@ defmodule Sigma.Web.ProjectSkillsLive do
     |> assign(:query, query)
     |> assign(:filtered_skills, filtered_skills)
     |> assign(:shown_skills, length(filtered_skills))
-    |> assign(:selected_skill_count, length(selected_skill_names))
+    |> assign(:selected_skill_count, MapSet.size(selected_skill_ids))
     |> assign(:all_visible_skills_selected?, all_visible_skills_selected?)
     |> assign(:some_visible_skills_selected?, some_visible_skills_selected?)
     |> assign(:enabled_skills, Enum.count(skills, & &1.enabled?))
@@ -400,34 +403,35 @@ defmodule Sigma.Web.ProjectSkillsLive do
   end
 
   @impl true
-  def handle_event("toggle_skill_selection", %{"name" => name, "selected" => selected}, socket) do
-    selected_skill_names =
-      socket.assigns.selected_skill_names
-      |> set_skill_selection(name, selected == "true")
+  def handle_event(
+        "toggle_skill_selection",
+        %{"source-id" => source_id, "skill-id" => skill_id, "selected" => selected},
+        socket
+      ) do
+    selection =
+      SkillSelection.set(
+        socket.assigns.selected_skill_ids,
+        [{source_id, skill_id}],
+        selected == "true"
+      )
 
-    {:noreply, assign(socket, :selected_skill_names, selected_skill_names)}
+    {:noreply, assign(socket, :selected_skill_ids, selection)}
   end
 
   @impl true
   def handle_event("toggle_visible_skill_selection", %{"selected" => selected}, socket) do
-    visible_names =
+    visible =
       socket.assigns.skills_result.skills
       |> filter_skills(socket.assigns.skills_query)
-      |> Enum.map(& &1.name)
+      |> Enum.map(&Skills.identity/1)
 
-    selected_skill_names =
-      if selected == "true" do
-        merge_skill_selection(socket.assigns.selected_skill_names, visible_names)
-      else
-        remove_skill_selection(socket.assigns.selected_skill_names, visible_names)
-      end
-
-    {:noreply, assign(socket, :selected_skill_names, selected_skill_names)}
+    selection = SkillSelection.set(socket.assigns.selected_skill_ids, visible, selected == "true")
+    {:noreply, assign(socket, :selected_skill_ids, selection)}
   end
 
   @impl true
   def handle_event("clear_skill_selection", _, socket) do
-    {:noreply, assign(socket, :selected_skill_names, [])}
+    {:noreply, assign(socket, :selected_skill_ids, MapSet.new())}
   end
 
   @impl true
@@ -447,14 +451,13 @@ defmodule Sigma.Web.ProjectSkillsLive do
     workdir = socket.assigns.workdir
 
     names =
-      socket.assigns.skills_result.skills
-      |> selected_existing_skill_names(socket.assigns.selected_skill_names)
+      SkillSelection.names(socket.assigns.selected_skill_ids, socket.assigns.skills_result.skills)
 
     Enum.each(names, &set_project_skill_enabled(workdir, &1, enabled?))
 
     {:noreply,
      socket
-     |> assign(:selected_skill_names, [])
+     |> assign(:selected_skill_ids, MapSet.new())
      |> reload_skills()
      |> put_flash(:info, bulk_skill_status_message(names, enabled?))}
   end
@@ -536,61 +539,6 @@ defmodule Sigma.Web.ProjectSkillsLive do
     ]
     |> Enum.join(" ")
     |> String.downcase()
-  end
-
-  defp skill_row_id(skill) do
-    skill.name
-    |> String.replace(~r/[^a-zA-Z0-9_-]+/, "-")
-    |> String.trim("-")
-    |> case do
-      "" -> "unnamed"
-      id -> id
-    end
-  end
-
-  defp skill_selected?(selected_skill_names, name), do: Enum.member?(selected_skill_names, name)
-
-  defp set_skill_selection(selected_skill_names, name, selected?) do
-    selected_skill_names =
-      selected_skill_names
-      |> List.wrap()
-      |> Enum.reject(&(&1 in [nil, ""]))
-
-    if selected? do
-      [name | selected_skill_names]
-    else
-      Enum.reject(selected_skill_names, &(&1 == name))
-    end
-    |> Enum.uniq()
-    |> Enum.sort()
-  end
-
-  defp merge_skill_selection(selected_skill_names, names) do
-    (List.wrap(selected_skill_names) ++ List.wrap(names))
-    |> Enum.reject(&(&1 in [nil, ""]))
-    |> Enum.uniq()
-    |> Enum.sort()
-  end
-
-  defp remove_skill_selection(selected_skill_names, names) do
-    names = names |> List.wrap() |> MapSet.new()
-
-    selected_skill_names
-    |> List.wrap()
-    |> Enum.reject(&MapSet.member?(names, &1))
-    |> Enum.reject(&(&1 in [nil, ""]))
-    |> Enum.uniq()
-    |> Enum.sort()
-  end
-
-  defp selected_existing_skill_names(skills, selected_skill_names) do
-    existing_names = skills |> Enum.map(& &1.name) |> MapSet.new()
-
-    selected_skill_names
-    |> List.wrap()
-    |> Enum.filter(&MapSet.member?(existing_names, &1))
-    |> Enum.uniq()
-    |> Enum.sort()
   end
 
   defp skill_status_message(name, true), do: "#{name} enabled for this project"

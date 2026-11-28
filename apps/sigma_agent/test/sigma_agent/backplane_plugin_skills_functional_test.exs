@@ -53,6 +53,7 @@ defmodule Sigma.Agent.BackplanePluginSkillsFunctionalTest do
     installed = Enum.find(list.skills, &String.starts_with?(&1.reference, "plugin:"))
     assert installed.reference == PluginSkills.reference(skill)
     assert installed.description == skill.description
+    assert {installed.source_id, installed.skill_id} == {skill.source_id, skill.skill_id}
 
     assert {:ok, main} =
              execute(resources, binding, "skills::read", %{"package" => installed.package})
@@ -93,6 +94,9 @@ defmodule Sigma.Agent.BackplanePluginSkillsFunctionalTest do
     assert {:ok, %{skills: [still_pinned]}} = list(resources, binding)
     assert still_pinned.reference == original.reference
 
+    assert {still_pinned.source_id, still_pinned.skill_id} ==
+             {original.source_id, original.skill_id}
+
     assert {:ok, pinned} =
              execute(resources, binding, "skills::read", %{"package" => still_pinned.package})
 
@@ -103,6 +107,7 @@ defmodule Sigma.Agent.BackplanePluginSkillsFunctionalTest do
     refute File.exists?(pinned.skill_root)
     assert {:ok, %{skills: [current]}} = list(resources, next)
     refute current.reference == original.reference
+    refute {current.source_id, current.skill_id} == {original.source_id, original.skill_id}
     refute current.package == original.package
 
     assert {:ok, current_read} =

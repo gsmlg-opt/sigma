@@ -334,6 +334,47 @@ defmodule Sigma.Web.SettingsLiveTest do
   end
 
   @tag :tmp_dir
+  test "same-named skills have independent row selection", %{conn: conn, tmp_dir: tmp_dir} do
+    global = Path.join(tmp_dir, "global")
+    write_skill(Path.join(global, "first"), "shared", "First skill")
+    write_skill(Path.join(global, "second"), "shared", "Second skill")
+
+    previous = Application.fetch_env(:sigma_session, :global_skills_dir)
+    Application.put_env(:sigma_session, :global_skills_dir, global)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, dir} -> Application.put_env(:sigma_session, :global_skills_dir, dir)
+        :error -> Application.delete_env(:sigma_session, :global_skills_dir)
+      end
+    end)
+
+    with_agent_dir(tmp_dir, fn ->
+      {:ok, view, _html} = live(conn, "/settings/skills")
+      selector = "input[aria-label='Select shared']"
+
+      [first_id, second_id] =
+        view
+        |> render_async()
+        |> Floki.parse_document!()
+        |> Floki.attribute(selector, "id")
+
+      refute first_id == second_id
+      html = view |> element("##{second_id}") |> render_click()
+      [first, second] = html |> Floki.parse_document!() |> Floki.find(selector)
+      refute checked?(first)
+      assert checked?(second)
+
+      view
+      |> form("#skills-filter-form", %{"skills" => %{"query" => "Second skill"}})
+      |> render_change()
+
+      refute has_element?(view, "##{first_id}")
+      assert has_element?(view, "##{second_id}[checked]")
+    end)
+  end
+
+  @tag :tmp_dir
   test "shows globally discovered skills", %{conn: conn, tmp_dir: tmp_dir} do
     global_skills_dir = Path.join([tmp_dir, ".agents", "skills"])
     write_skill(global_skills_dir, "global-skill", "Global skill description")
@@ -414,7 +455,7 @@ defmodule Sigma.Web.SettingsLiveTest do
       assert_skill_name_popover(html, "global-skill")
 
       view
-      |> element("#skill-enabled-global-skill")
+      |> element("input[aria-label='Enable global-skill']")
       |> render_click()
 
       html = render_async(view, 500)
@@ -429,7 +470,7 @@ defmodule Sigma.Web.SettingsLiveTest do
       html = render(view)
 
       assert html =~ "other-skill"
-      refute html_has_id?(html, "skill-enabled-global-skill")
+      refute has_element?(view, "input[aria-label='Enable global-skill']")
       assert_select_all_checked(html, false)
 
       view
@@ -453,7 +494,7 @@ defmodule Sigma.Web.SettingsLiveTest do
              ]
 
       assert html =~ "other-skill"
-      refute html_has_id?(html, "skill-enabled-global-skill")
+      refute has_element?(view, "input[aria-label='Enable global-skill']")
       assert_skill_enabled(html, "other-skill", false)
       assert_skill_selected(html, "other-skill", false)
       assert_select_all_checked(html, false)
@@ -739,15 +780,15 @@ defmodule Sigma.Web.SettingsLiveTest do
     assert Floki.attribute(tooltip_el, "popover") == ["hint"]
   end
 
-  defp assert_skill_enabled(html, id, expected) do
+  defp assert_skill_enabled(html, name, expected) do
     tree = Floki.parse_document!(html)
-    [input] = Floki.find(tree, "#skill-enabled-#{id}")
+    [input] = Floki.find(tree, "input[aria-label='Enable #{name}']")
     assert checked?(input) == expected
   end
 
-  defp assert_skill_selected(html, id, expected) do
+  defp assert_skill_selected(html, name, expected) do
     tree = Floki.parse_document!(html)
-    [input] = Floki.find(tree, "#skill-select-#{id}")
+    [input] = Floki.find(tree, "input[aria-label='Select #{name}']")
     assert checked?(input) == expected
   end
 
@@ -757,9 +798,9 @@ defmodule Sigma.Web.SettingsLiveTest do
     assert checked?(input) == expected
   end
 
-  defp assert_skill_description_popover(html, id) do
+  defp assert_skill_description_popover(html, name) do
     tree = Floki.parse_document!(html)
-    popover_id = "skill-description-#{id}"
+    popover_id = "skill-description-#{skill_row_suffix(tree, name)}"
     [popover] = Floki.find(tree, "##{popover_id}")
 
     assert Floki.find(tree, "p.settings-skills-description-trigger[interestfor='#{popover_id}']") !=
@@ -777,16 +818,23 @@ defmodule Sigma.Web.SettingsLiveTest do
     assert css =~ "text-overflow: ellipsis;"
   end
 
-  defp assert_skill_name_popover(html, id) do
+  defp assert_skill_name_popover(html, name) do
     tree = Floki.parse_document!(html)
-    popover_id = "skill-name-#{id}"
+    popover_id = "skill-name-#{skill_row_suffix(tree, name)}"
     [popover] = Floki.find(tree, "##{popover_id}")
     assert Floki.find(tree, ".settings-skills-name-trigger[interestfor='#{popover_id}']") != []
-    assert Floki.text(popover) =~ id
+    assert Floki.text(popover) =~ name
     assert Floki.attribute(popover, "popover") == ["auto"]
 
     css = File.read!(@app_css)
     assert css =~ ".settings-skills-name-trigger"
+  end
+
+  defp skill_row_suffix(tree, name) do
+    ["skill-select-" <> suffix] =
+      Floki.attribute(tree, "input[aria-label='Select #{name}']", "id")
+
+    suffix
   end
 
   defp class_values({_tag, attrs, _children}) do
@@ -800,13 +848,6 @@ defmodule Sigma.Web.SettingsLiveTest do
       {"checked", _value} -> true
       _ -> false
     end)
-  end
-
-  defp html_has_id?(html, id) do
-    html
-    |> Floki.parse_document!()
-    |> Floki.find("##{id}")
-    |> Enum.any?()
   end
 
   defp credential_id_by_name(credentials, name) do

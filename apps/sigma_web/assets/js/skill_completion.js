@@ -1,15 +1,25 @@
+export function skillCandidateId({ sourceId, skillId }) {
+  return JSON.stringify([sourceId, skillId])
+}
+
 export function filterSkillCandidates(candidates, value) {
   if (!Array.isArray(candidates) || typeof value !== 'string' || !value.startsWith('/skill ')) return []
 
   const query = value.slice('/skill '.length).split(/\s/, 1)[0].toLowerCase()
+  const seen = new Set()
 
   return candidates.filter((candidate) => {
     if (candidate?.kind !== 'skill') return false
+    const id = skillCandidateId(candidate)
+    if (seen.has(id)) return false
+
     const searchable = [candidate.name, candidate.description, candidate.source, candidate.reference]
       .filter((item) => typeof item === 'string')
       .join(' ')
       .toLowerCase()
-    return searchable.includes(query)
+    if (!searchable.includes(query)) return false
+    seen.add(id)
+    return true
   })
 }
 

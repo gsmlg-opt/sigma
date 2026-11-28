@@ -96,7 +96,7 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
     skill!(repo_root(ctx.dir), "existing", "Existing local skill")
     {binding, context, _profile, resources} = bound_resources!(ctx.dir)
     cache = :sys.get_state(resources).skill_resources
-    :sys.replace_state(cache, &Map.delete(&1, :remote_skills))
+    :sys.replace_state(cache, &Map.drop(&1, [:remote_skills, :remote_packages]))
 
     assert {:ok, %{skills: [%{reference: "repo:existing"}], warnings: []}} =
              execute(context, binding, "skills::list", %{"authority" => "executor"})
@@ -138,6 +138,9 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
 
     local = Enum.find(listed["skills"], &(&1["reference"] == "repo:shared"))
     global = Enum.find(listed["skills"], &(&1["reference"] == "global:shared"))
+    assert local["source_id"] =~ "repo-"
+    assert local["skill_id"] == local["source_id"] <> ":shared"
+    assert %{"source_id" => "global", "skill_id" => "global:shared"} = global
     assert local["authority"] == "executor"
     assert local["package"] != global["package"]
     assert local["main_resource"] =~ "skill://"
@@ -234,10 +237,30 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
     skill!(repo_root(ctx.dir), "added-later", "Not in pinned catalog")
     entries = first.skills ++ list_rest!(context, binding, first.next_cursor)
     assert length(entries) == 45
-    assert Enum.uniq_by(entries, & &1.package) == entries
+    assert Enum.uniq_by(entries, &{&1.source_id, &1.skill_id}) == entries
     assert Enum.sort(Enum.map(entries, & &1.name)) == Enum.map(1..45, &name/1)
     assert {:ok, read} = execute(context, binding, "skills::read", %{"package" => entry.package})
     assert read.contents =~ "Changed before first read"
+
+    skill!(repo_root(ctx.dir), entry.name, "Changed after snapshot")
+
+    assert {:ok, refreshed} =
+             execute(context, binding, "skills::list", %{"authority" => "executor"})
+
+    source_id = entry.source_id
+    skill_id = entry.skill_id
+
+    assert %{source_id: ^source_id, skill_id: ^skill_id} =
+             fresh =
+             Enum.find(refreshed.skills, &(&1.name == entry.name))
+
+    refute fresh.package == entry.package
+    assert {:ok, ^read} = execute(context, binding, "skills::read", %{"package" => entry.package})
+
+    assert {:ok, latest} =
+             execute(context, binding, "skills::read", %{"package" => fresh.package})
+
+    assert latest.contents =~ "Changed after snapshot"
     detach!(binding)
   end
 
@@ -486,7 +509,7 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
     end
   end
 
-  defp configure_cloud_source!(ctx) do
+  defp configure_cloud_source!(ctx, opts \\ []) do
     alias Sigma.Session.ConfigManager
     alias Backplane.SkillProtocol.{Bundle, SkillRef, Wire}
     previous = Application.fetch_env(:sigma_session, :remote_skill_source_options)
@@ -509,12 +532,27 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
     File.write!(Path.join(package_root, "references/checklist.md"), "Checklist version one")
     File.write!(Path.join(package_root, "references/extra.md"), "Unseen resource")
 
-    assert {:ok, bundle} =
-             Bundle.pack(package_root, Path.join(ctx.dir, "remote.tar.gz"),
-               ref: %SkillRef{source_id: "remote-one", skill_id: "review", revision: "rev-1"}
-             )
+    pack = fn variant, revision ->
+      assert {:ok, bundle} =
+               Bundle.pack(package_root, Path.join(ctx.dir, "#{variant}.tar.gz"),
+                 ref: %SkillRef{source_id: "remote-one", skill_id: "review", revision: revision}
+               )
 
-    archive = File.read!(bundle.archive_path)
+      {bundle.manifest, File.read!(bundle.archive_path)}
+    end
+
+    first = pack.(:first, "rev-1")
+
+    versions =
+      if opts[:versions] do
+        second = pack.(:second, "rev-2")
+        File.write!(Path.join(package_root, "references/checklist.md"), "Checklist version three")
+        %{first: first, second: second, revised: pack.(:revised, "rev-2")}
+      else
+        %{first: first}
+      end
+
+    active = start_supervised!({Agent, fn -> :first end})
     File.mkdir_p!(ConfigManager.agent_dir())
 
     File.write!(
@@ -525,9 +563,20 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
     {:ok, _} =
       ConfigManager.put_skill_source("remote-one", %{
         "discovery" => true,
+        "name" => "Shared catalog",
         "baseUrl" => "https://skills.test",
         "credentialId" => "fixture"
       })
+
+    if opts[:second_source] do
+      {:ok, _} =
+        ConfigManager.put_skill_source("remote-two", %{
+          "discovery" => true,
+          "name" => "Shared catalog",
+          "baseUrl" => "https://skills-two.test",
+          "credentialId" => "fixture"
+        })
+    end
 
     owner = self()
 
@@ -536,12 +585,25 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
       query = URI.decode_query(uri.query || "")
       send(owner, {:remote_request, uri.path, query})
 
+      if opts[:second_source] && uri.path == "/skill-protocol/v1/artifact" do
+        send(owner, {:artifact_host, uri.host})
+      end
+
+      current = Agent.get(active, & &1)
+
+      {manifest, archive} =
+        case {uri.path, query["revision"]} do
+          {"/skill-protocol/v1/catalog", _} -> first
+          {_, "rev-1"} -> first
+          _ -> Map.fetch!(versions, current)
+        end
+
       descriptor = %{
         "skill_id" => "review",
         "name" => "remote-review",
         "description" => "Remote review",
-        "revision" => "rev-1",
-        "artifact_digest" => bundle.manifest.artifact_digest,
+        "revision" => manifest.ref.revision,
+        "artifact_digest" => manifest.artifact_digest,
         "publication_status" => "ready",
         "disable_model_invocation" => false
       }
@@ -552,7 +614,7 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
             Formata.JSON.encode!(%{
               "protocol_version" => "1",
               "view" => "always",
-              "data" => [descriptor],
+              "data" => if(opts[:duplicates], do: [descriptor, descriptor], else: [descriptor]),
               "next_cursor" => nil
             })
 
@@ -560,12 +622,12 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
             Formata.JSON.encode!(%{
               "protocol_version" => "1",
               "view" => "search",
-              "data" => [descriptor],
+              "data" => if(opts[:duplicates], do: [descriptor, descriptor], else: [descriptor]),
               "next_cursor" => nil
             })
 
           "/skill-protocol/v1/resolve" ->
-            Formata.JSON.encode!(Wire.manifest_map(bundle.manifest))
+            Formata.JSON.encode!(Wire.manifest_map(manifest))
 
           "/skill-protocol/v1/artifact" ->
             archive
@@ -579,21 +641,51 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
       cache_root: Path.join(ctx.dir, "cache"),
       binding_path: Path.join(ctx.dir, "bindings.json")
     )
+
+    active
   end
 
-  test "cloud authority lists Backplane defaults and reads the issued package", ctx do
+  test "repeated cloud lists reuse the issued package and its text snapshot until expiration",
+       ctx do
     configure_cloud_source!(ctx)
     skill!(repo_root(ctx.dir), "local-only", "Repository body")
-    {binding, context, _profile} = bound!(ctx.dir)
+    {binding, context, _profile, resources} = bound_resources!(ctx.dir)
     assert {:ok, listing} = execute(context, binding, "skills::list", %{"authority" => "cloud"})
 
     assert [%{authority: "cloud", reference: "remote-one:review", package: package}] =
              listing.skills
 
-    assert {:ok, %{contents: contents}} =
+    assert {:ok, %{contents: contents, next_cursor: cursor} = read} =
              execute(context, binding, "skills::read", %{"package" => package})
 
     assert contents =~ "Remote quartzneedle"
+    assert is_binary(cursor)
+    assert_receive {:remote_request, "/skill-protocol/v1/artifact", %{"revision" => "rev-1"}}
+
+    assert [first] = listing.skills
+
+    for _ <- 1..9 do
+      assert {:ok, %{skills: [again]}} =
+               execute(context, binding, "skills::list", %{"authority" => "cloud"})
+
+      assert again.package == first.package
+      assert again.main_resource == first.main_resource
+    end
+
+    assert %{source_id: "remote-one", skill_id: "remote-one:review"} = first
+    assert {:ok, ^read} = execute(context, binding, "skills::read", %{"package" => package})
+    refute_received {:remote_request, "/skill-protocol/v1/artifact", _}
+
+    cache = :sys.get_state(resources).skill_resources
+    :sys.replace_state(cache, &%{&1 | expires_at: System.monotonic_time(:millisecond) - 1})
+
+    assert {:ok, %{skills: [fresh]}} =
+             execute(context, binding, "skills::list", %{"authority" => "cloud"})
+
+    refute fresh.package == package
+
+    assert {:error, %Error{class: :not_found}} =
+             execute(context, binding, "skills::read", %{"package" => package})
   end
 
   if "skills::search" in NativeTools.skill_names() and
@@ -602,17 +694,118 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
       configure_cloud_source!(ctx)
       {binding, context, _profile} = bound!(ctx.dir)
 
-      assert {:ok, %{skills: [%{authority: "cloud", package: package}]}} =
-               execute(context, binding, "skills::search", %{
-                 "authority" => "cloud",
-                 "source_id" => "remote-one",
-                 "query" => "quartzneedle"
-               })
+      args = %{"authority" => "cloud", "source_id" => "remote-one", "query" => "quartzneedle"}
+
+      assert {:ok, %{skills: [%{authority: "cloud", package: package} = first]}} =
+               execute(context, binding, "skills::search", args)
+
+      assert {:ok, %{skills: [^first]}} =
+               execute(context, binding, "skills::list", %{"authority" => "cloud"})
+
+      assert {:ok, %{skills: [^first]}} = execute(context, binding, "skills::search", args)
+
+      assert {:ok, %{skills: [%{authority: "executor", package: executor_package}]}} =
+               execute(context, binding, "skills::search", %{args | "authority" => "executor"})
+
+      refute executor_package == package
 
       assert {:ok, %{contents: contents}} =
                execute(context, binding, "skills::read", %{"package" => package})
 
       assert contents =~ "Remote quartzneedle"
+    end
+
+    test "deduplication by source and skill keeps same-named sources independent", ctx do
+      configure_cloud_source!(ctx, second_source: true, duplicates: true)
+      {binding, context, _profile} = bound!(ctx.dir)
+      args = %{"authority" => "cloud"}
+
+      assert {:ok, %{skills: [one, two], sources: sources}} =
+               execute(context, binding, "skills::list", args)
+
+      assert [%{name: "Shared catalog"}, %{name: "Shared catalog"}] = sources
+      assert %{source_id: "remote-one", skill_id: "remote-one:review"} = one
+      assert %{source_id: "remote-two", skill_id: "remote-two:review"} = two
+      assert one.name == two.name
+      assert one.revision == two.revision
+      assert one.artifact_digest == two.artifact_digest
+      refute one.package == two.package
+
+      for {skill, host} <- [{one, "skills.test"}, {two, "skills-two.test"}] do
+        search_args =
+          Map.merge(args, %{"source_id" => skill.source_id, "query" => "quartzneedle"})
+
+        assert {:ok, %{skills: [^skill]}} =
+                 execute(context, binding, "skills::search", search_args)
+
+        assert {:ok, %{resource: resource}} =
+                 execute(context, binding, "skills::read", %{"package" => skill.package})
+
+        assert resource == skill.main_resource
+        assert_receive {:artifact_host, ^host}
+      end
+    end
+
+    test "revision and digest changes issue new handles while the old version remains readable",
+         ctx do
+      active = configure_cloud_source!(ctx, versions: true)
+      {binding, context, _profile, resources} = bound_resources!(ctx.dir)
+      args = %{"authority" => "cloud"}
+      search = Map.merge(args, %{"source_id" => "remote-one", "query" => "quartzneedle"})
+      assert {:ok, %{skills: [first]}} = execute(context, binding, "skills::list", args)
+
+      Agent.update(active, fn _ -> :second end)
+      assert {:ok, %{skills: [second]}} = execute(context, binding, "skills::search", search)
+      assert second.revision != first.revision
+      assert second.artifact_digest == first.artifact_digest
+      assert second.package != first.package
+
+      assert {:ok, %{contents: contents}} =
+               execute(context, binding, "skills::read", %{"package" => second.package})
+
+      assert contents =~ "Remote quartzneedle"
+
+      Agent.update(active, fn _ -> :revised end)
+      assert {:ok, %{skills: [third]}} = execute(context, binding, "skills::search", search)
+      assert third.revision == second.revision
+      assert third.artifact_digest != second.artifact_digest
+      assert third.package not in [first.package, second.package]
+      assert {:ok, %{skills: [^first]}} = execute(context, binding, "skills::list", args)
+
+      for {skill, contents} <- [
+            {first, "Checklist version one"},
+            {third, "Checklist version three"}
+          ] do
+        assert {:ok, %{contents: ^contents}} =
+                 execute(context, binding, "skills::read", %{
+                   "package" => skill.package,
+                   "resource" =>
+                     String.replace_suffix(
+                       skill.main_resource,
+                       "SKILL.md",
+                       "references/checklist.md"
+                     )
+                 })
+      end
+
+      assert {:error, %Error{class: :forbidden}} =
+               execute(context, binding, "skills::read", %{"package" => second.package})
+
+      detach!(binding)
+      assert {:ok, next} = CodexResources.bind(resources, authority("next"))
+      assert {:ok, next_context} = CodexResources.context(resources, next)
+
+      assert {:ok, profile} =
+               NativeTools.profile(next_context, authority("next"), %{hook_specs: []},
+                 tools: @skills
+               )
+
+      assert :ok = Session.attach(next, profile)
+      assert {:ok, %{skills: [fresh]}} = execute(next_context, next, "skills::list", args)
+      refute fresh.package == first.package
+
+      assert {:error, %Error{class: :not_found}} =
+               execute(next_context, next, "skills::read", %{"package" => first.package})
     end
 
     test "remote defaults and search issue exact packages and read complete bundle resources",
@@ -624,7 +817,7 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
       assert {:ok, listing} =
                execute(context, binding, "skills::list", %{"authority" => "executor"})
 
-      assert [%{reference: "remote-one:review", revision: "rev-1"}] = listing.skills
+      assert [%{reference: "remote-one:review", revision: "rev-1"} = listed] = listing.skills
       assert [%{source_id: "remote-one"}] = listing.sources
 
       assert {:ok, search} =
@@ -633,7 +826,7 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
                  "query" => "quartzneedle"
                })
 
-      assert [%{package: package, main_resource: resource}] = search.skills
+      assert [%{package: package, main_resource: resource} = ^listed] = search.skills
       refute_received {:remote_request, "/skill-protocol/v1/artifact", _}
 
       assert {:ok, %{contents: body, next_cursor: text_cursor}} =
@@ -642,12 +835,18 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
       assert body =~ "Remote quartzneedle"
       assert is_binary(text_cursor)
       assert_receive {:remote_request, "/skill-protocol/v1/resolve", %{"revision" => "rev-1"}}
+      assert_receive {:remote_request, "/skill-protocol/v1/artifact", %{"revision" => "rev-1"}}
+
+      assert {:ok, %{skills: [^listed]}} =
+               execute(context, binding, "skills::list", %{"authority" => "executor"})
 
       assert {:ok, %{contents: "Checklist version one"}} =
                execute(context, binding, "skills::read", %{
                  "package" => package,
                  "resource" => String.replace(resource, "SKILL.md", "references/checklist.md")
                })
+
+      refute_received {:remote_request, "/skill-protocol/v1/artifact", _}
 
       Application.put_env(:sigma_session, :remote_skill_source_options,
         transport: fn _ ->
@@ -681,7 +880,12 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
                })
 
       {:ok, _} = ConfigManager.put_skill_source("remote-one", %{"enabled" => false})
-      assert {:error, _} = execute(context, binding, "skills::read", %{"package" => package})
+
+      assert {:error, %Error{class: :forbidden}} =
+               execute(context, binding, "skills::read", %{
+                 "package" => package,
+                 "cursor" => text_cursor
+               })
     end
   end
 
@@ -787,6 +991,8 @@ defmodule Sigma.Agent.BackplaneSkillResourcesTest do
       assert {:ok,
               %{
                 package: package,
+                source_id: "remote-one",
+                skill_id: "remote-one:created",
                 reference: "remote-one:created",
                 revision: "created-rev",
                 artifact_digest: digest
