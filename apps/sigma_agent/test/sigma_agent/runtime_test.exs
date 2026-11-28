@@ -1328,6 +1328,7 @@ defmodule Sigma.Agent.RuntimeTest do
 
     assert List.last(after_snapshot.messages).metadata == %{
              "retry_of_turn_id" => "turn-second",
+             "retry_model" => %{"model" => "mock-provider/mock-model", "reasoningEffort" => nil},
              "turn_id" => result.turn_id,
              "skill_preparations" => []
            }
@@ -1549,7 +1550,14 @@ defmodule Sigma.Agent.RuntimeTest do
              Sigma.Agent.Runtime.get_session(
                repo,
                "source",
-               session_opts(cwd: repo, transcript_path: source_path, messages: snapshot.messages)
+               session_opts(
+                 cwd: repo,
+                 transcript_path: source_path,
+                 messages: snapshot.messages,
+                 provider: CapturingProvider,
+                 model: %{id: "current", provider: "openai", api: "mock-api"},
+                 options: [test_pid: self(), reasoning_effort: "high"]
+               )
              )
 
     opts = mutation_opts(source_path, "retry-original-unavailable")
@@ -1577,6 +1585,91 @@ defmodule Sigma.Agent.RuntimeTest do
                "retry-user",
                replacement_opts
              )
+
+    assert_receive {:provider_model, "current"}, 5_000
+    assert {:ok, retried} = Sigma.Session.Log.snapshot(source_path)
+    assert {retried.provider_id, retried.model_id} == {"openai", "current"}
+    assert retried.reasoning_level == "high"
+    retry_message = List.last(retried.messages)
+
+    assert {:ok, replacement_checkpoint} =
+             Sigma.Session.Log.retry_checkpoint(source_path, retry_message.id)
+
+    assert {replacement_checkpoint.provider_id, replacement_checkpoint.model_id} ==
+             {"openai", "current"}
+
+    :ok =
+      DynamicSupervisor.terminate_child(
+        Sigma.Agent.DynamicSupervisor,
+        Sigma.Agent.Runtime.lookup(repo, :supervisor)
+      )
+
+    assert {:ok, reopened} = Sigma.Session.Log.snapshot(source_path)
+
+    assert {reopened.provider_id, reopened.model_id, reopened.reasoning_level} ==
+             {"openai", "current", "high"}
+  end
+
+  test "a blocked replacement restores the current model and selected conversation", context do
+    repo = tmp_repo!(context, "repo-retry-model-blocked")
+    sessions_dir = Path.join(repo, "sessions")
+    File.mkdir_p!(sessions_dir)
+    source_path = Path.join(sessions_dir, "source.jsonl")
+    user = %{Sigma.Agent.Message.user("retry-user", "again") | metadata: %{turn_id: "turn-old"}}
+    :ok = Sigma.Session.Log.persist_event(source_path, {:agent_start, repo})
+    {:ok, _} = Sigma.Session.Log.append_model_change(source_path, "anthropic", "old")
+    :ok = Sigma.Session.Log.persist_event(source_path, {:message_end, user})
+
+    :ok =
+      Sigma.Session.Log.persist_event(
+        source_path,
+        {:message_end, Sigma.Agent.Message.assistant("old-answer", %{content: "old"})}
+      )
+
+    {:ok, _} = Sigma.Session.Log.append_model_change(source_path, "openai", "current")
+    {:ok, before} = Sigma.Session.Log.snapshot(source_path)
+
+    hook = %Sigma.Coding.Hooks.Spec{
+      event: :user_prompt_submit,
+      matcher: :any,
+      handler: %Sigma.Coding.Hooks.Spec.Command{
+        cmd: ~s(printf '%s' '{"continue":false,"stopReason":"paused"}'),
+        timeout_ms: 1_000
+      },
+      origin: {:user, repo},
+      trusted?: true,
+      dialect: :codex
+    }
+
+    {:ok, handle} =
+      Sigma.Agent.Runtime.get_session(
+        repo,
+        "source",
+        session_opts(
+          cwd: repo,
+          transcript_path: source_path,
+          messages: before.messages,
+          provider: CapturingProvider,
+          model: %{id: "current", provider: "openai", api: "mock-api"},
+          options: [test_pid: self()],
+          hook_specs: [hook]
+        )
+      )
+
+    :ok = Sigma.Agent.subscribe(handle.agent)
+
+    opts =
+      mutation_opts(source_path, "blocked-retry")
+      |> Keyword.merge(provider_id: "openai", model_id: "current")
+
+    assert {:error, {:retry_rejected, "paused"}} =
+             Sigma.Agent.Runtime.retry_turn(repo, "source", sessions_dir, "retry-user", opts)
+
+    assert_receive {:agent_end, _}, 5_000
+    refute_receive {:provider_model, _}, 0
+    assert {:ok, after_failure} = Sigma.Session.Log.snapshot(source_path)
+    assert {after_failure.provider_id, after_failure.model_id} == {"openai", "current"}
+    assert after_failure.messages == before.messages
   end
 
   test "fork rejects a stale source revision or active leaf", context do

@@ -940,6 +940,7 @@ defmodule Sigma.Agent do
           {:ok, item} ->
             item =
               item
+              |> Map.put(:metadata, Keyword.get(opts, :continuation_metadata, %{}))
               |> Map.put(:retry_restore_messages, state.messages)
               |> Map.put(:retry_restore_context_window, state.context_window)
               |> Map.put(:retry_restore_context_excluded_ids, state.context_excluded_message_ids)
@@ -3557,7 +3558,11 @@ defmodule Sigma.Agent do
         end
 
       {:ok, user_msg, state} ->
-        user_msg = prepare_hook_feedback(state, user_msg, item.turn_id)
+        user_msg =
+          state
+          |> prepare_hook_feedback(user_msg, item.turn_id)
+          |> put_retry_model(item.retry_of_turn_id, state)
+
         state = %{state | messages: state.messages ++ [user_msg]}
         emit(state, {:message_start, user_msg})
         emit(state, {:message_end, user_msg})
@@ -3599,6 +3604,25 @@ defmodule Sigma.Agent do
   end
 
   defp prepare_hook_feedback(_state, message, _turn_id), do: message
+
+  # The replacement prompt and its selected model share one journal append.
+  defp put_retry_model(message, nil, _state), do: message
+
+  defp put_retry_model(message, _source_turn_id, state) do
+    with provider when is_binary(provider) and provider != "" <-
+           model_value(state.model, [:provider, "provider"]),
+         id when is_binary(id) and id != "" <-
+           model_value(state.model, [:id, "id", :model, "model"]) do
+      model = %{
+        "model" => "#{provider}/#{id}",
+        "reasoningEffort" => state.provider_options[:reasoning_effort]
+      }
+
+      %{message | metadata: Map.put(message.metadata, :retry_model, model)}
+    else
+      _ -> message
+    end
+  end
 
   defp reconcile_context_after_interrupted_turn(
          %{context_reconciliation_required: true, writer: writer} = state,

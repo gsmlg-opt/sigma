@@ -4511,6 +4511,59 @@ defmodule Sigma.Web.SessionLiveTest do
     assert_eventually(fn -> not chat_snapshot(view).runtime.active end)
   end
 
+  for action <- [:retry, :edit] do
+    @tag :tmp_dir
+    @tag action: action
+    test "#{action} uses the selected replacement model for an older checkpoint", %{
+      conn: conn,
+      tmp_dir: tmp_dir,
+      action: action
+    } do
+      with_agent_config(tmp_dir, fn ->
+        with_mock_provider(CaptureProvider, fn ->
+          with_capture_provider_pid(self(), fn ->
+            write_selectable_provider_configs()
+            id = unique_session_id("switch-before-retry")
+            path = session_storage_path(id)
+            File.mkdir_p!(Path.dirname(path))
+
+            prompt = %{
+              Message.user("old-prompt", "investigate")
+              | metadata: %{turn_id: "old-turn"}
+            }
+
+            :ok = Log.persist_event(path, {:agent_start, @workdir})
+            {:ok, _} = Log.append_model_change(path, "openai", "smart")
+            :ok = Log.persist_event(path, {:message_end, prompt})
+            {:ok, view, _} = live_loaded(conn, session_path(id))
+            value = Enum.find(composer_model(view).choices, &(&1.label == "MiniMax-M3")).value
+            request_composer_setting(view, "model", value)
+            assert_reply(view, %{status: "ok", value: ^value})
+
+            case action do
+              :retry ->
+                render_click(view, "prepare_retry", %{"msg-id" => prompt.id})
+                assert has_element?(view, "#retry-turn-modal", "minimax/MiniMax-M3")
+                view |> element("#confirm-retry-turn-btn") |> render_click()
+
+              :edit ->
+                render_click(view, "edit_message", %{"msg-id" => prompt.id})
+                assert has_element?(view, "#edit-message-form", "minimax/MiniMax-M3")
+                view |> form("#edit-message-form", text: "updated prompt") |> render_submit()
+            end
+
+            assert_receive {:provider_params, %{model: %{provider: "minimax", id: "MiniMax-M3"}}},
+                           5_000
+
+            assert_eventually(fn -> not chat_snapshot(view).runtime.active end)
+            assert {:ok, %{model_id: "MiniMax-M3", provider_id: "minimax"}} = Log.snapshot(path)
+            refute_receive {:provider_params, _}, 100
+          end)
+        end)
+      end)
+    end
+  end
+
   test "retry keeps the replacement prompt visible while the provider is waiting", %{conn: conn} do
     Application.put_env(:sigma_web, :blocking_provider_pid, self())
     on_exit(fn -> Application.delete_env(:sigma_web, :blocking_provider_pid) end)

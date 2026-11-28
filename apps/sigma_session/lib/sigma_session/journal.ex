@@ -102,32 +102,23 @@ defmodule Sigma.Session.Journal do
   defp reduce_entry(%{entry: %{"type" => "model_change"} = entry} = node, acc) do
     acc = mark_model_source(acc, entry)
 
-    update_snapshot(acc, node, fn snapshot ->
-      case {Map.get(entry, "role", "default"), split_model(entry["model"])} do
-        {role, {:ok, provider_id, model_id}} when role in [nil, "default"] ->
-          snapshot = %{snapshot | provider_id: provider_id, model_id: model_id}
+    update_snapshot(acc, node, &apply_model_change(&1, entry))
+  end
 
-          case Map.fetch(entry, "reasoningEffort") do
-            :error ->
-              {:ok, snapshot}
-
-            {:ok, effort} when is_binary(effort) or is_nil(effort) ->
-              {:ok, %{snapshot | reasoning_level: effort, configured_reasoning_level: effort}}
-
-            {:ok, _invalid} ->
-              {:error, :invalid_reasoning_level}
-          end
-
-        {role, {:ok, _provider_id, _model_id}} when is_binary(role) ->
-          {:ok, snapshot}
-
-        {_role, {:error, reason}} ->
-          {:error, reason}
-
-        {_role, {:ok, _provider_id, _model_id}} ->
-          {:error, :invalid_model_role}
-      end
-    end)
+  defp reduce_entry(
+         %{
+           entry: %{
+             "type" => "message",
+             "message" => %{
+               "role" => "user",
+               "metadata" => %{"retry_of_turn_id" => turn_id, "retry_model" => model}
+             }
+           }
+         } = node,
+         acc
+       )
+       when is_binary(turn_id) and turn_id != "" do
+    update_snapshot(acc, node, &apply_model_change(&1, model))
   end
 
   defp reduce_entry(%{entry: %{"type" => "thinking_level_change"} = entry} = node, acc) do
@@ -533,6 +524,41 @@ defmodule Sigma.Session.Journal do
         acc
     end)
   end
+
+  @doc false
+  def apply_model_change(snapshot, entry) when is_map(entry) do
+    case {Map.get(entry, "role", "default"), split_model(entry["model"])} do
+      {role, {:ok, provider_id, model_id}} when role in [nil, "default"] ->
+        snapshot = %{
+          snapshot
+          | provider_id: provider_id,
+            model_id: model_id,
+            model_source: :journal
+        }
+
+        case Map.fetch(entry, "reasoningEffort") do
+          :error ->
+            {:ok, snapshot}
+
+          {:ok, effort} when is_binary(effort) or is_nil(effort) ->
+            {:ok, %{snapshot | reasoning_level: effort, configured_reasoning_level: effort}}
+
+          {:ok, _invalid} ->
+            {:error, :invalid_reasoning_level}
+        end
+
+      {role, {:ok, _provider_id, _model_id}} when is_binary(role) ->
+        {:ok, snapshot}
+
+      {_role, {:error, reason}} ->
+        {:error, reason}
+
+      {_role, {:ok, _provider_id, _model_id}} ->
+        {:error, :invalid_model_role}
+    end
+  end
+
+  def apply_model_change(_snapshot, _entry), do: {:error, :invalid_model_change}
 
   defp mark_model_source({snapshot, diagnostics} = acc, entry) do
     case Map.get(entry, "role", "default") do

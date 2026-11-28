@@ -569,6 +569,15 @@ defmodule Sigma.Agent.RepositoryProcess do
       opts
       |> Keyword.get(:prompt_opts, [])
       |> Keyword.put(:attachments, checkpoint.attachments)
+      |> Keyword.put(
+        :continuation_metadata,
+        Map.take(checkpoint.message.metadata || %{}, [
+          :continuation_notice,
+          :continuation_tools,
+          "continuation_notice",
+          "continuation_tools"
+        ])
+      )
       |> Keyword.put(:retry_admission_notify, {self(), admission_ref})
       |> Keyword.put(:provider_context_messages, checkpoint.provider_context_messages)
       |> Keyword.put(:context_window, checkpoint.context_window)

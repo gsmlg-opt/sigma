@@ -1059,6 +1059,9 @@ defmodule Sigma.Web.SessionLive do
                 do: "Send from this checkpoint. The original branch stays in history.",
                 else: "Send the edited message as a new turn."}
             </p>
+            <p :if={get_in(@pending_edit, [:checkpoint, :replacement_model])}>
+              Send with {@pending_edit.checkpoint.replacement_model[:provider_id]}/{@pending_edit.checkpoint.replacement_model[:model_id]}.
+            </p>
             <div class="flex justify-end gap-2">
               <.dm_btn type="button" phx-click="cancel_edit" variant="ghost">Cancel</.dm_btn>
               <.dm_btn type="submit" variant="primary" phx-disable-with="Sending…">Send</.dm_btn>
@@ -1077,6 +1080,9 @@ defmodule Sigma.Web.SessionLive do
         <:body>
           <p class="text-sm text-on-surface">
             Start one replacement turn from the selected prompt checkpoint? The original branch remains in the journal.
+          </p>
+          <p :if={@pending_retry[:replacement_model]}>
+            Retry with {@pending_retry.replacement_model[:provider_id]}/{@pending_retry.replacement_model[:model_id]}.
           </p>
           <div class="mt-3">
             <SessionObservability.side_effect_warning />
@@ -2729,9 +2735,17 @@ defmodule Sigma.Web.SessionLive do
   defp pending_checkpoint(socket, message_id) do
     with {:ok, checkpoint} <-
            Sigma.Session.Log.retry_checkpoint(socket.assigns.storage_path, message_id) do
+      replacement_model =
+        if is_binary(checkpoint.current_provider_id) and is_binary(checkpoint.current_model_id) and
+             {checkpoint.provider_id, checkpoint.model_id} !=
+               {checkpoint.current_provider_id, checkpoint.current_model_id} do
+          [provider_id: checkpoint.current_provider_id, model_id: checkpoint.current_model_id]
+        end
+
       {:ok,
        %{
          message_id: message_id,
+         replacement_model: replacement_model,
          operation_id: new_operation_id("retry"),
          expected_source_revision: checkpoint.source_revision,
          expected_source_leaf: checkpoint.source_leaf_id
@@ -2748,6 +2762,7 @@ defmodule Sigma.Web.SessionLive do
           socket.assigns.sessions_dir,
           pending.message_id,
           opts ++
+            (pending[:replacement_model] || []) ++
             [
               prompt_opts:
                 Sigma.Agent.PublicRuntime.prompt_opts(
@@ -4767,6 +4782,12 @@ defmodule Sigma.Web.SessionLive do
 
   defp retry_error_message(:model_unavailable),
     do: "Choose a configured model before retrying."
+
+  defp retry_error_message({:retry_model_selection_required, _details}),
+    do: "Choose a model for this session and open Retry again."
+
+  defp retry_error_message({:retry_replacement_model_unavailable, _details}),
+    do: "The selected model changed. Open Retry again to confirm the current model."
 
   defp retry_error_message({:revision_conflict, _details}),
     do: "The session changed before retrying. Refresh and choose Retry again."

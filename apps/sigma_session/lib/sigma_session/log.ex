@@ -325,7 +325,8 @@ defmodule Sigma.Session.Log do
              leaf_id: node.parent_id,
              diagnostics: storage_diagnostics
            ),
-         {:ok, retry_of_turn_id} <- retry_turn_id(message) do
+         {:ok, retry_of_turn_id} <- retry_turn_id(message),
+         {:ok, model_snapshot} <- retry_model_snapshot(context_snapshot, message) do
       {:ok,
        %{
          message: message,
@@ -337,8 +338,8 @@ defmodule Sigma.Session.Log do
          context_messages: context_snapshot.messages,
          provider_context_messages: context_snapshot.context_messages,
          context_window: context_snapshot.context_window,
-         provider_id: context_snapshot.provider_id,
-         model_id: context_snapshot.model_id,
+         provider_id: model_snapshot.provider_id,
+         model_id: model_snapshot.model_id,
          current_provider_id: source_snapshot.provider_id,
          current_model_id: source_snapshot.model_id,
          retry_of_turn_id: retry_of_turn_id,
@@ -351,6 +352,14 @@ defmodule Sigma.Session.Log do
 
   def retry_checkpoint(_storage_id, _message_id, _storage_mod),
     do: {:error, :invalid_message_id}
+
+  defp retry_model_snapshot(snapshot, %{
+         metadata: %{"retry_of_turn_id" => turn_id, "retry_model" => model}
+       })
+       when is_binary(turn_id) and turn_id != "",
+       do: Journal.apply_model_change(snapshot, model)
+
+  defp retry_model_snapshot(snapshot, _message), do: {:ok, snapshot}
 
   defp retry_message_node(index, message_id) do
     case Enum.filter(index.ordered, fn node ->
