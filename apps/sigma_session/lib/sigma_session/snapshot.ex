@@ -1,6 +1,9 @@
 defmodule Sigma.Session.Snapshot do
   @moduledoc """
   Deterministic replay result for one active journal branch.
+
+  `display_messages` preserves saved tool frames for human history. `messages`
+  and `context_messages` repair incomplete tool pairs for Provider input.
   """
 
   @typedoc """
@@ -64,6 +67,7 @@ defmodule Sigma.Session.Snapshot do
     branch_entry_ids: [],
     message_entry_ids: %{},
     messages: [],
+    display_messages: nil,
     context_messages: [],
     context_window_entry_ids: %{},
     mcp_server_ids: [],
@@ -80,6 +84,7 @@ defmodule Sigma.Session.Snapshot do
           branch_entry_ids: [String.t()],
           message_entry_ids: %{optional(String.t()) => String.t()},
           messages: [Sigma.Agent.Message.t()],
+          display_messages: [Sigma.Agent.Message.t()] | nil,
           provider_id: String.t() | nil,
           model_id: String.t() | nil,
           model_source: :journal | nil,

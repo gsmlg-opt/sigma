@@ -86,6 +86,8 @@ defmodule Sigma.Web.SessionLive do
         log_session_id
       )
       |> assign(:storage_path, storage_path)
+      |> load_persisted_history()
+      |> mount_chat_history()
       |> start_async(:session_load, fn ->
         load_session_data(
           session_id,
@@ -243,7 +245,7 @@ defmodule Sigma.Web.SessionLive do
           current_model_value = model_option_value(provider_id, model_id)
 
           transcript =
-            snapshot |> live_display_messages(agent, workdir, session_id) |> transcript_data()
+            snapshot |> live_display_messages(agent) |> transcript_data()
 
           session_metrics_state = ensure_metrics_session(snapshot.metrics, session_id)
           session_metrics = Sigma.Session.Metrics.snapshot(session_metrics_state)
@@ -363,7 +365,7 @@ defmodule Sigma.Web.SessionLive do
          pending_user_questions: load_pending_user_questions(agent),
          pending_mcp_elicitations: load_pending_mcp_elicitations(agent),
          sessions: sessions,
-         transcript: transcript_data(snapshot.messages),
+         transcript: transcript_data(display_messages(snapshot)),
          terminal_capability:
            if(is_pid(agent),
              do: TerminalBinding.capability(),
@@ -487,42 +489,78 @@ defmodule Sigma.Web.SessionLive do
   def handle_async(:retry_branches, _result, socket), do: {:noreply, socket}
 
   defp load_failed_session(socket, reason) do
-    socket =
-      socket
-      |> assign(:session_load, AsyncResult.failed(socket.assigns.session_load, reason))
-      |> assign(runtime_status: :failed, session_ready: false, turn_in_flight: false, agent: nil)
-      |> put_flash(:error, "Could not load session: #{format_load_error(reason)}")
+    socket
+    |> assign(:session_load, AsyncResult.failed(socket.assigns.session_load, reason))
+    |> assign(runtime_status: :failed, session_ready: false, turn_in_flight: false, agent: nil)
+    |> put_flash(:error, "Could not load session: #{format_load_error(reason)}")
+    |> load_persisted_history()
+    |> initialize_chat()
+  end
 
-    # Display only: a failed Runtime attachment must not hide readable history or
-    # trigger another attachment, Provider request, or journal mutation.
-    socket =
-      case Sigma.Session.Log.snapshot(socket.assigns.storage_path) do
-        {:ok, snapshot} ->
-          sessions =
-            case Sigma.Session.Log.list_session_summaries(socket.assigns.sessions_dir) do
-              {:ok, sessions} -> sessions
-              {:error, _} -> []
-            end
+  # Readable history is available before Runtime attachment and remains available
+  # when recovery fails. Admission stays gated by the independent Runtime load.
+  defp load_persisted_history(socket) do
+    case Sigma.Session.Log.snapshot(socket.assigns.storage_path) do
+      {:ok, snapshot} ->
+        sessions =
+          case Sigma.Session.Log.list_session_summaries(socket.assigns.sessions_dir) do
+            {:ok, sessions} -> sessions
+            {:error, _} -> []
+          end
 
-          metrics = ensure_metrics_session(snapshot.metrics, socket.assigns.session_id)
+        metrics = ensure_metrics_session(snapshot.metrics, socket.assigns.session_id)
 
-          socket
-          |> assign(transcript_data(snapshot.messages))
-          |> assign(
-            sessions: sessions,
-            active_provider_id: snapshot.provider_id,
-            current_model: snapshot.model_id,
-            current_model_value: model_option_value(snapshot.provider_id, snapshot.model_id),
-            session_metrics_state: metrics,
-            session_metrics: Sigma.Session.Metrics.snapshot(metrics),
-            parent_session_id: snapshot.parent_session_id
-          )
+        socket
+        |> assign(transcript_data(display_messages(snapshot)))
+        |> assign(
+          sessions: sessions,
+          active_provider_id: snapshot.provider_id,
+          current_model: snapshot.model_id,
+          current_model_value: model_option_value(snapshot.provider_id, snapshot.model_id),
+          session_metrics_state: metrics,
+          session_metrics: Sigma.Session.Metrics.snapshot(metrics),
+          parent_session_id: snapshot.parent_session_id
+        )
+        |> assign_history_preview()
 
-        {:error, _} ->
-          socket
-      end
+      {:error, _} ->
+        socket
+    end
+  end
 
-    initialize_chat(socket)
+  defp mount_chat_history(socket) do
+    # The React hook reads data-chat on mount. Pushing the same initial
+    # snapshot would send every recorded tool result twice on connection.
+    if connected?(socket),
+      do: assign(socket, :chat_initial, chat_snapshot(socket, chat_metadata(socket))),
+      else: socket
+  end
+
+  defp assign_history_preview(socket) do
+    preview =
+      socket.assigns.chat_order
+      |> Enum.map(&socket.assigns.display_messages[&1])
+      |> Enum.reject(&hidden_chat_message?/1)
+      |> Enum.take(-12)
+      |> Enum.map(fn message ->
+        turn_status =
+          get_in(socket.assigns.session_metrics, [:turns, message_turn_id(message), :status])
+
+        tools =
+          for %{type: :tool_call, id: id, name: name} <- List.wrap(message.content) do
+            status = tool_call_status(socket.assigns.tool_results, id, turn_status)
+            %{name: name, status: if(status == "pending", do: "result unconfirmed", else: status)}
+          end
+
+        %{
+          id: message.id,
+          author: message_author(message.role),
+          text: String.slice(user_content(message.content), 0, 2000),
+          tools: Enum.take(tools, 8)
+        }
+      end)
+
+    assign(socket, :history_preview, preview)
   end
 
   defp apply_loaded_session(socket, session_data, chat_metadata \\ nil) do
@@ -612,7 +650,7 @@ defmodule Sigma.Web.SessionLive do
       {:ok, snapshot} ->
         transcript =
           snapshot
-          |> live_display_messages(session_data.agent, workdir, session_id)
+          |> live_display_messages(session_data.agent)
           |> transcript_data()
 
         metrics = ensure_metrics_session(snapshot.metrics, session_id)
@@ -639,6 +677,7 @@ defmodule Sigma.Web.SessionLive do
   def render(assigns) do
     assigns = assign_new(assigns, :goal_recovery, fn -> nil end)
     assigns = assign_new(assigns, :subagents_recovery_error, fn -> nil end)
+    assigns = assign_new(assigns, :history_preview, fn -> [] end)
 
     ~H"""
     <div id="session-panels" phx-hook="SessionPanels" class="sigma-session-shell relative flex h-[calc(100vh-64px)] overflow-hidden bg-surface text-on-surface font-sans">
@@ -856,18 +895,28 @@ defmodule Sigma.Web.SessionLive do
             <.dm_mdi :for={icon <- ~w(content-copy pencil-outline source-branch refresh play-outline)} id={"message-icon-#{icon}"} name={icon} width="24" height="24" />
           </defs>
         </svg>
-        <.dm_react_chat
-          id="messages"
-          hook="SigmaReactChat"
-          conversation_id={@session_id}
-          messages={@chat_initial.messages}
-          metadata={@chat_initial.metadata}
-          actions={%{setting: "chat.setting"}}
-          runtime={@chat_initial.runtime}
-          admission={@chat_initial.admission}
-          label="Session conversation"
-          class="sigma-session-transcript min-h-0 overflow-hidden px-4 py-5 md:px-6"
-        />
+        <div class="sigma-session-transcript min-h-0 overflow-hidden">
+          <section :if={@history_preview != []} id="session-history-preview" aria-label="Saved conversation" class="h-full overflow-y-auto px-4 py-5 md:px-6">
+            <p class="mx-auto mb-4 max-w-4xl text-xs text-on-surface-variant" role="status">Loading complete history…</p>
+            <article :for={message <- @history_preview} data-history-message-id={message.id} class="mx-auto mb-5 max-w-4xl text-sm">
+              <p class="mb-1 font-semibold">{message.author}</p>
+              <p :if={message.text != ""} class="whitespace-pre-wrap break-words">{message.text}</p>
+              <p :for={tool <- message.tools} class="mt-1 font-mono text-xs">{tool.name} · {tool.status}</p>
+            </article>
+          </section>
+          <.dm_react_chat
+            id="messages"
+            hook="SigmaReactChat"
+            conversation_id={@session_id}
+            messages={@chat_initial.messages}
+            metadata={@chat_initial.metadata}
+            actions={%{setting: "chat.setting"}}
+            runtime={@chat_initial.runtime}
+            admission={@chat_initial.admission}
+            label="Session conversation"
+            class="h-full min-h-0 overflow-hidden px-4 py-5 md:px-6"
+          />
+        </div>
 
         <footer class="sigma-session-composer px-4 py-3 md:px-6">
           <section
@@ -1427,10 +1476,12 @@ defmodule Sigma.Web.SessionLive do
     """
   end
 
-  defp initialize_chat(socket) do
+  defp initialize_chat(socket), do: replace_chat_snapshot(socket, chat_metadata(socket))
+
+  defp chat_metadata(socket) do
     full_access? = ConfigManager.get_permissions() == %{default: :allow, rules: %{}}
 
-    metadata = %{
+    %{
       cwd: socket.assigns.effective_cwd,
       host:
         case :inet.gethostname() do
@@ -1452,8 +1503,6 @@ defmodule Sigma.Web.SessionLive do
       draftKey:
         "sigma:composer-draft:/repository/#{socket.assigns.encoded_repository}/sessions/#{socket.assigns.session_id}"
     }
-
-    replace_chat_snapshot(socket, metadata)
   end
 
   defp composer_settings(assigns) do
@@ -1662,6 +1711,12 @@ defmodule Sigma.Web.SessionLive do
     turn_status =
       get_in(socket.assigns.session_metrics, [:turns, message_turn_id(message), :status])
 
+    turn_status =
+      if is_nil(turn_status) and socket.assigns.streaming_message_id == message.id and
+           socket.assigns.turn_in_flight,
+         do: :running,
+         else: turn_status
+
     tools =
       for %{type: :tool_call} = block <- blocks, do: tool_view(socket, block, turn_status)
 
@@ -1736,7 +1791,7 @@ defmodule Sigma.Web.SessionLive do
       statusLabel:
         case {status, turn_status} do
           {"pending", :cancelled} -> "turn cancelled"
-          {"pending", :failed} -> "result unconfirmed"
+          {"pending", _} -> "result unconfirmed"
           _ -> status
         end,
       # Codex-style one-line row: "Ran git status", plus parsed command output.
@@ -2040,8 +2095,8 @@ defmodule Sigma.Web.SessionLive do
 
   defp tool_call_status(tool_results, tool_call_id, turn_status) do
     case Map.get(tool_results, tool_call_id) do
-      nil when turn_status in [:cancelled, :failed] -> "pending"
-      nil -> "running"
+      nil when turn_status == :running -> "running"
+      nil -> "pending"
       {_, true, _} -> "error"
       _ -> "success"
     end
@@ -2089,9 +2144,21 @@ defmodule Sigma.Web.SessionLive do
 
   @doc false
   def split_messages(messages) do
-    Enum.reduce(messages, {[], %{}, %{}}, fn msg, {stream_msgs, tool_results, tc_map} ->
+    call_ids =
+      for %{role: :assistant, content: content} <- messages,
+          %{type: :tool_call, id: id} <- List.wrap(content),
+          into: MapSet.new(),
+          do: id
+
+    messages
+    |> Enum.reduce({[], %{}, %{}}, fn msg, {stream_msgs, tool_results, tc_map} ->
       case msg.role do
         :tool_result ->
+          stream_msgs =
+            if MapSet.member?(call_ids, msg.tool_call_id),
+              do: stream_msgs,
+              else: [msg | stream_msgs]
+
           {stream_msgs, Map.put(tool_results, msg.tool_call_id, tool_result_view(msg)), tc_map}
 
         :assistant ->
@@ -2100,57 +2167,40 @@ defmodule Sigma.Web.SessionLive do
             |> Enum.filter(&(is_map(&1) && Map.get(&1, :type) == :tool_call))
             |> Enum.reduce(tc_map, &Map.put(&2, &1.id, msg))
 
-          {stream_msgs ++ [msg], tool_results, new_tc_map}
+          {[msg | stream_msgs], tool_results, new_tc_map}
 
         _ ->
-          {stream_msgs ++ [msg], tool_results, tc_map}
+          {[msg | stream_msgs], tool_results, tc_map}
       end
     end)
+    |> then(fn {reversed, results, calls} -> {Enum.reverse(reversed), results, calls} end)
   end
 
-  defp live_display_messages(snapshot, agent, workdir, session_id) do
-    # Replay removes unfinished tool batches for safe model input. An active
-    # Agent's canonical transcript retains those calls for display only.
-    messages =
-      if active_runtime_phase?(Sigma.Agent.status(agent).phase),
-        do: Sigma.Agent.messages(agent),
-        else: snapshot.messages
+  defp live_display_messages(snapshot, agent) do
+    status = Sigma.Agent.status(agent)
 
-    cancelled_display_messages(%{snapshot | messages: messages}, workdir, session_id)
-  catch
-    :exit, _reason -> snapshot.messages
-  end
+    if active_runtime_phase?(status.phase) do
+      # The Agent starts with repaired Provider messages. Keep saved historical
+      # calls in the display while its current turn supplies live message frames.
+      saved = display_messages(snapshot)
+      live = Sigma.Agent.messages(agent)
+      by_id = Map.new(live, &{&1.id, &1})
+      saved_ids = MapSet.new(saved, & &1.id)
 
-  defp cancelled_display_messages(snapshot, workdir, session_id) do
-    cancelled_turns =
-      for {id, %{status: :cancelled}} <- snapshot.metrics.turns, into: MapSet.new(), do: id
-
-    if MapSet.size(cancelled_turns) == 0 do
-      snapshot.messages
+      Enum.map(saved, fn message ->
+        case by_id[message.id] do
+          nil -> message
+          current -> if message_turn_id(current) == status.turn_id, do: current, else: message
+        end
+      end) ++ Enum.reject(live, &MapSet.member?(saved_ids, &1.id))
     else
-      writer = Sigma.Agent.Runtime.lookup(workdir, session_id, :writer)
-
-      with writer when is_pid(writer) <- writer,
-           {:ok, %{entries: entries, leaf_id: leaf_id}} <-
-             Sigma.Session.Writer.selected_journal(writer),
-           {:ok, {_leaf, nodes}} <-
-             Sigma.Session.Journal.Index.path(Sigma.Session.Journal.Index.build(entries), leaf_id) do
-        branch_ids = MapSet.new(snapshot.branch_entry_ids)
-
-        originals =
-          for %{entry: %{"type" => "message", "id" => entry_id} = entry} <- nodes,
-              MapSet.member?(branch_ids, entry_id),
-              {:ok, %{role: :assistant} = message} <- [Sigma.Session.EntryDecoder.message(entry)],
-              MapSet.member?(cancelled_turns, message_turn_id(message)),
-              into: %{},
-              do: {message.id, message}
-
-        Enum.map(snapshot.messages, fn message -> Map.get(originals, message.id, message) end)
-      else
-        _ -> snapshot.messages
-      end
+      display_messages(snapshot)
     end
+  catch
+    :exit, _reason -> display_messages(snapshot)
   end
+
+  defp display_messages(snapshot), do: Map.get(snapshot, :display_messages) || snapshot.messages
 
   defp load_native_plan(workdir, session_id) do
     case Sigma.Agent.Runtime.lookup(workdir, session_id, :writer) do
@@ -3269,6 +3319,16 @@ defmodule Sigma.Web.SessionLive do
   end
 
   def handle_event("discard_unrecorded_runs", _params, socket), do: {:noreply, socket}
+
+  def handle_event(
+        "continue_session",
+        _params,
+        %{assigns: %{session_ready: false, session_load: %{failed: reason}}} = socket
+      )
+      when not is_nil(reason) do
+    {:noreply,
+     put_flash(socket, :error, "Could not continue session: #{format_load_error(reason)}")}
+  end
 
   def handle_event("continue_session", %{"msg-id" => msg_id}, socket) do
     cond do

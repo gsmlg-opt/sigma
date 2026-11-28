@@ -1014,17 +1014,49 @@ defmodule Sigma.Web.SessionLiveTest do
   test "renders while runtime session startup is busy", %{conn: conn, tmp_dir: tmp_dir} do
     with_agent_config(tmp_dir, fn ->
       write_provider_configs("openai", "smart", %{"openai" => ["smart"]})
+      session_id = unique_session_id("slow-start")
+      path = session_storage_path(session_id)
+      File.mkdir_p!(Path.dirname(path))
+      :ok = Log.persist_event(path, {:agent_start, @workdir})
+      {:ok, _} = Log.append_model_change(path, "openai", "smart")
+
+      :ok =
+        Log.persist_event(
+          path,
+          {:message_end,
+           Message.user(
+             "saved-user",
+             "Saved before loading\n" <> String.duplicate("long saved content ", 5000)
+           )}
+        )
+
       {:ok, %{repository: repository}} = Sigma.Agent.Runtime.ensure_repository(@workdir)
       :ok = :sys.suspend(repository)
 
       view =
         try do
-          {:ok, view, _html} = live(conn, session_path(unique_session_id("slow-start")))
+          initial_html = conn |> get(session_path(session_id)) |> html_response(200)
+          assert chat_config(initial_html)["messages"] == []
+          assert initial_html =~ ~s(id="session-history-preview")
+          assert initial_html =~ "Saved before loading"
+          assert byte_size(initial_html) < 60_000
+
+          {:ok, view, _html} = live(conn, session_path(session_id))
           html = render(view)
 
           assert html =~ ~s(phx-hook="SigmaReactChat")
+          assert html =~ "Loading session..."
+          assert inspect(chat_snapshot(view).messages) =~ "Saved before loading"
+          refute chat_snapshot(view).admission.canSubmit
           refute html =~ "Could not load session"
           refute html =~ "pending_user_questions"
+
+          :ok =
+            Log.persist_event(
+              path,
+              {:message_end, Message.user("during-load", "Committed while loading")}
+            )
+
           view
         after
           :sys.resume(repository)
@@ -1034,6 +1066,66 @@ defmodule Sigma.Web.SessionLiveTest do
       assert loaded_html =~ ~s(phx-hook="SigmaReactChat")
       refute loaded_html =~ "Could not load session"
       assert chat_snapshot(view).admission.canSubmit
+      assert inspect(chat_snapshot(view).messages) =~ "Saved before loading"
+      assert inspect(chat_snapshot(view).messages) =~ "Committed while loading"
+    end)
+  end
+
+  test "historical unconfirmed tool calls remain visible during a fresh turn", %{conn: conn} do
+    write_selectable_provider_configs()
+    session_id = unique_session_id("unconfirmed-history")
+    path = session_storage_path(session_id)
+    File.mkdir_p!(Path.dirname(path))
+    :ok = Log.persist_event(path, {:agent_start, @workdir})
+    :ok = Log.persist_event(path, {:message_end, Message.user("saved-user", "Inspect files")})
+
+    unfinished =
+      Message.assistant("saved-call", %{
+        content: [%{type: :tool_call, id: "saved-tool", name: "skills::list", arguments: %{}}],
+        metadata: %{turn_id: "old-turn"}
+      })
+
+    :ok = Log.persist_event(path, {:message_end, unfinished})
+
+    result =
+      Message.tool_result("saved-orphan-result", %{
+        tool_call_id: "missing-call",
+        tool_name: "read_file",
+        content: "Saved tool output",
+        timestamp: System.system_time(:millisecond)
+      })
+
+    :ok = Log.persist_event(path, {:message_end, result})
+    Application.put_env(:sigma_web, :blocking_provider_pid, self())
+    on_exit(fn -> Application.delete_env(:sigma_web, :blocking_provider_pid) end)
+
+    with_mock_provider(BlockingTurnProvider, fn ->
+      {:ok, view, _html} = live_loaded(conn, session_path(session_id))
+
+      assert [%{status: "pending", statusLabel: "result unconfirmed", result: nil}] =
+               Enum.find(chat_snapshot(view).messages, &(&1.id == unfinished.id)).tools
+
+      assert %{role: :tool_result, author: "Tool result", content: "Saved tool output"} =
+               Enum.find(chat_snapshot(view).messages, &(&1.id == result.id))
+
+      render_hook(view, "send_prompt", %{"value" => "Continue with a fresh turn", "images" => []})
+      assert_reply(view, %{status: "accepted"})
+      assert_receive {:web_provider_waiting, provider, "Continue with a fresh turn"}, 1_000
+
+      try do
+        {:ok, reloaded, _html} = live_loaded(conn, session_path(session_id))
+        assert chat_snapshot(reloaded).runtime.active
+
+        assert [%{status: "pending", statusLabel: "result unconfirmed", result: nil}] =
+                 Enum.find(chat_snapshot(reloaded).messages, &(&1.id == unfinished.id)).tools
+
+        assert %{role: :tool_result, content: "Saved tool output"} =
+                 Enum.find(chat_snapshot(reloaded).messages, &(&1.id == result.id))
+      after
+        send(provider, :release_web_provider)
+      end
+
+      assert_eventually(fn -> not chat_snapshot(view).runtime.active end)
     end)
   end
 
@@ -1063,7 +1155,19 @@ defmodule Sigma.Web.SessionLiveTest do
     assert {:ok, snapshot} = Log.snapshot(path)
     reason = {:invalid_plan_journal, {:invalid_content_field, :tool_call, :arguments}}
 
-    for result <- [{:ok, {:error, reason}}, {:exit, {:noproc, {:load, session_id}}}] do
+    interrupted =
+      Backplane.AgentRuntime.Error.new(
+        :resource_conflict,
+        "The previous tool result is unconfirmed.",
+        details: %{reason: :interrupted_tool_intent}
+      )
+
+    for {result, label} <- [
+          {{:ok, {:error, reason}}, "invalid_plan_journal"},
+          {{:exit, {:noproc, {:load, session_id}}}, "noproc"},
+          {{:ok, {:error, {:shutdown, {:failed_to_start_child, :agent, interrupted}}}},
+           interrupted.message}
+        ] do
       socket =
         recovery_socket(
           session_id: session_id,
@@ -1087,7 +1191,7 @@ defmodule Sigma.Web.SessionLiveTest do
       assert failed.assigns.active_provider_id == "openai"
 
       assert failed.assigns.display_messages[partial.id].content ==
-               List.last(snapshot.messages).content
+               List.last(snapshot.display_messages).content
 
       assert failed.assigns.session_metrics ==
                Sigma.Session.Metrics.snapshot(%{snapshot.metrics | session_id: session_id})
@@ -1097,14 +1201,55 @@ defmodule Sigma.Web.SessionLiveTest do
       assert failed.assigns.chat_initial.messages != []
       assert failed.assigns.display_messages["retained-user"].content == "Continue work"
       assert inspect(failed.assigns.chat_initial.messages) =~ "Saved partial response"
+
+      assert [%{status: "pending", statusLabel: "result unconfirmed", result: nil}] =
+               List.last(failed.assigns.chat_initial.messages).tools
+
       assert failed.assigns.flash["error"] =~ "Could not load session"
 
       html = render_session(failed.assigns)
       assert html =~ "Retained session"
       assert html =~ "Failed"
       assert html =~ "session-load-error"
-      assert html =~ if(match?({:exit, _}, result), do: "noproc", else: "invalid_plan_journal")
+      assert html =~ label
       refute html =~ "Loading session..."
+
+      assert {:noreply, blocked} =
+               Sigma.Web.SessionLive.handle_event(
+                 "continue_session",
+                 %{"msg-id" => partial.id},
+                 failed
+               )
+
+      assert blocked.assigns.flash["error"] ==
+               String.replace_prefix(
+                 failed.assigns.flash["error"],
+                 "Could not load session: ",
+                 "Could not continue session: "
+               )
+
+      refute blocked.assigns.flash["info"] == "Session is still loading."
+      refute blocked.assigns.session_ready
+      refute recovery_chat_snapshot(blocked).admission.canSubmit
+      assert blocked.assigns.agent == nil
+      refute blocked.assigns[:pending_continue]
+
+      assert {:reply, %{status: "ok"}, action_blocked} =
+               Sigma.Web.SessionLive.handle_event(
+                 "chat.action",
+                 %{
+                   "id" => "messages",
+                   "conversation_id" => session_id,
+                   "message_id" => partial.id,
+                   "action" => "continue_session"
+                 },
+                 failed
+               )
+
+      assert action_blocked.assigns.flash["error"] == blocked.assigns.flash["error"]
+      refute recovery_chat_snapshot(action_blocked).admission.canSubmit
+      assert action_blocked.assigns.agent == nil
+      refute action_blocked.assigns[:pending_continue]
 
       assert {:reply, %{status: "error"}, _} =
                Sigma.Web.SessionLive.handle_event(
@@ -2789,6 +2934,7 @@ defmodule Sigma.Web.SessionLiveTest do
     assert :ok = Log.persist_event(source_path, {:agent_start, @workdir})
     assert :ok = Log.persist_event(source_path, {:message_end, Message.user("prompt", "inspect")})
     assert :ok = Log.persist_event(source_path, {:message_end, unfinished})
+
     assert {:ok, source} = Log.snapshot(source_path)
     source_bytes = File.read!(source_path)
 
@@ -2849,6 +2995,7 @@ defmodule Sigma.Web.SessionLiveTest do
           {:ok, target, _html} = live_loaded(conn, session_path(target_id))
           assert chat_snapshot(target).admission.canSubmit
           refute chat_snapshot(target).runtime.active
+
           refute has_element?(target, "#subagent-recovery")
           refute_receive {:provider_params, _}, 0
         end)
@@ -3279,36 +3426,46 @@ defmodule Sigma.Web.SessionLiveTest do
       )
     end
 
-    assert [first, last] = chat_snapshot(view).messages
-    assert [%{status: "running"}, %{status: "success"}, %{status: "error"}] = first.tools
-    assert [%{status: "running"}] = last.tools
+    assert [first] = chat_snapshot(view).messages
+    assert first.messageIds == ["first-cancelled-tools", "last-cancelled-tools"]
+
+    assert [%{status: "running"}, %{status: "success"}, %{status: "error"}, %{status: "running"}] =
+             first.tools
 
     emit.(
       {:metrics, :turn_finished,
        %{session_id: session_id, turn_id: "cancelled-turn", revision: 1, status: :cancelled}}
     )
 
-    # Both assistant rows must refresh through the live event stream, without a resync.
-    for id <- ["first-cancelled-tools", "last-cancelled-tools"] do
-      assert_push_event(view, "chat:event", %{
-        type: "chat.message",
-        message_id: ^id,
-        message: %{tools: [%{status: "pending", statusLabel: "turn cancelled"} | _]}
-      })
-    end
+    # Both saved assistant frames refresh in their grouped item without a resync.
+    assert_push_event(view, "chat:event", %{
+      type: "chat.message",
+      message_id: "first-cancelled-tools",
+      message: %{
+        messageIds: ["first-cancelled-tools", "last-cancelled-tools"],
+        tools: [
+          %{status: "pending", statusLabel: "turn cancelled"},
+          %{status: "success"},
+          %{status: "error"},
+          %{status: "pending", statusLabel: "turn cancelled"}
+        ]
+      }
+    })
 
-    assert [cancelled_first, cancelled_last] = chat_snapshot(view).messages
+    assert [cancelled_first] = chat_snapshot(view).messages
 
-    for message <- [cancelled_first, cancelled_last] do
-      assert Enum.filter(message.blocks, &(&1.type == "tool")) ==
-               Enum.map(message.tools, &Map.put(&1, :type, "tool"))
-    end
+    assert Enum.filter(cancelled_first.blocks, &(&1.type == "tool")) ==
+             Enum.map(cancelled_first.tools, &Map.put(&1, :type, "tool"))
 
-    assert [%{result: nil, images: []}, %{status: "success"}, %{status: "error"}] =
+    assert [
+             %{result: nil, images: []},
+             %{status: "success"},
+             %{status: "error"},
+             %{result: nil, images: []}
+           ] =
              cancelled_first.tools
 
-    assert Enum.drop(cancelled_first.tools, 1) == Enum.drop(first.tools, 1)
-    assert [%{result: nil, images: []}] = cancelled_last.tools
+    assert Enum.slice(cancelled_first.tools, 1, 2) == Enum.slice(first.tools, 1, 2)
     assert {:ok, %{active_leaf_id: cancelled_leaf}} = Sigma.Session.Writer.flush(writer)
 
     emit.({:metrics, :turn_started, %{session_id: session_id, turn_id: "next-turn"}})
@@ -3331,19 +3488,17 @@ defmodule Sigma.Web.SessionLiveTest do
        }}
     )
 
-    assert [first_after, last_after, %{tools: [%{status: "running"}]}] =
+    assert [first_after, %{tools: [%{status: "running"}]}] =
              chat_snapshot(view).messages
 
     assert first_after.tools == cancelled_first.tools
-    assert last_after.tools == cancelled_last.tools
 
     before_reload = File.read!(path)
     GenServer.stop(view.pid)
     {:ok, reloaded, _html} = live_loaded(conn, session_path(session_id))
 
-    assert [first_reloaded, last_reloaded, _] = chat_snapshot(reloaded).messages
+    assert [first_reloaded, _] = chat_snapshot(reloaded).messages
     assert first_reloaded.tools == cancelled_first.tools
-    assert last_reloaded.tools == cancelled_last.tools
     assert File.read!(path) == before_reload
 
     assert {:ok, replayed} = Log.snapshot(path)
@@ -3367,9 +3522,17 @@ defmodule Sigma.Web.SessionLiveTest do
     before_branch_reload = File.read!(path)
     GenServer.stop(reloaded.pid)
     {:ok, selected, _html} = live_loaded(conn, session_path(session_id))
-    assert [first_selected, last_selected, %{tools: []}] = chat_snapshot(selected).messages
+
+    assert [
+             first_selected,
+             %{
+               tools: [
+                 %{id: "next-call", status: "pending", statusLabel: "turn cancelled", result: nil}
+               ]
+             }
+           ] = chat_snapshot(selected).messages
+
     assert first_selected.tools == cancelled_first.tools
-    assert last_selected.tools == cancelled_last.tools
     assert File.read!(path) == before_branch_reload
   end
 

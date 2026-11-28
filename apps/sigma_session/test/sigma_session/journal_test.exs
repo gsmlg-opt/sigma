@@ -827,6 +827,18 @@ defmodule Sigma.Session.JournalTest do
   end
 
   test "repairs assistant tool calls that have no persisted result" do
+    hosted = %{
+      "openai_responses_hosted" => %{
+        "items" => [
+          %{"output_index" => 0, "item" => %{"type" => "reasoning", "id" => "retained"}},
+          %{
+            "output_index" => 1,
+            "item" => %{"type" => "function_call", "call_id" => "call-orphan"}
+          }
+        ]
+      }
+    }
+
     entries = [
       header("session", "/repo"),
       message_entry("user", nil, "user-1", "user", "hello"),
@@ -837,13 +849,52 @@ defmodule Sigma.Session.JournalTest do
       message_entry("next-user", "assistant", "user-2", "user", "continue")
     ]
 
-    assert {:ok, %Snapshot{messages: [user, assistant, next_user], diagnostics: diagnostics}} =
+    entries =
+      List.update_at(entries, 2, &put_in(&1, ["message", "metadata"], hosted))
+
+    assert {:ok,
+            %Snapshot{
+              messages: [user, assistant, next_user],
+              display_messages: [display_user, display_assistant, display_next],
+              context_messages: context,
+              diagnostics: diagnostics
+            }} =
              Journal.replay(entries)
 
     assert user.role == :user
     assert assistant.content == [%{type: :text, text: "I will inspect it."}]
     assert next_user.role == :user
+    assert display_user == user
+    assert display_next == next_user
+
+    assert display_assistant.content == [
+             %{type: :text, text: "I will inspect it."},
+             %{type: :tool_call, id: "call-orphan", name: "bash", arguments: %{}}
+           ]
+
+    assert display_assistant.metadata == hosted
+
+    assert [%{"item" => %{"type" => "reasoning", "id" => "retained"}}] =
+             assistant.metadata["openai_responses_hosted"]["items"]
+
+    assert context == [user, assistant, next_user]
     assert [%{kind: :message_repair, reason: {:orphaned_tool_call, "call-orphan"}}] = diagnostics
+  end
+
+  test "display preserves standalone tool results omitted from Provider messages" do
+    result =
+      message_entry("result", nil, "result-message", "tool_result", "Saved tool output")
+      |> update_in(
+        ["message"],
+        &Map.merge(&1, %{"tool_call_id" => "missing-call", "tool_name" => "read_file"})
+      )
+
+    assert {:ok, snapshot} = Journal.replay([header("session", "/repo"), result])
+    assert snapshot.messages == []
+    assert snapshot.context_messages == []
+
+    assert [%{role: :tool_result, tool_call_id: "missing-call", content: "Saved tool output"}] =
+             snapshot.display_messages
   end
 
   test "restart replay projects unfinished requests as interrupted without treating operations as requests" do

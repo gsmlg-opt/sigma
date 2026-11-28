@@ -14,6 +14,7 @@ defmodule Sigma.Session.Journal do
 
   alias Sigma.Session.Journal.Index
   alias Sigma.Protocol.AsyncInteractions
+  alias Sigma.Ai.Providers.OpenAIResponses.Hosted
 
   @service_tier_values ~w(auto default flex scale priority)
   @legacy_service_tiers @service_tier_values ++ ~w(openai-only claude-only)
@@ -61,16 +62,18 @@ defmodule Sigma.Session.Journal do
         Enum.reduce(nodes, {snapshot, []}, &reduce_entry/2)
 
       payload_diagnostics = Enum.reverse(payload_diagnostics_rev)
-      {messages, message_diagnostics, rendered_compaction} = render_messages(nodes)
-      context_nodes = context_nodes(nodes, snapshot)
-      {context_messages, context_diagnostics, _compaction} = render_messages(context_nodes)
 
-      messages =
+      {messages, message_diagnostics, rendered_compaction, display_messages} =
+        render_messages(nodes)
+
+      {messages, display_messages, context_messages, context_diagnostics} =
         if snapshot.context_window do
+          {context_messages, diagnostics, _, _} = render_messages(context_nodes(nodes, snapshot))
           boundaries = snapshot.context_window_entry_ids |> Map.values() |> MapSet.new()
-          render_window_display(nodes, boundaries)
+          {messages, display} = render_window_display(nodes, boundaries)
+          {messages, display, context_messages, diagnostics}
         else
-          messages
+          {messages, display_messages, messages, []}
         end
 
       journal_diagnostics =
@@ -93,6 +96,7 @@ defmodule Sigma.Session.Journal do
          snapshot
          | compaction: rendered_compaction,
            messages: messages,
+           display_messages: display_messages,
            context_messages: context_messages,
            diagnostics: diagnostics
        }}
@@ -249,8 +253,6 @@ defmodule Sigma.Session.Journal do
 
   defp reduce_entry(_node, acc), do: acc
 
-  defp context_nodes(nodes, %{context_window: nil}), do: nodes
-
   defp context_nodes(nodes, snapshot) do
     window = snapshot.context_window
     id = snapshot.context_window_entry_ids[{window.run_id, window.incarnation, window.window}]
@@ -263,11 +265,15 @@ defmodule Sigma.Session.Journal do
         not MapSet.member?(boundaries, node.entry["id"])
       end)
 
-    {messages, _diagnostics, _compaction} = render_messages(before)
+    {messages, _diagnostics, _compaction, display} = render_messages(before)
 
     case boundary_and_after do
-      [] -> messages
-      [_boundary | after_nodes] -> messages ++ render_window_display(after_nodes, boundaries)
+      [] ->
+        {messages, display}
+
+      [_boundary | after_nodes] ->
+        {later_messages, later_display} = render_window_display(after_nodes, boundaries)
+        {messages ++ later_messages, display ++ later_display}
     end
   end
 
@@ -587,8 +593,8 @@ defmodule Sigma.Session.Journal do
     analysis = analyze_message_branch(nodes)
     {selected_compaction, compaction_diagnostics} = select_compaction(analysis)
 
-    messages = render_analyzed_messages(analysis.decoded_messages, selected_compaction)
-    {messages, repair_diagnostics} = repair_tool_message_sequence(messages, nodes)
+    display_messages = render_analyzed_messages(analysis.decoded_messages, selected_compaction)
+    {messages, repair_diagnostics} = repair_tool_message_sequence(display_messages, nodes)
 
     diagnostics =
       analysis.message_diagnostics
@@ -601,7 +607,7 @@ defmodule Sigma.Session.Journal do
         %{node: node} -> node.entry
       end
 
-    {messages, diagnostics, rendered_compaction}
+    {messages, diagnostics, rendered_compaction, display_messages}
   end
 
   defp analyze_message_branch(nodes) do
@@ -778,7 +784,15 @@ defmodule Sigma.Session.Journal do
                 [tool_repair_diagnostic(message, nodes, {:orphaned_tool_call, id}) | acc]
               end)
 
-            {%{message | content: kept}, diagnostics}
+            calls = MapSet.new(removed, & &1.id)
+
+            metadata =
+              case Hosted.without_tool_calls(message.metadata, calls) do
+                {:ok, metadata} -> metadata
+                :none -> message.metadata
+              end
+
+            {%{message | content: kept, metadata: metadata}, diagnostics}
 
           %{role: :tool_result, tool_call_id: id} = result ->
             if MapSet.member?(call_ids, id) do

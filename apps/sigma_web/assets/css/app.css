@@ -166,6 +166,14 @@ button.btn:focus-visible {
   scrollbar-gutter: stable;
 }
 
+.sigma-session-transcript:has(#messages [data-message-id]) #session-history-preview {
+  display: none;
+}
+
+.sigma-session-transcript:has(#session-history-preview):not(:has(#messages [data-message-id])) #messages {
+  display: none;
+}
+
 .sigma-session-composer {
   --composer-height: calc((100dvh - 64px) * 0.35);
   max-height: var(--composer-height);
