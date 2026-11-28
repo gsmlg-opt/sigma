@@ -284,6 +284,30 @@ defmodule Sigma.Agent.Backplane.StoreJournalStorageTest do
     dir = Path.join(root, "store")
     {:ok, store} = Store.open(path: dir)
     {snapshot, _inputs} = checkpoints(store, 3)
+    {:ok, compiled_schema} = Formata.JSONSchema.compile(false)
+
+    compiled_schema =
+      compiled_schema
+      |> Map.from_struct()
+      |> Map.update!(:rules, &Enum.map(&1, fn rule -> Map.from_struct(rule) end))
+
+    command =
+      {:conversation_updated, 4,
+       %{
+         "run_id" => snapshot.run.run_id,
+         "incarnation" => snapshot.incarnation,
+         "conversation" => %{
+           "messages" => [],
+           "compiled_schema" => compiled_schema,
+           "remote_sources" => [%{source_id: "cold-skill-source", offline?: false}]
+         }
+       }}
+
+    assert {:ok, %{stage: stage}} =
+             RuntimeStore.stage(Store, store, snapshot.run, %{command: command})
+
+    assert {:ok, _} = RuntimeStore.acknowledge_commit(Store, store, stage, %{command: command})
+    assert {:ok, snapshot} = Store.load(store, snapshot.run.run_id)
     assert {:ok, journal} = Store.recovery_journal(store, snapshot.run.run_id)
     assert :ok = Store.retire(store)
     before = tree(dir)
@@ -292,6 +316,18 @@ defmodule Sigma.Agent.Backplane.StoreJournalStorageTest do
     script = ~S'''
     [dir, run_id, result] = System.argv()
     if :code.is_loaded(Backplane.AgentRuntime.Kernel), do: raise("Runtime was already loaded")
+    try do
+      String.to_existing_atom("offline?")
+      raise "reader preloaded remote skill source vocabulary"
+    rescue
+      ArgumentError -> :ok
+    end
+    try do
+      String.to_existing_atom("boolean_schema")
+      raise "reader preloaded compiled schema vocabulary"
+    rescue
+      ArgumentError -> :ok
+    end
     {:ok, _registry} = Registry.start_link(keys: :unique, name: Sigma.Agent.RepositoryRegistry)
     {:ok, store} = Sigma.Agent.Backplane.Store.open(path: dir)
     {:ok, snapshot} = Sigma.Agent.Backplane.Store.load(store, run_id)
@@ -320,6 +356,67 @@ defmodule Sigma.Agent.Backplane.StoreJournalStorageTest do
     assert output =~ "COLD_JOURNAL_OK"
     assert :erlang.binary_to_term(File.read!(result), [:safe]) === {snapshot, journal}
     assert tree(dir) == before
+  end
+
+  test "standalone Store opens when the optional Session application is absent", %{root: root} do
+    script = ~S'''
+    [dir] = System.argv()
+    true = :code.del_path(:code.lib_dir(:sigma_session, :ebin))
+    :non_existing = :code.where_is_file(~c"sigma_session.app")
+    {:ok, _registry} = Registry.start_link(keys: :unique, name: Sigma.Agent.RepositoryRegistry)
+    {:ok, store} = Sigma.Agent.Backplane.Store.open(path: dir)
+    :ok = Sigma.Agent.Backplane.Store.retire(store)
+    IO.puts("STANDALONE_STORE_OK")
+    '''
+
+    paths = Enum.flat_map(:code.get_path(), &["-pa", List.to_string(&1)])
+
+    executable =
+      System.find_executable("elixir") || raise "Elixir is required for cold Store tests"
+
+    {output, status} =
+      System.cmd(executable, ["--erl", "+S 2:2"] ++ paths ++ ["-e", script, "--", root],
+        stderr_to_stdout: true
+      )
+
+    assert status == 0, output
+    assert output =~ "STANDALONE_STORE_OK"
+  end
+
+  test "atomic writes complete while the Inspect protocol is unavailable", %{root: root} do
+    script = ~S'''
+    [path] = System.argv()
+    {:module, _} = Code.ensure_loaded(Sigma.Agent.Backplane.Store.FileSystem)
+    {Inspect, original, filename} = :code.get_object_code(Inspect)
+    Code.compiler_options(ignore_module_conflict: true)
+    Code.compile_string("defmodule Inspect do end")
+
+    try do
+      :ok = Sigma.Agent.Backplane.Store.FileSystem.write_atomic(path, "checkpoint")
+      "checkpoint" = File.read!(path)
+      [] = Path.wildcard(path <> ".tmp-*")
+    after
+      :code.purge(Inspect)
+      {:module, Inspect} = :code.load_binary(Inspect, filename, original)
+    end
+
+    IO.puts("ATOMIC_WRITE_OK")
+    '''
+
+    paths = Enum.flat_map(:code.get_path(), &["-pa", List.to_string(&1)])
+
+    executable =
+      System.find_executable("elixir") || raise "Elixir is required for cold Store tests"
+
+    {output, status} =
+      System.cmd(
+        executable,
+        ["--erl", "+S 2:2"] ++ paths ++ ["-e", script, "--", Path.join(root, "checkpoint")],
+        stderr_to_stdout: true
+      )
+
+    assert status == 0, output
+    assert output =~ "ATOMIC_WRITE_OK"
   end
 
   defp raw_entries(path) do

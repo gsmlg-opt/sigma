@@ -32,7 +32,9 @@ defmodule Sigma.Agent.Backplane.Store do
   @behaviour RuntimeStore
 
   @record_keys [:run, :revision, :transition, :effects, :outbox, :incarnation]
+  # Compiled tool schemas carry Formata's rule names in persisted records.
   @record_applications [
+    :formata,
     :backplane_agent_runtime,
     :backplane_ai_protocol,
     :backplane_mcp_protocol,
@@ -64,7 +66,8 @@ defmodule Sigma.Agent.Backplane.Store do
     def write_atomic(_context, path, bytes) when is_binary(bytes) do
       temporary =
         path <>
-          ".tmp-#{System.unique_integer([:positive, :monotonic])}-#{inspect(make_ref())}"
+          ".tmp-#{System.unique_integer([:positive, :monotonic])}-" <>
+          Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
 
       result =
         with {:ok, file} <-
@@ -281,7 +284,15 @@ defmodule Sigma.Agent.Backplane.Store do
   end
 
   defp record_modules do
-    Enum.reduce_while(@record_applications, {:ok, []}, fn app, {:ok, modules} ->
+    # Remote skill source values originate in the optional Session host. Its
+    # installed schema supplies the vocabulary persisted in those records.
+    applications =
+      case :code.where_is_file(~c"sigma_session.app") do
+        :non_existing -> @record_applications
+        _path -> [:sigma_session | @record_applications]
+      end
+
+    Enum.reduce_while(applications, {:ok, []}, fn app, {:ok, modules} ->
       case Application.load(app) do
         result when result == :ok or result == {:error, {:already_loaded, app}} ->
           case Application.spec(app, :modules) do

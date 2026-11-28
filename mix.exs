@@ -5,6 +5,9 @@ defmodule Sigma.MixProject do
     [
       apps_path: "apps",
       version: "0.7.3",
+      # On Elixir 1.18 Phoenix purges consolidated protocols during dev reloads,
+      # including Inspect while session workers may still be using it.
+      consolidate_protocols: Mix.env() != :dev or System.get_env("SIGMA_RELEASE") == "true",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
