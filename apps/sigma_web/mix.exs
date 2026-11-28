@@ -34,6 +34,8 @@ defmodule Sigma.Web.MixProject do
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_reload, "~> 1.5", only: :dev},
       {:formata, "~> 0.4"},
+      {:http_fetch, "~> 1.0", only: :test},
+      {:http_web_socket, "~> 1.0", only: :test},
       {:gaoxy_http, "~> 0.16"},
       {:websock_adapter, "~> 0.16", hex: :gaoxy_websock_adapter, override: true},
       {:samgita_protocol, "~> 0.5"},
