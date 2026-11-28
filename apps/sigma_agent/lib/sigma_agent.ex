@@ -2075,15 +2075,22 @@ defmodule Sigma.Agent do
     end
   end
 
-  defp start_host_retirement(
-         %{host_retirement_facts: %{result: {:ok, %{status: :confirmed}}}} = state
-       ),
-       do: start_host_completion(state)
-
   defp start_host_retirement(state) do
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
-        {:root_retirement, RootRetirement.close(state, state.host_retirement_facts, :shutdown)}
+        continuation? = RootRetirement.capture_unresolved_shutdown?(state, :shutdown)
+
+        facts =
+          if match?(%{result: {:ok, %{status: :confirmed}}}, state.host_retirement_facts) and
+               not continuation? do
+            state.host_retirement_facts
+          else
+            RootRetirement.close(state, state.host_retirement_facts, :shutdown,
+              continuation: continuation?
+            )
+          end
+
+        {:root_retirement, facts}
       end)
 
     %{state | host_retirement_task: task, host_retirement_stage: :components}
@@ -2306,7 +2313,7 @@ defmodule Sigma.Agent do
 
     facts =
       case state.host_retirement_facts do
-        %{result: {:ok, %{status: :confirmed}}} = confirmed ->
+        %{result: {:ok, %{status: :confirmed}}} = confirmed when not unresolved? ->
           confirmed
 
         previous ->

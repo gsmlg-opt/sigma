@@ -10,7 +10,7 @@ defmodule Sigma.Agent.Backplane.RootRetirement do
   require Logger
 
   alias Backplane.AgentRuntime.{Error, Kernel}
-  alias Sigma.Agent.Backplane.{ChildIO, GoalRuns, RunRecovery, Store}
+  alias Sigma.Agent.Backplane.{ChildIO, GoalRuns, LifetimeEvidence, RunRecovery, Store}
   alias Sigma.Coding.Hooks.AsyncRuntime
   alias Sigma.Session.Writer
 
@@ -159,7 +159,8 @@ defmodule Sigma.Agent.Backplane.RootRetirement do
           current_turn_task: nil,
           goal_idle_task: nil,
           host_retirement: %{identity: identity},
-          backplane_store: store
+          backplane_store: store,
+          transcript_path: transcript
         },
         reason
       )
@@ -170,10 +171,25 @@ defmodule Sigma.Agent.Backplane.RootRetirement do
         Enum.any?(bindings, fn {_key, binding} ->
           case Store.load(store, binding.run_id) do
             {:ok, %{run: run}} ->
-              RunRecovery.missing_tool_result?(run, %{
+              identity = %{
+                thread_id: identity.root_header_id,
                 run_id: binding.run_id,
                 incarnation: binding.run_incarnation
-              })
+              }
+
+              cond do
+                RunRecovery.interrupted_tool_intent?(run, identity) ->
+                  true
+
+                RunRecovery.missing_tool_result?(run, identity) ->
+                  not match?(
+                    {:ok, _},
+                    LifetimeEvidence.read_continuation(transcript, identity)
+                  )
+
+                true ->
+                  false
+              end
 
             _ ->
               false
@@ -192,23 +208,29 @@ defmodule Sigma.Agent.Backplane.RootRetirement do
   def capture_unresolved_shutdown?(_state, _reason), do: false
 
   def close(state, previous, reason, opts \\ []) do
+    continuation? = Keyword.get(opts, :continuation, false)
+    retained_native = if continuation?, do: nil, else: confirmed(previous[:native])
+
     native =
-      confirmed(previous[:native]) ||
+      retained_native ||
         call(fn ->
           if Keyword.get(opts, :native_close, true) do
-            close =
-              if Keyword.get(opts, :continuation, false),
-                do: fn ->
-                  state.subagents && Sigma.Agent.Subagents.close_for_continuation(state.subagents)
-                end,
-                else: fn ->
-                  state.subagents && Sigma.Agent.Subagents.close_execution(state.subagents)
-                end
+            with :ok <- prepare_continuation_runs(state, continuation?) do
+              close =
+                if continuation?,
+                  do: fn ->
+                    state.subagents &&
+                      Sigma.Agent.Subagents.close_for_continuation(state.subagents)
+                  end,
+                  else: fn ->
+                    state.subagents && Sigma.Agent.Subagents.close_execution(state.subagents)
+                  end
 
-            case close.() do
-              nil -> {:ok, %{status: :confirmed}}
-              :ok -> {:ok, %{status: :confirmed}}
-              result -> result
+              case close.() do
+                nil -> {:ok, %{status: :confirmed}}
+                :ok -> {:ok, %{status: :confirmed}}
+                result -> result
+              end
             end
           else
             failure("active root native cleanup requires a responsive Agent", :active_termination)
@@ -262,6 +284,47 @@ defmodule Sigma.Agent.Backplane.RootRetirement do
       end
 
     %{native: native, async_hooks: hooks, session_end: session_end, result: result}
+  end
+
+  defp prepare_continuation_runs(_state, false), do: :ok
+
+  defp prepare_continuation_runs(state, true) do
+    identity = state.host_retirement.identity
+
+    with {:ok, ledger} <- Store.host_retirement(state.backplane_store, :all),
+         %{identity: ^identity, bindings: bindings} <- ledger.hosts[identity.host_lifetime_id] do
+      bindings
+      |> Map.values()
+      |> Enum.uniq_by(& &1.run_id)
+      |> Enum.reduce_while(:ok, fn binding, :ok ->
+        original = %{
+          thread_id: identity.root_header_id,
+          run_id: binding.run_id,
+          incarnation: binding.run_incarnation
+        }
+
+        result =
+          with {:ok, snapshot} <- Store.load(state.backplane_store, binding.run_id) do
+            if RunRecovery.interrupted_tool_intent?(snapshot.run, original),
+              do:
+                RunRecovery.prepare_root_continuation(
+                  state.backplane_store,
+                  original,
+                  snapshot,
+                  state.transcript_path
+                ),
+              else: {:ok, snapshot}
+          end
+
+        case result do
+          {:ok, _} -> {:cont, :ok}
+          error -> {:halt, error}
+        end
+      end)
+    else
+      {:error, _} = error -> error
+      _ -> failure("continuation requires the original host bindings", :missing_bindings)
+    end
   end
 
   def report(%{result: {:ok, %{status: :confirmed}}}), do: :ok

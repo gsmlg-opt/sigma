@@ -542,12 +542,22 @@ defmodule Sigma.Agent.Backplane.Store do
     }
 
     with {:ok, fences} <- read_recovery_fences(state) do
-      if fence in fences do
+      # compare_fence has just validated this authoritative source incarnation.
+      # Earlier proposals from that same source are unpublished. A later source
+      # revision supersedes them while completed earlier generations stay intact.
+      retained =
+        Enum.reject(fences, fn existing ->
+          existing["run_id"] == run_id and existing["from_incarnation"] == current
+        end)
+
+      next = retained ++ [fence]
+
+      if next == fences do
         :ok
       else
         case fs(state.filesystem, :write_atomic, [
                Path.join(state.path, "recovery-fences.etf"),
-               :erlang.term_to_binary(%{version: 1, fences: fences ++ [fence]})
+               :erlang.term_to_binary(%{version: 1, fences: next})
              ]) do
           :ok -> :ok
           {:error, reason} -> storage_error("recovery fence source commit failed", reason)

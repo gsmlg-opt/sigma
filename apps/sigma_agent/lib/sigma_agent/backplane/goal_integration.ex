@@ -165,8 +165,8 @@ defmodule Sigma.Agent.Backplane.GoalIntegration do
       {:ok, %{status: :ready}} ->
         GoalCoordinator.runtime_context(coordinator)
 
-      {:error, %Error{class: :resource_conflict, details: %{reason: :missing_tool_result}}} =
-          error ->
+      {:error, %Error{class: :resource_conflict, details: %{reason: reason}}} = error
+      when reason in [:missing_tool_result, :interrupted_tool_intent] ->
         if Keyword.get(opts, :allow_pending_continuation, false),
           do: GoalCoordinator.runtime_context(coordinator),
           else: error

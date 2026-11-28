@@ -64,6 +64,16 @@ defmodule Sigma.Agent.Backplane.StoreJournalStorageTest do
     def write_atomic(control, path, bytes) do
       options = Agent.get(control, & &1)
 
+      if observer = Map.get(options, :pause_snapshot) do
+        if String.ends_with?(path, ".runtime") do
+          send(observer, {:snapshot_pending, self()})
+
+          receive do
+            :publish_snapshot -> :ok
+          end
+        end
+      end
+
       cond do
         options.fail_snapshot and String.ends_with?(path, ".runtime") ->
           {:error, :snapshot_publication_failed}
@@ -86,6 +96,50 @@ defmodule Sigma.Agent.Backplane.StoreJournalStorageTest do
     assert {:ok, ^snapshot} = Store.load(store, snapshot.run.run_id)
     assert {:ok, _} = RuntimeStore.store(Store, store, snapshot.run, %{command: {:start, 100}})
     assert :ok = Store.retire(store)
+  end
+
+  test "accepted commit survives caller death and reopens with the complete journal", %{
+    root: root
+  } do
+    {:ok, control} = Agent.start_link(fn -> %{forbidden: MapSet.new(), fail_snapshot: false} end)
+    {:ok, store} = Store.open(path: root, filesystem: {ObservedFileSystem, control})
+    {snapshot, _inputs} = checkpoints(store, 2)
+    assert {:ok, journal} = Store.recovery_journal(store, snapshot.run.run_id)
+    [path] = Path.wildcard(Path.join(root, "*.runtime"))
+    before = File.read!(path)
+    command = {:start, 100}
+
+    assert {:ok, %{stage: stage}} =
+             RuntimeStore.stage(Store, store, snapshot.run, %{command: command})
+
+    observer = self()
+    Agent.update(control, &Map.put(&1, :pause_snapshot, observer))
+
+    {caller, monitor} =
+      spawn_monitor(fn ->
+        RuntimeStore.acknowledge_commit(Store, store, stage, %{command: command})
+      end)
+
+    try do
+      assert_receive {:snapshot_pending, ^store}, 5_000
+      assert File.read!(path) == before
+      Process.exit(caller, :kill)
+      assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}
+    after
+      send(store, :publish_snapshot)
+    end
+
+    committed = Map.take(stage, Map.keys(snapshot))
+    assert {:ok, ^committed} = Store.load(store, snapshot.run.run_id)
+    assert {:ok, entries} = Store.recovery_journal(store, snapshot.run.run_id)
+    assert Enum.drop(entries, -1) == journal
+    assert List.last(entries)["kind"] == "start"
+    assert :ok = Store.retire(store)
+
+    assert {:ok, reopened} = Store.open(path: root)
+    assert {:ok, ^committed} = Store.load(reopened, snapshot.run.run_id)
+    assert {:ok, ^entries} = Store.recovery_journal(reopened, snapshot.run.run_id)
+    assert :ok = Store.retire(reopened)
   end
 
   test "failed snapshot publication leaves the acknowledged pair exact and retry reuses its block",
@@ -156,6 +210,41 @@ defmodule Sigma.Agent.Backplane.StoreJournalStorageTest do
 
       assert :ok = Store.retire(reopened)
     end
+  end
+
+  test "a later fence supersedes only unpublished proposals from its exact source generation", %{
+    root: root
+  } do
+    {:ok, control} = Agent.start_link(fn -> %{forbidden: MapSet.new(), fail_snapshot: false} end)
+    {:ok, store} = Store.open(path: root, filesystem: {ObservedFileSystem, control})
+    {first, _} = checkpoints(store, 2)
+    {other, _} = checkpoints(store, 3)
+    assert {:ok, _} = RuntimeStore.fence(Store, store, first.run.run_id, first.revision, 1, 2)
+    assert {:ok, [completed]} = Store.recovery_fences(store, first.run.run_id)
+    assert {:ok, _} = RuntimeStore.fence(Store, store, other.run.run_id, other.revision, 1, 2)
+    assert {:ok, other_fences} = Store.recovery_fences(store, other.run.run_id)
+    assert {:ok, source} = Store.load(store, first.run.run_id)
+    assert {:ok, journal} = Store.recovery_journal(store, first.run.run_id)
+    Agent.update(control, &%{&1 | fail_snapshot: true})
+
+    assert {:error, %{cause: :snapshot_publication_failed}} =
+             RuntimeStore.fence(Store, store, source.run.run_id, source.revision, 2, 3)
+
+    assert {:ok, [^completed]} = Store.recovery_fences(store, first.run.run_id)
+    Agent.update(control, &%{&1 | fail_snapshot: false})
+    assert {:ok, _} = RuntimeStore.store(Store, store, source.run, %{command: {:start, 100}})
+    assert {:ok, advanced} = Store.load(store, first.run.run_id)
+
+    assert {:ok, _} =
+             RuntimeStore.fence(Store, store, advanced.run.run_id, advanced.revision, 2, 3)
+
+    assert {:ok, [^completed, current]} = Store.recovery_fences(store, first.run.run_id)
+    assert current["from_revision"] == advanced.revision
+    assert current["to_revision"] == advanced.revision + 1
+    assert {:ok, ^other_fences} = Store.recovery_fences(store, other.run.run_id)
+    assert {:ok, entries} = Store.recovery_journal(store, first.run.run_id)
+    assert Enum.drop(entries, -2) == journal
+    assert :ok = Store.retire(store)
   end
 
   test "recursive copies retain exact snapshot and public journal without rewriting files", %{

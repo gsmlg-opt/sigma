@@ -1,21 +1,30 @@
 defmodule Sigma.Agent.Backplane.RunRecovery do
   @moduledoc """
-  Reconciles retired provider-only runs before Goal receipt recovery.
+  Reconciles stopped Runtime runs before future admission.
 
   Component receipts and exact worker termination are prerequisites, separate
   from Kernel settlement. This controller never resumes a Conversation, closes
   a live host, dispatches an effect, or changes original Goal attribution.
   Child settlement does not reconcile its manager or containing root Session.
+  Live root continuation preserves interrupted tools as unknown before the
+  original host captures its complete ownership closure.
   """
 
   alias Backplane.AgentRuntime.{Error, Kernel}
   alias Backplane.AgentRuntime.Store, as: RuntimeStore
-  alias Sigma.Agent.Backplane.{ProviderLifecycle, Store}
+  alias Sigma.Agent.Backplane.{LifetimeEvidence, LifetimeRecovery, ProviderLifecycle, Store}
 
   @active [:queued, :running, :waiting_approval, :waiting_result, :cancelling]
 
   def reconcile_root(store, identity, %{run: run} = snapshot) do
-    reconcile(store, identity, snapshot, run, fn -> retired_root(store, identity) end)
+    if interrupted_tool_intent?(run, identity) do
+      {:error,
+       Error.new(:resource_conflict, "A tool from the previous turn has no recorded result.",
+         details: %{run_id: identity.run_id, reason: :interrupted_tool_intent}
+       )}
+    else
+      reconcile(store, identity, snapshot, run, fn -> retired_root(store, identity) end)
+    end
   end
 
   def reconcile_child(store, identity, %{run: run} = snapshot) do
@@ -23,6 +32,111 @@ defmodule Sigma.Agent.Backplane.RunRecovery do
   end
 
   def confirm_root_components(store, identity), do: retired_root(store, identity)
+
+  @doc "Retains a stopped root's interrupted tool outcome before preparing its continuation."
+  def prepare_root_continuation(store, identity, snapshot, transcript) do
+    LifetimeEvidence.with_writer(transcript, identity.thread_id, fn writer ->
+      prepare_root_continuation_writer(store, identity, snapshot, writer)
+    end)
+  end
+
+  defp prepare_root_continuation_writer(store, identity, %{run: run} = snapshot, writer) do
+    with :ok <- interrupted_root_work(identity, snapshot),
+         :ok <- original_recovery_fence(store, identity, snapshot),
+         {:ok, %{status: :stopped, reason: ":normal"} = executor} <-
+           LifetimeRecovery.executor(writer, identity),
+         :ok <- stopped_providers(store, run),
+         {:ok, snapshot} <- fence(store, identity, snapshot),
+         {:ok, snapshot} <- cancel(store, snapshot),
+         {:ok, _} <-
+           RuntimeStore.store(Store, store, snapshot.run, %{
+             command:
+               {:cleanup_settled, now(),
+                %{
+                  certainty: :uncertain,
+                  evidence: %{
+                    reason: "Root executor stopped with an unresolved tool intent",
+                    executor: executor
+                  }
+                }}
+           }) do
+      Store.load(store, identity.run_id)
+    else
+      {:error, _} = error -> error
+      _ -> conflict(identity, "root continuation requires its exact stopped executor")
+    end
+  end
+
+  defp interrupted_root_work(identity, %{run: run} = snapshot) do
+    work = Kernel.cleanup_requirements(run)
+    attempts = run[:provider_attempts]
+
+    original_tools? =
+      Enum.all?(Map.values(run.active_tools), fn operation ->
+        original_operation?(operation, identity) and
+          match?(
+            %{type: :tool, status: :started},
+            run.execution_intents["tool:#{operation.invocation_id}"]
+          ) and
+          not Map.has_key?(run.tool_results, operation.invocation_id)
+      end)
+
+    original_intents? =
+      Enum.all?(Map.values(run.execution_intents), fn intent ->
+        original_operation?(intent.operation, identity) and
+          (intent.status in [:consumed, :cancelled] or
+             (intent.type == :tool and intent.status == :started and
+                Map.has_key?(run.active_tools, intent.operation.invocation_id)))
+      end)
+
+    if interrupted_tool_intent?(run, identity) and
+         work.provider == nil and work.children == [] and work.dependencies == [] and
+         is_nil(run[:active_wait]) and snapshot.effects == [] and
+         original_tools? and original_intents? and
+         Enum.all?(snapshot.outbox, fn intent ->
+           intent.type == :tool and intent.status == :started and
+             run.execution_intents["tool:#{intent.operation.invocation_id}"] === intent
+         end) and
+         is_map(attempts) and map_size(attempts) > 0 and
+         Enum.all?(Map.values(attempts), &original_operation?(&1, identity)),
+       do: :ok,
+       else:
+         conflict(identity, "live root continuation requires only its original interrupted tools")
+  end
+
+  defp original_operation?(%{run_id: run, incarnation: incarnation}, identity),
+    do: run == identity.run_id and incarnation == identity.incarnation
+
+  defp original_operation?(_operation, _identity), do: false
+
+  defp original_recovery_fence(_store, identity, %{run: run})
+       when run.incarnation == identity.incarnation,
+       do: :ok
+
+  defp original_recovery_fence(store, identity, %{run: run} = snapshot)
+       when run.incarnation == identity.incarnation + 1 do
+    expected_revisions =
+      if run.state == :cancelling,
+        do: [snapshot.revision, snapshot.revision - 1],
+        else: [snapshot.revision]
+
+    with {:ok, fences} <- Store.recovery_fences(store, identity.run_id) do
+      if Enum.any?(fences, fn fence ->
+           fence["from_incarnation"] == identity.incarnation and
+             fence["to_incarnation"] == run.incarnation and
+             fence["to_revision"] in expected_revisions
+         end),
+         do: :ok,
+         else:
+           conflict(
+             identity,
+             "live root continuation requires its exact persisted recovery fence"
+           )
+    end
+  end
+
+  defp original_recovery_fence(_store, identity, _snapshot),
+    do: conflict(identity, "live root continuation source incarnation changed")
 
   def prepare_child_retirement(store, identity, %{run: run} = snapshot) do
     cond do
@@ -93,11 +207,22 @@ defmodule Sigma.Agent.Backplane.RunRecovery do
   defp confirm_terminal(_scope, _store, identity, _snapshot, _retirement),
     do: conflict(identity, "run is not a terminal unknown outcome")
 
-  def missing_tool_result?(
-        %{state: :unknown_outcome, run_id: id, execution_intents: intents, tool_results: results},
-        %{run_id: id, incarnation: incarnation}
-      )
-      when is_map(intents) and is_map(results) do
+  def missing_tool_result?(%{state: :unknown_outcome} = run, identity),
+    do: unresolved_tool_intent?(run, identity)
+
+  def missing_tool_result?(_run, _identity), do: false
+
+  def interrupted_tool_intent?(%{state: state} = run, identity)
+      when state in [:running, :cancelling],
+      do: unresolved_tool_intent?(run, identity)
+
+  def interrupted_tool_intent?(_run, _identity), do: false
+
+  defp unresolved_tool_intent?(
+         %{run_id: id, execution_intents: intents, tool_results: results},
+         %{run_id: id, incarnation: incarnation}
+       )
+       when is_map(intents) and is_map(results) do
     Enum.any?(intents, fn
       {_,
        %{
@@ -113,7 +238,7 @@ defmodule Sigma.Agent.Backplane.RunRecovery do
     end)
   end
 
-  def missing_tool_result?(_run, _identity), do: false
+  defp unresolved_tool_intent?(_run, _identity), do: false
 
   defp reconcile(store, identity, snapshot, run, retirement) do
     if Kernel.terminal?(run.state) do
@@ -212,6 +337,8 @@ defmodule Sigma.Agent.Backplane.RunRecovery do
   defp exact_provider_intent?(_intent, _provider, _key, _statuses), do: false
 
   defp retired_root(store, identity) do
+    # TODO(upstream): gsmlg-opt/backplane#199 — provider-only recovery after
+    # host loss needs a Runtime decision when the original receipts are absent.
     with {:ok, ledger} <- Store.host_retirement(store, :all) do
       hosts =
         ledger.hosts

@@ -132,7 +132,7 @@ defmodule Sigma.Agent.Backplane.LifetimeEvidence do
     with_writer(transcript, identity.thread_id, fn writer ->
       request_ref = "continuation-request:" <> Evidence.digest(identity)
 
-      case LifetimeRecovery.load_evidence(writer, request_ref) do
+      case continuation_request(writer, identity, request_ref) do
         {:ok, request} ->
           if request["instruction_ref"] == instruction_ref,
             do: Continuation.prepare(LifetimeRecovery.configuration(writer), request),
@@ -162,7 +162,7 @@ defmodule Sigma.Agent.Backplane.LifetimeEvidence do
   defp read_continuation_writer(writer, identity) do
     request_ref = "continuation-request:" <> Evidence.digest(identity)
 
-    with {:ok, request} <- LifetimeRecovery.load_evidence(writer, request_ref),
+    with {:ok, request} <- continuation_request(writer, identity, request_ref),
          true <-
            request["source"] == %{
              "store_ref" => "root",
@@ -184,7 +184,65 @@ defmodule Sigma.Agent.Backplane.LifetimeEvidence do
     end
   end
 
+  defp continuation_request(writer, identity, request_ref) do
+    case LifetimeRecovery.load_evidence(writer, request_ref) do
+      {:error, %Error{class: :not_found}} ->
+        recover_historical_request(writer, identity)
+
+      result ->
+        result
+    end
+  end
+
+  defp recover_historical_request(writer, identity) do
+    with {:ok, {Store, store}} <- LifetimeRecovery.runtime_store(writer, "root"),
+         {:ok, subject} <- historical_subject(store, identity),
+         source = %{"run_id" => identity.run_id, "original_incarnation" => identity.incarnation},
+         id = "continuation_" <> Evidence.digest(%{subject: subject, source: source}),
+         {:ok, decision} <- LifetimeRecovery.load_continuation(writer, id),
+         :ok <- Evidence.sealed(decision, "decision_digest"),
+         :ok <- Evidence.identifier(decision["request_digest"]),
+         {:ok, request} <-
+           LifetimeRecovery.load_evidence(
+             writer,
+             "continuation-candidate:" <> decision["request_digest"]
+           ),
+         true <- Evidence.digest(request) == decision["request_digest"] do
+      {:ok, request}
+    else
+      {:error, %Error{class: :unknown_outcome}} ->
+        {:error, Error.new(:not_found, "root continuation request is unavailable")}
+
+      {:error, _} = error ->
+        error
+
+      _ ->
+        fail("accepted historical Continue request changed")
+    end
+  end
+
   defp prepare_new_continuation(writer, identity, instruction_ref, request_ref) do
+    with {:ok, manifests} <- LifetimeRecovery.manifests(writer) do
+      original_manifest? =
+        Enum.any?(manifests, fn {_id, manifest} ->
+          manifest["subject"]["kind"] == "session" and
+            Enum.any?(manifest["run_refs"], &(&1["run_id"] == identity.run_id))
+        end)
+
+      if original_manifest?,
+        do: prepare_manifest_continuation(writer, identity, instruction_ref, request_ref),
+        else:
+          prepare_historical_continuation(
+            writer,
+            identity,
+            instruction_ref,
+            request_ref,
+            manifests
+          )
+    end
+  end
+
+  defp prepare_manifest_continuation(writer, identity, instruction_ref, request_ref) do
     source = %{
       "run_id" => identity.run_id,
       "original_incarnation" => identity.incarnation,
@@ -263,6 +321,162 @@ defmodule Sigma.Agent.Backplane.LifetimeEvidence do
         fail(
           "Continue requires the original execution, async-hook and SessionEnd shutdown acknowledgements"
         )
+    end
+  end
+
+  defp prepare_historical_continuation(writer, identity, instruction_ref, request_ref, manifests) do
+    source = %{
+      "run_id" => identity.run_id,
+      "original_incarnation" => identity.incarnation,
+      "store_ref" => "root"
+    }
+
+    with :ok <- Evidence.identifier(instruction_ref),
+         {:ok, {Store, store}} <- LifetimeRecovery.runtime_store(writer, "root"),
+         {:ok, %{run: %{state: :unknown_outcome} = run} = snapshot} <-
+           Store.load(store, identity.run_id),
+         {:ok, subject} <- historical_subject(store, identity),
+         true <- Enum.all?(manifests, fn {_id, manifest} -> manifest["subject"] != subject end),
+         :ok <- historical_registry(writer, subject, manifests),
+         {:ok, hosts} <- continuation_hosts(store, identity, %{"subject" => subject}),
+         {:ok, managers, root_agent_id} <- historical_managers(writer, identity, manifests),
+         {:ok, executor} <- LifetimeRecovery.executor(writer, identity),
+         {:ok, executor_ref} <- continuation_fact(writer, "executor-down", executor),
+         {:ok, provider_refs} <-
+           collect(Enum.sort(run.provider_attempts), fn {_id, operation} ->
+             with {:ok, fact} <- Store.provider_lifecycle(store, operation),
+                  do: continuation_fact(writer, "provider-down", fact)
+           end),
+         {:ok, host_refs} <-
+           collect(hosts, fn host ->
+             host =
+               Map.update!(host, "native", fn native ->
+                 Enum.map(native, fn fact ->
+                   {incarnation, fact} = Map.pop!(fact, "incarnation")
+                   Map.put(fact, "session_incarnation", incarnation)
+                 end)
+               end)
+
+             continuation_fact(writer, "source-host", host)
+           end),
+         {:ok, fences} <- Store.recovery_fences(store, identity.run_id),
+         bundle = %{
+           "schema_version" => 1,
+           "subject" => subject,
+           "source" => source,
+           "root_agent_id" => root_agent_id,
+           "authority" => %{
+             "revision" => snapshot.revision,
+             "incarnation" => snapshot.incarnation,
+             "fences" => fences
+           },
+           "root_admission_ref" => "root-admission:" <> identity.run_id,
+           "executor_ref" => executor_ref,
+           "provider_refs" => provider_refs,
+           "host_refs" => host_refs,
+           "managers" => managers
+         },
+         {:ok, bundle_ref} <- continuation_fact(writer, "historical-source", bundle),
+         request = %{
+           "schema_version" => 1,
+           "mode" => "historical_owner_loss",
+           "subject" => subject,
+           "source" => source,
+           "root_agent_id" => root_agent_id,
+           "evidence_ref" => bundle_ref,
+           "instruction_ref" => instruction_ref
+         },
+         :ok <-
+           LifetimeRecovery.put_evidence(
+             writer,
+             "continuation-candidate:" <> Evidence.digest(request),
+             request
+           ),
+         {:ok, decision} <- Continuation.prepare(LifetimeRecovery.configuration(writer), request),
+         :ok <- LifetimeRecovery.put_evidence(writer, request_ref, request) do
+      {:ok, decision}
+    else
+      {:error, _} = error ->
+        error
+
+      _ ->
+        fail(
+          "historical Continue requires the exact stopped source and its original acknowledgements"
+        )
+    end
+  end
+
+  defp historical_subject(store, identity) do
+    with {:ok, ledger} <- Store.host_retirement(store, :all) do
+      bindings =
+        for host <- Map.values(ledger.hosts),
+            binding <- Map.values(host.bindings),
+            binding.run_id == identity.run_id,
+            do: binding
+
+      subjects =
+        Enum.map(bindings, fn binding ->
+          %{
+            "kind" => "session",
+            "owner_id" => binding.native_owner_id,
+            "incarnation" => binding.native_session_incarnation,
+            "scope_id" => identity.thread_id
+          }
+        end)
+        |> Enum.uniq()
+
+      with [subject] <- subjects,
+           true <- Enum.all?(bindings, &(&1.run_incarnation == identity.incarnation)) do
+        {:ok, subject}
+      else
+        _ -> fail("historical Continue requires one exact original native Session binding")
+      end
+    end
+  end
+
+  defp historical_registry(writer, subject, manifests) do
+    registry_subject = Map.put(subject, "kind", "registry_owner")
+
+    manifests
+    |> Map.values()
+    |> Enum.filter(&(&1["subject"] == registry_subject))
+    |> Enum.reduce_while(:ok, fn manifest, :ok ->
+      case confirmed_tree(writer, manifest) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp historical_managers(writer, identity, manifests) do
+    managers =
+      manifests
+      |> Map.values()
+      |> Enum.filter(fn manifest ->
+        manifest["subject"]["kind"] == "manager" and
+          manifest["subject"]["scope_id"] == identity.thread_id
+      end)
+      |> Enum.sort_by(& &1["manifest_id"])
+
+    roots = managers |> Enum.map(& &1["subject"]["root_agent_id"]) |> Enum.uniq()
+
+    with [root_agent_id] <- roots,
+         :ok <- Evidence.identifier(root_agent_id),
+         {:ok, entries} <-
+           collect(managers, fn manifest ->
+             with :ok <- confirmed_tree(writer, manifest),
+                  {:ok, receipt} <- current_receipt(writer, manifest) do
+               {:ok,
+                %{
+                  "receipt_id" => receipt["receipt_id"],
+                  "acknowledgement_ref" => "manager-ack:" <> receipt["receipt_digest"]
+                }}
+             end
+           end) do
+      {:ok, entries, root_agent_id}
+    else
+      {:error, _} = error -> error
+      _ -> fail("historical Continue requires the original manager closure receipts")
     end
   end
 
@@ -695,7 +909,8 @@ defmodule Sigma.Agent.Backplane.LifetimeEvidence do
     {rank, depth, manifest["manifest_id"]}
   end
 
-  defp with_writer(transcript, header, fun) do
+  @doc false
+  def with_writer(transcript, header, fun) do
     case LifetimeRecovery.locate(transcript) do
       pid when is_pid(pid) ->
         fun.(pid)

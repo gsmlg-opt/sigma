@@ -68,7 +68,7 @@ defmodule Sigma.Agent.BackplaneGoalRootRecoveryFunctionalTest do
                end),
                do: :injected_root_recovery_transition_failure
 
-          {:lose_ack, transition} ->
+          {loss, transition} when loss in [:lose_ack, :lose_ack_block_recovery] ->
             if Enum.any?(get_in(record, [:transition, :events]) || [], fn event ->
                  event.type == transition
                end),
@@ -79,8 +79,12 @@ defmodule Sigma.Agent.BackplaneGoalRootRecoveryFunctionalTest do
         end
 
       if cause do
-        if match?({:lose_ack, _}, mode),
-          do: :ok = Store.FileSystem.write_atomic(path, bytes)
+        if match?({:lose_ack, _}, mode) or match?({:lose_ack_block_recovery, _}, mode) do
+          :ok = Store.FileSystem.write_atomic(path, bytes)
+
+          if elem(mode, 0) == :lose_ack_block_recovery,
+            do: Agent.update(control, &%{&1 | mode: {:reject_fence, record.incarnation}})
+        end
 
         send(owner, {:root_recovery_write_rejected, cause})
         {:error, cause}
@@ -553,7 +557,7 @@ defmodule Sigma.Agent.BackplaneGoalRootRecoveryFunctionalTest do
     assert get_in(retained, [:run, :context, :conversation, :goal_outbox]) in [nil, []]
 
     set_fault(c.ack_fault, :allow)
-    assert {:ok, %{status: :confirmed, capture: :durable}} = Sigma.Agent.retire_host(handle.agent)
+    assert {:ok, %{status: :confirmed, capture: :durable}} = retire_after_recovery(handle.agent)
     repository = Runtime.lookup(c.dir, :supervisor)
     assert :ok = DynamicSupervisor.terminate_child(Sigma.Agent.DynamicSupervisor, repository)
     assert :ok = Store.retire(store)
@@ -682,7 +686,316 @@ defmodule Sigma.Agent.BackplaneGoalRootRecoveryFunctionalTest do
     end
   end
 
+  test "a lost tool intent acknowledgement preserves prior results and identifies the recoverable history",
+       c do
+    {store, _handle, identity, retained} = root_after_lost_ack!(c, "run.tool_invoked")
+    assert_receive {:root_recovery_write_rejected, :injected_root_recovery_fence_failure}, 8_000
+
+    assert_receive {:prompt_rejected, %Error{cause: :injected_root_recovery_fence_failure}},
+                   8_000
+
+    assert [%{type: :tool, status: :started, operation: operation}] = retained.outbox
+    assert operation.tool_call_id == "unstarted-goal"
+    refute Map.has_key?(retained.run.tool_results, operation.invocation_id)
+
+    assert {:error,
+            %Error{class: :resource_conflict, details: %{reason: :interrupted_tool_intent}}} =
+             Sigma.Agent.Backplane.RunRecovery.reconcile_root(store, identity, retained)
+
+    assert {:ok, ^retained} = Store.load(store, identity.run_id)
+
+    [{attempt_id, provider} | _] = Map.to_list(retained.run.provider_attempts)
+
+    later_attempts =
+      Map.put(retained.run.provider_attempts, attempt_id, %{
+        provider
+        | incarnation: identity.incarnation + 1
+      })
+
+    for run <- [
+          %{retained.run | incarnation: identity.incarnation + 2},
+          %{retained.run | incarnation: identity.incarnation + 1},
+          %{retained.run | active_provider: provider},
+          %{retained.run | provider_attempts: later_attempts},
+          %{retained.run | dependencies: ["pending-dependency"]},
+          %{retained.run | children: ["pending-child"]}
+        ] do
+      assert {:error, %Error{class: :resource_conflict}} =
+               Sigma.Agent.Backplane.RunRecovery.prepare_root_continuation(
+                 store,
+                 identity,
+                 %{retained | run: run, incarnation: run.incarnation},
+                 c.path
+               )
+
+      assert {:ok, ^retained} = Store.load(store, identity.run_id)
+    end
+
+    refute_receive {:root_recovery_provider, _, _}, 0
+    set_fault(c.ack_fault, :allow)
+    repository = Runtime.lookup(c.dir, :supervisor)
+    assert :ok = DynamicSupervisor.terminate_child(Sigma.Agent.DynamicSupervisor, repository)
+    assert :ok = Store.retire(store)
+  end
+
+  test "a live lost intent acknowledgement retries public recovery and continues the same session",
+       c do
+    {store, handle, identity, retained} = root_after_lost_ack!(c, "run.tool_invoked")
+    assert_receive {:root_recovery_write_rejected, :injected_root_recovery_fence_failure}, 8_000
+
+    assert_receive {:prompt_rejected, %Error{cause: :injected_root_recovery_fence_failure}},
+                   8_000
+
+    assert {:ok, ^retained} = Store.load(store, identity.run_id)
+
+    for {transition, state, revisions} <- [
+          {"run.cancelling", :running, 1},
+          {"run.unknown_outcome", :cancelling, 2}
+        ] do
+      set_fault(c.ack_fault, {:reject_transition, transition})
+
+      assert {:rejected, %Error{class: :execution_failure}} =
+               Sigma.Agent.prompt(handle.agent, "Inspect and continue",
+                 continuation_source: identity.run_id
+               )
+
+      assert {:ok, snapshot} = Store.load(store, identity.run_id)
+      assert snapshot.run.state == state
+      assert snapshot.revision == retained.revision + revisions
+      assert snapshot.run.tool_results === retained.run.tool_results
+      assert snapshot.run.context === retained.run.context
+      refute_receive {:root_recovery_provider, _, _}, 0
+    end
+
+    set_fault(c.ack_fault, :allow)
+
+    assert {:accepted, %{turn_id: target}} =
+             Sigma.Agent.prompt(handle.agent, "Inspect and continue",
+               continuation_source: identity.run_id
+             )
+
+    next = provider!()
+    assert next.params.turn_id == target
+    assert target != identity.run_id
+    assert inspect(next.params.context.messages) =~ "outcome is unknown"
+    assert {:ok, %{goal: nil}} = Sigma.Agent.goal(handle.agent)
+    assert {:ok, unknown} = Store.load(store, identity.run_id)
+    assert unknown.run.state == :unknown_outcome
+    assert unknown.run.tool_results === retained.run.tool_results
+    assert unknown.run.context === retained.run.context
+    assert map_size(unknown.run.tool_results) == 1
+
+    assert [%{type: :tool, status: :uncertain}] =
+             Enum.filter(Map.values(unknown.run.execution_intents), &(&1.status == :uncertain))
+
+    assert unknown.run.active_tools === retained.run.active_tools
+    assert Sigma.Agent.Backplane.RunRecovery.missing_tool_result?(unknown.run, identity)
+
+    send(
+      next.pid,
+      {:root_recovery_response, [%{type: :text, text: "Continued after inspection"}]}
+    )
+
+    assert_receive {:agent_end, _}, 8_000
+    assert {:ok, ^unknown} = Store.load(store, identity.run_id)
+    assert {:ok, %{goal: nil}} = Sigma.Agent.goal(handle.agent)
+    refute_receive {:root_recovery_provider, _, _}, 0
+
+    repository = Runtime.lookup(c.dir, :supervisor)
+    assert :ok = DynamicSupervisor.terminate_child(Sigma.Agent.DynamicSupervisor, repository)
+    assert :ok = Store.retire(store)
+    assert :ok = GoalStore.retire(c.goal_root)
+    journal = File.read!(c.path)
+    assert {:ok, _} = Runtime.session_snapshot(c.dir, @session, c.path)
+    assert {:ok, _} = Runtime.session_snapshot(c.dir, @session, c.path)
+    assert {:ok, reopened} = Runtime.get_session(c.dir, @session, c.opts)
+
+    assert {:error, {:already_started, restored_store}} =
+             Store.start_link(path: c.path <> ".runtime")
+
+    assert {:ok, ^unknown} = Store.load(restored_store, identity.run_id)
+    assert File.read!(c.path) == journal
+    assert Sigma.Agent.status(reopened.agent).phase in [:idle, :completed]
+    refute_receive {:root_recovery_provider, _, _}, 100
+  end
+
+  test "live continuation retries a fence published after original cancellation", c do
+    {store, handle, identity, retained} = root_after_lost_ack!(c, "run.tool_invoked")
+    assert_receive {:root_recovery_write_rejected, :injected_root_recovery_fence_failure}, 8_000
+
+    assert_receive {:prompt_rejected, %Error{cause: :injected_root_recovery_fence_failure}},
+                   8_000
+
+    set_fault(c.ack_fault, :allow)
+    assert {:ok, _} = RuntimeStore.store(Store, store, retained.run, %{command: {:cancel, now()}})
+    assert {:ok, cancelling} = Store.load(store, identity.run_id)
+    set_fault(c.ack_fault, {:reject_transition, "run.unknown_outcome"})
+
+    assert {:error, %Error{class: :execution_failure}} =
+             Sigma.Agent.Backplane.RunRecovery.prepare_root_continuation(
+               store,
+               identity,
+               cancelling,
+               c.path
+             )
+
+    assert {:ok, fenced} = Store.load(store, identity.run_id)
+    assert fenced.run.state == :cancelling
+    assert fenced.revision == retained.revision + 2
+    set_fault(c.ack_fault, :allow)
+
+    assert {:ok, unknown} =
+             Sigma.Agent.Backplane.RunRecovery.prepare_root_continuation(
+               store,
+               identity,
+               fenced,
+               c.path
+             )
+
+    assert unknown.run.state == :unknown_outcome
+    assert unknown.run.tool_results === retained.run.tool_results
+    assert unknown.run.context === retained.run.context
+
+    assert {:accepted, _} =
+             Sigma.Agent.prompt(handle.agent, "Continue after cancellation",
+               continuation_source: identity.run_id
+             )
+
+    next = provider!()
+
+    send(
+      next.pid,
+      {:root_recovery_response, [%{type: :text, text: "Cancellation recovery completed"}]}
+    )
+
+    assert_receive {:agent_end, _}, 8_000
+    assert {:ok, ^unknown} = Store.load(store, identity.run_id)
+    refute_receive {:root_recovery_provider, _, _}, 0
+    repository = Runtime.lookup(c.dir, :supervisor)
+    assert :ok = DynamicSupervisor.terminate_child(Sigma.Agent.DynamicSupervisor, repository)
+    assert :ok = Store.retire(store)
+    assert :ok = GoalStore.retire(c.goal_root)
+  end
+
+  @tag capture_log: true
+  test "cold interrupted tool history opens without effects and retains missing retirement evidence",
+       c do
+    {store, _handle, identity, retained} = root_after_lost_ack!(c, "run.tool_invoked")
+    assert_receive {:root_recovery_write_rejected, :injected_root_recovery_fence_failure}, 8_000
+
+    assert_receive {:prompt_rejected, %Error{cause: :injected_root_recovery_fence_failure}},
+                   8_000
+
+    repository = Runtime.lookup(c.dir, :supervisor)
+    assert :ok = DynamicSupervisor.terminate_child(Sigma.Agent.DynamicSupervisor, repository)
+    assert {:ok, ^retained} = Store.load(store, identity.run_id)
+    assert :ok = Store.retire(store)
+    assert :ok = GoalStore.retire(c.goal_root)
+    journal = File.read!(c.path)
+
+    assert {:ok, _} = Runtime.session_snapshot(c.dir, @session, c.path)
+    assert {:ok, reopened} = Runtime.get_session(c.dir, @session, c.opts)
+    assert :ok = Sigma.Agent.subscribe(reopened.agent)
+    assert File.read!(c.path) == journal
+    refute_receive {:root_recovery_provider, _, _}, 100
+
+    assert {:rejected, %Error{class: :resource_conflict, message: message}} =
+             Sigma.Agent.prompt(reopened.agent, "Inspect and continue after reopening",
+               continuation_source: identity.run_id
+             )
+
+    assert message =~ "host retirement receipts"
+
+    assert {:error, {:already_started, restored_store}} =
+             Store.start_link(path: c.path <> ".runtime")
+
+    assert {:ok, ^retained} = Store.load(restored_store, identity.run_id)
+    refute_receive {:root_recovery_provider, _, _}, 100
+  end
+
+  for retirement <- [:orderly_exit, :retire_host] do
+    test "#{retirement} captures a lost intent acknowledgement for cold explicit continuation",
+         c do
+      {store, handle, identity, retained} = root_after_lost_ack!(c, "run.tool_invoked")
+      assert_receive {:root_recovery_write_rejected, :injected_root_recovery_fence_failure}, 8_000
+
+      assert_receive {:prompt_rejected, %Error{cause: :injected_root_recovery_fence_failure}},
+                     8_000
+
+      set_fault(c.ack_fault, :allow)
+
+      if unquote(retirement) == :retire_host do
+        assert {:error, %Error{class: :unknown_outcome}} = Sigma.Agent.retire_host(handle.agent)
+      end
+
+      repository = Runtime.lookup(c.dir, :supervisor)
+      assert :ok = DynamicSupervisor.terminate_child(Sigma.Agent.DynamicSupervisor, repository)
+      assert {:ok, unknown} = Store.load(store, identity.run_id)
+      assert unknown.run.state == :unknown_outcome
+      assert unknown.run.tool_results === retained.run.tool_results
+      assert unknown.run.context === retained.run.context
+      assert :ok = Store.retire(store)
+      assert :ok = GoalStore.retire(c.goal_root)
+      journal = File.read!(c.path)
+
+      assert {:ok, _} = Runtime.session_snapshot(c.dir, @session, c.path)
+      assert {:ok, reopened} = Runtime.get_session(c.dir, @session, c.opts)
+      assert :ok = Sigma.Agent.subscribe(reopened.agent)
+      assert File.read!(c.path) == journal
+      refute_receive {:root_recovery_provider, _, _}, 100
+
+      assert {:accepted, %{turn_id: target}} =
+               Sigma.Agent.prompt(reopened.agent, "Inspect and continue after reopening",
+                 continuation_source: identity.run_id
+               )
+
+      next = provider!()
+      assert next.params.turn_id == target
+      assert inspect(next.params.context.messages) =~ "outcome is unknown"
+
+      send(
+        next.pid,
+        {:root_recovery_response, [%{type: :text, text: "Cold continuation completed"}]}
+      )
+
+      assert_receive {:agent_end, _}, 8_000
+      assert {:ok, %{goal: nil}} = Sigma.Agent.goal(reopened.agent)
+
+      assert {:error, {:already_started, restored_store}} =
+               Store.start_link(path: c.path <> ".runtime")
+
+      assert {:ok, ^unknown} = Store.load(restored_store, identity.run_id)
+      refute_receive {:root_recovery_provider, _, _}, 0
+    end
+  end
+
   defp quiescent_root!(c) do
+    {store, handle, identity, retained} = root_after_lost_ack!(c, "run.provider_completed")
+
+    assert Kernel.cleanup_requirements(retained.run) == %{
+             provider: nil,
+             tools: [],
+             children: [],
+             dependencies: []
+           }
+
+    assert retained.effects == []
+    assert retained.outbox == []
+
+    assert Enum.all?(retained.run.execution_intents, fn {_key, intent} ->
+             intent.status in [:consumed, :cancelled]
+           end)
+
+    set_fault(c.ack_fault, :allow)
+    assert {:ok, %{status: :confirmed, capture: :durable}} = retire_after_recovery(handle.agent)
+    repository = Runtime.lookup(c.dir, :supervisor)
+    assert :ok = DynamicSupervisor.terminate_child(Sigma.Agent.DynamicSupervisor, repository)
+    assert :ok = Store.retire(store)
+    assert :ok = GoalStore.retire(c.goal_root)
+    {identity, retained}
+  end
+
+  defp root_after_lost_ack!(c, transition) do
     repository = Runtime.lookup(c.dir, :supervisor)
     assert :ok = DynamicSupervisor.terminate_child(Sigma.Agent.DynamicSupervisor, repository)
     assert :ok = GoalStore.retire(c.goal_root)
@@ -722,7 +1035,8 @@ defmodule Sigma.Agent.BackplaneGoalRootRecoveryFunctionalTest do
     monitor = Process.monitor(next.pid)
     assert {:ok, log} = Log.snapshot(c.path)
     assert {:ok, [identity]} = GoalRuns.list(c.goal_root, log.session_id)
-    set_fault(c.ack_fault, {:lose_ack, "run.provider_completed"})
+    mode = if transition == "run.tool_invoked", do: :lose_ack_block_recovery, else: :lose_ack
+    set_fault(c.ack_fault, {mode, transition})
 
     send(
       next.pid,
@@ -748,27 +1062,7 @@ defmodule Sigma.Agent.BackplaneGoalRootRecoveryFunctionalTest do
     assert retained.run.active_provider == nil
     assert map_size(retained.run.tool_results) == 1
 
-    assert Kernel.cleanup_requirements(retained.run) == %{
-             provider: nil,
-             tools: [],
-             children: [],
-             dependencies: []
-           }
-
-    assert retained.effects == []
-    assert retained.outbox == []
-
-    assert Enum.all?(retained.run.execution_intents, fn {_key, intent} ->
-             intent.status in [:consumed, :cancelled]
-           end)
-
-    set_fault(c.ack_fault, :allow)
-    assert {:ok, %{status: :confirmed, capture: :durable}} = Sigma.Agent.retire_host(handle.agent)
-    repository = Runtime.lookup(c.dir, :supervisor)
-    assert :ok = DynamicSupervisor.terminate_child(Sigma.Agent.DynamicSupervisor, repository)
-    assert :ok = Store.retire(store)
-    assert :ok = GoalStore.retire(c.goal_root)
-    {identity, retained}
+    {store, handle, identity, retained}
   end
 
   defp recovery_owners!(c) do
@@ -860,6 +1154,18 @@ defmodule Sigma.Agent.BackplaneGoalRootRecoveryFunctionalTest do
         do: refute(Process.alive?(pid))
 
     {snapshot.session_id, identity, retained, receipts, goal_record.goal.tokens_used}
+  end
+
+  # agent_end can precede the completion of the automatic recovery task.
+  defp retire_after_recovery(agent, attempts \\ 200) do
+    case Sigma.Agent.retire_host(agent) do
+      {:error, :session_busy} when attempts > 0 ->
+        Process.sleep(25)
+        retire_after_recovery(agent, attempts - 1)
+
+      result ->
+        result
+    end
   end
 
   defp provider! do

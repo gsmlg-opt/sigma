@@ -20,11 +20,14 @@ defmodule Sigma.Agent.Backplane.RootContinuation do
       identity = Enum.find(identities, &(&1.run_id == source_run_id))
 
       case identity && Store.load(state.backplane_store, source_run_id) do
-        {:ok, %{run: %{state: :unknown_outcome} = run}} ->
-          if RunRecovery.missing_tool_result?(run, identity) do
+        {:ok, %{run: run} = snapshot} ->
+          if RunRecovery.missing_tool_result?(run, identity) or
+               RunRecovery.interrupted_tool_intent?(run, identity) do
             record_started(state, identity, run)
             on_started.(%{source_run_id: source_run_id})
-            continue(state, identity)
+
+            with {:ok, _} <- prepare_source(state, identity, snapshot),
+                 do: continue(state, identity)
           else
             {:ok, nil}
           end
@@ -35,6 +38,48 @@ defmodule Sigma.Agent.Backplane.RootContinuation do
         _ ->
           {:ok, nil}
       end
+    end
+  end
+
+  defp prepare_source(_state, _identity, %{run: %{state: :unknown_outcome}} = snapshot),
+    do: {:ok, snapshot}
+
+  defp prepare_source(state, identity, snapshot) do
+    with {:ok, ledger} <- Store.host_retirement(state.backplane_store, :all) do
+      host = ledger.hosts[state.host_retirement.identity.host_lifetime_id]
+
+      current_host? =
+        host &&
+          Enum.any?(host.bindings, fn {_key, binding} ->
+            binding.run_id == identity.run_id and binding.run_incarnation == identity.incarnation
+          end)
+
+      with :ok <- prepare_source_host(state, identity, current_host?),
+           do:
+             RunRecovery.prepare_root_continuation(
+               state.backplane_store,
+               identity,
+               snapshot,
+               state.transcript_path
+             )
+    end
+  end
+
+  defp prepare_source_host(state, identity, current_host?) when current_host? in [false, nil],
+    do: RunRecovery.confirm_root_components(state.backplane_store, identity)
+
+  defp prepare_source_host(state, _identity, true) do
+    with {:ok, sources} <- Sigma.Agent.Subagents.archive_sources(state.subagents),
+         true <-
+           sources.root.host_lifetime_id == state.host_retirement.identity.host_lifetime_id do
+      :ok
+    else
+      {:error, _} = error ->
+        error
+
+      _ ->
+        {:error,
+         Error.new(:resource_conflict, "continuation requires the original live root host")}
     end
   end
 
@@ -62,7 +107,7 @@ defmodule Sigma.Agent.Backplane.RootContinuation do
   defp continue(state, identity) do
     case LifetimeEvidence.read_continuation(state.transcript_path, identity) do
       {:ok, decision} ->
-        case close_source_host(state, identity) do
+        case close_source_host(state, identity, true) do
           {:ok, facts} -> admit(state, identity, decision, facts)
           error -> error
         end
@@ -95,7 +140,7 @@ defmodule Sigma.Agent.Backplane.RootContinuation do
     end
   end
 
-  defp close_source_host(state, identity) do
+  defp close_source_host(state, identity, captured? \\ false) do
     with {:ok, ledger} <- Store.host_retirement(state.backplane_store, :all) do
       host = ledger.hosts[state.host_retirement.identity.host_lifetime_id]
 
@@ -108,13 +153,20 @@ defmodule Sigma.Agent.Backplane.RootContinuation do
       if binding do
         case Store.host_retirement(state.backplane_store, binding) do
           {:ok, %{status: :confirmed} = confirmation} ->
-            {:ok,
-             %{
-               native: {:ok, confirmation},
-               async_hooks: {:ok, host.async_hooks},
-               session_end: {:ok, host.session_end},
-               result: {:ok, confirmation}
-             }}
+            capture =
+              if captured?,
+                do: {:ok, %{status: :confirmed}},
+                else: Sigma.Agent.Subagents.close_for_continuation(state.subagents)
+
+            with {:ok, %{status: :confirmed}} <- capture do
+              {:ok,
+               %{
+                 native: {:ok, confirmation},
+                 async_hooks: {:ok, host.async_hooks},
+                 session_end: {:ok, host.session_end},
+                 result: {:ok, confirmation}
+               }}
+            end
 
           {:ok, %{status: :unconfirmed}} ->
             facts =

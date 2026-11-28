@@ -283,7 +283,7 @@ defmodule Sigma.Agent.BackplaneLifetimeContinuationTest do
     assert_receive {:command_cell_waiting, cell}, 10_000
     assert File.read!(launches) == "launched\n"
     pid = pid_path |> File.read!() |> String.trim()
-    assert {_, 0} = System.cmd("/bin/kill", ["-0", pid], stderr_to_stdout: true)
+    assert {_, 0} = System.cmd("kill", ["-0", pid], stderr_to_stdout: true)
     send(cell, :lose_completion)
     assert_receive {:agent_end, _}, 10_000
     assert eventually(fn -> File.exists?(session_end) end)
@@ -319,7 +319,7 @@ defmodule Sigma.Agent.BackplaneLifetimeContinuationTest do
                Runtime.lookup(dir, :supervisor)
              )
 
-    assert {_, status} = System.cmd("/bin/kill", ["-0", pid], stderr_to_stdout: true)
+    assert {_, status} = System.cmd("kill", ["-0", pid], stderr_to_stdout: true)
     refute status == 0
     assert File.read!(session_end) == "once\n"
     assert File.read!(path) == journal
@@ -571,6 +571,198 @@ defmodule Sigma.Agent.BackplaneLifetimeContinuationTest do
     assert {:ok, ^accepted} = LifetimeRecovery.load_continuation(reopened, id)
     assert File.read!(path) == committed
     assert :ok = LifetimeRecovery.retire(reopened)
+  end
+
+  @tag capture_log: true
+  test "historical continuation retries missing confirmations and cold-reads a lost request acknowledgement",
+       %{tmp_dir: dir} do
+    {hook, marker, gate} = gated_session_end(dir)
+    {path, handle, source} = failed_read!(dir, [hook])
+    assert eventually(fn -> File.exists?(marker) end)
+    state = :sys.get_state(handle.agent)
+
+    identity = %{
+      thread_id: state.host_retirement.identity.root_header_id,
+      run_id: source,
+      incarnation: 1
+    }
+
+    assert {:ok, original} = Store.load(state.backplane_store, source)
+    assert {:ok, _} = Sigma.Session.Writer.flush(state.writer)
+    assert {:cancelling, _} = Sigma.Agent.cancel(handle.agent)
+    File.touch!(gate)
+    assert eventually(fn -> Sigma.Agent.status(handle.agent).phase == :cancelled end)
+
+    assert :ok =
+             DynamicSupervisor.terminate_child(
+               Sigma.Agent.DynamicSupervisor,
+               Runtime.lookup(dir, :supervisor)
+             )
+
+    assert {:ok, source_store} = Store.open(path: path <> ".runtime")
+
+    assert {:ok, _} =
+             Backplane.AgentRuntime.Store.fence(
+               Store,
+               source_store,
+               source,
+               original.revision,
+               1,
+               2
+             )
+
+    assert {:ok, original} = Store.load(source_store, source)
+    GenServer.stop(source_store)
+
+    recovery = read_recovery(path)
+    request_ref = "continuation-request:" <> Evidence.digest(identity)
+
+    for missing <- [:manager, :provider, :admission, :registry] do
+      target = Path.join(dir, "historical-#{missing}.jsonl")
+      File.cp!(path, target)
+      File.cp_r!(path <> ".runtime", target <> ".runtime")
+      File.mkdir_p!(target <> ".subagents")
+
+      manifests =
+        Map.reject(recovery.manifests, fn {_id, manifest} ->
+          manifest["subject"]["kind"] == "session" or
+            (missing != :registry and manifest["subject"]["kind"] == "registry_owner")
+        end)
+
+      unrelated_registry =
+        Evidence.manifest(
+          %{
+            "kind" => "registry_owner",
+            "owner_id" => "other-native-owner",
+            "incarnation" => 99,
+            "scope_id" => identity.thread_id
+          },
+          [],
+          [],
+          "other-generation-fence"
+        )
+
+      manifests = Map.put(manifests, unrelated_registry["manifest_id"], unrelated_registry)
+
+      evidence =
+        Map.reject(recovery.evidence, fn {key, _} -> String.starts_with?(key, "continuation-") end)
+
+      stripped = %{recovery | manifests: manifests, evidence: evidence, continuations: %{}}
+      write_recovery(target, stripped)
+      restore = remove_historical_confirmation(target, missing, source)
+
+      assert {:error, %Error{class: class}} =
+               LifetimeEvidence.prepare_continuation(target, identity, "historical-continue")
+
+      assert class in [:not_found, :unknown_outcome]
+      failed = read_recovery(target)
+      assert failed.continuations == %{}
+      refute Map.has_key?(failed.evidence, request_ref)
+      restore.()
+
+      expected =
+        if missing == :admission do
+          assert {:ok, current_store} = Store.open(path: target <> ".runtime")
+
+          assert {:ok, _} =
+                   Backplane.AgentRuntime.Store.fence(
+                     Store,
+                     current_store,
+                     source,
+                     original.revision,
+                     2,
+                     3
+                   )
+
+          assert {:ok, refreshed} = Store.load(current_store, source)
+          GenServer.stop(current_store)
+          refreshed
+        else
+          original
+        end
+
+      assert {:ok, decision} =
+               LifetimeEvidence.prepare_continuation(target, identity, "historical-continue")
+
+      assert decision["mode"] == "historical_owner_loss"
+
+      assert [%{"tool_call_id" => "lost-call", "tool_name" => "lost_read"}] =
+               decision["unresolved_tools"]
+
+      assert {:ok, ^decision} = LifetimeEvidence.read_continuation(target, identity)
+
+      # A decision can survive the request pointer's lost write acknowledgement.
+      # Later manifests must not change the request whose digest won the CAS.
+      accepted = read_recovery(target)
+
+      [manager] =
+        Enum.filter(Map.values(accepted.manifests), &(&1["subject"]["kind"] == "manager"))
+
+      next_subject = Map.put(manager["subject"], "manager_id", "later-manager")
+      later = Evidence.manifest(next_subject, [], [], "later-admission-fence")
+
+      write_recovery(target, %{
+        accepted
+        | evidence: Map.delete(accepted.evidence, request_ref),
+          manifests: Map.put(accepted.manifests, later["manifest_id"], later)
+      })
+
+      assert {:ok, ^decision} = LifetimeEvidence.read_continuation(target, identity)
+
+      assert {:ok, ^decision} =
+               LifetimeEvidence.prepare_continuation(target, identity, "historical-continue")
+
+      assert {:ok, writer} =
+               LifetimeRecovery.start_link(
+                 transcript: target,
+                 root_header_id: identity.thread_id,
+                 root_agent_id: nil
+               )
+
+      assert {:ok, {Store, store}} = LifetimeRecovery.runtime_store(writer, "root")
+      assert {:ok, ^expected} = Store.load(store, source)
+      assert :ok = LifetimeRecovery.retire(writer)
+    end
+
+    refute_receive {:continuation_provider, _, _}, 0
+    refute_receive {:original_read, _, _}, 0
+  end
+
+  defp read_recovery(path) do
+    (path <> ".subagents/lifetime-recovery.etf")
+    |> File.read!()
+    |> :erlang.binary_to_term([:safe])
+  end
+
+  defp write_recovery(path, data),
+    do: File.write!(path <> ".subagents/lifetime-recovery.etf", :erlang.term_to_binary(data))
+
+  defp remove_historical_confirmation(path, :provider, _source) do
+    lifecycle = path <> ".runtime/provider-lifecycle.etf"
+    bytes = File.read!(lifecycle)
+    File.rm!(lifecycle)
+    fn -> File.write!(lifecycle, bytes) end
+  end
+
+  defp remove_historical_confirmation(path, missing, source) do
+    data = read_recovery(path)
+
+    removed =
+      Map.filter(data.evidence, fn {key, _} ->
+        case missing do
+          :manager -> String.starts_with?(key, "manager-ack:")
+          :registry -> String.starts_with?(key, "registry_owner-ack:")
+          :admission -> key == "root-admission:" <> source
+        end
+      end)
+
+    assert map_size(removed) > 0
+    write_recovery(path, %{data | evidence: Map.drop(data.evidence, Map.keys(removed))})
+
+    fn ->
+      current = read_recovery(path)
+      write_recovery(path, %{current | evidence: Map.merge(current.evidence, removed)})
+    end
   end
 
   defp failed_read!(dir, hooks, before_failure \\ fn _, _ -> :ok end) do
